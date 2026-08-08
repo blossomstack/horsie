@@ -79,12 +79,12 @@ pub fn serve_runtime_connections(
                     Err(e) => {
                         consecutive_failures += 1;
                         note(&format!(
-                            "vendor agent: accepting a runtime connection failed \
+                            "vendor process: accepting a runtime connection failed \
                              ({consecutive_failures}/{FATAL_ACCEPT_FAILURES}): {e}"
                         ));
                         if consecutive_failures >= FATAL_ACCEPT_FAILURES {
                             note(
-                                "vendor agent: the runtime listener has stopped accepting; \
+                                "vendor process: the runtime listener has stopped accepting; \
                                  shutting down so this agent can be restarted rather than \
                                  serving sessions no runtime can reach",
                             );

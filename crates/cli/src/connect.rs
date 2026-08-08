@@ -1,4 +1,4 @@
-//! `horsie connect`: run this machine as a **runtime vendor agent**.
+//! `horsie connect`: run this machine as a **runtime vendor process**.
 //!
 //! It holds one outbound WebSocket to the session server and spawns one
 //! `horsie-runtime` child per session, each dialing this process's own unix
@@ -224,7 +224,7 @@ fn runtime_socket_path(state_dir: &Path) -> PathBuf {
     state_dir.join(format!("vendor-runtimes-{}.sock", std::process::id()))
 }
 
-/// Run this machine as a vendor agent until the socket closes or the process is
+/// Run this machine as a vendor process until the socket closes or the process is
 /// interrupted.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -282,7 +282,7 @@ pub async fn run(
     if background {
         return Err(CliError::Validation(
             "--background is no longer supported: `horsie connect` is now a long-lived \
-             vendor agent that supervises one runtime per session. Run it under your \
+             vendor process that supervises one runtime per session. Run it under your \
              process manager (systemd, launchd, tmux) so its lifetime and logs are managed \
              explicitly."
                 .to_string(),

@@ -1,4 +1,4 @@
-//! Tracks every connected vendor agent and mirrors it into the shared vendor
+//! Tracks every connected vendor process and mirrors it into the shared vendor
 //! map sessions select from.
 //!
 //! This deliberately mirrors [`LocalDaemonRegistry`](crate::runtime_vendor::LocalDaemonRegistry):
@@ -23,7 +23,7 @@ pub type WebsocketVendorTable = Arc<std::sync::Mutex<HashMap<String, Arc<Websock
 #[derive(Debug, PartialEq)]
 pub enum RegisterError {
     /// A live link already answers to this name, and it belongs to another
-    /// agent process.
+    /// vendor process.
     NameTaken { by: String },
     /// The name belongs to a vendor configured in settings. No process owns it,
     /// so no reconnect rule can win it.
@@ -44,7 +44,7 @@ impl std::fmt::Display for RegisterError {
 }
 
 impl RegisterError {
-    /// What the refused agent is told.
+    /// What the refused vendor process is told.
     ///
     /// Deliberately not [`Display`](std::fmt::Display), which names the holder:
     /// that belongs in the server log, not in a message handed to whoever just
@@ -54,10 +54,12 @@ impl RegisterError {
     pub fn client_reason(&self, name: &str) -> String {
         match self {
             Self::NameTaken { .. } => {
-                format!("vendor name \"{name}\" is already in use by another agent")
+                format!(
+                    "runtime vendor name \"{name}\" is already in use by another vendor process"
+                )
             }
             Self::NameConfigured => {
-                format!("vendor name \"{name}\" is configured on the server")
+                format!("runtime vendor name \"{name}\" is configured on the server")
             }
         }
     }
@@ -104,7 +106,7 @@ impl RuntimeVendorRegistry {
     ///    corpse must not hold a name; this covers the window between a read
     ///    loop ending and [`publish`](Self::publish)'s eviction task removing
     ///    the entry.
-    /// 5. Otherwise — refuse. Two live agents cannot share one name, whatever
+    /// 5. Otherwise — refuse. Two live processes cannot share one name, whatever
     ///    principal they present.
     ///
     /// With authentication disabled every principal is `Anonymous`, so gate 2

@@ -1,4 +1,4 @@
-//! `horsie connect` runs this machine as a runtime vendor agent.
+//! `horsie connect` runs this machine as a runtime vendor process.
 //!
 //! This drives the whole chain against a fake session server that speaks the
 //! real `vendor.fl` protocol: the agent dials in and announces itself, a

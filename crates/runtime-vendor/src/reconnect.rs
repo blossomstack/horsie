@@ -1,4 +1,4 @@
-//! The delay schedule a vendor agent waits out between connection attempts.
+//! The delay schedule a vendor process waits out between connection attempts.
 //!
 //! Split out as a value rather than left inline in the reconnect loop because
 //! the schedule is the part with rules worth pinning down — it grows, it is

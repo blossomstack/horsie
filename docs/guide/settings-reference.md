@@ -89,7 +89,7 @@ Open **Settings**. The left nav lists one page per group of settings:
 | **Models** | Providers | Model providers: name, **kind** (Anthropic, OpenAI-compatible, OpenAI Responses, or ChatGPT plan), optional base URL, inline API key. See [Provider kinds](#provider-kinds). |
 | | Models | Models you can pick per session: alias, provider, model id, optional max tokens. |
 | **Runtimes** | Default vendor | Which runtime vendor new sessions use (only *active* vendors are selectable). Falls back to `local`. |
-| | Connected vendors | Read-only: the vendor agents connected right now and what each announced it can do. Vendors are configured in their own agent process, not here. See [Runtime vendors](runtime-vendors.md). |
+| | Connected vendors | Read-only: the vendor processes connected right now and what each announced it can do. Vendors are configured in their own agent process, not here. See [Runtime vendors](runtime-vendors.md). |
 | **Skills** | — | Skill/plugin bundles. See [Skills & plugins](skills-and-plugins.md). |
 | **Memory** | — | Memory spaces and the notes the agent has saved in them. |
 | **Integrations** | GitHub | GitHub App config + connection; the GitHub-tools-(MCP) toggle. See [GitHub](github.md). |
@@ -220,7 +220,7 @@ appends `/v1/chat/completions` itself) or a model id the backend has not loaded.
 - **Providers / models** — apply to the next turn; no restart.
 - **Default vendor** — applies to the next session created. It may name an
   agent that has not connected yet.
-- **Vendors themselves** — not editable here at all. Each vendor agent is
+- **Vendors themselves** — not editable here at all. Each vendor process is
   configured where it runs, and appears (or disappears) as it connects.
 - **GitHub, MCP servers, skill bundles** — apply as you save them.
 

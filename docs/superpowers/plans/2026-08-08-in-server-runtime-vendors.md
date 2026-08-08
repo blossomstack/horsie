@@ -78,13 +78,15 @@ that lets a vendor stop keeping its own copy on disk.
 
 ---
 
-### Task 2: Finish the naming pass (#234)
+### Task 2: Finish the naming pass (#234) — **done**
 
 Renames only; the suite is the test.
 
 - [ ] **Step 1: Rename the remaining types and fields**
 
-`SharedVendors` → `RuntimeVendorMap` (done in Task 1), `VendorError` → `RuntimeVendorError`, delete the server's `VendorCapabilities` in favour of the wire type, `UserServices::vendor_agents` → `runtime_vendors`.
+`SharedVendors` → `RuntimeVendorMap` (done in Task 1), `VendorError` → `RuntimeVendorError`, `UserServices::vendor_agents` → `connected_vendors`.
+
+Two deviations. The field is `connected_vendors`, not `runtime_vendors`: that name now belongs to the configured-vendor service from Task 7, and the two are different things. And `settings.VendorCapabilities` stays rather than collapsing onto `runtime_vendor.RuntimeVendorCapabilities` — unifying them makes the settings package depend on the whole vendor protocol, which drags `runtime_vendor.fl` and `executor.fl` into the published `clients/ts` package for a one-field duplicate between two genuinely separate protocols. The reasoning is recorded on the type.
 
 - [ ] **Step 2: Fix the user-facing strings**
 

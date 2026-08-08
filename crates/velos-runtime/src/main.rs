@@ -1,4 +1,4 @@
-//! `horsie-velos-runtime` — a runtime vendor agent backed by velos containers.
+//! `horsie-velos-runtime` — a runtime vendor process backed by velos containers.
 //!
 //! It dials a session server's `/api/vendor/connect` and serves runtimes by
 //! scheduling one velos container each. The server holds no velos credentials:

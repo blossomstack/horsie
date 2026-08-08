@@ -224,7 +224,7 @@ impl RuntimeManager {
     ///
     /// The client is bound to the vendor's *name*, not to the link this call
     /// happened to resolve. A caller holds it for a whole run — the toolbox an
-    /// agent loop executes against is built once — and a vendor agent that
+    /// agent loop executes against is built once — and a vendor process that
     /// reconnects mid-run comes back on a different link. Binding to the name
     /// means the next tool call finds it; binding to the link meant every tool
     /// call for the rest of that turn failed on a dead socket.

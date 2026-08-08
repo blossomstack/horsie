@@ -3,7 +3,7 @@
 # Multi-target Dockerfile for all three published horsie images:
 #   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI) -> --target server
 #   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)          -> --target runtime
-#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor agent doing the scheduling) -> --target velos
+#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor process doing the scheduling) -> --target velos
 #
 # All binaries are compiled in ONE shared `build` stage so the dependency tree
 # is compiled once per architecture. CI (.github/workflows/docker.yml) runs one
@@ -94,7 +94,7 @@ USER horsie
 # bind-mounted at /etc/horsie/config.json by the deploy stack.
 WORKDIR /data
 # 3789 is the only port: HTTP API, web UI, and the WebSocket routes agents and
-# clients dial. The reverse-dial listeners moved out with the vendor agents.
+# clients dial. The reverse-dial listeners moved out with the vendor processes.
 EXPOSE 3789
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3789/api/health || exit 1
@@ -115,12 +115,12 @@ RUN apt-get update \
  && mkdir -p /workspace
 COPY --from=build /usr/local/bin/horsie-runtime /usr/local/bin/horsie-runtime
 WORKDIR /workspace
-# The runtime needs outbound reachability to the vendor agent's advertised
+# The runtime needs outbound reachability to the vendor process's advertised
 # address (velos gives containers outbound NAT). The vendor supplies
 # the command; this entrypoint is just a sane default for manual runs.
 ENTRYPOINT ["horsie-runtime"]
 
-# ---- Target: horsie-velos-runtime (velos vendor agent) -----------------------
+# ---- Target: horsie-velos-runtime (velos vendor process) ---------------------
 FROM debian:bookworm-slim AS velos
 # ca-certificates: outbound TLS to the session server (wss://) and to velos.
 # No curl: the agent serves no HTTP health route, so there is no HEALTHCHECK to

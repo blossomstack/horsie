@@ -28,7 +28,7 @@ The project ships two agents:
 
 ## Authorizing an agent
 
-A vendor agent has to prove who it is before the server will publish it — a
+A vendor process has to prove who it is before the server will publish it — a
 name like `local` is owned by whoever claimed it, so nobody else can take it
 over and start receiving your tool calls.
 
@@ -155,7 +155,7 @@ durable transcript lives on the server.
 
 ## Writing another vendor
 
-A vendor agent is a `RuntimeProvider` (spawn a process, schedule a container,
+A vendor process is a `RuntimeProvider` (spawn a process, schedule a container,
 call a cloud sandbox API) plus a `WorkspaceResolver` (turn a requested workspace
 *name* into a path the vendor owns). Both sit behind `RuntimeVendor` in the
 `horsie-runtime-vendor` crate, which owns the protocol, the runtime listener, and
@@ -164,7 +164,7 @@ those two things and nothing else.
 
 ## Upgrading from the old dial-in runtime
 
-Before vendor agents, a runtime dialed the server directly:
+Before vendor processes, a runtime dialed the server directly:
 
 ```bash
 # No longer works — the route is gone.

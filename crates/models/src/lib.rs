@@ -226,7 +226,7 @@ pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 /// startup (written by the server's plugin provisioner into the runtime env).
 ///
 /// No URLs: the server does not know what address its runtimes can reach it at.
-/// The vendor agent supplies that separately as [`ENV_PLUGINS_BASE`], and the
+/// The vendor process supplies that separately as [`ENV_PLUGINS_BASE`], and the
 /// runtime builds each fetch URL from the base plus the hash.
 pub const ENV_PLUGIN_MANIFEST: &str = "HORSIE_PLUGIN_MANIFEST";
 

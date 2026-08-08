@@ -14,7 +14,7 @@ thiserror        = "2.0"
 tokio             = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time"] }
 tokio-util        = { version = "0.7" }
 tokio-stream      = { version = "0.1", features = ["sync"] }
-# `native-tls` is not optional: vendor agents and runtimes dial `wss://` URLs
+# `native-tls` is not optional: vendor processes and runtimes dial `wss://` URLs
 # whenever the session server sits behind HTTPS, and without a TLS feature
 # `connect_async` rejects those before any I/O ("TLS support not compiled in").
 # native-tls rather than rustls because reqwest's default-tls already links it

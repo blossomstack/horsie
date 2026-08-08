@@ -434,7 +434,7 @@ impl RuntimeVendorConfigService {
         self.save(row).await.map(|r| r.to_view()).map_err(|e| {
             // A name held by a live agent is the one refusal a client can act
             // on by choosing another name, so it is not lumped in with the rest.
-            if e.contains("connected vendor agent") {
+            if e.contains("connected vendor process") {
                 VendorConfigError::Conflict(e)
             } else {
                 VendorConfigError::Invalid(e)
@@ -478,7 +478,7 @@ impl RuntimeVendorConfigService {
         }
         if self.is_websocket_name(&row.name) {
             return Err(format!(
-                "the name '{}' is in use by a connected vendor agent",
+                "the name '{}' is in use by a connected vendor process",
                 row.name
             ));
         }
@@ -756,6 +756,6 @@ mod tests {
             .unwrap()
             .insert("fly".to_string(), agent.link());
         let err = service.save(row()).await.unwrap_err();
-        assert!(err.contains("connected vendor agent"), "{err}");
+        assert!(err.contains("connected vendor process"), "{err}");
     }
 }

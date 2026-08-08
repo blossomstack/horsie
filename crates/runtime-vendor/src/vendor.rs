@@ -414,7 +414,7 @@ impl RuntimeVendorClient {
                     failures = failures.saturating_add(1);
                     let delay = backoff.next_delay();
                     note(&format!(
-                        "vendor agent: attempt {failures} failed: {why}; reconnecting in {:.1}s",
+                        "vendor process: attempt {failures} failed: {why}; reconnecting in {:.1}s",
                         delay.as_secs_f64()
                     ));
                     tokio::select! {
@@ -433,7 +433,7 @@ impl RuntimeVendorClient {
                     backoff.reset();
                     if connections > 1 {
                         note(&format!(
-                            "vendor agent: reconnected to {server_url} as \"{}\"",
+                            "vendor process: reconnected to {server_url} as \"{}\"",
                             agent.vendor_name
                         ));
                     }
@@ -460,7 +460,7 @@ impl RuntimeVendorClient {
             };
             let delay = backoff.next_delay();
             note(&format!(
-                "vendor agent: {reason}; reconnecting in {:.1}s",
+                "vendor process: {reason}; reconnecting in {:.1}s",
                 delay.as_secs_f64()
             ));
             // Cancellation must not have to wait out a 30s delay to be heard.
@@ -540,7 +540,7 @@ impl RuntimeVendorClient {
                     Err(e) => return Err(ConnectError::Transient(format!("link failed: {e}"))),
                 };
                 let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                    note("vendor agent: undecodable frame while awaiting registration, ignoring");
+                    note("vendor process: undecodable frame while awaiting registration, ignoring");
                     continue;
                 };
                 match inbound.command {
@@ -554,7 +554,7 @@ impl RuntimeVendorClient {
                     | RuntimeVendorCommand::DeleteRuntime(_)
                     | RuntimeVendorCommand::QueryRuntimes(_)
                     | RuntimeVendorCommand::Runtime(_) => {
-                        note("vendor agent: command before registration was answered, ignoring");
+                        note("vendor process: command before registration was answered, ignoring");
                     }
                 }
             }
@@ -586,7 +586,7 @@ impl RuntimeVendorClient {
                     // A failed write means the socket is gone; let the read
                     // half report it rather than racing it to a verdict.
                     if let Err(e) = sink.lock().await.send(Message::Ping(Vec::new().into())).await {
-                        note(&format!("vendor agent: heartbeat failed: {e}"));
+                        note(&format!("vendor process: heartbeat failed: {e}"));
                     }
                 }
                 next = stream.next() => {
@@ -600,7 +600,7 @@ impl RuntimeVendorClient {
                         Ok(Message::Close(_)) | Err(_) => return LinkEnd::Disconnected,
                     };
                     let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                        note("vendor agent: undecodable command, ignoring");
+                        note("vendor process: undecodable command, ignoring");
                         continue;
                     };
                     // Each command runs on its own task: a bash tool call can
@@ -722,7 +722,7 @@ impl RuntimeVendorClient {
             // runs. Arriving here means the server sent one twice; there is
             // nothing to do with it and nothing to reply.
             RuntimeVendorCommand::VendorRegistered(_) | RuntimeVendorCommand::VendorRejected(_) => {
-                note("vendor agent: a registration verdict arrived on an established link");
+                note("vendor process: a registration verdict arrived on an established link");
                 return;
             }
         };
@@ -876,7 +876,7 @@ impl RuntimeVendorClient {
         };
         for (id, handle) in live {
             if let Err(e) = handle.stop().await {
-                note(&format!("vendor agent: stopping runtime '{id}': {e}"));
+                note(&format!("vendor process: stopping runtime '{id}': {e}"));
             }
         }
     }
@@ -997,7 +997,7 @@ impl RuntimeVendorClient {
             && let Err(e) = std::fs::create_dir_all(&dir)
         {
             note(&format!(
-                "vendor agent: cannot create bundle dir {}: {e}",
+                "vendor process: cannot create bundle dir {}: {e}",
                 dir.display()
             ));
         }

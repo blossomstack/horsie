@@ -129,7 +129,7 @@ Run the binary directly with:
 horsie-server --addr 0.0.0.0:3789 --web clients/web/dist
 ```
 
-`make build-cli` / `make install-cli` build the `horsie` binary (the vendor agent
+`make build-cli` / `make install-cli` build the `horsie` binary (the vendor process
 behind `horsie connect`) and its sandboxed `horsie-runtime` child. `make help`
 lists every target.
 

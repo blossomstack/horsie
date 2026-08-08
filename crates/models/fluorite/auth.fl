@@ -1,5 +1,5 @@
 /// Wire contracts for server authentication. Sub-project A covers the browser
-/// session only: the CLI device flow and vendor agent tokens add their own
+/// session only: the CLI device flow and vendor process tokens add their own
 /// types to this package later.
 package auth;
 

@@ -1,4 +1,4 @@
-//! One connected vendor agent's WebSocket, with request/reply correlation.
+//! One connected vendor process's WebSocket, with request/reply correlation.
 //!
 //! The agent owns runtime lifecycle; this link is the server's only handle on
 //! it. Every command carries a fresh `request_id`; the read loop matches each
@@ -303,7 +303,7 @@ impl WebsocketRuntimeVendor {
 
     async fn write(&self, msg: &RuntimeVendorInboundMessage) -> Result<(), String> {
         if !self.is_reachable() {
-            return Err("vendor agent disconnected".to_string());
+            return Err("vendor process disconnected".to_string());
         }
         let json = serde_json::to_string(msg).map_err(|e| format!("encode command: {e}"))?;
         self.sink
@@ -311,7 +311,7 @@ impl WebsocketRuntimeVendor {
             .await
             .send(Message::Text(json.into()))
             .await
-            .map_err(|e| format!("send to vendor agent: {e}"))
+            .map_err(|e| format!("send to vendor process: {e}"))
     }
 
     /// Send a command and await the event carrying the same `request_id`.

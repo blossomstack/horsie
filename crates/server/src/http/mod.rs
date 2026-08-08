@@ -395,7 +395,7 @@ mod tests {
     }
 
     /// The real composition root, on a throwaway database, with one fake
-    /// vendor agent published under `mock` in the bootstrap account.
+    /// vendor process published under `mock` in the bootstrap account.
     ///
     /// Deliberately built through `UserRegistry` rather than by assembling a
     /// bundle by hand: what these tests exercise is what a request actually
@@ -434,7 +434,7 @@ mod tests {
         state
     }
 
-    /// Publish a fake vendor agent as `mock` in the state's anonymous account,
+    /// Publish a fake vendor process as `mock` in the state's anonymous account,
     /// which is who every unauthenticated request resolves to.
     async fn publish_mock_vendor(state: &AppState) {
         let agent = FakeRuntimeVendor::builder("mock")
@@ -443,7 +443,7 @@ mod tests {
             .expect("fake agent");
         services(state)
             .await
-            .vendor_agents
+            .connected_vendors
             .publish(agent.link())
             .expect("mock is unclaimed in a fresh account");
     }
@@ -1696,7 +1696,7 @@ mod tests {
     async fn a_connected_agent_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let router = app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3044,7 +3044,7 @@ mod tests {
         );
     }
 
-    /// Bring up a real listener so vendor agents can dial a real WS upgrade.
+    /// Bring up a real listener so vendor processes can dial a real WS upgrade.
     async fn serve(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3071,7 +3071,7 @@ mod tests {
     async fn a_vendor_dial_without_a_credential_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, _pw) = auth_state(&tmp).await;
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         // The dial fails at the HTTP layer — a 401, not a completed upgrade
@@ -3097,7 +3097,7 @@ mod tests {
         // A valid credential of the wrong kind: right principal, but a cookie
         // has no business being a machine.
         let web = state.auth.login(&pw).await.unwrap();
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
@@ -3119,7 +3119,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")

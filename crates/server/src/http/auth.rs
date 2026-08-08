@@ -3,7 +3,7 @@
 //!
 //! The browser authenticates by cookie rather than a header because it has no
 //! choice: both event streams use the native `EventSource`, which cannot set
-//! headers. Non-browser callers (the CLI, vendor agents) send
+//! headers. Non-browser callers (the CLI, vendor processes) send
 //! `Authorization: Bearer` and are accepted by the same code path.
 
 use crate::auth::{DeviceError, LoginError, Principal};

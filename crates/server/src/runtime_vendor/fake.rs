@@ -1,4 +1,4 @@
-//! A scriptable vendor agent for tests — never compiled into a production build.
+//! A scriptable vendor process for tests — never compiled into a production build.
 //!
 //! It speaks the real `runtime_vendor.fl` protocol over a real WebSocket, in the two
 //! shapes production uses: dialing a running server's `/api/vendor/connect`, or

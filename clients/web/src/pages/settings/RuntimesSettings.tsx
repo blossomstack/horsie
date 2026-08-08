@@ -80,10 +80,10 @@ export function RuntimesSettings() {
 
         <Section
           title="Connected vendors"
-          desc="Agents connected right now. Run horsie connect on a machine, or start a vendor agent such as horsie-velos-runtime, and it appears here. New sessions use the default when they don’t pick one."
+          desc="Agents connected right now. Run horsie connect on a machine, or start a vendor process such as horsie-velos-runtime, and it appears here. New sessions use the default when they don’t pick one."
           empty={
             vendors.length === 0 && !absentDefault
-              ? "No vendor agents are connected, so sessions cannot run a turn yet."
+              ? "No vendor processes are connected, so sessions cannot run a turn yet."
               : null
           }
         >

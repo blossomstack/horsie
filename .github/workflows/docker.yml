@@ -4,7 +4,7 @@ name: Docker
 # every push to main and every v* release tag:
 #   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI)
 #   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)
-#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor agent doing the scheduling)
+#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor process doing the scheduling)
 #
 # Mirrors the velos pipeline: auth via the workflow's OIDC-minted GITHUB_TOKEN
 # (no stored registry secret); OIDC also backs the keyless cosign signature and

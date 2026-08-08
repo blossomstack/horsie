@@ -1,4 +1,4 @@
-//! A vendor agent survives losing its link to the server.
+//! A vendor process survives losing its link to the server.
 //!
 //! Everything here is real: a real `RuntimeVendorClient` dialing a real
 //! `WebsocketRuntimeVendor` over a real TCP WebSocket, published through the real

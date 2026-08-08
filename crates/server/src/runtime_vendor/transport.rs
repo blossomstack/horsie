@@ -6,9 +6,9 @@
 //!
 //! Nothing here understands what it is forwarding. The runtime protocol crosses
 //! the vendor link whole, so a new runtime message needs no change in this file,
-//! in the link, or in the vendor agent on the other end.
+//! in the link, or in the vendor process on the other end.
 //!
-//! **The link is resolved per call, never held.** A vendor agent that reconnects
+//! **The link is resolved per call, never held.** A vendor process that reconnects
 //! comes back on a brand-new [`WebsocketRuntimeVendor`]; the one it was reached on
 //! before is a corpse forever. A transport that captured that `Arc` would fail
 //! every later call, and since a client is acquired once per *run* and baked

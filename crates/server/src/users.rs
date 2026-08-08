@@ -82,11 +82,11 @@ pub struct UserServices {
     pub routine_runner: Arc<crate::routines::RoutineRunner>,
     pub environments: Arc<crate::environments::EnvironmentService>,
     pub workflows: Arc<crate::workflows::WorkflowService>,
-    /// Where this account's vendor agents publish themselves. A name claimed
+    /// Where this account's vendor processes publish themselves. A name claimed
     /// here is claimed for this account only, so `main` is available to
     /// everyone — and no session can select another account's runtime, because
     /// it is not in the map it reads.
-    pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    pub connected_vendors: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
     /// This account's runtime vendors that are *configured* rather than dialled
     /// in. A cloud vendor has nothing to announce itself from, so its row is
     /// the only record it exists; this service is what rebuilds it at boot.
@@ -172,7 +172,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         opened.store.clone(),
     ));
 
-    let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
+    let connected_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
     let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
@@ -182,7 +182,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         opened.vendors.clone(),
         // The registry's own table, so the two publishers of one map can see
         // each other's names rather than silently overwriting them.
-        vendor_agents.links(),
+        connected_vendors.links(),
         connected_runtimes.clone(),
         opened.dial_secret.clone(),
     ));
@@ -223,7 +223,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         agents.clone(),
         environments.clone(),
         opened.store.clone(),
-        vendor_agents.clone(),
+        connected_vendors.clone(),
         supervisor.clone(),
     ));
 
@@ -245,7 +245,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         routine_runner,
         environments,
         workflows,
-        vendor_agents,
+        connected_vendors,
         runtime_vendors,
         connected_runtimes,
         dial_secret: opened.dial_secret.clone(),
