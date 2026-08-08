@@ -180,7 +180,7 @@ mod tests {
     use horsie_models::environments::{EnvironmentInput, NamedEnvironment, RuntimeEnvironment};
     use horsie_models::executor::{EnvVar, ProvisionStep, StepParam};
     use horsie_models::session_api::RepoConfig;
-    use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
+    use horsie_models::settings::{ModelInput, ProviderInput};
 
     /// A config store carrying one model ("m"), and an environment service on
     /// the same database.
@@ -204,15 +204,15 @@ mod tests {
         .unwrap();
         opened
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: "p".into(),
                     kind: "anthropic".into(),
                     base_url: Some("http://localhost:1".into()),
                     api_key: Some("sk-x".into()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![ModelInput {
+                }],
+                vec![ModelInput {
                     alias: "m".into(),
                     provider: "p".into(),
                     model_id: "claude".into(),
@@ -222,9 +222,8 @@ mod tests {
                     thinking_effort: None,
                     thinking_dialect: None,
                     forced_tools_disable_thinking: None,
-                }]),
-                default_vendor: None,
-            })
+                }],
+            )
             .await
             .unwrap();
         let envs = EnvironmentService::new(crate::environments::EnvironmentStore::new(

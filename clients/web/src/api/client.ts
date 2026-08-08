@@ -58,8 +58,11 @@ import type {
   Ack,
   SessionAck,
   SetAnnotationsRequest,
-  SettingsUpdate,
   SettingsView,
+  ModelInput,
+  ModelView,
+  ProviderInput,
+  ProviderView,
 } from "./types";
 
 // All horsie endpoints live under `/api`. In dev, Vite proxies this prefix to
@@ -407,11 +410,52 @@ export const api = {
     /** The current redacted settings (providers, models, vendors, deployment info). */
     get: (): Promise<SettingsView> => request("/config"),
 
-    /** Persist + live-apply a settings update; returns the new view. */
-    update: (body: SettingsUpdate): Promise<SettingsView> =>
-      request("/config", { method: "PUT", body: JSON.stringify(body) }),
+    /** The vendor new sessions default to; returns the new view. */
+    setDefaultVendor: (vendor: string): Promise<SettingsView> =>
+      request("/config/default-vendor", {
+        method: "PUT",
+        body: JSON.stringify({ vendor }),
+      }),
 
-    /** On-demand reachability + token check for a vendor (velos only); never mutates settings. */
+    /** Forget the default-vendor preference, falling back to the built-in. */
+    clearDefaultVendor: (): Promise<SettingsView> =>
+      request("/config/default-vendor", { method: "DELETE" }),
+
+    /** Model aliases, one resource at a time. */
+    models: {
+      list: (): Promise<ModelView[]> => request("/config/models"),
+
+      /** Create or replace one alias. The path is the identity. */
+      put: (alias: string, body: ModelInput): Promise<ModelView> =>
+        request(`/config/models/${encodeURIComponent(alias)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }),
+
+      remove: (alias: string): Promise<void> =>
+        request(`/config/models/${encodeURIComponent(alias)}`, {
+          method: "DELETE",
+        }),
+    },
+
+    /** LLM providers. Named `model-providers` server-side because a bare
+     * "provider" collides with the runtime vendor vocabulary. */
+    modelProviders: {
+      list: (): Promise<ProviderView[]> => request("/config/model-providers"),
+
+      /** Omitting `apiKey` keeps the stored key; `""` clears it. */
+      put: (name: string, body: ProviderInput): Promise<ProviderView> =>
+        request(`/config/model-providers/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }),
+
+      /** 409 while any model still routes to it. */
+      remove: (name: string): Promise<void> =>
+        request(`/config/model-providers/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        }),
+    },
   },
 
   modelCards: {
@@ -428,24 +472,24 @@ export const api = {
      * ChatGPT password. */
     chatgpt: {
       status: (provider: string): Promise<ChatGptStatus> =>
-        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt`),
+        request(`/config/model-providers/${encodeURIComponent(provider)}/chatgpt`),
 
       /** Ask OpenAI for a user code. The operator types it at `verificationUrl`. */
       start: (provider: string): Promise<ChatGptStartedLogin> =>
-        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/login`, {
+        request(`/config/model-providers/${encodeURIComponent(provider)}/chatgpt/login`, {
           method: "POST",
           body: "{}",
         }),
 
       /** One poll. `pending` until the operator approves it in their browser. */
       poll: (provider: string): Promise<ChatGptPoll> =>
-        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/poll`, {
+        request(`/config/model-providers/${encodeURIComponent(provider)}/chatgpt/poll`, {
           method: "POST",
           body: "{}",
         }),
 
       signOut: (provider: string): Promise<void> =>
-        request(`/admin/providers/${encodeURIComponent(provider)}/chatgpt/login`, {
+        request(`/config/model-providers/${encodeURIComponent(provider)}/chatgpt/login`, {
           method: "DELETE",
         }),
     },

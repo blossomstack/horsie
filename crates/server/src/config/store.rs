@@ -24,11 +24,11 @@ use horsie_llm_providers::responses::chatgpt::{
     ChatGptTokens, ResponsesError, StoredTokens, TokenStore,
 };
 use horsie_models::settings::{
-    ModelInput, ModelView, ProviderInput, ProviderView, ServerInfo, SettingsUpdate, SettingsView,
+    ModelInput, ModelView, ProviderInput, ProviderView, ServerInfo, SettingsView,
     VendorCapabilities, VendorView,
 };
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 type Registry = HashMap<String, Arc<dyn LlmProvider>>;
@@ -49,6 +49,32 @@ pub struct OpenedConfig {
     /// that persist into the same settings DB.
     pub db: Db,
 }
+
+/// Test-only seeding, applying providers and then models one resource at a
+/// time.
+///
+/// Exists because the tests predate the per-resource API and describe a whole
+/// configuration at once, which is a fine way to *set up* a fixture even though
+/// it is a bad way to expose an API.
+#[cfg(test)]
+impl DbConfigStore {
+    pub(crate) async fn seed(
+        &self,
+        providers: Vec<ProviderInput>,
+        models: Vec<ModelInput>,
+    ) -> Result<SettingsView, String> {
+        for p in providers {
+            self.upsert_provider(p).await?;
+        }
+        for m in models {
+            self.upsert_model(m).await?;
+        }
+        self.build_view().await
+    }
+}
+
+/// The vendor sessions default to when no preference is stored.
+pub const DEFAULT_VENDOR: &str = "local";
 
 pub struct DbConfigStore {
     db: Db,
@@ -114,7 +140,7 @@ impl DbConfigStore {
         let default_vendor = read_setting(&db, db.pool(), &user, "default_vendor")
             .await
             .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "local".into());
+            .unwrap_or_else(|| DEFAULT_VENDOR.into());
 
         let store = Arc::new(Self {
             db: db.clone(),
@@ -217,211 +243,56 @@ impl ConfigStore for DbConfigStore {
         self.build_view().await
     }
 
-    async fn update(&self, update: SettingsUpdate) -> Result<SettingsView, String> {
-        // `begin_write`, not `begin`: this transaction reads the existing
-        // providers before rewriting them, and a deferred transaction that
-        // upgrades to a write that late loses to any writer that committed in
-        // between — SQLite answers `database is locked` and no busy timeout
-        // retries it. Sessions journal constantly, so saving settings while one
-        // is working is exactly that race.
+    async fn set_default_vendor(&self, vendor: &str) -> Result<SettingsView, String> {
+        let vendor = vendor.trim();
+        if vendor.is_empty() {
+            return Err("default vendor cannot be empty".into());
+        }
+
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
-
-        if let Some(providers) = &update.providers {
-            let existing = read_providers(&self.db, &mut *tx, &self.user)
-                .await
-                .map_err(|e| e.to_string())?;
-            let keep: HashMap<&str, &str> = existing
-                .iter()
-                .filter_map(|r| r.api_key.as_deref().map(|k| (r.name.as_str(), k)))
-                .collect();
-            let mut seen = HashSet::new();
-            let mut chatgpt_now = HashSet::new();
-            // Scoped, and load-bearing: providers are rewritten wholesale, so
-            // an unscoped DELETE here would wipe every other account's
-            // providers on any settings save.
-            sqlx::query(&self.db.q("DELETE FROM providers WHERE user_id = ?"))
-                .bind(self.user.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            for p in providers {
-                let name = p.name.trim();
-                if name.is_empty() {
-                    return Err("provider name cannot be empty".into());
-                }
-                if !matches!(
-                    p.kind.as_str(),
-                    "anthropic" | "openai" | "openai-responses" | "chatgpt"
-                ) {
-                    return Err(format!(
-                        "unsupported provider kind '{}' (expected 'anthropic', 'openai', \
-                         'openai-responses' or 'chatgpt')",
-                        p.kind
-                    ));
-                }
-                if !seen.insert(name.to_string()) {
-                    return Err(format!("duplicate provider '{name}'"));
-                }
-                // A ChatGPT plan authorizes with an OAuth token and has no key
-                // field in the UI at all, so any key on that row is a leftover
-                // from the kind it used to be — kept alive until now by
-                // `resolve_secret`'s "omitted means unchanged" rule. Dropping it
-                // here is what lets `has_credential` mean one thing.
-                let api_key = if p.kind == "chatgpt" {
-                    chatgpt_now.insert(name.to_string());
-                    None
-                } else {
-                    resolve_secret(&p.api_key, keep.get(name).copied())
-                };
-                sqlx::query(&self.db.q(
-                    "INSERT INTO providers (user_id, name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?, ?)",
-                ))
-                .bind(self.user.as_str())
-                .bind(name)
-                .bind(&p.kind)
-                .bind(trimmed(&p.base_url))
-                .bind(api_key)
-                .bind(i64::from(p.keep_thinking_signature.unwrap_or(false)))
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            }
-
-            // A sign-in outlives its provider in two ways, and both leave a live
-            // refresh token that the next provider of that name would silently
-            // inherit: the provider is removed or renamed (providers are
-            // rewritten wholesale), or it is still there under a kind that no
-            // longer signs in. Keeping only the names that are ChatGPT plans
-            // *now* covers both without asking which happened.
-            let orphans: Vec<String> = read_provider_oauth(&self.db, &mut *tx, &self.user)
-                .await
-                .map_err(|e| e.to_string())?
-                .into_keys()
-                .filter(|p| !chatgpt_now.contains(p))
-                .collect();
-            for provider in orphans {
-                sqlx::query(
-                    &self
-                        .db
-                        .q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"),
-                )
-                .bind(self.user.as_str())
-                .bind(&provider)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            }
-        }
-
-        if let Some(models) = &update.models {
-            let mut seen = HashSet::new();
-            // Scoped for the same reason as the provider rewrite above.
-            sqlx::query(&self.db.q("DELETE FROM models WHERE user_id = ?"))
-                .bind(self.user.as_str())
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            for m in models {
-                let alias = m.alias.trim();
-                if alias.is_empty() {
-                    return Err("model alias cannot be empty".into());
-                }
-                if m.model_id.trim().is_empty() {
-                    return Err(format!("model '{alias}' needs a model id"));
-                }
-                if !seen.insert(alias.to_string()) {
-                    return Err(format!("duplicate model '{alias}'"));
-                }
-                let context_window = m
-                    .context_window
-                    .or_else(|| default_context_window(m.model_id.trim()));
-                if let Some(d) = m.thinking_dialect.as_deref()
-                    && ThinkingDialect::parse(d).is_none()
-                {
-                    return Err(format!(
-                        "model '{alias}' has unknown thinking dialect '{d}'"
-                    ));
-                }
-                let offered: Vec<String> = m.thinking_efforts.clone().unwrap_or_default();
-                for e in &offered {
-                    if ThinkingEffort::parse(e).is_none() {
-                        return Err(format!(
-                            "model '{alias}' offers unknown thinking effort '{e}'"
-                        ));
-                    }
-                }
-                if let Some(def) = m.thinking_effort.as_deref()
-                    && !offered.iter().any(|e| e == def)
-                {
-                    return Err(format!(
-                        "model '{alias}' default thinking effort '{def}' is not among its offered efforts"
-                    ));
-                }
-                sqlx::query(&self.db.q(
-                    "INSERT INTO models (user_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                ))
-                .bind(self.user.as_str())
-                .bind(alias)
-                .bind(&m.provider)
-                .bind(m.model_id.trim())
-                .bind(m.max_tokens.map(i64::from))
-                .bind(context_window.map(i64::from))
-                .bind(encode_efforts(m.thinking_efforts.as_ref()))
-                .bind(m.thinking_effort.clone())
-                .bind(m.thinking_dialect.clone())
-                .bind(i64::from(m.forced_tools_disable_thinking.unwrap_or(false)))
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| e.to_string())?;
-            }
-        }
-
-        if let Some(dv) = &update.default_vendor {
-            if dv.trim().is_empty() {
-                return Err("default vendor cannot be empty".into());
-            }
-            // Deliberately not validated against the live roster: the agent
-            // answering to this name may connect long after the preference is
-            // set, and rejecting it here would make the setting unusable
-            // before its agent is running.
-            sqlx::query(&self.db.q(
-                "INSERT INTO settings (user_id, key, value) VALUES (?, 'default_vendor', ?) \
-                 ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
-            ))
-            .bind(self.user.as_str())
-            .bind(dv)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-        }
-
-        // Validate providers/models by building the registry from the new state
-        // before committing — a bad edit rolls back untouched.
-        let provs = read_providers(&self.db, &mut *tx, &self.user)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mods = read_models(&self.db, &mut *tx, &self.user)
-            .await
-            .map_err(|e| e.to_string())?;
-        let chatgpt = live_chatgpt_tokens(
-            &self.db,
-            &self.user,
-            read_provider_oauth(&self.db, &mut *tx, &self.user)
-                .await
-                .map_err(|e| e.to_string())?,
-        );
-        let new_registry = build_registry(&provs, &mods, &chatgpt)?;
-
+        sqlx::query(&self.db.q(
+            "INSERT INTO settings (user_id, key, value) VALUES (?, 'default_vendor', ?) \
+             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        ))
+        .bind(self.user.as_str())
+        .bind(vendor)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
 
-        *self.registry.write().unwrap_or_else(|e| e.into_inner()) = new_registry;
-        if let Some(dv) = &update.default_vendor {
-            *self
-                .default_vendor
-                .write()
-                .unwrap_or_else(|e| e.into_inner()) = dv.clone();
-        }
+        *self
+            .default_vendor
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = vendor.to_string();
         self.build_view().await
+    }
+
+    async fn clear_default_vendor(&self) -> Result<SettingsView, String> {
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM settings WHERE user_id = ? AND key = 'default_vendor'"),
+        )
+        .bind(self.user.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+
+        // Matches what `open` falls back to when the row is absent, so the
+        // live value and a fresh boot agree.
+        *self
+            .default_vendor
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = DEFAULT_VENDOR.to_string();
+        self.build_view().await
+    }
+
+    async fn rebuild_registry(&self) -> Result<(), String> {
+        let tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+        self.validate_and_commit(tx).await
     }
 
     async fn upsert_provider(&self, input: ProviderInput) -> Result<ProviderView, String> {
@@ -1272,15 +1143,15 @@ mod tests {
         let store = open().await.store;
 
         store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: "deepseek".into(),
                     kind: "openai".into(),
                     base_url: Some("https://api.deepseek.com".into()),
                     api_key: Some("k".into()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![ModelInput {
+                }],
+                vec![ModelInput {
                     alias: "ds".into(),
                     provider: "deepseek".into(),
                     model_id: "deepseek-v4-flash".into(),
@@ -1290,9 +1161,8 @@ mod tests {
                     thinking_effort: Some("high".into()),
                     thinking_dialect: Some("openai_effort".into()),
                     forced_tools_disable_thinking: Some(true),
-                }]),
-                default_vendor: None,
-            })
+                }],
+            )
             .await
             .expect("update succeeds");
 
@@ -1332,11 +1202,10 @@ mod tests {
         let o = open().await;
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-inline"))]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider("p", Some("sk-inline"))],
+                vec![model("m", "p")],
+            )
             .await
             .expect("update ok");
         assert_eq!(view.models.len(), 1);
@@ -1359,15 +1228,10 @@ mod tests {
         let o = open().await;
 
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind(
-                    "p",
-                    "openai-responses",
-                    Some("sk-inline"),
-                )]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider_of_kind("p", "openai-responses", Some("sk-inline"))],
+                vec![model("m", "p")],
+            )
             .await
             .expect("update ok");
 
@@ -1383,11 +1247,10 @@ mod tests {
 
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider_of_kind("p", "chatgpt", None)],
+                vec![model("m", "p")],
+            )
             .await
             .expect_err("no credential yet");
 
@@ -1400,11 +1263,7 @@ mod tests {
 
         // A provider with no models: accepted, since nothing needs building yet.
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider_of_kind("p", "chatgpt", None)], vec![])
             .await
             .expect("provider alone is fine");
 
@@ -1424,11 +1283,10 @@ mod tests {
         .expect("stored");
 
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider_of_kind("p", "chatgpt", None)],
+                vec![model("m", "p")],
+            )
             .await
             .expect("update ok");
 
@@ -1447,11 +1305,7 @@ mod tests {
 
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", None)]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", None)], vec![model("m", "p")])
             .await
             .expect_err("a key-less provider must not build");
         unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
@@ -1468,22 +1322,14 @@ mod tests {
     async fn a_kind_change_drops_the_credential_the_new_kind_cannot_use() {
         let o = open().await;
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-inline"))]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-inline"))], vec![])
             .await
             .expect("update ok");
 
         // anthropic → chatgpt: the API key goes.
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider_of_kind("p", "chatgpt", None)], vec![])
             .await
             .expect("update ok");
         assert!(
@@ -1511,11 +1357,7 @@ mod tests {
         // not come back with it.
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", None)]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", None)], vec![])
             .await
             .expect("update ok");
         assert!(!view.providers[0].has_credential);
@@ -1535,11 +1377,7 @@ mod tests {
     async fn removing_a_provider_drops_its_sign_in() {
         let o = open().await;
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "chatgpt", None)]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider_of_kind("p", "chatgpt", None)], vec![])
             .await
             .expect("update ok");
         write_provider_oauth(
@@ -1558,13 +1396,9 @@ mod tests {
         .expect("stored");
 
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .delete_provider("p")
             .await
-            .expect("update ok");
+            .expect("provider deleted");
 
         let left = read_provider_oauth(&o.db, o.db.pool(), &UserId::new("1"))
             .await
@@ -1581,11 +1415,7 @@ mod tests {
 
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_of_kind("p", "nonsense", None)]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+            .seed(vec![provider_of_kind("p", "nonsense", None)], vec![])
             .await
             .expect_err("unknown kind");
 
@@ -1597,9 +1427,9 @@ mod tests {
         let o = open().await;
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-inline"))]),
-                models: Some(vec![
+            .seed(
+                vec![provider("p", Some("sk-inline"))],
+                vec![
                     ModelInput {
                         alias: "sonnet".into(),
                         provider: "p".into(),
@@ -1622,9 +1452,8 @@ mod tests {
                         thinking_dialect: None,
                         forced_tools_disable_thinking: None,
                     },
-                ]),
-                default_vendor: None,
-            })
+                ],
+            )
             .await
             .expect("update ok");
         let sonnet = view.models.iter().find(|m| m.alias == "sonnet").unwrap();
@@ -1641,21 +1470,13 @@ mod tests {
     async fn update_preserves_inline_key_when_omitted() {
         let o = open().await;
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-secret"))]),
-                models: None,
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-secret"))], vec![])
             .await
             .unwrap();
         // Re-send without a key → keep it (the view still reports a stored key).
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", None)]),
-                models: None,
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", None)], vec![])
             .await
             .unwrap();
         assert!(view.providers[0].has_credential);
@@ -1665,20 +1486,12 @@ mod tests {
     async fn update_rejects_unknown_provider_and_rolls_back() {
         let o = open().await;
         o.store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("k"))]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("k"))], vec![model("m", "p")])
             .await
             .unwrap();
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![]),
-                models: Some(vec![model("m", "ghost")]),
-                default_vendor: None,
-            })
+            .seed(vec![], vec![model("m", "ghost")])
             .await
             .unwrap_err();
         assert!(err.contains("ghost"), "error names the provider: {err}");
@@ -1704,11 +1517,10 @@ mod tests {
         let o = open().await;
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_kind("local", "openai")]),
-                models: Some(vec![model("m", "local")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider_kind("local", "openai")],
+                vec![model("m", "local")],
+            )
             .await
             .expect("openai must be an accepted provider kind");
 
@@ -1723,11 +1535,7 @@ mod tests {
         let o = open().await;
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider_kind("bogus", "cohere")]),
-                models: None,
-                default_vendor: None,
-            })
+            .seed(vec![provider_kind("bogus", "cohere")], vec![])
             .await
             .expect_err("unknown kinds must be rejected");
 
@@ -1793,31 +1601,36 @@ mod tests {
     async fn keep_thinking_signature_round_trips() {
         let o = open().await;
 
+        let flag = |view: &SettingsView, name: &str| {
+            view.providers
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap_or_else(|| panic!("no provider {name}"))
+                .keep_thinking_signature
+        };
+
         // Defaults off for a fresh provider.
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("kimi", Some("sk-test"))]),
-                models: Some(vec![model("m", "kimi")]),
-                default_vendor: None,
-            })
+            .seed(
+                vec![provider("kimi", Some("sk-test"))],
+                vec![model("m", "kimi")],
+            )
             .await
             .expect("update succeeds");
-        assert!(!view.providers[0].keep_thinking_signature);
+        assert!(!flag(&view, "kimi"));
 
-        // Opting in persists and reads back.
+        // Opting in persists and reads back. Providers accumulate now rather
+        // than being replaced wholesale, so this is looked up by name.
         let mut p = provider("real-anthropic", Some("sk-test"));
         p.keep_thinking_signature = Some(true);
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![p]),
-                models: Some(vec![model("m", "real-anthropic")]),
-                default_vendor: None,
-            })
+            .seed(vec![p], vec![model("m2", "real-anthropic")])
             .await
             .expect("update succeeds");
-        assert!(view.providers[0].keep_thinking_signature);
+        assert!(flag(&view, "real-anthropic"));
+        assert!(!flag(&view, "kimi"), "the other provider is untouched");
     }
 
     #[tokio::test]
@@ -1829,11 +1642,7 @@ mod tests {
         m.thinking_dialect = Some("anthropic_effort".into());
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-test"))]),
-                models: Some(vec![m]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-test"))], vec![m])
             .await
             .expect("update succeeds");
         let got = &view.models[0];
@@ -1850,11 +1659,7 @@ mod tests {
         let o = open().await;
         let view = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-test"))]),
-                models: Some(vec![model("m", "p")]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-test"))], vec![model("m", "p")])
             .await
             .expect("update succeeds");
         assert_eq!(view.models[0].thinking_efforts, None);
@@ -1871,11 +1676,7 @@ mod tests {
         m.thinking_dialect = Some("anthropic_effort".into());
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-test"))]),
-                models: Some(vec![m]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-test"))], vec![m])
             .await
             .expect_err("default effort must be one the model offers");
         assert!(
@@ -1891,11 +1692,7 @@ mod tests {
         m.thinking_dialect = Some("telepathy".into());
         let err = o
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![provider("p", Some("sk-test"))]),
-                models: Some(vec![m]),
-                default_vendor: None,
-            })
+            .seed(vec![provider("p", Some("sk-test"))], vec![m])
             .await
             .expect_err("unknown dialect must be rejected");
         assert!(err.contains("telepathy"), "error should name it: {err}");

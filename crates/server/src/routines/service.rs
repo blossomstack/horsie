@@ -378,7 +378,7 @@ pub(crate) mod tests {
         DailySchedule, EverySchedule, ManualSchedule, MonthlySchedule, OnceSchedule, Weekday,
         WeeklySchedule, YearlySchedule,
     };
-    use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
+    use horsie_models::settings::{ModelInput, ProviderInput};
 
     /// Everything a routine test needs, over one temp DB: a config store with
     /// one model ("sonnet"), one agent preset ("reviewer"), and the routine
@@ -416,15 +416,15 @@ pub(crate) mod tests {
         .unwrap();
         opened
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: "p".into(),
                     kind: "anthropic".into(),
                     base_url: Some("http://localhost:1".into()),
                     api_key: Some("sk-x".into()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![ModelInput {
+                }],
+                vec![ModelInput {
                     alias: "sonnet".into(),
                     provider: "p".into(),
                     model_id: "claude-sonnet-4-6".into(),
@@ -434,9 +434,8 @@ pub(crate) mod tests {
                     thinking_effort: None,
                     thinking_dialect: None,
                     forced_tools_disable_thinking: None,
-                }]),
-                default_vendor: Some("mock".into()),
-            })
+                }],
+            )
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(

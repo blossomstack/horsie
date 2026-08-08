@@ -54,7 +54,7 @@ pub struct StatusBody {
     pub account_id: Option<String>,
 }
 
-/// `POST /api/admin/providers/:name/chatgpt/login`
+/// `POST /api/config/model-providers/:name/chatgpt/login`
 pub async fn start(
     Scope(state): Scope,
     Path(name): Path<String>,
@@ -67,7 +67,7 @@ pub async fn start(
     }))
 }
 
-/// `POST /api/admin/providers/:name/chatgpt/poll`
+/// `POST /api/config/model-providers/:name/chatgpt/poll`
 pub async fn poll(Scope(state): Scope, Path(name): Path<String>) -> Result<Json<PollBody>, Api> {
     Ok(Json(match state.chatgpt.poll(&name).await? {
         PollOutcome::Pending => PollBody {
@@ -81,7 +81,7 @@ pub async fn poll(Scope(state): Scope, Path(name): Path<String>) -> Result<Json<
     }))
 }
 
-/// `GET /api/admin/providers/:name/chatgpt`
+/// `GET /api/config/model-providers/:name/chatgpt`
 pub async fn status(
     Scope(state): Scope,
     Path(name): Path<String>,
@@ -93,7 +93,7 @@ pub async fn status(
     }))
 }
 
-/// `DELETE /api/admin/providers/:name/chatgpt/login`
+/// `DELETE /api/config/model-providers/:name/chatgpt/login`
 pub async fn sign_out(Scope(state): Scope, Path(name): Path<String>) -> Result<StatusCode, Api> {
     state.chatgpt.sign_out(&name).await?;
     Ok(StatusCode::NO_CONTENT)

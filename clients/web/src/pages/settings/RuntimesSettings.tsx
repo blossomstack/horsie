@@ -1,7 +1,7 @@
 import { Star, X } from "lucide-react";
 import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { useSettings, useSetDefaultVendor } from "../../hooks/useSettings";
 import { ListRow, RowAction, Section, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
@@ -17,15 +17,15 @@ import { SettingsHeader } from "./SettingsHeader";
  */
 export function RuntimesSettings() {
   const { data: settings, isLoading, error } = useSettings();
-  const update = useUpdateSettings();
+  const update = useSetDefaultVendor();
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Setting the default is one action on one row, so there is nothing to batch
   // and no dirty state to publish.
-  const makeDefault = async (name: string) => {
+  const makeDefault = async (name: string | null) => {
     setSaveError(null);
     try {
-      await update.mutateAsync({ defaultVendor: name || undefined });
+      await update.mutateAsync(name);
     } catch (e) {
       setSaveError(
         e instanceof ApiRequestError ? e.message : "Failed to save settings.",
@@ -134,7 +134,7 @@ export function RuntimesSettings() {
                 <RowAction
                   icon={<X size={14} />}
                   label="Clear the default"
-                  onClick={() => makeDefault("")}
+                  onClick={() => makeDefault(null)}
                   disabled={update.isPending}
                   testId="vendor-clear-default"
                 />

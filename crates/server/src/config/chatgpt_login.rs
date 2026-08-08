@@ -14,7 +14,6 @@ use crate::db::Db;
 use horsie_llm_providers::responses::chatgpt::{
     ChatGptAuth, DeviceLogin, DeviceLoginPoll, poll_device_login, start_device_login,
 };
-use horsie_models::settings::SettingsUpdate;
 use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -166,18 +165,13 @@ impl ChatGptLoginService {
     }
 
     async fn rebuild_registry(&self) -> Result<(), LoginError> {
-        // An empty update changes nothing but rebuilds and swaps the registry,
-        // which is exactly what a fresh credential needs: the provider was
+        // Nothing to persist — the credential landed in `provider_oauth`. The
+        // registry just has to be re-derived, because the provider was
         // unbuildable a moment ago.
         self.config
-            .update(SettingsUpdate {
-                providers: None,
-                models: None,
-                default_vendor: None,
-            })
+            .rebuild_registry()
             .await
-            .map_err(LoginError::Upstream)?;
-        Ok(())
+            .map_err(LoginError::Upstream)
     }
 
     /// Forget a sign-in. The models on this provider stop working until it is
@@ -340,17 +334,16 @@ mod tests {
     async fn add_provider(f: &Fixture, name: &str, kind: &str) {
         f.opened
             .store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
+            .seed(
+                vec![ProviderInput {
                     name: name.into(),
                     kind: kind.into(),
                     base_url: None,
                     api_key: (kind != "chatgpt").then(|| "sk-x".to_string()),
                     keep_thinking_signature: None,
-                }]),
-                models: Some(vec![]),
-                default_vendor: None,
-            })
+                }],
+                vec![],
+            )
             .await
             .unwrap();
     }

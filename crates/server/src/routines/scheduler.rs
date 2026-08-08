@@ -111,7 +111,7 @@ mod tests {
     use horsie_models::routines::{
         EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule, Weekday, WeeklySchedule,
     };
-    use horsie_models::settings::{ModelInput, ProviderInput, SettingsUpdate};
+    use horsie_models::settings::{ModelInput, ProviderInput};
 
     /// One account, configured far enough that a routine can actually start a
     /// session: a provider, a model, an agent preset, and a `mock` vendor agent
@@ -152,28 +152,31 @@ mod tests {
     /// routine whose runtime is offline is tested.
     async fn account(users: &UserRegistry, user: &UserId, connected: bool) -> Account {
         let services = users.get(user).await.unwrap();
+        // Through the trait object, so the per-resource calls rather than the
+        // concrete store's test seed helper.
         services
             .config_store
-            .update(SettingsUpdate {
-                providers: Some(vec![ProviderInput {
-                    name: "p".into(),
-                    kind: "anthropic".into(),
-                    base_url: Some("http://localhost:1".into()),
-                    api_key: Some("sk-x".into()),
-                    keep_thinking_signature: None,
-                }]),
-                models: Some(vec![ModelInput {
-                    alias: "sonnet".into(),
-                    provider: "p".into(),
-                    model_id: "claude-sonnet-4-6".into(),
-                    max_tokens: None,
-                    context_window: None,
-                    thinking_efforts: None,
-                    thinking_effort: None,
-                    thinking_dialect: None,
-                    forced_tools_disable_thinking: None,
-                }]),
-                default_vendor: Some("mock".into()),
+            .upsert_provider(ProviderInput {
+                name: "p".into(),
+                kind: "anthropic".into(),
+                base_url: Some("http://localhost:1".into()),
+                api_key: Some("sk-x".into()),
+                keep_thinking_signature: None,
+            })
+            .await
+            .unwrap();
+        services
+            .config_store
+            .upsert_model(ModelInput {
+                alias: "sonnet".into(),
+                provider: "p".into(),
+                model_id: "claude-sonnet-4-6".into(),
+                max_tokens: None,
+                context_window: None,
+                thinking_efforts: None,
+                thinking_effort: None,
+                thinking_dialect: None,
+                forced_tools_disable_thinking: None,
             })
             .await
             .unwrap();

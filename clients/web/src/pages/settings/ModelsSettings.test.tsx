@@ -34,6 +34,15 @@ const view = (providers: ProviderView[]): SettingsView => ({
   },
 });
 
+/** A settings mutation that is idle and never resolves anything. */
+const idleMutation = () => ({
+  mutateAsync: vi.fn(),
+  isPending: false,
+  isSuccess: false,
+  isError: false,
+  error: null,
+});
+
 vi.mock("../../hooks/useSettings", () => ({
   useRefreshSettings: () => vi.fn(),
   useSettings: () => ({
@@ -41,13 +50,10 @@ vi.mock("../../hooks/useSettings", () => ({
     isLoading: false,
     isError: false,
   }),
-  useUpdateSettings: () => ({
-    mutateAsync: vi.fn(),
-    isPending: false,
-    isSuccess: false,
-    isError: false,
-    error: null,
-  }),
+  usePutProvider: () => idleMutation(),
+  useDeleteProvider: () => idleMutation(),
+  usePutModel: () => idleMutation(),
+  useDeleteModel: () => idleMutation(),
 }));
 
 vi.mock("../../hooks/useModelCards", () => ({
