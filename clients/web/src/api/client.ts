@@ -221,15 +221,23 @@ export const api = {
         body: JSON.stringify({ text }),
       }),
 
-    /** Answer every pending ask at once; a partial set is refused by the server. */
+    /** Answer every pending ask at once; a partial set is refused by the server.
+     *
+     * `agentId` names who asked. It is not optional: the questions belong to one
+     * agent, and a workflow run has no main agent to fall back to — sending this
+     * unaddressed there resolved nothing and silently did nothing. */
     answerAsks: (
       id: string,
+      agentId: string,
       answers: { toolCallId: string; text: string }[],
     ): Promise<Ack> =>
-      request(`/sessions/${encodeURIComponent(id)}/answers`, {
-        method: "POST",
-        body: JSON.stringify({ answers }),
-      }),
+      request(
+        `/sessions/${encodeURIComponent(id)}/answers?aid=${encodeURIComponent(agentId)}`,
+        {
+          method: "POST",
+          body: JSON.stringify({ answers }),
+        },
+      ),
 
     stop: (id: string): Promise<Ack> =>
       request(`/sessions/${encodeURIComponent(id)}/stop`, {

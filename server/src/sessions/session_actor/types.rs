@@ -118,6 +118,9 @@ pub enum RunCommand {
     State {
         reply: oneshot::Sender<Option<crate::sessions::workflow::WorkflowRunState>>,
     },
+    /// Recovery found a step the process died inside. Suspends the run, which is
+    /// the state a retry can move.
+    ReconcileInterrupted,
 }
 
 /// The tree of delegated work.

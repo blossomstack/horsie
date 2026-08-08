@@ -49,6 +49,7 @@ use crate::sessions::{
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::SessionSupervisorCommand,
+    workflow::WorkflowRunState,
 };
 use async_trait::async_trait;
 use context::{SessionAgentKind, SessionContextProvider};
@@ -348,10 +349,16 @@ impl SessionActor {
         );
     }
 
-    /// Resolve an agent selector to its resident actor: `None`/`"main"` for the
-    /// primary agent, else a subagent id. A cold node — one in the persisted
-    /// tree with no actor since this session loaded — is spawned on demand, so
-    /// reading a finished subagent works exactly like reading a live one.
+    /// Resolve an agent selector to its actor: `None`/`"main"` for the primary
+    /// agent, else the id of a step or a subagent. A cold node — one the
+    /// persisted state knows about with no actor since this session loaded — is
+    /// spawned on demand, so reading a finished agent works exactly like
+    /// reading a live one.
+    ///
+    /// A run has no primary agent, so an unaddressed selector means the step in
+    /// flight there. Without that, everything a caller can leave unaddressed —
+    /// an answer above all — resolved to nothing on a run and silently did
+    /// nothing.
     fn resolve_agent(
         &mut self,
         state: &SessionState,
@@ -359,9 +366,20 @@ impl SessionActor {
         agent_id: Option<&str>,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
-            None | Some("main") => self.agent().map(|actor| (AgentKey::Main, actor)),
+            None | Some(MAIN_AGENT_ID) => {
+                match state.run.as_ref().and_then(WorkflowRunState::current_agent) {
+                    // At most one step runs at a time, and the definition chose
+                    // it, so there is nothing else an unaddressed request on a
+                    // run could mean.
+                    Some(step) => self.resolve_step(state, ctx, step),
+                    None => self.agent().map(|actor| (AgentKey::Main, actor)),
+                }
+            }
             Some(raw) => {
                 let id = Uuid::parse_str(raw).ok()?;
+                if let Some(resolved) = self.resolve_step(state, ctx, id) {
+                    return Some(resolved);
+                }
                 if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
                     return Some((AgentKey::Sub(id), agent.actor.clone()));
                 }
@@ -374,6 +392,32 @@ impl SessionActor {
                 ))
             }
         }
+    }
+
+    /// One of a run's step agents, spawned if it is not resident. `None` when
+    /// this session is not a run, or when the id names no execution in its log.
+    ///
+    /// The log, not the roster, is what identifies a step: a run's step
+    /// subagents are registered in the same roster, so residency alone cannot
+    /// tell the two apart. Spawning on demand is what keeps a finished run's
+    /// step transcripts readable — the roster is empty after a reload, and
+    /// every agent-scoped read comes through here.
+    fn resolve_step(
+        &mut self,
+        state: &SessionState,
+        ctx: &ActorContext<Self>,
+        id: Uuid,
+    ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
+        let run = state.run.as_ref()?;
+        let index = run.index_of_agent(id)?;
+        if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
+            return Some((AgentKey::Step(id), agent.actor.clone()));
+        }
+        let step = run.get(index)?.step.clone();
+        Some((
+            AgentKey::Step(id),
+            self.spawn_step_agent(ctx, state, id, &step)?,
+        ))
     }
 
     fn agent(&self) -> Option<ActorRef<AgentCommand>> {
@@ -506,9 +550,13 @@ impl SessionActor {
                 let agent_type = state.subagents.node(id)?.agent_type.clone();
                 Some(self.spawn_sub_agent_actor(ctx, state, id, agent_type))
             }
-            // A step's actor is spawned by the step itself, and the main agent
-            // is spawned at load — neither is created on demand here.
-            AgentKey::Step(_) | AgentKey::Main => None,
+            // A step's actor spawns on demand from the run log, the same way a
+            // cold subagent's does: a boundary can owe a result to a step whose
+            // actor has since been unloaded.
+            AgentKey::Step(id) => self.resolve_step(state, ctx, id).map(|(_, actor)| actor),
+            // Spawned at load, so it is either resident or this session is a run
+            // and has none.
+            AgentKey::Main => None,
         }
     }
 

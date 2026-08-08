@@ -344,6 +344,29 @@ async fn messages_page(
         .unwrap()
 }
 
+/// Poll the main agent's transcript until it carries `want` (10s cap).
+///
+/// The honest wait for "the turn produced this": a session's status is not it,
+/// because `Idle` is reported both when provisioning finishes and when the turn
+/// that followed it ends.
+async fn wait_for_reply(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &str) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    let mut last = String::new();
+    loop {
+        let page = messages_page(client, addr, id, "main").await;
+        last = serde_json::to_string(&page_messages(&page)).unwrap_or(last);
+        if last.contains(want) {
+            return;
+        }
+        assert!(
+            start.elapsed() < deadline,
+            "the message the session was created with is still owed an answer: {last}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Poll the main agent's log until its queue holds exactly `want` texts.
 async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
     let deadline = Duration::from_secs(10);
@@ -574,23 +597,17 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
     );
 
     agent.release_creates();
-    wait_status(&client, &server.addr, &id, "Idle").await;
-    let page: serde_json::Value = client
-        .get(format!(
-            "http://{}/api/sessions/{id}/messages?aid=main&max=50",
-            server.addr
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&page_messages(&page)).unwrap();
-    assert!(
-        text.contains("answered once the runtime was up"),
-        "the message the session was created with is still owed an answer: {text}"
-    );
+    // Not `wait_status(Idle)`: a session reports `Idle` *twice* — once when
+    // provisioning finishes and again when the queued turn ends — so waiting on
+    // the status can return between the two and read the transcript before the
+    // turn has run. Wait for the reply itself, which is what this asserts.
+    wait_for_reply(
+        &client,
+        &server.addr,
+        &id,
+        "answered once the runtime was up",
+    )
+    .await;
 
     server.shutdown().await;
 }
@@ -2391,4 +2408,177 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
     }
 
     server.shutdown().await;
+}
+
+/// A workflow, over HTTP, from definition to a retried run.
+///
+/// The workflow surface had no end-to-end coverage at all, which is how a run
+/// that could be neither answered nor interrupted, and step transcripts that
+/// vanished on reload, all shipped. This drives the wire: define a graph, start
+/// a run, watch it finish, read the projected graph, and retry a step.
+///
+/// Both steps deliberately declare no output schema. Such a step has no
+/// `conclude` tool and ends its turn with plain text, which becomes its output —
+/// so a run is two ordinary completions rather than two hand-built tool calls.
+#[tokio::test]
+async fn a_workflow_run_is_created_driven_and_retried_over_http() {
+    let mock = MockLlmServer::builder().build().await;
+    for _ in 0..4 {
+        mock.queue_response("step done");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", server.addr);
+
+    // A run resolves each step's preset and checks its model is still
+    // configured, so both have to exist over the wire rather than be injected.
+    // Pointing the provider at the mock is what `provider_at` already does, so
+    // swapping the live registry changes nothing but the route.
+    let res = client
+        .put(format!("{base}/api/config"))
+        .json(&serde_json::json!({
+            "providers": [{
+                "name": "p", "kind": "anthropic",
+                "baseUrl": mock.url(), "apiKey": "test-key"
+            }],
+            "models": [{"alias": "mock", "provider": "p", "modelId": "m"}],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "configure the model a step runs"
+    );
+
+    let res = client
+        .post(format!("{base}/api/agents"))
+        .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
+
+    let res = client
+        .post(format!("{base}/api/workflows"))
+        .json(&serde_json::json!({
+            "name": "e2e-flow",
+            "start": "triage",
+            "steps": [
+                {
+                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
+                    "transitions": [{"to": "fix"}]
+                },
+                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "create the definition");
+
+    // Creating the run is what starts it: there is no message to send.
+    let res = client
+        .post(format!("{base}/api/workflows/e2e-flow/runs"))
+        .json(&serde_json::json!({"input": "the build is red", "vendor": "mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "start a run");
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+
+    // The graph is the run's document, and it hangs off the session because a
+    // run *is* one.
+    let graph_url = format!("{base}/api/sessions/{id}/workflow");
+    let graph = wait_for_run_status(&client, &graph_url, "Finished").await;
+    let visited: Vec<&str> = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| !n["runs"].as_array().unwrap().is_empty())
+        .map(|n| n["step"].as_str().unwrap())
+        .collect();
+    assert_eq!(visited, vec!["triage", "fix"], "graph: {graph}");
+
+    // Every node of the definition is present, reached or not, so a client draws
+    // the whole graph and lights up what happened.
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(graph["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        graph["edges"][0]["traversals"].as_array().unwrap().len(),
+        1,
+        "the edge the run took records which execution took it"
+    );
+
+    // A step is addressable as an agent, which is where its transcript is.
+    let step_agent = graph["nodes"][0]["runs"][0]["agentId"].as_str().unwrap();
+    let res = client
+        .get(format!("{base}/api/sessions/{id}/agents/{step_agent}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "a step's own page reads through the agent API"
+    );
+    let page = messages_page(&client, &server.addr, &id, step_agent).await;
+    assert!(
+        !page_messages(&page).is_empty(),
+        "the step's transcript is what its page shows: {page}"
+    );
+
+    // Retrying appends an attempt rather than replacing one.
+    let res = client
+        .post(format!("{base}/api/sessions/{id}/workflow/retry"))
+        .json(&serde_json::json!({"stepIndex": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 202, "retry one execution");
+    let graph = wait_for_run_status(&client, &graph_url, "Finished").await;
+    let fix = graph["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["step"] == serde_json::json!("fix"))
+        .unwrap();
+    assert_eq!(
+        fix["runs"].as_array().unwrap().len(),
+        2,
+        "the retry appends, so the earlier attempt stays readable: {fix}"
+    );
+    assert_eq!(fix["runs"][1]["attempt"], serde_json::json!(2));
+
+    server.shutdown().await;
+}
+
+/// Poll a run's graph until its status is `want` (10s cap).
+///
+/// Asserts against the status rather than a step count: this suite is serial
+/// against one long-lived server, so a baseline is the only safe comparison.
+async fn wait_for_run_status(
+    client: &reqwest::Client,
+    graph_url: &str,
+    want: &str,
+) -> serde_json::Value {
+    let mut last = serde_json::Value::Null;
+    for _ in 0..200 {
+        let res = client.get(graph_url).send().await.unwrap();
+        if res.status().is_success() {
+            last = res.json().await.unwrap();
+            if last["status"]["type"] == serde_json::json!(want) {
+                return last;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("run never reached {want}: {last}");
 }

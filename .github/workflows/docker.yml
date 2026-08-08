@@ -22,7 +22,8 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    # Every base: see ci.yml — a stacked PR targets its parent, not `main`.
+    branches: ["**"]
   workflow_dispatch:
 
 env:
