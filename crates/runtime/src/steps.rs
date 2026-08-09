@@ -1,8 +1,7 @@
-//! Provision steps: setup the runtime executes inside its sandbox after
-//! hackamore provisioning and before the agent message loop. Steps arrive as
-//! JSON in the `HORSIE_PROVISION` env var (vendor-injected, mirroring the
-//! hackamore env pattern). Fail closed: malformed JSON, an unknown step kind,
-//! or a failed command aborts provisioning with a human-readable error.
+//! Provision steps: setup the runtime executes inside its sandbox before the
+//! agent message loop. Steps arrive as JSON in the `HORSIE_PROVISION` env var
+//! (vendor-injected). Fail closed: malformed JSON, an unknown step kind, or a
+//! failed command aborts provisioning with a human-readable error.
 //!
 //! **Nothing here handles credentials.** A `git_checkout` of a private
 //! repository authenticates through the credential helper this binary
