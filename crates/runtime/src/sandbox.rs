@@ -90,6 +90,27 @@ fn build_capability_set(
         }
     }
 
+    // This binary itself, so a confined process can exec it again.
+    //
+    // Needed because git runs `horsie-runtime git-credential` as its credential
+    // helper, from inside the sandbox. The runtime that applies this spec was
+    // exec'd *before* confinement, so nothing else has ever needed the grant —
+    // but a fresh exec from within does, and a binary installed outside the
+    // baseline's read-only prefixes (`~/.cargo/bin`, say, which no grant covers)
+    // would otherwise be unreachable. Git reports that as "no credentials", so
+    // a private clone would fail with nothing pointing at the cause.
+    //
+    // `AccessMode::Read` carries `Execute` on Linux; on macOS the seatbelt
+    // profile reads the same way. An unresolvable path is skipped rather than
+    // fatal: the sandbox is still correct without it, only less capable.
+    if let Ok(exe) = std::env::current_exe()
+        && exe.exists()
+    {
+        caps = caps
+            .allow_file(&exe, nono::AccessMode::Read)
+            .map_err(|e| e.to_string())?;
+    }
+
     // The executor IPC socket is an AF_UNIX grant — a capability layer separate from
     // the TCP network mode in nono, so it stays effective under `Block` and
     // `ProxyOnly` alike (nono emits the unix-socket allow after the network deny).

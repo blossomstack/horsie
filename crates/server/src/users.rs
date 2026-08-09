@@ -35,9 +35,6 @@ pub struct Shared {
     pub db: Db,
     /// Bundle bytes, addressed by content and therefore shared by construction.
     pub artifacts: Arc<ArtifactStore>,
-    /// HS256 secret for artifact capability tokens. Shared with the artifact
-    /// route, which serves runtimes holding no account credential.
-    pub artifact_secret: Arc<Vec<u8>>,
     /// Read-only deployment paths, surfaced in every account's settings view.
     pub info: ServerInfo,
     /// The model-card catalogue every account is seeded from, plus the digest
@@ -146,7 +143,6 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         crate::plugins::PluginStore::new(shared.db.clone(), user.clone()),
         crate::plugins::MarketplaceStore::new(shared.db.clone(), user.clone()),
         shared.artifacts.clone(),
-        shared.artifact_secret.clone(),
     ));
     let memory = Arc::new(crate::memory::MemoryService::new(
         crate::memory::MemoryStore::new(shared.db.clone(), user.clone()),
@@ -178,13 +174,11 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
     let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
         crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
-        user.as_str().to_string(),
         opened.vendors.clone(),
         // The registry's own table, so the two publishers of one map can see
         // each other's names rather than silently overwriting them.
         connected_vendors.links(),
         connected_runtimes.clone(),
-        opened.dial_secret.clone(),
     ));
     // Before anything can select a vendor: a session started early would
     // otherwise be told its configured vendor does not exist.
@@ -194,6 +188,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             vendors: opened.vendors.clone(),
             github_tokens: Some(github.clone()),
             plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
+            dial_secret: opened.dial_secret.clone(),
+            account: user.as_str().to_string(),
         },
     ));
     let deps = ServerDeps {
@@ -366,7 +362,6 @@ mod tests {
         UserRegistry::new(Arc::new(Shared {
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
-            artifact_secret: Arc::new(b"test-secret".to_vec()),
             info: test_info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: model_cards::seed_marker(&[]),

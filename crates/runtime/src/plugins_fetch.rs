@@ -1,20 +1,24 @@
 //! Fetch the session's selected plugin bundles at startup and unpack them into
 //! a plugins dir the existing scanner reads. The server injects a manifest of
-//! `{name, hash}` refs plus a bearer token via env, and the vendor process adds
-//! the base URL its runtimes can reach the server at plus the directory to
-//! unpack into; the runtime GETs each zip over its own outbound connection,
-//! verifies the content hash, and materializes the tree.
+//! `{name, hash}` refs via env, and whoever spawned the runtime adds the base
+//! URL it can reach the server at plus the directory to unpack into; the
+//! runtime GETs each zip over its own outbound connection, verifies the content
+//! hash, and materializes the tree.
+//!
+//! The bearer is the runtime's dial token — the credential it already holds,
+//! rather than a second short-lived one minted alongside it. That one expired
+//! after an hour with nothing able to renew it, so a runtime that outlived it
+//! could never fetch again.
 //!
 //! Materialization happens once per runtime, not once per process. The
 //! directory records the manifest it was built from, and a start that finds a
 //! matching record does nothing — which is what makes a hibernated runtime's
-//! respawn free, and keeps it from presenting an artifact token that has since
-//! expired.
+//! respawn free.
 //!
 //! Fully best-effort: any failure is logged and skipped, so a session never
 //! fails to start because a bundle was unavailable — it just runs without it.
 
-use horsie_models::{ENV_PLUGIN_MANIFEST, ENV_PLUGINS_BASE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN};
+use horsie_models::{ENV_CONNECT_TOKEN, ENV_PLUGIN_MANIFEST, ENV_PLUGINS_DIR, ENV_SERVER_URL};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -50,8 +54,11 @@ impl ArtifactRef {
 pub async fn provision_plugins() -> Option<PathBuf> {
     let manifest = std::env::var(ENV_PLUGIN_MANIFEST).ok()?;
     let dir = PathBuf::from(std::env::var(ENV_PLUGINS_DIR).ok()?);
-    let base = std::env::var(ENV_PLUGINS_BASE).ok()?;
-    let token = std::env::var(ENV_PLUGINS_TOKEN).ok();
+    let base = std::env::var(ENV_SERVER_URL).ok()?;
+    // The runtime's own identity. There is no bundle-specific credential any
+    // more: the server checks that this account installed the bundle it is
+    // asking for, which is a live lookup rather than an hour-old claim.
+    let token = std::env::var(ENV_CONNECT_TOKEN).ok();
     provision_into(&manifest, &base, &dir, token.as_deref()).await
 }
 

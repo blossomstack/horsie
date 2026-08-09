@@ -2,6 +2,7 @@ mod baseline;
 mod connected_registry;
 mod env_scrub;
 mod error;
+mod issued_tokens;
 mod listener;
 mod process_provider;
 mod provider;
@@ -18,6 +19,7 @@ mod vendor;
 pub use connected_registry::ConnectedRuntimeRegistry;
 pub use env_scrub::{SANDBOX_ENV_ALLOWLIST, scrubbed_env};
 pub use error::{CredentialError, ExecutorError, RuntimeError};
+pub use issued_tokens::IssuedTokens;
 pub use listener::{handle_runtime_connection, serve_runtime_connections};
 pub use process_provider::{ProcessRuntimeProvider, SandboxPolicy};
 pub use provider::{HealthStatus, RuntimeHandle, RuntimeProvider};
@@ -25,7 +27,7 @@ pub use reconnect::Backoff;
 pub use runtime_listener::{AcceptedStream, RuntimeEndpoint, RuntimeListenerServer};
 pub use runtime_vendor::{
     RuntimeEvent, RuntimeHandleImpl, RuntimeHandleTransport, RuntimeProgress, RuntimeProgressSink,
-    RuntimeVendorError, new_dial_secret,
+    RuntimeVendorError,
 };
 pub use socket_transport::{SocketRuntimeTransport, UnixSocketRuntimeTransport};
 pub use vendor::{

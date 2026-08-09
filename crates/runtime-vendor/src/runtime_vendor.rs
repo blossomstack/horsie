@@ -27,22 +27,6 @@ use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use horsie_runtime_client::TransportError;
 use std::sync::Arc;
 
-/// A fresh secret for signing the dial-back tokens of one vendor's runtimes.
-///
-/// Held in memory and never persisted or configured: the vendor that mints is
-/// the vendor that verifies, so nothing else needs to know it. A restart
-/// invalidates every outstanding token, which is correct — the runtimes it
-/// spawned died with it.
-///
-/// The same value must reach both the vendor and the listener its runtimes
-/// dial. Mismatching them refuses every dial-back at the first create, loudly.
-#[must_use]
-pub fn new_dial_secret() -> Arc<Vec<u8>> {
-    let mut secret = vec![0u8; 32];
-    rand::fill(&mut secret[..]);
-    Arc::new(secret)
-}
-
 /// Where a runtime is, as its vendor currently understands it.
 #[derive(Debug, Clone)]
 pub enum RuntimeProgress {

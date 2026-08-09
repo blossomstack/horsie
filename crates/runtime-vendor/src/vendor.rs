@@ -227,13 +227,15 @@ pub struct RuntimeVendorClient {
     /// Whether a get for a runtime that is not live may rebuild it from its
     /// persisted spec. See [`RuntimeVendorClient::with_respawnable_runtimes`].
     respawnable: bool,
-    /// Signs the bearer each spawned runtime presents on its dial-back.
+    /// The dial tokens this vendor has handed out, shared with the listener its
+    /// runtimes dial.
     ///
-    /// Minted per process and never persisted or configured: this vendor is the
-    /// only party that needs to mint or verify, so a random secret held in
-    /// memory is both sufficient and self-rotating — a restart invalidates
-    /// every outstanding token, and the runtimes it spawned died with it.
-    dial_secret: Arc<Vec<u8>>,
+    /// The vendor no longer mints: the server does, so the token is one the
+    /// *server* can verify too. What is left here is recognising a token this
+    /// process issued, which is a lookup — see [`IssuedTokens`].
+    ///
+    /// [`IssuedTokens`]: crate::IssuedTokens
+    issued: Arc<crate::IssuedTokens>,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
     /// One lock per runtime id, held for the whole of a lifecycle command.
     ///
@@ -289,7 +291,7 @@ impl RuntimeVendorClient {
             bundles: None,
             backoff: Backoff::default(),
             respawnable: false,
-            dial_secret: crate::runtime_vendor::new_dial_secret(),
+            issued: crate::IssuedTokens::new(),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -813,20 +815,26 @@ impl RuntimeVendorClient {
 
         let mut env = request.env.clone();
         env.extend(self.bundle_env(runtime_id));
-        // The runtime proves it is *this* runtime when it dials back. A vendor
-        // process serves one account by construction and verifies with a secret
-        // only it holds, so the account field carries this vendor's own name —
-        // enough to tell one vendor's listener from another's in a log.
-        env.push(EnvVar {
-            name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
-            value: horsie_support::dial_token::mint(
-                &self.dial_secret,
-                &horsie_support::dial_token::DialClaims {
-                    user_id: self.vendor_name.clone(),
-                    runtime_id: runtime_id.to_string(),
-                },
-            ),
-        });
+        // The runtime proves it is *this* runtime when it dials back, with the
+        // token the server minted and sent in the spec. Recorded before the
+        // spawn, never after: the child dials as soon as it is up, and a token
+        // this vendor has not filed yet is one its own listener would refuse.
+        //
+        // A spec with no token is a server that did not mint one. Nothing is
+        // invented here — the spawn goes ahead and the dial-back is refused,
+        // which is a loud, local failure rather than a runtime holding a
+        // credential no one can account for.
+        if let Some(token) = env
+            .iter()
+            .find(|v| v.name == horsie_models::ENV_CONNECT_TOKEN)
+        {
+            self.issued.issue(&token.value, runtime_id);
+        } else {
+            note(&format!(
+                "vendor process: the spec for runtime '{runtime_id}' carries no dial token; \
+                 its dial-back will be refused"
+            ));
+        }
 
         let config = RuntimeConfig {
             workspaces,
@@ -859,13 +867,14 @@ impl RuntimeVendorClient {
         Ok(())
     }
 
-    /// Sign dial-back tokens with this secret.
+    /// Recognise dial-backs against this table.
     ///
-    /// Must be the same value the runtime listener verifies against; pair them
-    /// from one [`new_dial_secret`](crate::new_dial_secret) call.
+    /// Must be the same handle the runtime listener resolves against; pair them
+    /// from one [`IssuedTokens::new`](crate::IssuedTokens::new) call. Mismatching
+    /// them refuses every dial-back at the first create, loudly.
     #[must_use]
-    pub fn with_dial_secret(mut self, secret: Arc<Vec<u8>>) -> Self {
-        self.dial_secret = secret;
+    pub fn with_issued_tokens(mut self, issued: Arc<crate::IssuedTokens>) -> Self {
+        self.issued = issued;
         self
     }
 
@@ -886,6 +895,11 @@ impl RuntimeVendorClient {
         if let Some(live) = self.runtimes.lock().await.remove(runtime_id) {
             let _ = live.handle.stop().await;
         }
+        // A stopped runtime's token stops being accepted. Nothing should be
+        // dialing with it — the process is gone — so anything that still does
+        // is not the runtime this token was issued to, and a revive re-issues
+        // rather than reviving the old credential.
+        self.issued.revoke_runtime(runtime_id);
     }
 
     async fn transport_for(&self, runtime_id: &str) -> Option<Arc<dyn RuntimeTransport>> {
@@ -1012,7 +1026,7 @@ impl RuntimeVendorClient {
             return Vec::new();
         };
         let mut env = vec![EnvVar {
-            name: horsie_models::ENV_PLUGINS_BASE.to_string(),
+            name: horsie_models::ENV_SERVER_URL.to_string(),
             value: b.base_url.clone(),
         }];
         if let Some(dir) = self.plugins_path(runtime_id) {
@@ -1149,7 +1163,7 @@ mod tests {
             Some("/state/plugins/rt-2")
         );
         assert_eq!(
-            value(&one, horsie_models::ENV_PLUGINS_BASE).as_deref(),
+            value(&one, horsie_models::ENV_SERVER_URL).as_deref(),
             Some("http://127.0.0.1:3789")
         );
     }

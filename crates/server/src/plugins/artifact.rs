@@ -55,17 +55,6 @@ impl ArtifactStore {
         }
         Ok(())
     }
-
-    /// Verify a fetch token authorizes `hash`.
-    ///
-    /// Lives here rather than on `PluginService` because the artifact route is
-    /// reached *before* the auth layer, by runtimes that hold a capability
-    /// token and no account credential. A token names hashes, and a hash is
-    /// already the content it addresses, so there is nothing per-account for
-    /// this check to consult.
-    pub fn verify_token(&self, secret: &[u8], token: &str, hash: &str) -> Result<(), String> {
-        crate::plugins::token::verify(secret, token, hash)
-    }
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ pub mod fly;
 pub mod fly_api;
 mod registry;
 pub mod runtime_command;
+pub mod server_url;
 mod transport;
 pub mod velos;
 pub mod velos_api;

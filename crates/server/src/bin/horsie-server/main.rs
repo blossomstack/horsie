@@ -113,10 +113,6 @@ async fn boot(
             .unwrap_or(horsie_server::config::DEFAULT_MAX_CONNECTIONS),
         auth_mode: config::auth_mode(cfg),
         extra_model_cards,
-        artifact_secret: std::env::var("HORSIE_ARTIFACT_SECRET")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(String::into_bytes),
         web_dir: cli.web.clone(),
         config_path,
     })

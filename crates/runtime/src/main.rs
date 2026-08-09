@@ -67,6 +67,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Answer git's credential protocol on stdin. Configured by this binary at
+    /// startup as `credential.https://github.com.helper`, and invoked by git —
+    /// never by a person.
+    ///
+    /// Mints a GitHub token for the repository git names, scoped to that one
+    /// repository and lasting only as long as the operation. Prints nothing and
+    /// exits 0 when it cannot, which is how a helper says "no credentials" and
+    /// what keeps a public-repo clone working on a deployment with no GitHub
+    /// connection.
+    GitCredential {
+        /// `get`, `store` or `erase`. Only `get` does anything.
+        operation: String,
+    },
     /// Apply the sandbox from --sandbox-caps, then exit — no endpoint, no connect,
     /// no retry. Exit 0 = sandbox applied; 3 = unsupported on this platform/build.
     /// Lets callers probe confinement support in milliseconds instead of burning
@@ -125,6 +138,22 @@ fn parse_endpoint(s: &str) -> Result<Endpoint, String> {
 fn main() {
     let cli = Cli::parse();
 
+    // Credential mode: answer git and exit. Runs before endpoint parsing and
+    // before the sandbox, because this process *is* a child of a git command
+    // already running inside one — it inherits that confinement rather than
+    // applying its own.
+    if let Some(Commands::GitCredential { operation }) = &cli.command {
+        let operation = operation.clone();
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(horsie_runtime::git_credential::run(&operation)),
+            Err(e) => eprintln!("failed to build tokio runtime: {e}"),
+        }
+        std::process::exit(0);
+    }
+
     // Probe mode: apply the sandbox and exit — before endpoint parsing, the tokio
     // runtime, provisioning, and any connect attempt.
     if let Some(Commands::Probe {
@@ -173,6 +202,8 @@ fn main() {
         apply_sandbox_or_exit(&dirs, socket, caps_file);
     }
 
+    configure_git_credentials();
+
     // Build the multi-threaded runtime only after confinement is in place, so
     // every worker thread it spawns inherits the Landlock domain.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -186,6 +217,49 @@ fn main() {
         }
     };
     runtime.block_on(run(cli, runtime_id, endpoint));
+}
+
+/// Point git at this binary's credential helper, for every process this runtime
+/// ever spawns.
+///
+/// Set on *this* process's environment rather than on each git command, so it
+/// reaches the provision-step clone and the agent's own `bash` tool calls
+/// alike — including a `git push`, which had no credential at all when the
+/// clone passed a one-shot `http.extraHeader` and left nothing behind.
+///
+/// `useHttpPath` is not optional. Without it git omits `path=` from what it
+/// sends the helper, and the server would have no repository to scope a token
+/// to; the helper declines rather than asking for something broader.
+///
+/// **On `set_var` being unsafe.** It races any concurrent `getenv`, so it is
+/// sound only while this process is single-threaded — which is exactly here:
+/// after `Cli::parse`, before the tokio runtime is built, and before anything
+/// has been spawned. Doing it later, or per-command, would either be a data
+/// race or would miss the descendants this exists to reach.
+fn configure_git_credentials() {
+    let Ok(exe) = std::env::current_exe() else {
+        // Without our own path there is no helper to name. Git then has no
+        // credentials, which is the same position a tokenless clone was in.
+        return;
+    };
+    let pairs = [
+        (
+            "credential.https://github.com.helper",
+            format!("{} git-credential", exe.display()),
+        ),
+        (
+            "credential.https://github.com.useHttpPath",
+            "true".to_string(),
+        ),
+    ];
+    // SAFETY: single-threaded at this point — see the doc comment above.
+    unsafe {
+        std::env::set_var("GIT_CONFIG_COUNT", pairs.len().to_string());
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            std::env::set_var(format!("GIT_CONFIG_KEY_{i}"), key);
+            std::env::set_var(format!("GIT_CONFIG_VALUE_{i}"), value);
+        }
+    }
 }
 
 /// Apply the sandbox from `caps_file`, exiting 3 on any failure (fail-closed).
@@ -492,10 +566,7 @@ async fn run_loop<S>(
             eprintln!("failed to send Provisioning: {e}");
             std::process::exit(1);
         }
-        let token = std::env::var(horsie_models::ENV_GITHUB_TOKEN).ok();
-        if let Err(message) =
-            horsie_runtime::steps::run_steps(&registry, &steps, token.as_deref()).await
-        {
+        if let Err(message) = horsie_runtime::steps::run_steps(&registry, &steps).await {
             eprintln!("provisioning failed: {message}");
             if let Ok(json) = serde_json::to_string(&RuntimeOutboundMessage::ProvisionFailed(
                 RuntimeProvisionFailed {

@@ -42,9 +42,6 @@ pub struct BootOptions {
     /// Extra model cards seeded alongside the bundled catalogue, which every
     /// deployment gets whether or not it asks.
     pub extra_model_cards: Vec<ModelCardInput>,
-    /// HS256 secret for artifact capability tokens. `None` mints a random one,
-    /// which is fine per-process because the tokens are short-lived.
-    pub artifact_secret: Option<Vec<u8>>,
     /// Built web-UI assets to serve alongside the API.
     pub web_dir: Option<PathBuf>,
     /// Reported in the settings view, purely so an operator can see it.
@@ -61,7 +58,6 @@ impl BootOptions {
             max_connections: crate::config::DEFAULT_MAX_CONNECTIONS,
             auth_mode: AuthMode::default(),
             extra_model_cards: Vec::new(),
-            artifact_secret: None,
             web_dir: None,
             config_path: None,
         }
@@ -135,7 +131,6 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
     let shared = Arc::new(Shared {
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
-        artifact_secret: Arc::new(opts.artifact_secret.unwrap_or_else(random_secret)),
         info,
         model_card_seed_marker: model_cards::seed_marker(&seed),
         model_card_seed: Arc::new(seed),
@@ -159,12 +154,6 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         initial_password,
         state_dir,
     })
-}
-
-fn random_secret() -> Vec<u8> {
-    let mut v = uuid::Uuid::new_v4().as_bytes().to_vec();
-    v.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
-    v
 }
 
 /// Hide credentials in a database URL's authority (e.g. `postgres://u:p@host`).

@@ -48,9 +48,10 @@ installation, each with an optional ref. See
 [GitHub repositories](/using/github-repositories/).
 
 **Environment variables** — plain, non-sensitive values injected into the
-runtime. Names in the server's reserved `HORSIE_*` namespace, and
-`GITHUB_TOKEN`, are refused: the server sets those itself. Secrets are a
-separate concept and this is not it — treat everything here as readable.
+runtime. Names in the server's reserved `HORSIE_*` and `GIT_CONFIG_*`
+namespaces are refused: the server and the runtime set those themselves.
+Secrets are a separate concept and this is not it — treat everything here as
+readable.
 
 **Setup steps** — commands the runtime runs after the checkouts and before the
 agent's first turn, like `make setup` or `npm install`. Checkouts always run

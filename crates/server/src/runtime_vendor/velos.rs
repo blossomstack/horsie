@@ -98,11 +98,6 @@ pub struct VelosRuntimeVendor<A: ContainerApi> {
     settings: VelosSettings,
     /// Where this account's runtimes land when they dial back.
     connected: Arc<ConnectedRuntimeRegistry>,
-    /// Signs the token each container presents on its dial-back.
-    dial_secret: Arc<Vec<u8>>,
-    /// The account this vendor serves; travels in the dial token so the connect
-    /// route can resolve the right registry without a database read.
-    account: String,
 }
 
 impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
@@ -111,16 +106,12 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         api: Arc<A>,
         settings: VelosSettings,
         connected: Arc<ConnectedRuntimeRegistry>,
-        dial_secret: Arc<Vec<u8>>,
-        account: String,
     ) -> Self {
         Self {
             name,
             api,
             settings,
             connected,
-            dial_secret,
-            account,
         }
     }
 
@@ -150,16 +141,24 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
             .iter()
             .map(|v| (v.name.clone(), v.value.clone()))
             .collect();
-        // The credential rides the environment, never argv: argv is readable by
-        // any process in the container through `ps`.
+        // The dial token is already in `spec.env`, minted by the server. It
+        // rides the environment and never argv, which argv-readable `ps` is the
+        // reason for; copying `spec.env` wholesale is what carries it.
+        //
+        // Where this runtime reaches the server, and where it unpacks bundles.
+        // Both are the *vendor's* knowledge — the server cannot know the
+        // address a container of ours can route to, and it does not know this
+        // image's filesystem. Neither was supplied before, which is why bundles
+        // never worked on this vendor at all.
         env.insert(
-            horsie_models::ENV_CONNECT_TOKEN.to_string(),
-            horsie_support::dial_token::mint(
-                &self.dial_secret,
-                &horsie_support::dial_token::DialClaims {
-                    user_id: self.account.clone(),
-                    runtime_id: runtime_id.to_string(),
-                },
+            horsie_models::ENV_SERVER_URL.to_string(),
+            crate::runtime_vendor::server_url::http_base_of(&self.settings.callback_url),
+        );
+        env.insert(
+            horsie_models::ENV_PLUGINS_DIR.to_string(),
+            format!(
+                "{}/.horsie-plugins",
+                self.settings.workspace_root.trim_end_matches('/')
             ),
         );
         // Encoding cannot fail for this type, and a container with no provision
@@ -473,8 +472,6 @@ mod tests {
                     memory_bytes: 1 << 30,
                 },
                 connected.clone(),
-                Arc::new(vec![0_u8; 32]),
-                "u1".to_string(),
             )),
             connected,
         )
@@ -710,14 +707,57 @@ mod tests {
         );
     }
 
+    /// Bundles never worked on this vendor: nothing ever told a container what
+    /// address to fetch them from, so the runtime gave up before its first
+    /// request — silently, because fetching is best-effort. The credential
+    /// helper needs the same address, so it is no longer optional.
+    #[test]
+    fn a_container_learns_where_to_reach_the_server() {
+        let (v, _reg) = vendor(FakeVelos::default());
+        let launch = v.launch_spec("s1", &spec()).unwrap();
+        assert_eq!(
+            launch
+                .env
+                .get(horsie_models::ENV_SERVER_URL)
+                .map(String::as_str),
+            Some("http://horsie:8080"),
+            "derived from the configured callback_url"
+        );
+        assert!(
+            launch.env.contains_key(horsie_models::ENV_PLUGINS_DIR),
+            "a runtime also needs somewhere to unpack what it fetches"
+        );
+    }
+
+    /// The vendor no longer mints — the server does, and the token arrives in
+    /// `spec.env` like every other secret only the server can produce. What
+    /// this vendor still owes is that it carries it, and carries it in the
+    /// environment rather than argv.
     #[test]
     fn the_dial_token_rides_the_environment_and_never_argv() {
         let (v, _reg) = vendor(FakeVelos::default());
-        let launch = v.launch_spec("s1", &spec()).unwrap();
-        assert!(launch.env.contains_key(horsie_models::ENV_CONNECT_TOKEN));
+        let launch = v
+            .launch_spec(
+                "s1",
+                &RuntimeSpec {
+                    env: vec![horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+                        value: "acct.s1.deadbeef".to_string(),
+                    }],
+                    ..spec()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            launch
+                .env
+                .get(horsie_models::ENV_CONNECT_TOKEN)
+                .map(String::as_str),
+            Some("acct.s1.deadbeef")
+        );
         let argv = launch.command.join(" ");
         assert!(
-            !argv.contains(&launch.env[horsie_models::ENV_CONNECT_TOKEN]),
+            !argv.contains("acct.s1.deadbeef"),
             "argv is readable by any process through ps"
         );
     }

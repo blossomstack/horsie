@@ -993,10 +993,6 @@ impl crate::plugins::PluginProvisioner for FakeLibrary {
         Ok(Vec::new())
     }
 
-    fn mint_token(&self, _session_id: &str, _hashes: &[String]) -> String {
-        String::new()
-    }
-
     async fn default_names(&self) -> Vec<String> {
         Vec::new()
     }

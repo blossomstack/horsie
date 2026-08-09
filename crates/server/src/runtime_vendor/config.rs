@@ -29,7 +29,7 @@ const COLS: &str = "name, kind, settings, credential, created_at, updated_at";
 
 /// The path on this server that runtimes dial. Named in the error a callback
 /// URL without one earns, since that is the whole of what is missing.
-const CONNECT_PATH: &str = "/api/runtime/connect";
+pub(super) const CONNECT_PATH: &str = "/api/runtime/connect";
 
 /// How a Fly vendor builds machines: the *storage* shape.
 ///
@@ -435,33 +435,27 @@ fn row_to_vendor(row: &AnyRow) -> Result<RuntimeVendorRow, String> {
 /// server's own connect route.
 pub struct RuntimeVendorConfigService {
     store: RuntimeVendorStore,
-    account: String,
     /// The map sessions select from, shared with dialled-in vendors.
     vendors: RuntimeVendorMap,
     /// Which names belong to a dialled-in agent. Consulted so a save cannot
     /// take a live agent's name out from under it.
     websockets: WebsocketVendorTable,
     connected: Arc<ConnectedRuntimeRegistry>,
-    dial_secret: Arc<Vec<u8>>,
 }
 
 impl RuntimeVendorConfigService {
     #[must_use]
     pub fn new(
         store: RuntimeVendorStore,
-        account: String,
         vendors: RuntimeVendorMap,
         websockets: WebsocketVendorTable,
         connected: Arc<ConnectedRuntimeRegistry>,
-        dial_secret: Arc<Vec<u8>>,
     ) -> Self {
         Self {
             store,
-            account,
             vendors,
             websockets,
             connected,
-            dial_secret,
         }
     }
 
@@ -676,8 +670,6 @@ impl RuntimeVendorConfigService {
                         volumes: fly.volumes,
                     },
                     self.connected.clone(),
-                    self.dial_secret.clone(),
-                    self.account.clone(),
                 )))
             }
             StoredVendorSettings::Velos(velos) => {
@@ -703,8 +695,6 @@ impl RuntimeVendorConfigService {
                         memory_bytes: u64::from(velos.memory_mb) * 1024 * 1024,
                     },
                     self.connected.clone(),
-                    self.dial_secret.clone(),
-                    self.account.clone(),
                 )))
             }
         }
@@ -743,11 +733,9 @@ mod tests {
     fn service(vendors: RuntimeVendorMap, db: Db) -> RuntimeVendorConfigService {
         RuntimeVendorConfigService::new(
             RuntimeVendorStore::new(db, UserId::new("u1")),
-            "u1".to_string(),
             vendors,
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             Arc::new(ConnectedRuntimeRegistry::new()),
-            Arc::new(vec![0_u8; 32]),
         )
     }
 
@@ -969,11 +957,9 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let service = RuntimeVendorConfigService::new(
             RuntimeVendorStore::new(db, UserId::new("u1")),
-            "u1".to_string(),
             empty_map(),
             websockets.clone(),
             Arc::new(ConnectedRuntimeRegistry::new()),
-            Arc::new(vec![0_u8; 32]),
         );
         // A real dialled-in agent holding the name.
         let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("fly")

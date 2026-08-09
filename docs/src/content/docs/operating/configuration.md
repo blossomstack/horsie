@@ -90,7 +90,6 @@ Writing either side never destroys the other's keys.
 | --- | --- |
 | `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. Accepts `sqlite://` or `postgres://`. |
 | `HORSIE_AUTH_MODE` | Overrides `auth.mode`: `password`, `delegated`, or `off`. An unrecognised value falls through to the config file rather than silently changing who may reach the server. |
-| `HORSIE_ARTIFACT_SECRET` | Signing secret for the short-lived tokens runtimes use to fetch skill bundles. Unset → a random per-process secret, which is fine for a single instance. Set a stable value if you run more than one. |
 | `HORSIE_MODEL_CARDS_SEED` | Same as `--model-cards-seed`. |
 | `HORSIE_TOKEN` | **CLI.** Bearer token to send instead of reading stored credentials. For scripts and CI. |
 
