@@ -47,6 +47,7 @@ fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
 struct Server {
     addr: SocketAddr,
     supervisor: ActorRef<SessionSupervisorCommand>,
+    vendors: Arc<horsie_server::runtime_vendor::RuntimeVendorRegistry>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -58,6 +59,29 @@ impl Server {
             .ask(|reply| SessionSupervisorCommand::Shutdown { reply })
             .await;
         self.task.abort();
+    }
+
+    /// Poll until this server has published `name` as a vendor, or let go of it.
+    ///
+    /// A dial finishes on the agent's side before the server has finished
+    /// registering it, and a `disconnect` returns before the server has noticed —
+    /// so a session created in the gap resolves the wrong thing, or nothing.
+    /// This is the registration itself, not an estimate of how long one takes.
+    async fn await_vendor(&self, name: &str, connected: bool) {
+        let deadline = Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        loop {
+            let names = self.vendors.connected_names();
+            if names.contains(&name.to_string()) == connected {
+                return;
+            }
+            assert!(
+                start.elapsed() < deadline,
+                "timed out waiting for '{name}' to be {}; published: {names:?}",
+                if connected { "published" } else { "let go" }
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 
@@ -172,14 +196,16 @@ async fn start_server_on(
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // No wait for the accept loop: the socket is listening from `bind`, so a
+    // connection made before `serve` first polls it waits in the backlog rather
+    // than being refused.
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app(state)).await;
     });
-    // Give the accept loop a beat to come up.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     Server {
         addr,
         supervisor,
+        vendors: services.connected_vendors.clone(),
         task,
     }
 }
@@ -366,6 +392,49 @@ async fn wait_for_reply(client: &reqwest::Client, addr: &SocketAddr, id: &str, w
     }
 }
 
+/// How many turns the main agent has finished, however they finished.
+///
+/// Every ending — concluded, failed, stopped, interrupted — writes one
+/// `TurnEnded` entry with an outcome, so counting them is the one reading that
+/// does not have to enumerate the ways a turn can be over.
+fn turns_ended(page: &serde_json::Value) -> usize {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a messages page must carry entries: {page}"))
+        .iter()
+        .filter(|e| e["body"]["type"] == serde_json::json!("Lifecycle"))
+        .filter(|e| e["body"]["value"]["kind"] == serde_json::json!("TurnEnded"))
+        .count()
+}
+
+/// Poll until the main agent has finished `want` turns.
+///
+/// **The turn boundary in this file — `wait_status(…, "Idle")` is not one.** A
+/// session reports `Idle` when provisioning finishes *and* again when each turn
+/// ends, so waiting on it after a create can return before the first turn has
+/// run. A message is accepted (202) and queued before the agent picks it up, so
+/// waiting on it after a send can return before that turn has *started*, while
+/// the session is still `Idle` from the turn before. Either way the assertions
+/// that follow read a transcript the turn has not reached yet.
+///
+/// Counting turns has no such gap, and stating the number is itself the claim:
+/// a stray extra turn fails here rather than somewhere later and stranger.
+async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: usize) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        let got = turns_ended(&messages_page(client, addr, id, "main").await);
+        if got >= want {
+            assert_eq!(got, want, "more turns ran than the test expected");
+            return;
+        }
+        if start.elapsed() > deadline {
+            panic!("timed out waiting for {want} finished turns; the agent has finished {got}");
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
 /// Poll the main agent's log until its queue holds exactly `want` texts.
 async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
     let deadline = Duration::from_secs(10);
@@ -458,12 +527,33 @@ async fn collect_sse(
     last_event_id: Option<&str>,
     stop: impl Fn(&[Ev]) -> bool,
 ) -> Vec<Ev> {
+    collect_sse_from(client, url, last_event_id, None, stop).await
+}
+
+/// As [`collect_sse`], but reports when the reader is subscribed.
+///
+/// `subscribed` fires once the response headers are in, which is the point the
+/// server has registered this reader: the handler takes its watch *before* it
+/// returns a response, so headers are proof of subscription rather than a guess
+/// about one. A test that spawns a collector and then causes the events it means
+/// to collect has to wait for this, or it is racing its own subscription — and a
+/// sleep long enough to usually win that race is not the same as winning it.
+async fn collect_sse_from(
+    client: &reqwest::Client,
+    url: &str,
+    last_event_id: Option<&str>,
+    subscribed: Option<tokio::sync::oneshot::Sender<()>>,
+    stop: impl Fn(&[Ev]) -> bool,
+) -> Vec<Ev> {
     use futures_util::StreamExt;
     let mut req = client.get(url).header("accept", "text/event-stream");
     if let Some(cursor) = last_event_id {
         req = req.header("last-event-id", cursor);
     }
     let resp = req.send().await.unwrap();
+    if let Some(tx) = subscribed {
+        let _ = tx.send(());
+    }
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut events: Vec<Ev> = Vec::new();
@@ -629,12 +719,13 @@ async fn create_message_sse_roundtrip() {
     // change: there is no longer a "backfill, then subscribe" seam for a turn
     // to fall through, because the read and the stream are the same request.
     let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             // Two: the create's turn, replayed, and the one sent below.
             stream_lifecycle(evs)
                 .iter()
@@ -644,8 +735,7 @@ async fn create_message_sse_roundtrip() {
         })
         .await
     });
-    // Small beat so the subscription is live before the turn runs.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     assert_eq!(
         send_message(&client, &server.addr, &id, "hi")
             .await
@@ -706,7 +796,7 @@ async fn create_message_sse_roundtrip() {
         "entry ids must strictly increase: {entry_seqs:?}"
     );
 
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
     assert_eq!(
         agent.signals(),
         vec![
@@ -748,8 +838,9 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     // the agent's, so it rides that agent's log like everything else.
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             // Two: the create's own message, replayed, and the one queued
             // mid-turn below.
             stream_lifecycle(evs)
@@ -760,7 +851,7 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
 
     assert_eq!(
         send_message(&client, &server.addr, &id, "two")
@@ -825,20 +916,21 @@ async fn prep_progressions_stream_during_a_turn() {
     // frames are live-only, so this test needs a turn it can subscribe *before*,
     // and only a second message gives it one.
     let id = create_session(&client, &server.addr, &agent, "warm up").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     // Subscribe before sending so the live progression frames are seen. Prep
     // is session-scoped, so it streams on the session — and the turn's end is
     // observed there as the status returning to Idle.
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             stream_lifecycle(evs).iter().any(|k| k == "TurnEnded")
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     send_message(&client, &server.addr, &id, "hi").await;
 
     let events = sse.await.unwrap();
@@ -1068,7 +1160,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
     let after_one_input = after_one["session"]["usageTotal"]["inputTokens"]
         .as_u64()
         .unwrap();
@@ -1084,7 +1176,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
     let agent_doc = usage(server.addr, id.clone()).await;
     assert_eq!(
         after_two["session"]["usageTotal"], agent_doc["agent"]["usage"],
@@ -1124,7 +1216,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     // Stop only cancels a turn that is actually running, and cancelling is what
     // snapshots and compacts — so block the second turn mid-flight rather than
@@ -1141,7 +1233,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
     block.release();
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
 
     let history = |addr: std::net::SocketAddr| {
         let client = client.clone();
@@ -1201,7 +1293,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     // Stop cancels the turn and nothing else: the runtime is the supervisor's
     // to release when the session goes cold, not the user's to destroy.
@@ -1212,7 +1304,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
     assert!(
         !agent.signals().contains(&format!("hibernate:{id}")),
         "stop must not hibernate: {:?}",
@@ -1226,7 +1318,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
             .as_u16(),
         202
     );
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
     assert!(agent.signals().contains(&format!("get:{id}")));
 
     server.shutdown().await;
@@ -1256,7 +1348,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     // calls no vendor.
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_status(&client, &server2.addr, &id, "Idle").await;
+    wait_turns(&client, &server2.addr, &id, 1).await;
     assert_eq!(
         agent.signals(),
         signals_before,
@@ -1271,7 +1363,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
             .as_u16(),
         202
     );
-    wait_status(&client, &server2.addr, &id, "Idle").await;
+    wait_turns(&client, &server2.addr, &id, 2).await;
     assert!(agent.signals().iter().any(|s| s == &format!("get:{id}")));
 
     server2.shutdown().await;
@@ -1291,9 +1383,9 @@ async fn last_event_id_replay_is_gap_free() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
     send_message(&client, &server.addr, &id, "two").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
 
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
 
@@ -1302,13 +1394,14 @@ async fn last_event_id_replay_is_gap_free() {
     // this transcript's ids.
     let live_url = url.clone();
     let live_client = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let live = tokio::spawn(async move {
-        collect_sse(&live_client, &live_url, None, |evs| {
+        collect_sse_from(&live_client, &live_url, None, Some(ready), |evs| {
             evs.iter().filter(|e| e.kind == "TurnCompleted").count() >= 1
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     mock.queue_response("three");
     send_message(&client, &server.addr, &id, "three").await;
     let streamed = live.await.unwrap();
@@ -1434,6 +1527,8 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
         .as_str()
         .unwrap()
         .to_string();
+    // The provisioning `Idle` is the one this wants, and no turn is waited for:
+    // what follows reads the session's resolved environment, not its transcript.
     wait_status(&client, &server.addr, &id, "Idle").await;
 
     let detail = |id: String| {
@@ -1754,7 +1849,7 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
             .await
             .unwrap();
         assert_eq!(res.status().as_u16(), 200);
-        wait_status(&client, &server.addr, &id, "Idle").await;
+        wait_turns(&client, &server.addr, &id, 1).await;
         agent.release_tool_calls();
 
         // The cancel was already written to the wire the instant `Stop`
@@ -1812,11 +1907,10 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
         .await
         .expect("agent connects");
-    // Let the handshake land before the session resolves the vendor name.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-1", true).await;
 
     let id = create_session_for_vendor(&client, &server.addr, "agent-1", &agent, "hi").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     assert!(
         agent.signals().iter().any(|s| s.starts_with("create:")),
@@ -1847,7 +1941,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "hello").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     let after_turn = agent.signals();
     assert_eq!(
@@ -1936,7 +2030,7 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     mock.queue_response("second");
     block.release();
     wait_inbox(&client, &server.addr, &id, &[]).await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
 
     // One turn, one user message: consecutive user turns are not portable
     // across providers, so the queue is joined with a blank line instead.
@@ -1990,7 +2084,7 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
 
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_status(&client, &server2.addr, &id, "Idle").await;
+    wait_turns(&client, &server2.addr, &id, 1).await;
     // The queue survived: the session actor recovers it from its journal, and
     // recovering acquires no runtime.
     wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
@@ -2002,8 +2096,13 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
 
     // And nothing ran on its own: the queued message is still queued, waiting
     // for the user to come back rather than being answered behind their back.
+    //
+    // A real pause, and the only one left in this file: proving that something
+    // does *not* happen means giving it a window in which to happen. Every other
+    // wait here is for an event, and none of them can stand in for this.
     tokio::time::sleep(Duration::from_millis(200)).await;
     wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
+    wait_turns(&client, &server2.addr, &id, 1).await;
 
     server2.shutdown().await;
 }
@@ -2067,15 +2166,15 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .connect(&url)
         .await
         .expect("agent connects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", true).await;
 
     let id = create_session_for_vendor(&client, &server.addr, "agent-3", &agent, "first").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     // The vendor goes away between turns. Its runtime is not gone — nobody can
     // say either way — so the turn fails and the session stays usable.
     agent.disconnect();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", false).await;
     mock.queue_response("never reached");
     send_message(&client, &server.addr, &id, "while the vendor is down").await;
     wait_status(&client, &server.addr, &id, "Failed").await;
@@ -2087,7 +2186,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .connect(&url)
         .await
         .expect("agent reconnects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", true).await;
     mock.queue_response("back in business");
     assert_eq!(
         send_message(&client, &server.addr, &id, "and now?")
@@ -2095,7 +2194,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
             .as_u16(),
         202
     );
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 3).await;
     let signals = agent2.signals();
     assert!(
         signals.iter().any(|s| s == &format!("get:{id}")),
@@ -2132,7 +2231,7 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     // Nothing happens on its own — the clock has not moved.
     let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
@@ -2166,7 +2265,7 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
             .as_u16(),
         202
     );
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
     assert_eq!(
         agent
             .signals()
@@ -2209,12 +2308,12 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
         .await
         .expect("agent connects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-2", true).await;
 
     let a = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
     let b = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
-    wait_status(&client, &server.addr, &a, "Idle").await;
-    wait_status(&client, &server.addr, &b, "Idle").await;
+    wait_turns(&client, &server.addr, &a, 1).await;
+    wait_turns(&client, &server.addr, &b, 1).await;
     assert_eq!(agent.live_runtimes().len(), 2, "one runtime per session");
 
     client
@@ -2223,7 +2322,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .send()
         .await
         .unwrap();
-    wait_status(&client, &server.addr, &a, "Idle").await;
+    wait_turns(&client, &server.addr, &a, 1).await;
 
     // Hibernate is advisory and this agent declines it, so both runtimes are
     // still there. What matters is that stopping one session did not disturb
@@ -2239,7 +2338,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         202,
         "session b must be unaffected by a's stop"
     );
-    wait_status(&client, &server.addr, &b, "Idle").await;
+    wait_turns(&client, &server.addr, &b, 2).await;
 }
 
 // ── prompt-cache prefix stability ────────────────────────────────────────────
@@ -2293,16 +2392,16 @@ async fn the_request_prefix_only_ever_grows() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
-    for text in ["two", "three"] {
+    for (n, text) in ["two", "three"].into_iter().enumerate() {
         assert_eq!(
             send_message(&client, &server.addr, &id, text)
                 .await
                 .as_u16(),
             202
         );
-        wait_status(&client, &server.addr, &id, "Idle").await;
+        wait_turns(&client, &server.addr, &id, n + 2).await;
     }
 
     let bodies = received(&client, &mock).await;
@@ -2356,14 +2455,14 @@ async fn the_request_prefix_survives_a_restart() {
     let client = reqwest::Client::new();
 
     let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
     send_message(&client, &server.addr, &id, "two").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
 
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
     send_message(&client, &server2.addr, &id, "three").await;
-    wait_status(&client, &server2.addr, &id, "Idle").await;
+    wait_turns(&client, &server2.addr, &id, 3).await;
 
     let bodies = received(&client, &mock).await;
     let (before, after) = (&bodies[bodies.len() - 2], &bodies[bodies.len() - 1]);
@@ -2407,10 +2506,10 @@ async fn the_request_prefix_only_grows_across_tool_calls() {
     };
     script();
     let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
     script();
     send_message(&client, &server.addr, &id, "second").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 2).await;
 
     let bodies = received(&client, &mock).await;
     assert!(bodies.len() >= 6, "expected 6 calls, got {}", bodies.len());
@@ -2468,12 +2567,12 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
     let client = reqwest::Client::new();
     mock.queue_reasoning("weighing it up", "done");
     let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
-    for text in ["second", "third"] {
+    for (n, text) in ["second", "third"].into_iter().enumerate() {
         mock.queue_reasoning("weighing it up", "done");
         send_message(&client, &server.addr, &id, text).await;
-        wait_status(&client, &server.addr, &id, "Idle").await;
+        wait_turns(&client, &server.addr, &id, n + 2).await;
     }
 
     let bodies = received(&client, &mock).await;

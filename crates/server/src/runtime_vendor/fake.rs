@@ -969,8 +969,9 @@ mod tests {
 
     /// A cancel is the one relayed message that draws no reply, so nothing
     /// upstream fails if it silently goes nowhere. The only other assertion that
-    /// it reaches the vendor lives in an `#[ignore]`d e2e (the `POST /stop` port
-    /// gap), which would leave the one-way branch of the relay uncovered.
+    /// it reaches the vendor is the e2e `stopping_a_turn_cancels_the_in_flight_tool_call`,
+    /// which drives the whole `POST /stop` path; this covers the one-way branch
+    /// of the relay on its own.
     /// The identity has to survive the whole path — `RuntimeClient` stamps it,
     /// the vendor link relays the message verbatim, and the agent reads it back
     /// off the wire. Stamping and the runtime's use of the id are unit-tested

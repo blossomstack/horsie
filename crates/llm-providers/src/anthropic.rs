@@ -30,9 +30,19 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub fn env_base_url() -> Option<String> {
-    env::var("ANTHROPIC_BASE_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
+    base_url_from(env::var("ANTHROPIC_BASE_URL").ok())
+}
+
+/// The rule [`env_base_url`] applies, separated from the reading of it: a
+/// variable that is set but blank is unset, which is what a shell produces from
+/// an unexpanded `$VAR` and must not become a base URL of `""`.
+///
+/// Split out so it can be tested without writing to the process environment.
+/// `set_var` races every concurrent `getenv` in the binary — and a test binary
+/// runs its tests on several threads — so a test that mutates the environment is
+/// unsound rather than merely flaky.
+fn base_url_from(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| !s.is_empty())
 }
 
 /// Whether a classified error is worth another attempt.
@@ -993,25 +1003,13 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_env_base_url_treated_as_unset() {
-        let original = env::var("ANTHROPIC_BASE_URL").ok();
-        unsafe {
-            env::set_var("ANTHROPIC_BASE_URL", "");
-        }
-        assert_eq!(env_base_url(), None);
-        unsafe {
-            env::set_var("ANTHROPIC_BASE_URL", "https://example.com");
-        }
-        assert_eq!(env_base_url(), Some("https://example.com".into()));
-        unsafe {
-            env::remove_var("ANTHROPIC_BASE_URL");
-        }
-        assert_eq!(env_base_url(), None);
-        if let Some(v) = original {
-            unsafe {
-                env::set_var("ANTHROPIC_BASE_URL", v);
-            }
-        }
+    fn an_empty_base_url_is_unset() {
+        assert_eq!(base_url_from(Some(String::new())), None);
+        assert_eq!(
+            base_url_from(Some("https://example.com".into())),
+            Some("https://example.com".into())
+        );
+        assert_eq!(base_url_from(None), None);
     }
 
     #[test]
