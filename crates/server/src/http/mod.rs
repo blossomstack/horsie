@@ -518,6 +518,148 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// The contract every *created* named resource on this API keeps.
+    ///
+    /// `POST /api/thing` to create, `GET|PUT|DELETE /api/thing/{name}` to work
+    /// on one. Four resources answer to exactly this, and used to say so in four
+    /// hundred-line tests that each asserted ten behaviours in sequence — where
+    /// the first failure hid the nine after it and reported only a status code.
+    ///
+    /// Not every resource is in here, and that is the point of a contract: the
+    /// runtime-vendor and MCP-server routes are `PUT`-upsert with no `POST` and
+    /// no item `GET`, so they keep no part of this and are tested on their own.
+    /// What a resource does *differently* — which bodies it refuses, which
+    /// fields a full replace clears, what it redacts — likewise stays its own
+    /// test. This is the shape they share, not the reasons they differ.
+    macro_rules! crud_over_http {
+        (
+            mod $module:ident,
+            app: $app:path,
+            path: $path:expr,
+            name: $name:expr,
+            create: $create:expr,
+            replace: $replace:expr,
+            replaced: $replaced:expr $(,)?
+        ) => {
+            mod $module {
+                use super::*;
+
+                fn item() -> String {
+                    format!("{}/{}", $path, $name)
+                }
+
+                /// The app with the resource already created — the starting
+                /// point for every test below except the create ones.
+                async fn seeded(tmp: &tempfile::TempDir) -> axum::Router {
+                    let app = $app(tmp).await;
+                    let res = app
+                        .clone()
+                        .oneshot(post_json($path, &$create))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        res.status(),
+                        StatusCode::CREATED,
+                        "the fixture's own create must succeed"
+                    );
+                    app
+                }
+
+                #[tokio::test]
+                async fn creating_returns_201_and_the_stored_view() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = $app(&tmp).await;
+                    let res = app.oneshot(post_json($path, &$create)).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::CREATED);
+                    let v: serde_json::Value = read_json(res).await;
+                    assert_eq!(v["name"], serde_json::json!($name));
+                }
+
+                #[tokio::test]
+                async fn creating_the_same_name_twice_is_a_conflict() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.oneshot(post_json($path, &$create)).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::CONFLICT);
+                }
+
+                #[tokio::test]
+                async fn the_list_holds_what_was_created() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.oneshot(get($path)).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::OK);
+                    let list: Vec<serde_json::Value> = read_json(res).await;
+                    assert_eq!(list.len(), 1);
+                    assert_eq!(list[0]["name"], serde_json::json!($name));
+                }
+
+                #[tokio::test]
+                async fn getting_it_by_name_returns_it() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.oneshot(get(&item())).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::OK);
+                }
+
+                #[tokio::test]
+                async fn getting_a_name_that_does_not_exist_is_404() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.oneshot(get(&format!("{}/ghost", $path))).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                }
+
+                #[tokio::test]
+                async fn replacing_it_returns_200_and_takes_effect() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.oneshot(put_json(&item(), &$replace)).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::OK);
+                    let v: serde_json::Value = read_json(res).await;
+                    #[allow(clippy::redundant_closure_call)]
+                    ($replaced)(&v);
+                }
+
+                #[tokio::test]
+                async fn replacing_a_name_that_does_not_exist_is_404() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let mut body = $replace;
+                    body["name"] = serde_json::json!("ghost");
+                    let res = app
+                        .oneshot(put_json(&format!("{}/ghost", $path), &body))
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                }
+
+                /// A rename is not a replace: the name in the path is the
+                /// identity, and a body that disagrees is refused rather than
+                /// quietly moving the resource.
+                #[tokio::test]
+                async fn replacing_with_a_body_that_renames_is_422() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let mut body = $replace;
+                    body["name"] = serde_json::json!("other");
+                    let res = app.oneshot(put_json(&item(), &body)).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                }
+
+                #[tokio::test]
+                async fn deleting_is_204_and_deleting_again_is_404() {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let app = seeded(&tmp).await;
+                    let res = app.clone().oneshot(delete(&item())).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+                    let res = app.oneshot(delete(&item())).await.unwrap();
+                    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                }
+            }
+        };
+    }
+
     #[tokio::test]
     async fn health_responds_ok() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2277,107 +2419,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agents_crud_over_http() {
+    async fn an_agent_needs_a_slug_name_and_a_model_that_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = agent_app(&tmp).await;
+        for bad in [
+            serde_json::json!({"name": "Bad Name", "model": "mock"}),
+            serde_json::json!({"name": "x", "model": "ghost"}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/agents", &bad))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+        }
+    }
+
+    /// A `PUT` that omits a list clears it, rather than merging into what was
+    /// there — the difference between a replace and a patch, on the field where
+    /// a silent merge would keep granting a plugin the operator removed.
+    #[tokio::test]
+    async fn replacing_an_agent_clears_the_plugins_it_omits() {
         use horsie_models::agents::AgentView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-        put_mock_model(&app).await;
-
-        // Create -> 201 with the stored view.
-        let body = serde_json::json!({
+        let app = agent_app(&tmp).await;
+        let created = serde_json::json!({
             "name": "reviewer", "description": "reviews PRs", "model": "mock",
             "plugins": ["superpowers"], "memorySpaces": ["default"]
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/agents", &body))
+            .oneshot(post_json("/api/agents", &created))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
         let v: AgentView = read_json(res).await;
-        assert_eq!(v.name, "reviewer");
         assert_eq!(v.plugins, vec!["superpowers".to_string()]);
 
-        // Duplicate -> 409; bad slug -> 422; unknown model -> 422.
         let res = app
-            .clone()
-            .oneshot(post_json("/api/agents", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
-        let res = app
-            .clone()
-            .oneshot(post_json(
-                "/api/agents",
-                &serde_json::json!({"name": "Bad Name", "model": "mock"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let res = app
-            .clone()
-            .oneshot(post_json(
-                "/api/agents",
-                &serde_json::json!({"name": "x", "model": "ghost"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        // List + get.
-        let res = app.clone().oneshot(get("/api/agents")).await.unwrap();
-        let list: Vec<AgentView> = read_json(res).await;
-        assert_eq!(list.len(), 1);
-        let res = app
-            .clone()
-            .oneshot(get("/api/agents/reviewer"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-
-        // Replace -> 200; unknown replace -> 404; name mismatch -> 422.
-        let upd = serde_json::json!({"name": "reviewer", "model": "mock", "description": "v2"});
-        let res = app
-            .clone()
-            .oneshot(put_json("/api/agents/reviewer", &upd))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let v: AgentView = read_json(res).await;
-        assert_eq!(v.description, "v2");
-        assert!(v.plugins.is_empty(), "PUT is a full replace");
-        let res = app
-            .clone()
-            .oneshot(put_json(
-                "/api/agents/ghost",
-                &serde_json::json!({"name": "ghost", "model": "mock"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        let res = app
-            .clone()
             .oneshot(put_json(
                 "/api/agents/reviewer",
-                &serde_json::json!({"name": "other", "model": "mock"}),
+                &serde_json::json!({"name": "reviewer", "model": "mock", "description": "v2"}),
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        // Delete -> 204; again -> 404.
-        let res = app
-            .clone()
-            .oneshot(delete("/api/agents/reviewer"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app.oneshot(delete("/api/agents/reviewer")).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v: AgentView = read_json(res).await;
+        assert!(v.plugins.is_empty(), "PUT is a full replace");
     }
 
     /// An app with a "mock" model and a "reviewer" agent preset on the
     /// connected "mock" vendor — everything a routine needs to be runnable.
+    /// An app with a "mock" model, which is all an agent preset needs.
+    async fn agent_app(tmp: &tempfile::TempDir) -> axum::Router {
+        let app = app(test_state(tmp).await);
+        put_mock_model(&app).await;
+        app
+    }
+
+    /// An app with nothing extra — what an environment needs.
+    async fn plain_app(tmp: &tempfile::TempDir) -> axum::Router {
+        app(test_state(tmp).await)
+    }
+
     async fn routine_app(tmp: &tempfile::TempDir) -> axum::Router {
         let app = app(test_state(tmp).await);
         put_mock_model(&app).await;
@@ -2417,39 +2519,11 @@ mod tests {
         })
     }
 
+    /// Every graph defect is refused, rather than a workflow saved broken.
     #[tokio::test]
-    async fn workflows_crud_over_http() {
-        use horsie_models::workflow::WorkflowView;
+    async fn a_workflow_whose_graph_does_not_hold_together_is_422() {
         let tmp = tempfile::tempdir().unwrap();
-        // Same fixture as routines: it creates the `reviewer` preset the steps
-        // reference.
         let app = routine_app(&tmp).await;
-
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/workflows", &workflow_body()))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
-        let v: WorkflowView = read_json(res).await;
-        assert_eq!(v.name, "fix-bug");
-        assert_eq!(v.start, "triage");
-        assert_eq!(v.steps.len(), 2);
-        // Transition order decides which condition wins, so it has to survive
-        // the wire.
-        let t = v.steps[0].transitions.as_ref().unwrap();
-        assert_eq!(t.len(), 2);
-        assert!(t[1].condition.is_none());
-
-        // Duplicate -> 409.
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/workflows", &workflow_body()))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
-
-        // Every graph defect -> 422, rather than a workflow saved broken.
         for bad in [
             // start names no step
             serde_json::json!({"name": "b", "start": "nowhere",
@@ -2483,35 +2557,82 @@ mod tests {
                 "expected 422 for {bad}"
             );
         }
+    }
 
-        // List, get, replace, delete.
-        let res = app.clone().oneshot(get("/api/workflows")).await.unwrap();
-        let all: Vec<WorkflowView> = read_json(res).await;
-        assert_eq!(all.len(), 1);
-
-        let mut changed = workflow_body();
-        changed["description"] = serde_json::json!("changed");
+    /// Transition order decides which condition wins, so it has to survive the
+    /// wire — an unconditional fallback reordered ahead of a guard would take
+    /// every branch.
+    #[tokio::test]
+    async fn a_workflows_steps_and_transition_order_survive_the_wire() {
+        use horsie_models::workflow::WorkflowView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = routine_app(&tmp).await;
         let res = app
-            .clone()
-            .oneshot(put_json("/api/workflows/fix-bug", &changed))
+            .oneshot(post_json("/api/workflows", &workflow_body()))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
         let v: WorkflowView = read_json(res).await;
-        assert_eq!(v.description, "changed");
+        assert_eq!(v.start, "triage");
+        assert_eq!(v.steps.len(), 2);
+        let t = v.steps[0].transitions.as_ref().unwrap();
+        assert_eq!(t.len(), 2);
+        assert!(t[1].condition.is_none());
+    }
 
-        let res = app
-            .clone()
-            .oneshot(delete("/api/workflows/fix-bug"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app
-            .clone()
-            .oneshot(get("/api/workflows/fix-bug"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    crud_over_http! {
+        mod agents_contract,
+        app: agent_app,
+        path: "/api/agents",
+        name: "reviewer",
+        create: serde_json::json!({
+            "name": "reviewer", "description": "reviews PRs", "model": "mock",
+            "plugins": ["superpowers"], "memorySpaces": ["default"]
+        }),
+        replace: serde_json::json!({"name": "reviewer", "model": "mock", "description": "v2"}),
+        replaced: |v: &serde_json::Value| assert_eq!(v["description"], "v2"),
+    }
+
+    crud_over_http! {
+        mod environments_contract,
+        app: plain_app,
+        path: "/api/environments",
+        name: "staging",
+        create: serde_json::json!({
+            "name": "staging", "description": "fly box", "vendor": "fly",
+            "repos": [{"url": "https://github.com/o/api", "gitRef": "dev"}],
+            "envVars": [{"name": "RUST_LOG", "value": "debug"}],
+            "provision": [{"name": "setup", "uses": "run", "with": [{"key": "cmd", "value": "make setup"}]}],
+        }),
+        replace: serde_json::json!({"name": "staging", "vendor": "docker"}),
+        replaced: |v: &serde_json::Value| assert_eq!(v["vendor"], "docker"),
+    }
+
+    crud_over_http! {
+        mod routines_contract,
+        app: routine_app,
+        path: "/api/routines",
+        name: "nightly",
+        create: routine_body(),
+        replace: {
+            let mut b = routine_body();
+            b["description"] = serde_json::json!("v2");
+            b
+        },
+        replaced: |v: &serde_json::Value| assert_eq!(v["description"], "v2"),
+    }
+
+    crud_over_http! {
+        mod workflows_contract,
+        app: routine_app,
+        path: "/api/workflows",
+        name: "fix-bug",
+        create: workflow_body(),
+        replace: {
+            let mut b = workflow_body();
+            b["description"] = serde_json::json!("v2");
+            b
+        },
+        replaced: |v: &serde_json::Value| assert_eq!(v["description"], "v2"),
     }
 
     fn routine_body() -> serde_json::Value {
@@ -2524,31 +2645,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routines_crud_over_http() {
-        use horsie_models::routines::RoutineView;
+    async fn a_routine_needs_a_slug_name_a_real_agent_a_prompt_and_a_sane_interval() {
         let tmp = tempfile::tempdir().unwrap();
         let app = routine_app(&tmp).await;
-
-        // Create -> 201, with the schedule armed.
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/routines", &routine_body()))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
-        let v: RoutineView = read_json(res).await;
-        assert_eq!(v.name, "nightly");
-        assert_eq!(v.agent, "reviewer");
-        assert!(v.enabled);
-        assert!(v.next_run_at_ms.is_some());
-
-        // Duplicate -> 409; bad slug, unknown agent, and a too-short interval -> 422.
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/routines", &routine_body()))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
         for bad in [
             serde_json::json!({"name": "Bad Name", "agent": "reviewer", "prompt": "x"}),
             serde_json::json!({"name": "b", "agent": "ghost", "prompt": "x"}),
@@ -2563,35 +2662,35 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
         }
+    }
 
-        // List + get.
-        let res = app.clone().oneshot(get("/api/routines")).await.unwrap();
-        let list: Vec<RoutineView> = read_json(res).await;
-        assert_eq!(list.len(), 1);
+    /// Creating arms the schedule; a replace that omits it disarms, because a
+    /// `PUT` is a full replace and `Manual` is what "no schedule" means.
+    #[tokio::test]
+    async fn a_routines_schedule_is_armed_on_create_and_replaced_wholesale() {
+        use horsie_models::routines::RoutineView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = routine_app(&tmp).await;
         let res = app
             .clone()
-            .oneshot(get("/api/routines/nightly"))
+            .oneshot(post_json("/api/routines", &routine_body()))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let res = app
-            .clone()
-            .oneshot(get("/api/routines/ghost"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v: RoutineView = read_json(res).await;
+        assert_eq!(v.agent, "reviewer");
+        assert!(v.enabled);
+        assert!(v.next_run_at_ms.is_some());
 
-        // Replace -> 200 and a full replace of the schedule; rename -> 422.
-        let upd = serde_json::json!({
-            "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false,
-            "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
-        });
         let res = app
-            .clone()
-            .oneshot(put_json("/api/routines/nightly", &upd))
+            .oneshot(put_json(
+                "/api/routines/nightly",
+                &serde_json::json!({
+                    "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false,
+                    "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+                }),
+            ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
         let v: RoutineView = read_json(res).await;
         assert_eq!(v.prompt, "new prompt");
         assert!(!v.enabled);
@@ -2603,25 +2702,6 @@ mod tests {
             ),
             "PUT is a full replace"
         );
-        let res = app
-            .clone()
-            .oneshot(put_json(
-                "/api/routines/nightly",
-                &serde_json::json!({"name": "other", "agent": "reviewer", "prompt": "x"}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        // Delete -> 204; again -> 404.
-        let res = app
-            .clone()
-            .oneshot(delete("/api/routines/nightly"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app.oneshot(delete("/api/routines/nightly")).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2735,39 +2815,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn environments_crud_over_http() {
-        use horsie_models::environments::EnvironmentView;
+    async fn an_environment_needs_a_slug_name_and_a_real_vendor() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-
-        let body = serde_json::json!({
-            "name": "staging", "description": "fly box", "vendor": "fly",
-            "repos": [{"url": "https://github.com/o/api", "gitRef": "dev"}],
-            "envVars": [{"name": "RUST_LOG", "value": "debug"}],
-            "provision": [{"name": "setup", "uses": "run", "with": [{"key": "cmd", "value": "make setup"}]}],
-        });
-
-        // Create -> 201 with the full view.
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/environments", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
-        let v: EnvironmentView = read_json(res).await;
-        assert_eq!(v.name, "staging");
-        assert_eq!(v.vendor, "fly");
-        assert_eq!(v.repos[0].git_ref.as_deref(), Some("dev"));
-        assert_eq!(v.env_vars[0].name, "RUST_LOG");
-        assert_eq!(v.provision[0].uses, "run");
-
-        // Duplicate -> 409; bad slug, empty vendor, and "local" -> 422.
-        let res = app
-            .clone()
-            .oneshot(post_json("/api/environments", &body))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let app = plain_app(&tmp).await;
         for bad in [
             serde_json::json!({"name": "Bad Name", "vendor": "fly"}),
             serde_json::json!({"name": "b", "vendor": ""}),
@@ -2780,57 +2830,41 @@ mod tests {
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
         }
+    }
 
-        // List + get; unknown -> 404.
-        let res = app.clone().oneshot(get("/api/environments")).await.unwrap();
-        let list: Vec<EnvironmentView> = read_json(res).await;
-        assert_eq!(list.len(), 1);
+    /// The nested collections survive the wire on create, and a `PUT` that
+    /// omits them clears them.
+    #[tokio::test]
+    async fn an_environments_repos_env_vars_and_provision_round_trip() {
+        use horsie_models::environments::EnvironmentView;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = plain_app(&tmp).await;
+        let body = serde_json::json!({
+            "name": "staging", "description": "fly box", "vendor": "fly",
+            "repos": [{"url": "https://github.com/o/api", "gitRef": "dev"}],
+            "envVars": [{"name": "RUST_LOG", "value": "debug"}],
+            "provision": [{"name": "setup", "uses": "run", "with": [{"key": "cmd", "value": "make setup"}]}],
+        });
         let res = app
             .clone()
-            .oneshot(get("/api/environments/staging"))
+            .oneshot(post_json("/api/environments", &body))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let res = app
-            .clone()
-            .oneshot(get("/api/environments/ghost"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-
-        // Replace -> 200, full replace; rename via body -> 422.
-        let upd = serde_json::json!({"name": "staging", "vendor": "docker"});
-        let res = app
-            .clone()
-            .oneshot(put_json("/api/environments/staging", &upd))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
         let v: EnvironmentView = read_json(res).await;
-        assert_eq!(v.vendor, "docker");
-        assert!(v.repos.is_empty(), "PUT is a full replace");
+        assert_eq!(v.vendor, "fly");
+        assert_eq!(v.repos[0].git_ref.as_deref(), Some("dev"));
+        assert_eq!(v.env_vars[0].name, "RUST_LOG");
+        assert_eq!(v.provision[0].uses, "run");
+
         let res = app
-            .clone()
             .oneshot(put_json(
                 "/api/environments/staging",
-                &serde_json::json!({"name": "other", "vendor": "fly"}),
+                &serde_json::json!({"name": "staging", "vendor": "docker"}),
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
-
-        // Delete -> 204; again -> 404.
-        let res = app
-            .clone()
-            .oneshot(delete("/api/environments/staging"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app
-            .oneshot(delete("/api/environments/staging"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let v: EnvironmentView = read_json(res).await;
+        assert!(v.repos.is_empty(), "PUT is a full replace");
     }
 
     #[tokio::test]
