@@ -65,6 +65,33 @@ function callbackOf(settings: RuntimeVendorSettings): string {
   return settings.value.callbackUrl;
 }
 
+const CONNECT_PATH = "/api/runtime/connect";
+
+/**
+ * Complete a bare origin with the connect path a runtime dials.
+ *
+ * The server validates this field and refuses a URL with no path. It used to
+ * complete one instead, which is a helpful thing for a form to do and a harmful
+ * thing for an API: anything that declares configuration reads back a value it
+ * never wrote and cannot tell that from drift. So the affordance lives here,
+ * and a URL this cannot parse is passed through untouched — the server refuses
+ * it with a message written for whoever typed it.
+ */
+export function withConnectPath(url: string): string {
+  const trimmed = url.trim();
+  const authority = trimmed.startsWith("wss://")
+    ? trimmed.slice("wss://".length)
+    : trimmed.startsWith("ws://")
+      ? trimmed.slice("ws://".length)
+      : null;
+  if (authority === null) return trimmed;
+  const [, ...rest] = authority.split("/");
+  // A trailing slash is an empty path, not a path: `wss://host/` needs the
+  // same completion `wss://host` does.
+  if (rest.join("/") !== "") return trimmed;
+  return `${trimmed.replace(/\/+$/, "")}${CONNECT_PATH}`;
+}
+
 function summarise(v: RuntimeVendorConfigView): string {
   return v.settings.kind === "Fly"
     ? `Fly · ${v.settings.value.region} · ${v.settings.value.image || "no image"}`
@@ -108,7 +135,13 @@ export function CloudVendors() {
         name: draft.name,
         body: {
           name: draft.name,
-          settings: draft.settings,
+          settings: {
+            kind: draft.settings.kind,
+            value: {
+              ...draft.settings.value,
+              callbackUrl: withConnectPath(callbackOf(draft.settings)),
+            },
+          } as RuntimeVendorSettings,
           credential: draft.credential || undefined,
         },
       });
@@ -259,8 +292,8 @@ export function CloudVendors() {
               onChange={(callbackUrl) => patch({ callbackUrl })}
               placeholder={
                 draft.settings.kind === "Fly"
-                  ? "wss://horsie.example.com"
-                  : "ws://horsie.internal:3789"
+                  ? "wss://horsie.example.com/api/runtime/connect"
+                  : "ws://horsie.internal:3789/api/runtime/connect"
               }
             />
             <TextField
