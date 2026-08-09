@@ -813,9 +813,10 @@ impl RuntimeVendorClient {
 
         let mut env = request.env.clone();
         env.extend(self.bundle_env(runtime_id));
-        // The runtime proves it is *this* runtime when it dials back. The
-        // account id is empty here: a vendor process serves one account by
-        // construction, so the token only has to bind the runtime id.
+        // The runtime proves it is *this* runtime when it dials back. A vendor
+        // process serves one account by construction and verifies with a secret
+        // only it holds, so the account field carries this vendor's own name —
+        // enough to tell one vendor's listener from another's in a log.
         env.push(EnvVar {
             name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
             value: horsie_support::dial_token::mint(

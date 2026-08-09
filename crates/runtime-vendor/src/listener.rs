@@ -100,6 +100,21 @@ pub fn serve_runtime_connections(
     });
 }
 
+/// The response a peer with no usable dial token gets.
+///
+/// The status is the whole point. `ErrorResponse::new` builds a **200**, and
+/// tungstenite refuses to write a successful custom error response — so a
+/// rejected runtime saw a dropped socket rather than an answer, read it as a
+/// transport blip, and retried its full budget against a token that was never
+/// going to work. A 401 reaches the peer, and its dial loop gives up on it.
+fn refusal() -> tokio_tungstenite::tungstenite::handshake::server::ErrorResponse {
+    let mut res = tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some(
+        "a runtime must present a dial token for its own id".to_string(),
+    ));
+    *res.status_mut() = tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED;
+    res
+}
+
 /// Complete the WebSocket handshake for one accepted socket, then serve it.
 ///
 /// Off the accept path on purpose: a runtime child that is killed between
@@ -136,11 +151,7 @@ async fn upgrade_and_serve<S>(
                     }
                     Ok(res)
                 }
-                Err(_) => Err(
-                    tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(Some(
-                        "a runtime must present a dial token for its own id".to_string(),
-                    )),
-                ),
+                Err(_) => Err(refusal()),
             }
         };
 
@@ -393,9 +404,18 @@ mod tests {
         let cancel = CancellationToken::new();
         serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
 
-        assert!(
-            connect_async(format!("ws://{addr}")).await.is_err(),
-            "an unauthenticated peer must be refused during the HTTP upgrade"
+        // A 4xx the peer can *read*, not merely a dropped socket. The runtime's
+        // dial loop only stops retrying on an HTTP 4xx; anything else looks like
+        // a network blip and costs it thirty attempts over ten minutes before it
+        // learns what the first answer already said.
+        let Err(tokio_tungstenite::tungstenite::Error::Http(res)) =
+            connect_async(format!("ws://{addr}")).await
+        else {
+            panic!("an unauthenticated peer must be refused with an HTTP response");
+        };
+        assert_eq!(
+            res.status(),
+            tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
         );
         cancel.cancel();
     }

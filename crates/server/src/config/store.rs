@@ -1136,6 +1136,31 @@ async fn load_or_create_dial_secret(db: &Db, user: &UserId) -> Result<Arc<Vec<u8
 /// Settings key holding this account's hex-encoded dial secret.
 const RUNTIME_DIAL_SECRET_KEY: &str = "runtime_dial_secret";
 
+/// An account's dial secret if it has one, **never creating it**.
+///
+/// The read a dial-back needs, and the reason it is not
+/// [`load_or_create_dial_secret`]. A token names its own account, and that name
+/// is unverified until the secret it points at has checked the tag — so the
+/// lookup that fetches the secret must not be the thing that brings the account
+/// into being. Reaching for the account's services instead would: building one
+/// spawns a supervisor, a sweep task and a secret, which is a lot of machinery
+/// for `Bearer whatever.x.y` to conjure out of a stranger.
+///
+/// `None` means "no such account, or one that has never had a runtime", and
+/// both answer the caller the same way: refuse.
+pub async fn dial_secret_of(db: &Db, user: &UserId) -> Result<Option<Arc<Vec<u8>>>, String> {
+    let Some(hex) = read_setting(db, db.pool(), user, RUNTIME_DIAL_SECRET_KEY)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    Ok(hex::decode(&hex)
+        .ok()
+        .filter(|b| !b.is_empty())
+        .map(Arc::new))
+}
+
 async fn read_setting<'e, E>(
     db: &Db,
     ex: E,

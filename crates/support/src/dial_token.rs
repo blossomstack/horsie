@@ -12,9 +12,13 @@
 //! nowhere else.
 //!
 //! The payload names the account as well as the runtime, so whoever accepts the
-//! dial can route it to the right account's services without a database read. A
-//! sandbox learning its own account id is not a disclosure: it is that
-//! account's own sandbox.
+//! dial knows which secret to check it against. A sandbox learning its own
+//! account id is not a disclosure: it is that account's own sandbox.
+//!
+//! "Account" is whoever owns the secret, which is not always a user: a vendor
+//! process signs with a secret of its own and puts its `--name` in the field.
+//! Both are caller-chosen strings, which is why the format is parsed from the
+//! right — see [`split`].
 
 use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
@@ -51,9 +55,6 @@ fn tag(secret: &[u8], payload: &str) -> String {
 }
 
 /// `<user_id>.<runtime_id>.<hex tag>`.
-///
-/// Both ids are `.`-free by construction — account ids and session UUIDs — so a
-/// plain split is unambiguous.
 #[must_use]
 pub fn mint(secret: &[u8], claims: &DialClaims) -> String {
     let payload = format!("{}.{}", claims.user_id, claims.runtime_id);
@@ -61,22 +62,47 @@ pub fn mint(secret: &[u8], claims: &DialClaims) -> String {
     format!("{payload}.{tag}")
 }
 
+/// Split a token into its three parts, **from the right**.
+///
+/// The last two fields are `.`-free by construction — a hex tag, and a runtime
+/// id that is a session UUID or a vendor-minted label — so everything before
+/// them is the account, dots and all. Splitting from the left instead made a
+/// dotted account id (a delegating front layer whose subject is an email) or a
+/// dotted vendor name (`horsie connect --name mac.local`, which mints under its
+/// own name) produce a four-field token that refused *every* dial-back as
+/// malformed.
+fn split(token: &str) -> Option<(&str, &str, &str)> {
+    let (payload, presented) = token.rsplit_once('.')?;
+    let (user_id, runtime_id) = payload.rsplit_once('.')?;
+    if user_id.is_empty() || runtime_id.is_empty() || presented.is_empty() {
+        return None;
+    }
+    Some((user_id, runtime_id, presented))
+}
+
+/// The account a token claims, before anything has verified it.
+///
+/// Only ever a hint: whoever reads it has to find that account's secret and
+/// check the tag before believing any of it. Exposed so the parsing rule lives
+/// in one place — a caller that split the token its own way would disagree with
+/// [`verify`] on exactly the dotted names this format exists to tolerate.
+#[must_use]
+pub fn claimed_account(token: &str) -> Option<&str> {
+    split(token).map(|(user_id, _, _)| user_id)
+}
+
 /// Verify a presented token and recover what it claims.
 pub fn verify(secret: &[u8], token: &str) -> Result<DialClaims, DialTokenError> {
-    let parts: Vec<&str> = token.split('.').collect();
-    let [user_id, runtime_id, presented] = parts.as_slice() else {
+    let Some((user_id, runtime_id, presented)) = split(token) else {
         return Err(DialTokenError::Malformed);
     };
-    if user_id.is_empty() || runtime_id.is_empty() || presented.is_empty() {
-        return Err(DialTokenError::Malformed);
-    }
     let expected = tag(secret, &format!("{user_id}.{runtime_id}"));
     if expected.is_empty() || !constant_time_eq(expected.as_bytes(), presented.as_bytes()) {
         return Err(DialTokenError::BadSignature);
     }
     Ok(DialClaims {
-        user_id: (*user_id).to_string(),
-        runtime_id: (*runtime_id).to_string(),
+        user_id: user_id.to_string(),
+        runtime_id: runtime_id.to_string(),
     })
 }
 
@@ -142,6 +168,33 @@ mod tests {
         for bad in ["", ".", "..", "no-dot", "a.b", "a.b.c.d", "a..c", ".b.c"] {
             assert!(verify(b"secret", bad).is_err(), "{bad:?} must not verify");
         }
+    }
+
+    /// A vendor mints under its own `--name`, and an account id can come from a
+    /// front layer that uses an email as the subject. Neither is `.`-free, and
+    /// splitting from the left turned both into a token nothing could verify —
+    /// so every runtime that vendor started was refused at the door.
+    #[test]
+    fn an_account_with_dots_in_it_still_round_trips() {
+        for user_id in ["mac.local", "someone@example.com", "a.b.c.d"] {
+            let claims = DialClaims {
+                user_id: user_id.to_string(),
+                runtime_id: "s1".to_string(),
+            };
+            let token = mint(b"secret", &claims);
+            assert_eq!(verify(b"secret", &token).unwrap(), claims);
+            assert_eq!(claimed_account(&token), Some(user_id));
+        }
+    }
+
+    #[test]
+    fn the_claimed_account_reads_the_same_field_verify_does() {
+        assert_eq!(claimed_account("u1.s1.deadbeef"), Some("u1"));
+        // Guards the lookup a claim feeds: an empty account must never become a
+        // lookup for the empty account.
+        assert_eq!(claimed_account(".s1.deadbeef"), None);
+        assert_eq!(claimed_account("s1.deadbeef"), None);
+        assert_eq!(claimed_account(""), None);
     }
 
     #[test]

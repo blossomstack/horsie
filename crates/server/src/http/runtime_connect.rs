@@ -5,16 +5,26 @@
 //! back here: one port, and TLS and reverse proxies for free.
 //!
 //! The bearer is self-describing — `<account>.<runtime>.<tag>`, signed with the
-//! account's dial secret — so this handler resolves the owning account without a
-//! database read. A sandbox learning its own account id is not a disclosure: it
-//! is that account's own sandbox.
+//! account's dial secret — so this handler knows which secret to check it
+//! against. A sandbox learning its own account id is not a disclosure: it is
+//! that account's own sandbox.
 //!
 //! **The secret is per account, so verification is two-phase.** The account has
 //! to be read out of the token before the secret that validates it can be
-//! fetched, which means the id is *claimed* until the tag checks out. Nothing
-//! is done with the claim except look up a secret, and a wrong claim simply
-//! fails the tag — but the ordering is worth naming, because reversing it would
-//! mean trusting an unverified string.
+//! fetched, which means the id is *claimed* until the tag checks out. The only
+//! thing done with the claim is a bare settings read for that account's secret
+//! — deliberately not [`UserRegistry::get`], which builds the account when it
+//! is absent, and would let any stranger's `Bearer whatever.x.y` spawn a
+//! supervisor, a dial secret and a sweep task per request. Nothing else touches
+//! the account until the tag has checked out.
+//!
+//! **This route is outside `require_auth`'s allowlist on purpose.** A runtime
+//! holds no session credential and never will; the token below is the whole
+//! authentication, and the middleware — which only knows how to verify a
+//! session credential — answered 401 to every dial-back on any deployment with
+//! authentication turned on.
+//!
+//! [`UserRegistry::get`]: crate::users::UserRegistry::get
 //!
 //! A *raw* WebSocket upgrade rather than axum's `WebSocketUpgrade`, whose
 //! `WebSocket` type cannot be handed to `tokio_tungstenite` — the same
@@ -29,15 +39,6 @@ use hyper_util::rt::TokioIo;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
-
-/// The account a token claims, before anything has verified it.
-fn claimed_account(token: &str) -> Option<String> {
-    token
-        .split('.')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-}
 
 fn bearer_of(headers: &axum::http::HeaderMap) -> Option<String> {
     headers
@@ -64,20 +65,42 @@ pub async fn runtime_connect(
     let Some(token) = bearer_of(req.headers()) else {
         return refused();
     };
-    let Some(account) = claimed_account(&token) else {
+    let Some(account) = horsie_support::dial_token::claimed_account(&token) else {
         return refused();
     };
+    let account = crate::auth::UserId::new(account);
 
-    let services = match state.users.get(&crate::auth::UserId::new(account)).await {
-        Ok(services) => services,
-        // An unknown account and a bad signature are the same answer on the
-        // wire: neither tells a stranger whether an account exists.
+    // An unknown account, an account that has never owned a runtime, and a bad
+    // signature are all the same answer on the wire: none tells a stranger
+    // whether an account exists.
+    let secret = match crate::config::dial_secret_of(&state.shared.db, &account).await {
+        Ok(Some(secret)) => secret,
+        Ok(None) => return refused(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading a dial secret failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not verify the token",
+            )
+                .into_response();
+        }
+    };
+    let claims = match horsie_support::dial_token::verify(&secret, &token) {
+        Ok(claims) => claims,
         Err(_) => return refused(),
     };
 
-    let claims = match horsie_support::dial_token::verify(&services.dial_secret, &token) {
-        Ok(claims) => claims,
-        Err(_) => return refused(),
+    // Verified: now, and only now, is it this account's own runtime asking.
+    let services = match state.users.get(&account).await {
+        Ok(services) => services,
+        Err(e) => {
+            tracing::error!(error = %e, "building an account for its runtime failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not accept the runtime",
+            )
+                .into_response();
+        }
     };
 
     let Some(key) = req
@@ -131,19 +154,6 @@ pub async fn runtime_connect(
 )]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_claimed_account_is_the_first_segment() {
-        assert_eq!(claimed_account("u1.s1.deadbeef").as_deref(), Some("u1"));
-    }
-
-    #[test]
-    fn a_token_with_no_account_is_not_claimable() {
-        // Guards the lookup: an empty first segment must not become a lookup
-        // for the empty account.
-        assert_eq!(claimed_account(".s1.deadbeef"), None);
-        assert_eq!(claimed_account(""), None);
-    }
 
     #[test]
     fn a_bearer_is_read_only_when_it_is_a_non_empty_bearer() {

@@ -309,7 +309,23 @@ impl UserRegistry {
         &self.shared
     }
 
+    /// Whether this account has been touched, without touching it.
+    ///
+    /// For assertions about what a request *did not* build: every other way of
+    /// asking would build the thing being asked about.
+    #[must_use]
+    pub fn is_built(&self, user: &UserId) -> bool {
+        self.users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(user)
+    }
+
     /// This account's services, building them if this is its first touch.
+    ///
+    /// **Get-or-create.** Every caller has to have established that the account
+    /// is real first — a request that reaches here with an unverified,
+    /// caller-supplied id is a way to spawn a supervisor per stranger.
     pub async fn get(&self, user: &UserId) -> Result<Arc<UserServices>, String> {
         let cell = {
             let mut users = self

@@ -1692,6 +1692,79 @@ mod tests {
         );
     }
 
+    /// The dial-back has to work on a deployment that has authentication on —
+    /// which is every hosted one, and the only kind with cloud vendors to dial
+    /// back from. A runtime holds no session credential, so `require_auth` used
+    /// to answer 401 before this handler ever ran, and no Fly or velos machine
+    /// could register at all. Both non-`Off` modes, because they refuse for
+    /// different reasons: `Password` fails to verify the bearer, `Delegated`
+    /// finds no identity attached.
+    #[tokio::test]
+    async fn a_runtime_dials_in_on_a_deployment_with_authentication_on() {
+        for mode in [
+            crate::auth::AuthMode::Password,
+            crate::auth::AuthMode::Delegated,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut state = test_state(&tmp).await;
+            state.auth = Arc::new(crate::auth::AuthService::new(
+                crate::auth::AuthStore::new(crate::db::testing::db().await),
+                crate::auth::AuthDeps {
+                    mode,
+                    state_dir: tmp.path().to_path_buf(),
+                },
+            ));
+            let services = services(&state).await;
+            let token = horsie_support::dial_token::mint(
+                &services.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: services.user.as_str().to_string(),
+                    runtime_id: "s1".to_string(),
+                },
+            );
+            let addr = serve_state(state).await;
+
+            let _ws = dial_runtime(addr, &token, "s1")
+                .await
+                .unwrap_or_else(|e| panic!("a dial under {mode:?} must be accepted: {e}"));
+            let mut registered = false;
+            for _ in 0..100 {
+                if services
+                    .connected_runtimes
+                    .runtime_transport("s1")
+                    .await
+                    .is_some()
+                {
+                    registered = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(registered, "the runtime never registered under {mode:?}");
+        }
+    }
+
+    /// Building an account is not free — a supervisor, a dial secret, a sweep
+    /// task — and the account a token names is a *claim* until its tag checks
+    /// out. Resolving the claim through the get-or-create registry meant a
+    /// stranger could mint accounts by dialling in a loop with nonsense.
+    #[tokio::test]
+    async fn a_token_for_an_account_that_does_not_exist_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let users = state.users.clone();
+        let addr = serve_state(state).await;
+
+        assert!(
+            dial_runtime(addr, "ghost.s1.deadbeef", "s1").await.is_err(),
+            "a token no secret can verify must never reach a websocket"
+        );
+        assert!(
+            !users.is_built(&crate::auth::UserId::new("ghost")),
+            "an unverified claim must not have built an account"
+        );
+    }
+
     #[tokio::test]
     async fn a_connected_agent_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
