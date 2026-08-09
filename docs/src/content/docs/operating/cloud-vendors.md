@@ -64,11 +64,13 @@ first. It is the `ws://` or `wss://` address a sandbox reaches **your server**
 on, from wherever that sandbox runs — not necessarily the address your browser
 uses.
 
-Two things happen when you save it:
+Two things are checked when you save it:
 
-- A bare origin gains the connect path, so `wss://horsie.example.com` is stored
-  as `wss://horsie.example.com/api/runtime/connect`. A URL you wrote with a
-  trailing slash is handled too.
+- It must carry the connect path. The settings form completes a bare origin for
+  you, so typing `wss://horsie.example.com` still gives you
+  `wss://horsie.example.com/api/runtime/connect` — but what the form sends is
+  what gets stored, so anything configuring horsie over its API (Terraform, a
+  script) writes the full URL itself.
 - An address that only resolves on the server itself — `localhost`,
   `127.0.0.1`, `0.0.0.0`, `::1`, or anything under `.localhost` — is **refused**
   with an error naming the host. Inside a container those names mean the

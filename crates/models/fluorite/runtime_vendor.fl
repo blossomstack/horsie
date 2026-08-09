@@ -185,10 +185,12 @@ struct FlyVendorSettings {
     region: String,
     /// Where in the machine workspaces are allocated.
     workspace_root: String,
-    /// The `ws://`/`wss://` URL a machine reaches this server on. A bare origin
-    /// gains the connect path on save. An address that only resolves on the
-    /// server's own loopback is refused: a machine could never reach it, and
-    /// the failure would otherwise surface as an unexplained session timeout.
+    /// The `ws://`/`wss://` URL a machine reaches this server on, including the
+    /// connect path — a URL with no path is refused rather than completed, so
+    /// what is stored is always what was sent. An address that only resolves on
+    /// the server's own loopback is refused too: a machine could never reach
+    /// it, and the failure would otherwise surface as an unexplained session
+    /// timeout.
     callback_url: String,
     /// Give each runtime a volume, so a stopped one keeps its workspace.
     volumes: bool,
@@ -211,6 +213,7 @@ struct VelosVendorSettings {
     workspace_root: String,
     /// The `ws://` URL a container reaches this server on, *from velos's
     /// container network* — not necessarily the address a browser uses.
+    /// Includes the connect path, as on a Fly vendor.
     callback_url: String,
     cpu: u32,
     memory_mb: u32,

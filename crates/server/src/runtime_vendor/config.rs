@@ -27,8 +27,8 @@ use std::sync::{Arc, PoisonError};
 
 const COLS: &str = "name, kind, settings, credential, created_at, updated_at";
 
-/// The path on this server that runtimes dial. Appended when an operator gives
-/// a bare origin, which is the shape they will reach for.
+/// The path on this server that runtimes dial. Named in the error a callback
+/// URL without one earns, since that is the whole of what is missing.
 const CONNECT_PATH: &str = "/api/runtime/connect";
 
 /// How a Fly vendor builds machines: the *storage* shape.
@@ -241,8 +241,7 @@ impl StoredVendorSettings {
 /// resolves on the server's own loopback. That failure surfaces minutes later,
 /// in a session, attributed to nothing.
 ///
-/// Returns the normalised callback URL.
-pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<String, String> {
+pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<(), String> {
     match settings {
         StoredVendorSettings::Fly(fly) => {
             if credential.trim().is_empty() {
@@ -259,7 +258,7 @@ pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<Str
             if fly.volumes && fly.volume_size_gb == 0 {
                 return Err("a volume needs a size".to_string());
             }
-            normalise_callback(&fly.callback_url)
+            validate_callback(&fly.callback_url)
         }
         StoredVendorSettings::Velos(velos) => {
             // No credential check: a velos deployment may run without auth, and
@@ -280,15 +279,19 @@ pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<Str
             if velos.cpu == 0 || velos.memory_mb == 0 {
                 return Err("a container needs at least one cpu and some memory".to_string());
             }
-            normalise_callback(&velos.callback_url)
+            validate_callback(&velos.callback_url)
         }
     }
 }
 
-/// Check a callback URL a machine has to reach from outside, and fill in the
-/// connect path when an operator gives a bare origin.
-pub fn normalise_callback(url: &str) -> Result<String, String> {
-    let url = url.trim();
+/// Check a callback URL a machine has to reach this server from outside.
+///
+/// Validates and never rewrites. An earlier version completed a bare origin
+/// with [`CONNECT_PATH`] and trimmed surrounding whitespace, which is a helpful
+/// thing for a form to do and a harmful thing for an API: anything that
+/// declares configuration reads back a value it never wrote, and cannot tell
+/// that from drift. The completion lives in the settings form instead.
+pub fn validate_callback(url: &str) -> Result<(), String> {
     let Some(rest) = url
         .strip_prefix("wss://")
         .or_else(|| url.strip_prefix("ws://"))
@@ -312,15 +315,15 @@ pub fn normalise_callback(url: &str) -> Result<String, String> {
             "a machine cannot reach '{host}' — the callback url must be an address reachable from outside this server"
         ));
     }
-    // `trim_end_matches`, not a bare concatenation: a url written with a
-    // trailing slash has an empty path, and appending to it produced
-    // `wss://host//api/runtime/connect`, which axum will not route — so every
-    // runtime dialled a 404 and the vendor looked broken for a stray keystroke.
-    Ok(if path.is_empty() {
-        format!("{}{CONNECT_PATH}", url.trim_end_matches('/'))
-    } else {
-        url.to_string()
-    })
+    // A bare origin makes the machine dial the server root and collect a 404 it
+    // cannot explain, so it is refused rather than completed — and the message
+    // names the path, because that is the whole of what is missing.
+    if path.is_empty() {
+        return Err(format!(
+            "the callback url must include the connect path, e.g. wss://horsie.example.com{CONNECT_PATH}"
+        ));
+    }
+    Ok(())
 }
 
 pub struct RuntimeVendorStore {
@@ -603,20 +606,9 @@ impl RuntimeVendorConfigService {
                 row.name
             ));
         }
-        let callback = validate(&row.settings, &row.credential)?;
-        let settings = match row.settings {
-            StoredVendorSettings::Fly(fly) => StoredVendorSettings::Fly(StoredFlySettings {
-                callback_url: callback,
-                ..fly
-            }),
-            StoredVendorSettings::Velos(velos) => {
-                StoredVendorSettings::Velos(StoredVelosSettings {
-                    callback_url: callback,
-                    ..velos
-                })
-            }
-        };
-        let row = RuntimeVendorRow { settings, ..row };
+        // Stored exactly as it arrived: `validate` no longer rewrites anything,
+        // so there is nothing to fold back into the row.
+        validate(&row.settings, &row.credential)?;
         self.store.upsert(&row).await?;
         self.publish(&row)?;
         Ok(row)
@@ -733,7 +725,7 @@ mod tests {
         StoredVendorSettings::Fly(StoredFlySettings {
             app: "horsie-runtimes".to_string(),
             image: "ghcr.io/x/runtime:1".to_string(),
-            callback_url: "wss://horsie.example.com".to_string(),
+            callback_url: "wss://horsie.example.com/api/runtime/connect".to_string(),
             ..StoredFlySettings::default()
         })
     }
@@ -764,46 +756,51 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_origin_gains_the_connect_path() {
-        // The shape an operator reaches for; without this the machine dials the
-        // server root and gets a 404 it cannot explain.
-        assert_eq!(
-            normalise_callback("wss://horsie.example.com").unwrap(),
-            "wss://horsie.example.com/api/runtime/connect"
+    fn a_bare_origin_is_refused() {
+        // The server used to complete this silently. It cannot: a client that
+        // declares configuration reads back a value it never wrote and has no
+        // way to tell that from drift. Completing it is a typing affordance,
+        // and belongs in the form.
+        let err = validate_callback("wss://horsie.example.com").unwrap_err();
+        assert!(
+            err.contains("/api/runtime/connect"),
+            "{err} must name the path it wants"
         );
     }
 
     #[test]
-    fn a_trailing_slash_does_not_double_up() {
-        // A stray keystroke used to produce `//api/runtime/connect`, which axum
-        // will not route — so every runtime dialled a 404 and the vendor looked
-        // broken rather than mistyped.
-        assert_eq!(
-            normalise_callback("wss://horsie.example.com/").unwrap(),
-            "wss://horsie.example.com/api/runtime/connect"
-        );
+    fn a_trailing_slash_is_refused() {
+        // Still no path — and completing it used to produce
+        // `//api/runtime/connect`, which axum will not route.
+        assert!(validate_callback("wss://horsie.example.com/").is_err());
     }
 
     #[test]
-    fn an_explicit_path_is_left_alone() {
-        assert_eq!(
-            normalise_callback("wss://horsie.example.com/relay/rt").unwrap(),
-            "wss://horsie.example.com/relay/rt"
-        );
+    fn an_explicit_path_is_accepted() {
+        assert!(validate_callback("wss://horsie.example.com/relay/rt").is_ok());
+        assert!(validate_callback("wss://horsie.example.com/api/runtime/connect").is_ok());
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_refused() {
+        // Not trimmed, for the reason a bare origin is not completed: whatever
+        // is stored has to be exactly what was sent.
+        assert!(validate_callback(" wss://horsie.example.com/api/runtime/connect").is_err());
     }
 
     #[test]
     fn a_loopback_callback_is_refused() {
         // The whole point of validating at save time: this configuration saves
-        // cleanly and then fails every session as an unexplained timeout.
+        // cleanly and then fails every session as an unexplained timeout. Each
+        // url carries a path, so the refusal is about the host and nothing else.
         for url in [
-            "ws://localhost:8080",
+            "ws://localhost:8080/api/runtime/connect",
             "ws://127.0.0.1:8080/api/runtime/connect",
-            "wss://[::1]:8080",
-            "ws://0.0.0.0:8080",
-            "ws://app.localhost",
+            "wss://[::1]:8080/api/runtime/connect",
+            "ws://0.0.0.0:8080/api/runtime/connect",
+            "ws://app.localhost/api/runtime/connect",
         ] {
-            assert!(normalise_callback(url).is_err(), "{url} must be refused");
+            assert!(validate_callback(url).is_err(), "{url} must be refused");
         }
     }
 
@@ -811,8 +808,8 @@ mod tests {
     fn a_non_websocket_scheme_is_refused() {
         // The runtime's own endpoint parser accepts only ws/wss, so an https
         // URL would fail inside the machine where nobody can see it.
-        assert!(normalise_callback("https://horsie.example.com").is_err());
-        assert!(normalise_callback("horsie.example.com").is_err());
+        assert!(validate_callback("https://horsie.example.com/api/runtime/connect").is_err());
+        assert!(validate_callback("horsie.example.com/api/runtime/connect").is_err());
     }
 
     #[test]
@@ -846,7 +843,7 @@ mod tests {
         StoredVendorSettings::Velos(StoredVelosSettings {
             server_url: "http://velos:8080".to_string(),
             image: "ghcr.io/x/runtime:1".to_string(),
-            callback_url: "ws://horsie.internal:8080".to_string(),
+            callback_url: "ws://horsie.internal:8080/api/runtime/connect".to_string(),
             ..StoredVelosSettings::default()
         })
     }

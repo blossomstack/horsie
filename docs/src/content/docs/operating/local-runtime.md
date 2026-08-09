@@ -47,7 +47,7 @@ horsie connect \
 - `--workspace name=path` — a directory to serve, repeatable. A bare path
   becomes `main=<path>`. At least one is required.
 - `--name` — how this machine appears when picking a runtime. Defaults to
-  `local`, matching the server's own default vendor.
+  `local`, matching the server's own default runtime vendor.
 - `--no-sandbox` — run the runtimes unconfined.
 
 It appears under **Settings → Runtimes** as soon as it dials in. Keep it

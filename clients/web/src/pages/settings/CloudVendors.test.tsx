@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeVendorConfigView } from "../../api/types";
-import { CloudVendors } from "./CloudVendors";
+import { CloudVendors, withConnectPath } from "./CloudVendors";
 
 afterEach(cleanup);
 
@@ -79,7 +79,10 @@ describe("CloudVendors", () => {
           value: expect.objectContaining({
             app: "horsie-runtimes",
             image: "ghcr.io/o/runtime:1",
-            callbackUrl: "wss://horsie.example.com",
+            // Typed as a bare origin, sent complete: the server refuses a
+            // callback url with no path, and completing one is a typing
+            // affordance that belongs here rather than in the API.
+            callbackUrl: "wss://horsie.example.com/api/runtime/connect",
           }),
         },
         credential: "tok",
@@ -134,5 +137,40 @@ describe("CloudVendors", () => {
     const body = saved.mock.calls[0][0].body;
     expect(body.credential).toBeUndefined();
     expect(body.settings.value.region).toBe("lhr");
+  });
+});
+
+describe("withConnectPath", () => {
+  it("completes a bare origin", () => {
+    expect(withConnectPath("wss://horsie.example.com")).toBe(
+      "wss://horsie.example.com/api/runtime/connect",
+    );
+  });
+
+  it("does not double up a trailing slash", () => {
+    // The completion used to live server-side, where a stray keystroke produced
+    // `//api/runtime/connect` — a path axum will not route, so every runtime
+    // dialled a 404 and the vendor looked broken rather than mistyped.
+    expect(withConnectPath("wss://horsie.example.com/")).toBe(
+      "wss://horsie.example.com/api/runtime/connect",
+    );
+  });
+
+  it("leaves an explicit path alone", () => {
+    expect(withConnectPath("wss://horsie.example.com/relay/rt")).toBe(
+      "wss://horsie.example.com/relay/rt",
+    );
+  });
+
+  it("trims what was pasted", () => {
+    expect(withConnectPath("  wss://horsie.example.com  ")).toBe(
+      "wss://horsie.example.com/api/runtime/connect",
+    );
+  });
+
+  it("passes through what it cannot parse", () => {
+    // The server refuses this with a message written for a human. Guessing at
+    // a scheme here would only turn that into a different error.
+    expect(withConnectPath("horsie.example.com")).toBe("horsie.example.com");
   });
 });

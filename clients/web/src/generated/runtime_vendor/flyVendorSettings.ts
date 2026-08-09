@@ -18,10 +18,12 @@ export interface FlyVendorSettings {
    */
   workspaceRoot: string;
   /**
-   * The `ws://`/`wss://` URL a machine reaches this server on. A bare origin
-   * gains the connect path on save. An address that only resolves on the
-   * server's own loopback is refused: a machine could never reach it, and
-   * the failure would otherwise surface as an unexplained session timeout.
+   * The `ws://`/`wss://` URL a machine reaches this server on, including the
+   * connect path — a URL with no path is refused rather than completed, so
+   * what is stored is always what was sent. An address that only resolves on
+   * the server's own loopback is refused too: a machine could never reach
+   * it, and the failure would otherwise surface as an unexplained session
+   * timeout.
    */
   callbackUrl: string;
   /**

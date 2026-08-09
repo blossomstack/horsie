@@ -156,7 +156,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       draft,
       models.map((m) => m.alias),
       activeVendors.map((v) => v.name),
-      settings.defaultVendor,
+      settings.defaultRuntimeVendor,
       environmentNames,
     );
     if (next !== draft) setDraft(next);

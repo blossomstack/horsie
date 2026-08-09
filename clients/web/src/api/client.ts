@@ -436,16 +436,16 @@ export const api = {
     /** The current redacted settings (providers, models, vendors, deployment info). */
     get: (): Promise<SettingsView> => request("/config"),
 
-    /** The vendor new sessions default to; returns the new view. */
-    setDefaultVendor: (vendor: string): Promise<SettingsView> =>
-      request("/config/default-vendor", {
+    /** The runtime vendor new sessions default to; returns the new view. */
+    setDefaultRuntimeVendor: (vendor: string): Promise<SettingsView> =>
+      request("/config/default-runtime-vendor", {
         method: "PUT",
         body: JSON.stringify({ vendor }),
       }),
 
-    /** Forget the default-vendor preference, falling back to the built-in. */
-    clearDefaultVendor: (): Promise<SettingsView> =>
-      request("/config/default-vendor", { method: "DELETE" }),
+    /** Forget the default-runtime-vendor preference, falling back to the built-in. */
+    clearDefaultRuntimeVendor: (): Promise<SettingsView> =>
+      request("/config/default-runtime-vendor", { method: "DELETE" }),
 
     /** Model aliases, one resource at a time. */
     models: {

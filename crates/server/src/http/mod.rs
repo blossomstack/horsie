@@ -185,8 +185,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))
         .route(
-            "/api/config/default-vendor",
-            put(config::put_default_vendor).delete(config::delete_default_vendor),
+            "/api/config/default-runtime-vendor",
+            put(config::put_default_runtime_vendor).delete(config::delete_default_runtime_vendor),
         )
         .route("/api/config/models", get(config::list_models))
         .route(
@@ -689,7 +689,7 @@ mod tests {
         let res = app.clone().oneshot(get("/api/config")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "local");
+        assert_eq!(view.default_runtime_vendor, "local");
         assert!(view.models.is_empty());
         assert_eq!(
             view.vendors.iter().map(|v| &v.name).collect::<Vec<_>>(),
@@ -726,23 +726,23 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 &serde_json::json!({"vendor": "mock"}),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "mock");
+        assert_eq!(view.default_runtime_vendor, "mock");
 
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/default-vendor"))
+            .oneshot(delete_req("/api/config/default-runtime-vendor"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "local");
+        assert_eq!(view.default_runtime_vendor, "local");
 
         // A model referencing a missing provider is a 422.
         let res = app
@@ -2162,7 +2162,7 @@ mod tests {
                 serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
             ),
             (
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 serde_json::json!({"vendor": "mock"}),
             ),
         ] {
@@ -2546,7 +2546,7 @@ mod tests {
         };
         let body = serde_json::json!({
             "name": "fly",
-            "settings": settings("wss://horsie.example.com"),
+            "settings": settings("wss://horsie.example.com/api/runtime/connect"),
             "credential": "fly-token",
         });
 
@@ -2563,7 +2563,7 @@ mod tests {
         };
         assert_eq!(
             fly.callback_url, "wss://horsie.example.com/api/runtime/connect",
-            "a bare origin gains the connect path"
+            "the callback url is stored exactly as it was sent"
         );
 
         // The token is never readable back, however it is asked for.
@@ -2608,7 +2608,7 @@ mod tests {
                 "/api/runtime-vendors/local-only",
                 &serde_json::json!({
                     "name": "local-only",
-                    "settings": settings("ws://localhost:8080"),
+                    "settings": settings("ws://localhost:8080/api/runtime/connect"),
                     "credential": "t",
                 }),
             ))
@@ -2910,7 +2910,7 @@ mod tests {
             // A vendor no agent answers to: still accepted, because the agent
             // may dial in later.
             (
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 serde_json::json!({"vendor": "ghost-vendor"}),
             ),
         ] {

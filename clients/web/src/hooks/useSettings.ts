@@ -88,13 +88,13 @@ export function useDeleteProvider() {
  * old whole-document save expressed "clear" as an omitted field, which the
  * server read as "leave unchanged", so the button silently did nothing.
  */
-export function useSetDefaultVendor() {
+export function useSetDefaultRuntimeVendor() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (vendor: string | null) =>
       vendor === null
-        ? api.config.clearDefaultVendor()
-        : api.config.setDefaultVendor(vendor),
+        ? api.config.clearDefaultRuntimeVendor()
+        : api.config.setDefaultRuntimeVendor(vendor),
     onSuccess: (view: SettingsView) => client.setQueryData(settingsKey, view),
   });
 }

@@ -25,7 +25,7 @@ bun run test:e2e
 
 `global-setup` builds the three Rust binaries + the web assets, brings the four
 processes up on ephemeral ports, seeds the settings DB (a `mock` provider →
-model `mock-sonnet`, `defaultVendor = e2e`), and writes the running URLs to
+model `mock-sonnet`, `defaultRuntimeVendor = e2e`), and writes the running URLs to
 `e2e/.runtime.json`. `global-teardown` kills everything and removes the temp
 root.
 
