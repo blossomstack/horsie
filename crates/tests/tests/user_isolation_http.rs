@@ -29,7 +29,6 @@ use horsie_server::sessions::supervisor::SupervisorConfig;
 use horsie_server::users::{Shared, UserRegistry};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// One account: its id, a bearer token that resolves to it, and a fake vendor
 /// agent it has connected — under the same name as everyone else's.
@@ -170,10 +169,12 @@ async fn fixture() -> Fixture {
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // No wait for the accept loop: the socket is listening from `bind`, so a
+    // connection made before `serve` first polls it waits in the backlog rather
+    // than being refused.
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app(state)).await;
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     Fixture {
         addr,

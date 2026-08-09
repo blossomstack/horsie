@@ -47,6 +47,7 @@ fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
 struct Server {
     addr: SocketAddr,
     supervisor: ActorRef<SessionSupervisorCommand>,
+    vendors: Arc<horsie_server::runtime_vendor::RuntimeVendorRegistry>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -58,6 +59,29 @@ impl Server {
             .ask(|reply| SessionSupervisorCommand::Shutdown { reply })
             .await;
         self.task.abort();
+    }
+
+    /// Poll until this server has published `name` as a vendor, or let go of it.
+    ///
+    /// A dial finishes on the agent's side before the server has finished
+    /// registering it, and a `disconnect` returns before the server has noticed —
+    /// so a session created in the gap resolves the wrong thing, or nothing.
+    /// This is the registration itself, not an estimate of how long one takes.
+    async fn await_vendor(&self, name: &str, connected: bool) {
+        let deadline = Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        loop {
+            let names = self.vendors.connected_names();
+            if names.contains(&name.to_string()) == connected {
+                return;
+            }
+            assert!(
+                start.elapsed() < deadline,
+                "timed out waiting for '{name}' to be {}; published: {names:?}",
+                if connected { "published" } else { "let go" }
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
 
@@ -172,14 +196,16 @@ async fn start_server_on(
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // No wait for the accept loop: the socket is listening from `bind`, so a
+    // connection made before `serve` first polls it waits in the backlog rather
+    // than being refused.
     let task = tokio::spawn(async move {
         let _ = axum::serve(listener, app(state)).await;
     });
-    // Give the accept loop a beat to come up.
-    tokio::time::sleep(Duration::from_millis(50)).await;
     Server {
         addr,
         supervisor,
+        vendors: services.connected_vendors.clone(),
         task,
     }
 }
@@ -501,12 +527,33 @@ async fn collect_sse(
     last_event_id: Option<&str>,
     stop: impl Fn(&[Ev]) -> bool,
 ) -> Vec<Ev> {
+    collect_sse_from(client, url, last_event_id, None, stop).await
+}
+
+/// As [`collect_sse`], but reports when the reader is subscribed.
+///
+/// `subscribed` fires once the response headers are in, which is the point the
+/// server has registered this reader: the handler takes its watch *before* it
+/// returns a response, so headers are proof of subscription rather than a guess
+/// about one. A test that spawns a collector and then causes the events it means
+/// to collect has to wait for this, or it is racing its own subscription — and a
+/// sleep long enough to usually win that race is not the same as winning it.
+async fn collect_sse_from(
+    client: &reqwest::Client,
+    url: &str,
+    last_event_id: Option<&str>,
+    subscribed: Option<tokio::sync::oneshot::Sender<()>>,
+    stop: impl Fn(&[Ev]) -> bool,
+) -> Vec<Ev> {
     use futures_util::StreamExt;
     let mut req = client.get(url).header("accept", "text/event-stream");
     if let Some(cursor) = last_event_id {
         req = req.header("last-event-id", cursor);
     }
     let resp = req.send().await.unwrap();
+    if let Some(tx) = subscribed {
+        let _ = tx.send(());
+    }
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut events: Vec<Ev> = Vec::new();
@@ -676,8 +723,9 @@ async fn create_message_sse_roundtrip() {
 
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             // Two: the create's turn, replayed, and the one sent below.
             stream_lifecycle(evs)
                 .iter()
@@ -687,8 +735,7 @@ async fn create_message_sse_roundtrip() {
         })
         .await
     });
-    // Small beat so the subscription is live before the turn runs.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     assert_eq!(
         send_message(&client, &server.addr, &id, "hi")
             .await
@@ -791,8 +838,9 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     // the agent's, so it rides that agent's log like everything else.
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             // Two: the create's own message, replayed, and the one queued
             // mid-turn below.
             stream_lifecycle(evs)
@@ -803,7 +851,7 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
 
     assert_eq!(
         send_message(&client, &server.addr, &id, "two")
@@ -875,13 +923,14 @@ async fn prep_progressions_stream_during_a_turn() {
     // observed there as the status returning to Idle.
     let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
     let client2 = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
-        collect_sse(&client2, &url, None, |evs| {
+        collect_sse_from(&client2, &url, None, Some(ready), |evs| {
             stream_lifecycle(evs).iter().any(|k| k == "TurnEnded")
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     send_message(&client, &server.addr, &id, "hi").await;
 
     let events = sse.await.unwrap();
@@ -1345,13 +1394,14 @@ async fn last_event_id_replay_is_gap_free() {
     // this transcript's ids.
     let live_url = url.clone();
     let live_client = client.clone();
+    let (ready, subscribed) = tokio::sync::oneshot::channel();
     let live = tokio::spawn(async move {
-        collect_sse(&live_client, &live_url, None, |evs| {
+        collect_sse_from(&live_client, &live_url, None, Some(ready), |evs| {
             evs.iter().filter(|e| e.kind == "TurnCompleted").count() >= 1
         })
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    subscribed.await.expect("the reader subscribes");
     mock.queue_response("three");
     send_message(&client, &server.addr, &id, "three").await;
     let streamed = live.await.unwrap();
@@ -1857,8 +1907,7 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
         .await
         .expect("agent connects");
-    // Let the handshake land before the session resolves the vendor name.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-1", true).await;
 
     let id = create_session_for_vendor(&client, &server.addr, "agent-1", &agent, "hi").await;
     wait_turns(&client, &server.addr, &id, 1).await;
@@ -2047,8 +2096,13 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
 
     // And nothing ran on its own: the queued message is still queued, waiting
     // for the user to come back rather than being answered behind their back.
+    //
+    // A real pause, and the only one left in this file: proving that something
+    // does *not* happen means giving it a window in which to happen. Every other
+    // wait here is for an event, and none of them can stand in for this.
     tokio::time::sleep(Duration::from_millis(200)).await;
     wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
+    wait_turns(&client, &server2.addr, &id, 1).await;
 
     server2.shutdown().await;
 }
@@ -2112,7 +2166,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .connect(&url)
         .await
         .expect("agent connects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", true).await;
 
     let id = create_session_for_vendor(&client, &server.addr, "agent-3", &agent, "first").await;
     wait_turns(&client, &server.addr, &id, 1).await;
@@ -2120,7 +2174,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
     // The vendor goes away between turns. Its runtime is not gone — nobody can
     // say either way — so the turn fails and the session stays usable.
     agent.disconnect();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", false).await;
     mock.queue_response("never reached");
     send_message(&client, &server.addr, &id, "while the vendor is down").await;
     wait_status(&client, &server.addr, &id, "Failed").await;
@@ -2132,7 +2186,7 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
         .connect(&url)
         .await
         .expect("agent reconnects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-3", true).await;
     mock.queue_response("back in business");
     assert_eq!(
         send_message(&client, &server.addr, &id, "and now?")
@@ -2254,7 +2308,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .connect(&format!("ws://{}/api/vendor/connect", server.addr))
         .await
         .expect("agent connects");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    server.await_vendor("agent-2", true).await;
 
     let a = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
     let b = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
