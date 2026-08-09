@@ -199,4 +199,3 @@ fn info() -> horsie_models::settings::ServerInfo {
         version: "test".into(),
     }
 }
-

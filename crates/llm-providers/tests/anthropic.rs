@@ -62,7 +62,7 @@ fn no_tools_request(messages: &[Message]) -> CompletionRequest<'_> {
 // ── text response ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_text_response() {
+async fn a_text_response_becomes_parts_and_events() {
     let mock = MockLlmServer::builder()
         .response("Hello world")
         .build()
@@ -92,7 +92,7 @@ async fn test_text_response() {
 }
 
 #[tokio::test]
-async fn test_text_response_has_no_cache_tokens_when_wire_omits_them() {
+async fn text_response_has_no_cache_tokens_when_wire_omits_them() {
     let mock = MockLlmServer::builder()
         .response("Hello world")
         .build()
@@ -113,7 +113,7 @@ async fn test_text_response_has_no_cache_tokens_when_wire_omits_them() {
 // ── tool call ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_tool_call_response() {
+async fn a_tool_call_response_becomes_a_tool_use_part() {
     let input = serde_json::json!({"q": "rust async"});
     let mock = MockLlmServer::builder()
         .tool_call("search", input.clone())
@@ -154,7 +154,7 @@ async fn test_tool_call_response() {
 // ── streaming text chunks ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_streaming_text_chunks() {
+async fn streamed_text_arrives_as_chunks_and_reassembles() {
     let mock = MockLlmServer::builder()
         .response_stream(["Hello", " ", "world"])
         .build()
@@ -195,7 +195,7 @@ async fn test_streaming_text_chunks() {
 // ── retry on 529 ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_retry_on_overload() {
+async fn an_overload_is_retried_rather_than_surfaced() {
     let mock = MockLlmServer::builder()
         .error(529, "overloaded_error")
         .response("recovered")
@@ -225,7 +225,7 @@ async fn test_retry_on_overload() {
 // ── extended thinking ─────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_thinking_block_and_signature() {
+async fn thinking_block_and_signature() {
     let mock = MockLlmServer::builder()
         .thinking("I should analyse carefully.", "sig-abc-123")
         .build()
@@ -261,7 +261,7 @@ async fn test_thinking_block_and_signature() {
 /// Anthropic-compatible endpoints never validate signatures on replay, and no
 /// client reads them, so retention is opt-in per provider.
 #[tokio::test]
-async fn test_thinking_signature_dropped_by_default() {
+async fn thinking_signature_dropped_by_default() {
     let mock = MockLlmServer::builder()
         .thinking("I should analyse carefully.", "sig-abc-123")
         .build()
@@ -291,7 +291,7 @@ async fn test_thinking_signature_dropped_by_default() {
 // ── with tools in request ─────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_with_tools_in_request() {
+async fn the_toolbox_is_sent_in_the_request() {
     let mock = MockLlmServer::builder().response("done").build().await;
     let p = provider_at(&mock.url());
     let msgs = user_messages("run tool");

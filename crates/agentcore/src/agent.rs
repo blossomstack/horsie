@@ -773,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_simple_text_completion() {
+    async fn a_text_only_turn_completes_and_reports_its_usage() {
         let mut agent = Agent::builder(
             MockProvider::text("Hello, world!"),
             Arc::new(EmptyToolbox),
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_completion_emits_message_complete_events() {
+    async fn completion_emits_message_complete_events() {
         let mut agent = Agent::builder(
             MockProvider::text("done"),
             Arc::new(EmptyToolbox),
@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_input_message_event_emitted() {
+    async fn the_run_emits_the_input_message_it_was_given() {
         let mut agent = Agent::builder(
             MockProvider::text("ok"),
             Arc::new(EmptyToolbox),
@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_complete_event_emitted() {
+    async fn a_run_emits_run_complete_exactly_once() {
         let mut agent = Agent::builder(
             MockProvider::text("ok"),
             Arc::new(EmptyToolbox),
@@ -885,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_call_cycle() {
+    async fn a_tool_call_is_executed_and_its_result_finishes_the_turn() {
         let provider =
             MockProvider::tool_then_text("tc1", "search", json!({"q": "rust"}), "found it");
         let toolbox = MockToolbox::echo("search");
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_complete_usage_sums_cache_tokens_across_iterations() {
+    async fn run_complete_usage_sums_cache_tokens_across_iterations() {
         let provider = MockProvider::new(vec![
             CompletionResponse {
                 parts: vec![ContentPart::ToolCall(ToolCallPart {
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_result_message_id_is_derived_from_tool_call_id() {
+    async fn tool_result_message_id_is_derived_from_tool_call_id() {
         let provider = MockProvider::tool_then_text("tc1", "calc", json!({"x": 1}), "result: 1");
         let toolbox = MockToolbox::echo("calc");
         let mut agent = Agent::builder(provider, toolbox, "test-conversation")
@@ -1113,7 +1113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_tool_returns_handoff_result() {
+    async fn handoff_tool_returns_handoff_result() {
         let provider = MockProvider::new(vec![CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "hc1".to_string(),
@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_fails_when_handoff_tool_missing() {
+    async fn build_fails_when_handoff_tool_missing() {
         let agent = Agent::builder(
             MockProvider::text("x"),
             Arc::new(EmptyToolbox),
@@ -1165,7 +1165,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_schema_validation_retries_then_succeeds() {
+    async fn handoff_schema_validation_retries_then_succeeds() {
         // First call: invalid handoff input (missing required field). Second: valid.
         let toolbox = {
             let spec = ToolSpec {
@@ -1221,7 +1221,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_validation_fails_after_max_retries() {
+    async fn handoff_validation_fails_after_max_retries() {
         let toolbox = {
             let spec = ToolSpec {
                 name: "finish".to_string(),
@@ -1500,7 +1500,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_resume_with_tool_result() {
+    async fn resuming_from_a_tool_result_emits_it_as_the_input() {
         let history = vec![
             Message {
                 created_at_ms: 0,
@@ -1554,7 +1554,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_max_iterations_exceeded() {
+    async fn running_past_max_iterations_is_an_error() {
         let provider = MockProvider::always(CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "t1".into(),
@@ -1590,7 +1590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stuck_detection() {
+    async fn an_agent_going_in_circles_is_stopped_as_stuck() {
         let provider = MockProvider::always(CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "s1".into(),
@@ -1626,7 +1626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancellation() {
+    async fn a_cancelled_run_ends_as_cancelled() {
         let provider = MockProvider::new(vec![CompletionResponse {
             parts: vec![ContentPart::ToolCall(ToolCallPart {
                 id: "c1".into(),
@@ -1836,7 +1836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_agent_forces_tool_choice_any() {
+    async fn handoff_agent_forces_tool_choice_any() {
         // A handoff agent concludes immediately; assert the call used tool_choice=Any.
         let provider = Arc::new(RecordingProvider {
             seen: Mutex::new(None),
@@ -1874,7 +1874,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handoff_agent_errors_on_plain_text_completion() {
+    async fn handoff_agent_errors_on_plain_text_completion() {
         // Provider ignores tool_choice and keeps returning plain text. A handoff
         // agent must not silently complete — it nudges then fails.
         let provider = MockProvider::text("just chatting, no tool");
@@ -1900,7 +1900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_non_handoff_agent_uses_tool_choice_auto() {
+    async fn non_handoff_agent_uses_tool_choice_auto() {
         let provider = Arc::new(RecordingProvider {
             seen: Mutex::new(None),
             response: CompletionResponse {
@@ -1934,7 +1934,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_optional_handoff_tool_uses_tool_choice_auto() {
+    async fn optional_handoff_tool_uses_tool_choice_auto() {
         // An *optional* handoff tool must not force tool_choice=Any, even though
         // one is registered — the model stays free to respond with plain text.
         let provider = Arc::new(RecordingProvider {
@@ -1971,7 +1971,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_optional_handoff_tool_accepts_plain_text_completion() {
+    async fn optional_handoff_tool_accepts_plain_text_completion() {
         // Unlike a forced handoff tool, an optional one never nudges/rejects a
         // text-only turn — it's accepted immediately as `Completed`.
         let provider = MockProvider::text("just chatting, no tool");
@@ -1995,7 +1995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_optional_handoff_tool_still_recognized_when_voluntarily_called() {
+    async fn optional_handoff_tool_still_recognized_when_voluntarily_called() {
         // A voluntary call to the optional handoff tool is still interpreted as a
         // Handoff (not executed as a regular tool), exactly as a forced one would be.
         let provider = MockProvider::new(vec![CompletionResponse {
@@ -2031,7 +2031,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_string_tool_output_is_not_json_escaped() {
+    async fn string_tool_output_is_not_json_escaped() {
         // A tool returning a JSON string should reach the conversation verbatim —
         // no surrounding quotes, no `\n` escapes from a second JSON encoding.
         let provider = MockProvider::tool_then_text("t1", "cat", json!({}), "done");
@@ -2105,7 +2105,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_calls_in_a_turn_run_concurrently() {
+    async fn tool_calls_in_a_turn_run_concurrently() {
         let provider = MockProvider::new(vec![
             CompletionResponse {
                 parts: vec![
@@ -2160,7 +2160,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_max_tokens_truncation_is_an_error_not_a_completion() {
+    async fn max_tokens_truncation_is_an_error_not_a_completion() {
         // stop_reason was computed but never read in production: a response cut
         // off by max_tokens looked exactly like a normal end of turn, so the
         // caller received a silently truncated answer as a success.
