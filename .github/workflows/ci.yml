@@ -52,18 +52,6 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace --all-features
 
-      # The #61 red catalogue: known-broken behaviours that now have real tests.
-      # Failing here is the EXPECTED state, so this job never blocks a merge. Its
-      # only purpose is to surface a red test that has quietly gone *green* — a
-      # finding fixed as a side effect, which should then be closed deliberately
-      # rather than left ignored and rotting. Run locally with:
-      #   cargo test --workspace --all-features --no-fail-fast -- --ignored
-      # `--no-fail-fast` matters: without it cargo stops at the first failing test
-      # binary and the remaining red tests are never reported.
-      - name: Red catalogue (#61)
-        continue-on-error: true
-        run: cargo test --locked --workspace --all-features --no-fail-fast -- --ignored
-
   postgres:
     name: Tests (PostgreSQL)
     runs-on: ubuntu-latest
@@ -136,8 +124,19 @@ jobs:
       - name: Install fluorite CLI
         run: cargo install fluorite_codegen --version =0.7.0
 
+      # `clients/web` regenerates through its own package script, which bun runs.
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      # BOTH generated trees. They are committed, and they are generated from
+      # different schema lists — `clients/web` additionally covers github, mcp,
+      # memory, model_cards, plugins and runtime_vendor — so checking one leaves
+      # the other free to go stale. Nothing else regenerates the web tree: the
+      # web jobs build against whatever is committed.
       - name: Regenerate and typecheck
-        run: make ts-types
+        run: make types
 
       # `git diff` alone misses a generated file that is new and untracked, and
       # before `generate-types` cleaned first it also missed orphans — a file
@@ -145,7 +144,7 @@ jobs:
       # `git status --porcelain` covers modified, deleted and untracked alike.
       - name: Fail on uncommitted drift
         run: |
-          drift="$(git status --porcelain clients/ts/src/generated)"
+          drift="$(git status --porcelain clients/ts/src/generated clients/web/src/generated)"
           if [ -n "$drift" ]; then
             echo "generated types are out of sync with crates/models/fluorite:"
             echo "$drift"

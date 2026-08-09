@@ -20,7 +20,7 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build-cli
-.PHONY: build-cli build-server build test fmt fmt-check clippy deny check ts-types web web-build docs docs-check install-cli uninstall-cli install-server uninstall-server clean help
+.PHONY: build-cli build-server build test fmt fmt-check clippy deny check types ts-types web-types web web-build docs docs-check install-cli uninstall-cli install-server uninstall-server clean help
 
 ## build-cli: build the horsie CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
@@ -54,10 +54,22 @@ deny:
 ## check: the full pre-PR gate (fmt + clippy + tests)
 check: fmt-check clippy test
 
-## ts-types: regenerate TypeScript protocol types from fluorite schemas (needs the
-## `fluorite` CLI on PATH — `cargo install fluorite` — plus node/npm)
+## types: regenerate BOTH generated TypeScript trees from the fluorite schemas
+##
+## There are two, they are generated from different schema lists, and both are
+## committed — so a `.fl` edit that regenerates only one leaves the other stale.
+## This is the command to run after touching crates/models/fluorite.
+types: ts-types web-types
+
+## ts-types: regenerate the clients/ts protocol types (needs the `fluorite` CLI
+## on PATH — `cargo install fluorite_codegen` — plus node/npm)
 ts-types:
 	cd clients/ts && npm install --no-audit --no-fund && npm run generate-types && npm run typecheck
+
+## web-types: regenerate the web UI's protocol types (needs the `fluorite` CLI
+## plus bun). Typechecked by `web-build`, not here.
+web-types:
+	cd clients/web && bun run generate-types
 
 ## web: run the web UI dev server (needs bun + a running `horsie-server`)
 web:
