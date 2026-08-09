@@ -265,6 +265,22 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         // rides the environment and never argv, which argv-readable `ps` is the
         // reason for; copying `spec.env` wholesale is what carries it.
         //
+        // Where this runtime reaches the server, and where it unpacks bundles.
+        // Both are the *vendor's* knowledge — the server cannot know the
+        // address a machine of ours can route to, and it does not know this
+        // image's filesystem. Neither was supplied before, which is why bundles
+        // never worked on this vendor at all.
+        env.push((
+            horsie_models::ENV_SERVER_URL.to_string(),
+            crate::runtime_vendor::server_url::http_base_of(&self.settings.callback_url),
+        ));
+        env.push((
+            horsie_models::ENV_PLUGINS_DIR.to_string(),
+            format!(
+                "{}/.horsie-plugins",
+                self.settings.workspace_root.trim_end_matches('/')
+            ),
+        ));
         // Provision steps travel the same channel the process provider uses, so
         // the runtime binary needs no Fly-specific path. Encoding cannot fail
         // for this type, and a machine with no provision steps is a working
@@ -854,6 +870,26 @@ mod tests {
             .map(|(_, v)| v.clone())
             .expect("provision steps must reach the machine");
         assert!(provision.contains("git_checkout"), "{provision}");
+    }
+
+    /// Bundles never worked on this vendor: nothing ever told a machine what
+    /// address to fetch them from, so the runtime gave up before its first
+    /// request — silently, because fetching is best-effort. The credential
+    /// helper needs the same address, so it is no longer optional.
+    #[test]
+    fn a_machine_learns_where_to_reach_the_server() {
+        let (v, _reg) = vendor(FakeFly::default(), false);
+        let machine = v.spec_for("s1", &spec(), None).unwrap();
+        let env: std::collections::HashMap<_, _> = machine.env.into_iter().collect();
+        assert_eq!(
+            env.get(horsie_models::ENV_SERVER_URL).map(String::as_str),
+            Some("https://horsie.example.com"),
+            "derived from the configured callback_url"
+        );
+        assert!(
+            env.contains_key(horsie_models::ENV_PLUGINS_DIR),
+            "a runtime also needs somewhere to unpack what it fetches"
+        );
     }
 
     /// The vendor no longer mints — the server does, and the token arrives in

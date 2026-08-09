@@ -14,7 +14,7 @@
 //! Fully best-effort: any failure is logged and skipped, so a session never
 //! fails to start because a bundle was unavailable — it just runs without it.
 
-use horsie_models::{ENV_PLUGIN_MANIFEST, ENV_PLUGINS_BASE, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN};
+use horsie_models::{ENV_PLUGIN_MANIFEST, ENV_PLUGINS_DIR, ENV_PLUGINS_TOKEN, ENV_SERVER_URL};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -50,7 +50,7 @@ impl ArtifactRef {
 pub async fn provision_plugins() -> Option<PathBuf> {
     let manifest = std::env::var(ENV_PLUGIN_MANIFEST).ok()?;
     let dir = PathBuf::from(std::env::var(ENV_PLUGINS_DIR).ok()?);
-    let base = std::env::var(ENV_PLUGINS_BASE).ok()?;
+    let base = std::env::var(ENV_SERVER_URL).ok()?;
     let token = std::env::var(ENV_PLUGINS_TOKEN).ok();
     provision_into(&manifest, &base, &dir, token.as_deref()).await
 }

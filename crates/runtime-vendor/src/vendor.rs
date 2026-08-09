@@ -1026,7 +1026,7 @@ impl RuntimeVendorClient {
             return Vec::new();
         };
         let mut env = vec![EnvVar {
-            name: horsie_models::ENV_PLUGINS_BASE.to_string(),
+            name: horsie_models::ENV_SERVER_URL.to_string(),
             value: b.base_url.clone(),
         }];
         if let Some(dir) = self.plugins_path(runtime_id) {
@@ -1163,7 +1163,7 @@ mod tests {
             Some("/state/plugins/rt-2")
         );
         assert_eq!(
-            value(&one, horsie_models::ENV_PLUGINS_BASE).as_deref(),
+            value(&one, horsie_models::ENV_SERVER_URL).as_deref(),
             Some("http://127.0.0.1:3789")
         );
     }

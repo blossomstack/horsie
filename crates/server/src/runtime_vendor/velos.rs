@@ -145,6 +145,22 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         // rides the environment and never argv, which argv-readable `ps` is the
         // reason for; copying `spec.env` wholesale is what carries it.
         //
+        // Where this runtime reaches the server, and where it unpacks bundles.
+        // Both are the *vendor's* knowledge — the server cannot know the
+        // address a container of ours can route to, and it does not know this
+        // image's filesystem. Neither was supplied before, which is why bundles
+        // never worked on this vendor at all.
+        env.insert(
+            horsie_models::ENV_SERVER_URL.to_string(),
+            crate::runtime_vendor::server_url::http_base_of(&self.settings.callback_url),
+        );
+        env.insert(
+            horsie_models::ENV_PLUGINS_DIR.to_string(),
+            format!(
+                "{}/.horsie-plugins",
+                self.settings.workspace_root.trim_end_matches('/')
+            ),
+        );
         // Encoding cannot fail for this type, and a container with no provision
         // steps is a working container — so a failure drops the steps rather
         // than the runtime.
@@ -688,6 +704,28 @@ mod tests {
                 .await
                 .is_err(),
             "an unknown phase must not end the wait"
+        );
+    }
+
+    /// Bundles never worked on this vendor: nothing ever told a container what
+    /// address to fetch them from, so the runtime gave up before its first
+    /// request — silently, because fetching is best-effort. The credential
+    /// helper needs the same address, so it is no longer optional.
+    #[test]
+    fn a_container_learns_where_to_reach_the_server() {
+        let (v, _reg) = vendor(FakeVelos::default());
+        let launch = v.launch_spec("s1", &spec()).unwrap();
+        assert_eq!(
+            launch
+                .env
+                .get(horsie_models::ENV_SERVER_URL)
+                .map(String::as_str),
+            Some("http://horsie:8080"),
+            "derived from the configured callback_url"
+        );
+        assert!(
+            launch.env.contains_key(horsie_models::ENV_PLUGINS_DIR),
+            "a runtime also needs somewhere to unpack what it fetches"
         );
     }
 

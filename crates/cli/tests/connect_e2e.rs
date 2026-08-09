@@ -36,6 +36,19 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
+/// The dial token the *server* mints for a runtime and ships in `RuntimeSpec.env`.
+///
+/// This test stands in for that server, so it has to mint too: the vendor files
+/// whatever token the spec carries and its listener refuses any dial-back it
+/// cannot find in that table. A spec with no token produces a runtime that
+/// comes up, dials, and is turned away — which surfaces as a connect timeout.
+fn dial_env(runtime_id: &str) -> Vec<horsie_models::executor::EnvVar> {
+    vec![horsie_models::executor::EnvVar {
+        name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+        value: format!("dial-token-for-{runtime_id}"),
+    }]
+}
+
 fn locate_runtime_bin() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?; // .../target/<profile>/deps
@@ -199,7 +212,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             runtime_id: "rt-1".to_string(),
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
-                env: vec![],
+                env: dial_env("rt-1"),
                 provision: vec![],
             },
         }),
@@ -254,7 +267,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             runtime_id: "rt-2".to_string(),
             spec: RuntimeSpec {
                 workspaces: vec!["nope".to_string()],
-                env: vec![],
+                env: dial_env("rt-2"),
                 provision: vec![],
             },
         }),
@@ -341,7 +354,7 @@ async fn a_runtime_survives_restarting_the_agent() {
             runtime_id: "rt-1".to_string(),
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
-                env: vec![],
+                env: dial_env("rt-1"),
                 provision: vec![],
             },
         }),
@@ -390,10 +403,13 @@ async fn a_runtime_survives_restarting_the_agent() {
         RuntimeVendorCommand::GetRuntime(horsie_models::runtime_vendor::GetRuntimeRequest {
             runtime_id: "rt-1".to_string(),
             // The same spec the create carried: the agent keeps no copy, so
-            // this is the only description of the runtime it has.
+            // this is the only description of the runtime it has. The token is
+            // re-minted rather than remembered — this agent is a fresh process
+            // whose issued-token table starts empty, so a get that carried no
+            // token could never revive anything.
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
-                env: vec![],
+                env: dial_env("rt-1"),
                 provision: vec![],
             },
         }),
@@ -540,7 +556,7 @@ async fn runtimes_die_with_the_agent() {
             runtime_id: "rt-1".to_string(),
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
-                env: vec![],
+                env: dial_env("rt-1"),
                 provision: vec![],
             },
         }),
