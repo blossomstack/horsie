@@ -6,9 +6,9 @@ sidebar:
   order: 1
 ---
 
-A **session** is one conversation with an agent. Everything in it is saved
-server-side and streamed to the browser, so a session is something you come
-back to rather than something you have open.
+A **session** is one running agent and the append-only record of everything it
+did. It is saved server-side and streamed to the browser, so a session is
+something you come back to rather than something you have open.
 
 ## Create one
 
@@ -19,8 +19,8 @@ comes into being when you send the first message.
 **Model** *(required)* — one of the models added under Settings. With none
 configured the control links you there instead.
 
-**Environment** *(required)* — where the session runs and what it runs
-against. One list with two sections: environments you have saved, and the
+**Environment** *(required)* — which sandbox the session runs in and what it
+runs against. One list with two sections: environments you have saved, and the
 runtimes connected right now. Picking a runtime that builds its own workspace
 reveals a repository checklist in the same popover, if GitHub is connected.
 Picking a saved environment shows its runtime and repositories read-only —
@@ -34,8 +34,9 @@ See [MCP servers](/using/mcp-servers/).
 
 **Memory** — which memory spaces the agent may read and write.
 
-Everything above is fixed for the session's lifetime. The header shows what it
-was launched with.
+Everything above is fixed for the session's lifetime — an agent whose
+capabilities changed halfway through would make the transcript a record of two
+different agents. The header shows what it was launched with.
 
 ## Read the transcript
 

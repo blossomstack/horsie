@@ -79,7 +79,8 @@ in the composer.
 **Agents** (`agents/*.md`) become agent types the session's agent can delegate
 to, and answer to `@`. Each file's frontmatter names it, says when to pick it,
 and may narrow its tools or ask for a model. A declared tool list is written in
-Claude Code's vocabulary and mapped onto horsie's own; names with no equivalent
+the upstream plugin specification's vocabulary and mapped onto horsie's own;
+names with no equivalent
 grant nothing. It can only ever *narrow* — it is intersected with what the
 session already allows, so installing a plugin can never hand an agent a tool
 you withheld.

@@ -23,7 +23,7 @@ key.
 | **Anthropic** | the Anthropic Messages API | Claude models, or any endpoint speaking that wire — set a base URL. |
 | **OpenAI-compatible** | `/v1/chat/completions` | OpenAI, plus anything exposing the same API: Ollama, vLLM, llama.cpp, OpenRouter, DeepSeek. |
 | **OpenAI Responses** | `/responses` | OpenAI's Responses API with a platform key. Unlike chat completions it carries reasoning across turns, so a reasoning model keeps its train of thought through a tool loop. |
-| **ChatGPT plan** | `/responses` on OpenAI's Codex backend | Spending a ChatGPT subscription rather than API credit. Signs in instead of storing a key. |
+| **ChatGPT plan** | `/responses` on OpenAI's subscription backend | Spending a ChatGPT subscription rather than API credit. Signs in instead of storing a key. |
 
 Every provider must carry its own credential. horsie does **not** fall back to
 `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in the server's environment, and does
@@ -68,7 +68,7 @@ Ordinary sessions are unaffected.
 
 ## ChatGPT plan providers
 
-A **ChatGPT plan** provider spends a ChatGPT subscription's Codex allowance
+A **ChatGPT plan** provider spends a ChatGPT subscription's own allowance
 rather than API credit. It has no API key field: you sign in instead.
 
 Add the provider (kind **ChatGPT plan**, no base URL) and save it. Its row
@@ -87,17 +87,16 @@ server.
 
 Three things to know:
 
-- **Usage counts against that plan's Codex limits**, not an API bill. When the
+- **Usage counts against that plan's own limits**, not an API bill. When the
   window is exhausted, turns fail with a rate-limit error until it resets.
-- **Model ids are the ones the plan offers** — the Codex line, not the platform
-  API's. A model the subscription cannot reach fails with the backend's own
+- **Model ids are the ones the plan offers**, which are not the platform API's. A model the subscription cannot reach fails with the backend's own
   error rather than being silently substituted.
-- **A model's max-tokens is ignored.** The Codex backend rejects the parameter,
+- **A model's max-tokens is ignored.** That backend rejects the parameter,
   so horsie does not send it. The field still applies to every other kind.
 
-horsie identifies itself honestly to OpenAI, as `horsie` rather than as Codex,
-and sends no client-attestation header, since only OpenAI's own clients can
-produce a valid one. This is a personal-use path: sign in with your own plan.
+horsie identifies itself honestly to OpenAI, under its own name rather than
+impersonating another client, and sends no client-attestation header, since only
+OpenAI's own clients can produce a valid one. This is a personal-use path: sign in with your own plan.
 
 ## How reasoning differs by kind
 

@@ -7,8 +7,10 @@ sidebar:
 ---
 
 This takes you from an empty machine to an agent doing work on your files.
-Follow it in order — a fresh server has no model and no runtime, and a session
-cannot run a turn without both.
+
+Follow it in order. A harness needs two things it does not bring itself: a
+**model** to think with, and a **sandbox** to act in. A fresh server has
+neither, and a session cannot run a turn until both exist.
 
 You will need Docker, and an API key for a model provider.
 
@@ -51,7 +53,7 @@ Go to **Settings → Models**.
 3. Press **Save changes**. The Models page batches its edits, so nothing is
    stored until you do.
 
-## 4. Give sessions somewhere to run tools
+## 4. Give sessions a sandbox
 
 On the machine holding the code you want the agent to work on — which may be
 this same machine — install the CLI and connect it:
@@ -67,9 +69,9 @@ horsie connect --server http://localhost:3789 --workspace .
 check the code matches, and approve.
 
 `horsie connect` registers the current directory as a workspace and holds a
-connection open to the server. Leave it running — sessions can reach this
-machine only while it is up. It appears under **Settings → Runtimes** within a
-second or two of dialing in.
+connection open to the server. It dials *out*, so there is no port to open.
+Leave it running — sessions can reach this machine only while it is up. It
+appears under **Settings → Runtimes** within a second or two.
 
 :::note
 The agent will read and write files in the directory you passed. Point it at a
@@ -108,3 +110,6 @@ You now have a working server, but it is doing the least it can:
 - **Move off the single container** — see
   [Deploying the server](/operating/deploying/) for PostgreSQL and for running
   it somewhere other than your laptop.
+- **Understand what you just ran** — [the harness](/internals/the-harness/)
+  covers the loop, and why the session, the harness and the sandbox have three
+  different lifetimes.

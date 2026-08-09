@@ -1,0 +1,113 @@
+---
+title: Context & memory
+description: Why a long run degrades, what horsie does about it, and the difference between what an agent is holding and what it has written down.
+kind: explanation
+sidebar:
+  order: 5
+---
+
+Everything the model knows on a given turn, it knows because the harness put it
+in the context window. Deciding what goes in — and what comes out — is most of
+what separates an agent that works for five minutes from one that works for
+five hours.
+
+## Why a long run degrades
+
+A context window is a budget, and it is also a signal-to-noise problem. As a
+window fills, quality falls before it runs out: the answer is somewhere in
+there, but so are forty tool results the agent no longer needs, and the thing
+that matters is competing with all of them for attention. Long runs get worse
+before they get truncated.
+
+The three levers against it are all in use here: keep less, look at less at
+once, and write things down outside the window.
+
+## Keep less: compaction
+
+A session's journal grows forever; the context does not.
+
+The journal is periodically snapshotted and compacted — a snapshot is a
+serialized state, and replay starts from the newest one rather than from the
+first message. That keeps recovery cheap no matter how long a session has run.
+It is also why the state a session serializes is a contract rather than an
+implementation detail: a change to it has to be able to read what older
+snapshots wrote.
+
+For the reader this is invisible except in one place. The full transcript stays
+readable in the UI — history paginates, so opening a long session loads recent
+messages and fetches older ones as you scroll — while what the model is handed
+is the compacted state. The record is complete; the working set is not.
+
+## Look at less: progressive disclosure
+
+Skills are the clearest example of the idea. A bundle's skills do not sit in
+the context taking up room on the chance they are needed. What the model sees is
+their names and one-line descriptions; the body loads when a skill is actually
+picked.
+
+That is what makes it reasonable to install a bundle of forty skills. The cost
+of a skill you never use is one line.
+
+The same shape appears in slash commands, which expand to a template only when
+you send one, and in subagent types, which the model chooses from by
+description.
+
+## Write it down: subagents
+
+A subagent is usually described as parallelism. Its more important job is
+**context isolation**.
+
+When work involves twenty tool calls whose intermediate output the parent will
+never need — reading a wide directory, searching a large repository, grinding
+through a migration — doing it in the parent's context spends the parent's
+budget on rubble. Handing it to a subagent spends the *subagent's* budget
+instead, and what comes back to the parent is the result.
+
+The result arrives as its own entry in the parent's transcript rather than
+smuggled inside a tool result, so reading a transcript keeps telling you which
+agent did what, and a subagent's internal steps never pollute what the parent
+is working from.
+
+## Memory: what survives the session
+
+Two different things get called memory, and horsie keeps them apart.
+
+**Short-term memory** is the transcript: what has been said and done in this
+session. It is durable, it is compacted, and it dies with the session.
+
+**Long-term memory** is a **memory space**: notes the agent writes and reads
+across sessions — project conventions, things learned, decisions taken. A
+session selects which spaces it may read and write, the same way it selects
+skills and MCP servers.
+
+The trade-off worth knowing: memory is not progressively disclosed. A selected
+space is in the context, not fetched on demand. Keep memory small and factual,
+and put anything long or procedural in a skill, where it costs a line until it
+is needed.
+
+Memory spaces are mutable and unversioned. An agent that writes a wrong fact has
+written a wrong fact; there is no history to roll back to.
+
+## Reasoning across a turn
+
+Whether a model's own thinking carries from one turn to the next is a property
+of the provider, not a choice horsie makes.
+
+On the chat-completions wire, reasoning traces are displayed but never sent
+back, because some backends reject them. On the Responses wire the model's
+reasoning is replayed in encrypted form, which is what lets a reasoning model
+keep one thread of thought across a long tool loop.
+
+If a run involves many tool calls and the model is a reasoning model, that
+difference is worth more than it sounds. See
+[Models & providers](/operating/models-and-providers/).
+
+## What horsie does not do
+
+There is no automatic mid-run summarisation of the conversation you can tune,
+no tool-output clearing policy, and no retrieval layer that decides which files
+belong in context. Context is assembled from the session, the selected memory
+spaces, and what the agent chose to read.
+
+The lever you have is the outer harness: fewer tools per session, skills instead
+of instructions, subagents for anything wide, and memory kept short.

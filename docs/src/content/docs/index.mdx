@@ -1,10 +1,10 @@
 ---
-title: horsie server
-description: Self-hosted LLM agent sessions in your browser — durable, inspectable, and running tools on hardware you chose.
+title: horsie
+description: An open-source managed agent harness — durable sessions, sandboxed execution and scheduled runs, on infrastructure you own.
 kind: explanation
 template: splash
 hero:
-  tagline: Run LLM agents as durable chat sessions in your browser, with tools executing on a machine you chose.
+  tagline: An open-source managed agent harness. Durable sessions, a sandbox per session, and unattended runs — on infrastructure you own, with models you already pay for.
   actions:
     - text: Quickstart
       link: /start-here/quickstart/
@@ -20,22 +20,38 @@ hero:
 
 import { Card, CardGrid } from '@astrojs/starlight/components';
 
+An agent is a model plus a harness — the loop that assembles context, calls the
+model, decides whether a tool call is allowed, runs it, and writes down what
+happened. horsie is the harness. You bring the model.
+
 <CardGrid>
-  <Card title="Start a session" icon="rocket">
-    Install the server, add a model, give it somewhere to run tools, and chat.
+  <Card title="Run one" icon="rocket">
+    Start the server, add a model, give it a sandbox, and hold a session.
     [Quickstart](/start-here/quickstart/)
   </Card>
-  <Card title="Choose where tools run" icon="setting">
-    On your own machine over a dialed-out connection, or on containers the
-    server creates for each session.
-    [Runtimes](/operating/local-runtime/)
+  <Card title="Sessions that survive" icon="approve-check">
+    An append-only record of every model call, tool call and result. Close the
+    tab, restart the server, walk back in.
+    [Sessions & durability](/internals/sessions-and-durability/)
   </Card>
-  <Card title="Run work unattended" icon="seti:clock">
-    Save an agent and a prompt as a routine, or chain agents into a workflow
-    graph. [Routines](/using/routines/) · [Workflows](/using/workflows/)
+  <Card title="A sandbox per session" icon="puzzle">
+    Your own machine over a connection it dials out, or a container the server
+    builds and throws away.
+    [Runtimes & vendors](/internals/runtimes-and-vendors/)
   </Card>
-  <Card title="Understand the design" icon="open-book">
-    Why sessions survive a restart, and why runtimes dial out instead of being
-    dialed into. [How it works](/internals/sessions-and-durability/)
+  <Card title="Work without you" icon="seti:clock">
+    Scheduled and API-triggered runs that report back a session you can read
+    and continue — not a log file.
+    [Routines](/using/routines/)
+  </Card>
+  <Card title="Your own outer harness" icon="setting">
+    Skills, hooks, MCP servers, agent presets and environments, selected per
+    session.
+    [The harness](/internals/the-harness/)
+  </Card>
+  <Card title="Read the loop" icon="open-book">
+    The interesting part of an agent is not the model. All of it is source you
+    can read and change.
+    [What horsie is](/start-here/what-horsie-is/)
   </Card>
 </CardGrid>
