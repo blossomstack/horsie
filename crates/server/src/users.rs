@@ -178,13 +178,11 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
     let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
         crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
-        user.as_str().to_string(),
         opened.vendors.clone(),
         // The registry's own table, so the two publishers of one map can see
         // each other's names rather than silently overwriting them.
         connected_vendors.links(),
         connected_runtimes.clone(),
-        opened.dial_secret.clone(),
     ));
     // Before anything can select a vendor: a session started early would
     // otherwise be told its configured vendor does not exist.
@@ -194,6 +192,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             vendors: opened.vendors.clone(),
             github_tokens: Some(github.clone()),
             plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
+            dial_secret: opened.dial_secret.clone(),
+            account: user.as_str().to_string(),
         },
     ));
     let deps = ServerDeps {

@@ -71,7 +71,7 @@ fn checkout_step(url: &str, dir: &str) -> ProvisionStep {
 
 struct Assembly {
     provider: ProcessRuntimeProvider,
-    dial_secret: Arc<Vec<u8>>,
+    issued: Arc<horsie_runtime_vendor::IssuedTokens>,
     _cancel_guard: tokio_util::sync::DropGuard,
 }
 
@@ -82,13 +82,8 @@ async fn assembly(sock_dir: &Path) -> Assembly {
         .await
         .unwrap();
     let cancel = CancellationToken::new();
-    let dial_secret = horsie_runtime_vendor::new_dial_secret();
-    serve_runtime_connections(
-        listener,
-        connected.clone(),
-        dial_secret.clone(),
-        cancel.clone(),
-    );
+    let issued = horsie_runtime_vendor::IssuedTokens::new();
+    serve_runtime_connections(listener, connected.clone(), issued.clone(), cancel.clone());
     let provider = ProcessRuntimeProvider::new(
         PathBuf::from(env!("CARGO_BIN_EXE_horsie-runtime")),
         RuntimeEndpoint::Unix(sock),
@@ -96,26 +91,26 @@ async fn assembly(sock_dir: &Path) -> Assembly {
     );
     Assembly {
         provider,
-        dial_secret,
+        issued,
         _cancel_guard: cancel.drop_guard(),
     }
 }
 
-/// The bearer a runtime presents on its dial-back.
+/// The bearer a runtime presents on its dial-back, filed the way a vendor
+/// files the one the server minted.
 ///
 /// These tests drive a provider directly rather than through a vendor, so they
-/// mint what a vendor would have injected. Without it the listener refuses the
-/// dial — which is the point of the token, and would otherwise look like a hang.
-fn dial_env(secret: &[u8], runtime_id: &str) -> Vec<horsie_models::executor::EnvVar> {
+/// do both halves themselves. Without it the listener refuses the dial — which
+/// is the point of the token, and would otherwise look like a hang.
+fn dial_env(
+    issued: &horsie_runtime_vendor::IssuedTokens,
+    runtime_id: &str,
+) -> Vec<horsie_models::executor::EnvVar> {
+    let token = format!("dial-token-for-{runtime_id}");
+    issued.issue(&token, runtime_id);
     vec![horsie_models::executor::EnvVar {
         name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
-        value: horsie_support::dial_token::mint(
-            secret,
-            &horsie_support::dial_token::DialClaims {
-                user_id: "test".to_string(),
-                runtime_id: runtime_id.to_string(),
-            },
-        ),
+        value: token,
     }]
 }
 
@@ -145,7 +140,7 @@ async fn provision_steps_clone_before_ready() {
         .create(
             "rt-prov-1",
             &RuntimeConfig {
-                env: dial_env(&a.dial_secret, "rt-prov-1"),
+                env: dial_env(&a.issued, "rt-prov-1"),
                 ..config(ws.path(), vec![checkout_step(&url, "repo")])
             },
         )
@@ -167,7 +162,7 @@ async fn provision_failure_reports_git_error() {
         .create(
             "rt-prov-2",
             &RuntimeConfig {
-                env: dial_env(&a.dial_secret, "rt-prov-2"),
+                env: dial_env(&a.issued, "rt-prov-2"),
                 ..config(
                     ws.path(),
                     vec![checkout_step("file:///nonexistent-xyz", "repo")],

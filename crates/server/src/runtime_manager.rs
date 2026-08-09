@@ -51,6 +51,17 @@ pub struct RuntimeDeps {
     pub vendors: RuntimeVendorMap,
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,
     pub plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+    /// Signs the dial token every runtime presents when it dials back.
+    ///
+    /// Here rather than in each vendor because the server is now the only
+    /// minter. A vendor that signed with a secret of its own — which
+    /// `horsie connect` did — produced a token only *it* could verify, so the
+    /// server could not accept that runtime's dial-back and could not
+    /// authenticate anything else the runtime later asked for.
+    pub dial_secret: Arc<Vec<u8>>,
+    /// The account whose runtimes these are. Travels in the dial token so the
+    /// route that accepts the dial knows which secret to check it against.
+    pub account: String,
 }
 
 /// How many progress reports may queue before the oldest are dropped.
@@ -95,8 +106,9 @@ impl RuntimeManager {
 
     /// Assemble the vendor-facing spec.
     ///
-    /// Re-assembled on every create rather than cached: the GitHub token and
-    /// the plugin token are short-lived, and a stale one is worse than none.
+    /// Re-assembled on every create rather than cached. Nothing in here is
+    /// worth holding on to: the dial token is cheap to derive, and everything
+    /// else the runtime needs it now fetches for itself.
     async fn runtime_spec(
         &self,
         session: &str,
@@ -139,6 +151,22 @@ impl RuntimeManager {
                 })
                 .collect(),
         };
+
+        // The runtime's own identity, and after this the only credential it
+        // carries. Everything that expires is fetched against it rather than
+        // baked in beside it — which matters because a vendor whose substrate
+        // cannot rewrite a running machine's environment freezes whatever was
+        // here at create time, forever.
+        rt_spec.env.push(horsie_models::executor::EnvVar {
+            name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+            value: horsie_support::dial_token::mint(
+                &self.deps.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: self.deps.account.clone(),
+                    runtime_id: session.to_string(),
+                },
+            ),
+        });
 
         // A fresh, scoped token authorizing this session's `git_checkout`
         // provision steps. Never persisted.
@@ -412,6 +440,8 @@ pub(crate) fn test_runtime_manager(
             vendors: vendors.clone(),
             github_tokens: None,
             plugins: None,
+            dial_secret: std::sync::Arc::new(b"test-dial-secret".to_vec()),
+            account: "test-account".to_string(),
         },
     ))
 }
@@ -462,7 +492,62 @@ mod tests {
             vendors,
             github_tokens: None,
             plugins: None,
+            dial_secret: Arc::new(DIAL_SECRET.to_vec()),
+            account: "acct-1".to_string(),
         }))
+    }
+
+    const DIAL_SECRET: &[u8] = b"test-dial-secret";
+
+    /// The property every later credential rests on: a runtime's environment
+    /// carries a token the *server* can verify. Before this, `horsie connect`
+    /// signed with a per-process secret the server had never seen, so a dial
+    /// token proved nothing to anyone but the vendor that minted it.
+    #[tokio::test]
+    async fn the_spec_carries_a_dial_token_the_account_secret_verifies() {
+        // No vendor: assembling a spec never consults one.
+        let manager = manager(Arc::new(RwLock::new(HashMap::new())));
+        let spec = manager
+            .runtime_spec("sess-1", &session_spec("v"))
+            .await
+            .unwrap();
+        let token = spec
+            .env
+            .iter()
+            .find(|e| e.name == horsie_models::ENV_CONNECT_TOKEN)
+            .expect("the spec must carry a dial token");
+        let claims = horsie_support::dial_token::verify(DIAL_SECRET, &token.value).unwrap();
+        assert_eq!(claims.runtime_id, "sess-1");
+        assert_eq!(claims.user_id, "acct-1");
+    }
+
+    /// Two sessions must not be able to wear each other's identity.
+    #[tokio::test]
+    async fn each_session_gets_a_token_that_only_names_itself() {
+        // No vendor: assembling a spec never consults one.
+        let manager = manager(Arc::new(RwLock::new(HashMap::new())));
+        let one = manager
+            .runtime_spec("sess-1", &session_spec("v"))
+            .await
+            .unwrap();
+        let two = manager
+            .runtime_spec("sess-2", &session_spec("v"))
+            .await
+            .unwrap();
+        let token_of = |s: &RuntimeSpec| {
+            s.env
+                .iter()
+                .find(|e| e.name == horsie_models::ENV_CONNECT_TOKEN)
+                .map(|e| e.value.clone())
+                .unwrap()
+        };
+        assert_ne!(token_of(&one), token_of(&two));
+        assert_eq!(
+            horsie_support::dial_token::verify(DIAL_SECRET, &token_of(&two))
+                .unwrap()
+                .runtime_id,
+            "sess-2"
+        );
     }
 
     fn published(agent: &FakeRuntimeVendor, name: &str) -> RuntimeVendorMap {
@@ -632,6 +717,8 @@ mod tests {
             vendors: published(&agent, "v"),
             github_tokens: None,
             plugins: Some(Arc::new(FakeProvisioner)),
+            dial_secret: Arc::new(DIAL_SECRET.to_vec()),
+            account: "acct-1".to_string(),
         }));
         let mut spec = session_spec("v");
         spec.plugins = vec!["superpowers".to_string()];
@@ -689,6 +776,8 @@ mod tests {
             vendors: published(&agent, "v"),
             github_tokens: Some(minter.clone() as Arc<dyn crate::github::GithubTokenMinter>),
             plugins: None,
+            dial_secret: Arc::new(DIAL_SECRET.to_vec()),
+            account: "acct-1".to_string(),
         }));
         let mut spec = session_spec("v");
         spec.provision

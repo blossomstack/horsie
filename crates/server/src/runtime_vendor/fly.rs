@@ -180,11 +180,6 @@ pub struct FlyRuntimeVendor<A: FlyApi> {
     settings: FlySettings,
     /// Where this account's runtimes land when they dial back.
     connected: Arc<ConnectedRuntimeRegistry>,
-    /// Signs the token each machine presents on its dial-back.
-    dial_secret: Arc<Vec<u8>>,
-    /// The account this vendor serves; travels in the dial token so the
-    /// connect route can resolve the right registry without a database read.
-    account: String,
 }
 
 impl<A: FlyApi> FlyRuntimeVendor<A> {
@@ -193,27 +188,13 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         api: A,
         settings: FlySettings,
         connected: Arc<ConnectedRuntimeRegistry>,
-        dial_secret: Arc<Vec<u8>>,
-        account: String,
     ) -> Self {
         Self {
             name,
             api,
             settings,
             connected,
-            dial_secret,
-            account,
         }
-    }
-
-    fn dial_token(&self, runtime_id: &str) -> String {
-        horsie_support::dial_token::mint(
-            &self.dial_secret,
-            &horsie_support::dial_token::DialClaims {
-                user_id: self.account.clone(),
-                runtime_id: runtime_id.to_string(),
-            },
-        )
     }
 
     fn handle(
@@ -280,12 +261,10 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             .iter()
             .map(|v| (v.name.clone(), v.value.clone()))
             .collect();
-        // The credential rides the environment, never argv: argv is readable by
-        // any process on the host through `ps`.
-        env.push((
-            horsie_models::ENV_CONNECT_TOKEN.to_string(),
-            self.dial_token(runtime_id),
-        ));
+        // The dial token is already in `spec.env`, minted by the server. It
+        // rides the environment and never argv, which argv-readable `ps` is the
+        // reason for; copying `spec.env` wholesale is what carries it.
+        //
         // Provision steps travel the same channel the process provider uses, so
         // the runtime binary needs no Fly-specific path. Encoding cannot fail
         // for this type, and a machine with no provision steps is a working
@@ -662,8 +641,6 @@ mod tests {
                 api,
                 settings(volumes),
                 connected.clone(),
-                Arc::new(b"secret".to_vec()),
-                "acct".to_string(),
             ),
             connected,
         )
@@ -877,6 +854,35 @@ mod tests {
             .map(|(_, v)| v.clone())
             .expect("provision steps must reach the machine");
         assert!(provision.contains("git_checkout"), "{provision}");
+    }
+
+    /// The vendor no longer mints — the server does, and the token arrives in
+    /// `spec.env` like every other secret only the server can produce. What
+    /// this vendor still owes is that it carries it, and carries it in the
+    /// environment rather than argv, which `ps` makes readable to anything on
+    /// the host.
+    #[test]
+    fn the_dial_token_rides_the_environment_and_never_argv() {
+        let (v, _reg) = vendor(FakeFly::default(), false);
+        let spec = RuntimeSpec {
+            env: vec![horsie_models::executor::EnvVar {
+                name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+                value: "acct.s1.deadbeef".to_string(),
+            }],
+            ..spec()
+        };
+        let machine = v.spec_for("s1", &spec, None).unwrap();
+        assert!(
+            machine
+                .env
+                .iter()
+                .any(|(k, val)| k == horsie_models::ENV_CONNECT_TOKEN && val == "acct.s1.deadbeef"),
+            "the machine must carry the server's dial token"
+        );
+        assert!(
+            !machine.command.join(" ").contains("acct.s1.deadbeef"),
+            "argv is readable by any process through ps"
+        );
     }
 
     #[tokio::test]

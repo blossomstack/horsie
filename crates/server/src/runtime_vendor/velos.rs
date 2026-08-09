@@ -98,11 +98,6 @@ pub struct VelosRuntimeVendor<A: ContainerApi> {
     settings: VelosSettings,
     /// Where this account's runtimes land when they dial back.
     connected: Arc<ConnectedRuntimeRegistry>,
-    /// Signs the token each container presents on its dial-back.
-    dial_secret: Arc<Vec<u8>>,
-    /// The account this vendor serves; travels in the dial token so the connect
-    /// route can resolve the right registry without a database read.
-    account: String,
 }
 
 impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
@@ -111,16 +106,12 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         api: Arc<A>,
         settings: VelosSettings,
         connected: Arc<ConnectedRuntimeRegistry>,
-        dial_secret: Arc<Vec<u8>>,
-        account: String,
     ) -> Self {
         Self {
             name,
             api,
             settings,
             connected,
-            dial_secret,
-            account,
         }
     }
 
@@ -150,18 +141,10 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
             .iter()
             .map(|v| (v.name.clone(), v.value.clone()))
             .collect();
-        // The credential rides the environment, never argv: argv is readable by
-        // any process in the container through `ps`.
-        env.insert(
-            horsie_models::ENV_CONNECT_TOKEN.to_string(),
-            horsie_support::dial_token::mint(
-                &self.dial_secret,
-                &horsie_support::dial_token::DialClaims {
-                    user_id: self.account.clone(),
-                    runtime_id: runtime_id.to_string(),
-                },
-            ),
-        );
+        // The dial token is already in `spec.env`, minted by the server. It
+        // rides the environment and never argv, which argv-readable `ps` is the
+        // reason for; copying `spec.env` wholesale is what carries it.
+        //
         // Encoding cannot fail for this type, and a container with no provision
         // steps is a working container — so a failure drops the steps rather
         // than the runtime.
@@ -473,8 +456,6 @@ mod tests {
                     memory_bytes: 1 << 30,
                 },
                 connected.clone(),
-                Arc::new(vec![0_u8; 32]),
-                "u1".to_string(),
             )),
             connected,
         )
@@ -710,14 +691,35 @@ mod tests {
         );
     }
 
+    /// The vendor no longer mints — the server does, and the token arrives in
+    /// `spec.env` like every other secret only the server can produce. What
+    /// this vendor still owes is that it carries it, and carries it in the
+    /// environment rather than argv.
     #[test]
     fn the_dial_token_rides_the_environment_and_never_argv() {
         let (v, _reg) = vendor(FakeVelos::default());
-        let launch = v.launch_spec("s1", &spec()).unwrap();
-        assert!(launch.env.contains_key(horsie_models::ENV_CONNECT_TOKEN));
+        let launch = v
+            .launch_spec(
+                "s1",
+                &RuntimeSpec {
+                    env: vec![horsie_models::executor::EnvVar {
+                        name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+                        value: "acct.s1.deadbeef".to_string(),
+                    }],
+                    ..spec()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            launch
+                .env
+                .get(horsie_models::ENV_CONNECT_TOKEN)
+                .map(String::as_str),
+            Some("acct.s1.deadbeef")
+        );
         let argv = launch.command.join(" ");
         assert!(
-            !argv.contains(&launch.env[horsie_models::ENV_CONNECT_TOKEN]),
+            !argv.contains("acct.s1.deadbeef"),
             "argv is readable by any process through ps"
         );
     }

@@ -3,15 +3,23 @@
 //! A vendor binds a listener its runtimes dial; this drives the handshake and
 //! registers each connection's transport.
 //!
-//! **Every dial is authenticated.** A runtime presents a bearer minted for its
-//! own id (see [`horsie_support::dial_token`]), and the id it then announces
-//! must be the one the token names. Before this, a connection announced an id
-//! and was registered as that runtime's transport with a duplicate check as the
-//! only guard — sound on a private container network, and nowhere else, because
-//! whoever arrived first with a given id received the relayed tool calls.
+//! **Every dial is authenticated.** A runtime presents the bearer this vendor
+//! injected when it spawned it, and the runtime it is registered as is the one
+//! [`IssuedTokens`] says that bearer names — never the one the connection
+//! announces. Before this, a connection announced an id and was registered as
+//! that runtime's transport with a duplicate check as the only guard — sound on
+//! a private container network, and nowhere else, because whoever arrived first
+//! with a given id received the relayed tool calls.
+//!
+//! The token is checked by lookup rather than by signature, because this vendor
+//! no longer mints it: the server does, so that the *server* can verify it too.
+//! See [`IssuedTokens`] for why a lookup is the stronger check of the two.
+//!
+//! [`IssuedTokens`]: crate::IssuedTokens
 
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
+    issued_tokens::IssuedTokens,
     runtime_listener::{AcceptedStream, RuntimeListenerServer},
     socket_transport::SocketRuntimeTransport,
     vendor::note,
@@ -51,7 +59,7 @@ const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub fn serve_runtime_connections(
     listener: RuntimeListenerServer,
     registry: Arc<ConnectedRuntimeRegistry>,
-    dial_secret: Arc<Vec<u8>>,
+    issued: Arc<IssuedTokens>,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -65,7 +73,7 @@ pub fn serve_runtime_connections(
                         tokio::spawn(upgrade_and_serve(
                             stream,
                             registry.clone(),
-                            dial_secret.clone(),
+                            issued.clone(),
                         ));
                     }
                     Ok(AcceptedStream::Unix(stream)) => {
@@ -73,7 +81,7 @@ pub fn serve_runtime_connections(
                         tokio::spawn(upgrade_and_serve(
                             stream,
                             registry.clone(),
-                            dial_secret.clone(),
+                            issued.clone(),
                         ));
                     }
                     Err(e) => {
@@ -127,7 +135,7 @@ fn refusal() -> tokio_tungstenite::tungstenite::handshake::server::ErrorResponse
 async fn upgrade_and_serve<S>(
     stream: S,
     registry: Arc<ConnectedRuntimeRegistry>,
-    dial_secret: Arc<Vec<u8>>,
+    issued: Arc<IssuedTokens>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -144,14 +152,14 @@ async fn upgrade_and_serve<S>(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .unwrap_or_default();
-            match horsie_support::dial_token::verify(&dial_secret, token) {
-                Ok(claims) => {
+            match issued.resolve(token) {
+                Some(runtime_id) => {
                     if let Ok(mut slot) = seen.lock() {
-                        *slot = Some(claims.runtime_id);
+                        *slot = Some(runtime_id);
                     }
                     Ok(res)
                 }
-                Err(_) => Err(refusal()),
+                None => Err(refusal()),
             }
         };
 
@@ -309,20 +317,20 @@ mod tests {
     use std::time::Duration as StdDuration;
     use tokio_tungstenite::connect_async;
 
-    /// The secret every test in this module signs and verifies with.
-    fn secret() -> Arc<Vec<u8>> {
-        Arc::new(b"test-dial-secret".to_vec())
+    /// The bearer this vendor would have handed `runtime_id`. Opaque by
+    /// design — the listener recognises a token by lookup, never by shape, so
+    /// a test token needs no structure at all.
+    fn token_for(runtime_id: &str) -> String {
+        format!("dial-token-for-{runtime_id}")
     }
 
-    /// A bearer for `runtime_id`, signed with [`secret`].
-    fn token_for(runtime_id: &str) -> String {
-        horsie_support::dial_token::mint(
-            &secret(),
-            &horsie_support::dial_token::DialClaims {
-                user_id: "test-vendor".to_string(),
-                runtime_id: runtime_id.to_string(),
-            },
-        )
+    /// A table holding exactly the tokens this vendor issued to `ids`.
+    fn issued_for(ids: &[&str]) -> Arc<IssuedTokens> {
+        let issued = IssuedTokens::new();
+        for id in ids {
+            issued.issue(&token_for(id), id);
+        }
+        issued
     }
 
     /// Dial with a bearer for `token_id` and announce `runtime_id`. Equal in
@@ -402,7 +410,8 @@ mod tests {
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
+        let issued = issued_for(&[]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
 
         // A 4xx the peer can *read*, not merely a dropped socket. The runtime's
         // dial loop only stops retrying on an HTTP 4xx; anything else looks like
@@ -420,6 +429,35 @@ mod tests {
         cancel.cancel();
     }
 
+    /// The gain over the HMAC check this replaced. A signature check accepts
+    /// *any* token the secret signs, including one minted for a runtime this
+    /// vendor never started; a lookup accepts only what this process handed
+    /// out. A well-formed stranger is simply unknown.
+    #[tokio::test]
+    async fn a_token_this_vendor_never_issued_is_refused() {
+        let listener =
+            RuntimeListenerServer::bind(RuntimeEndpoint::Tcp("127.0.0.1:0".parse().unwrap()))
+                .await
+                .unwrap();
+        let addr = listener.tcp_addr().unwrap();
+        let registry = Arc::new(ConnectedRuntimeRegistry::new());
+        let cancel = CancellationToken::new();
+        let issued = issued_for(&["known"]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
+
+        let Err(tokio_tungstenite::tungstenite::Error::Http(res)) =
+            dial_as(addr, "never-issued", "never-issued").await
+        else {
+            panic!("a token this vendor never issued must be refused");
+        };
+        assert_eq!(
+            res.status(),
+            tokio_tungstenite::tungstenite::http::StatusCode::UNAUTHORIZED
+        );
+        assert!(registry.runtime_transport("never-issued").await.is_none());
+        cancel.cancel();
+    }
+
     #[tokio::test]
     async fn a_token_cannot_be_re_pointed_at_another_runtime() {
         // The property the token buys. Before it, whoever announced an id first
@@ -431,7 +469,8 @@ mod tests {
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
+        let issued = issued_for(&["mine"]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
 
         let _held = dial_as(addr, "mine", "someone-elses")
             .await
@@ -453,7 +492,8 @@ mod tests {
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
+        let issued = issued_for(&["dup-id"]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
 
         let (_sink1, _stream1) = announce(addr, "dup-id").await;
         wait_registered(&registry, "dup-id").await;
@@ -488,7 +528,8 @@ mod tests {
             .unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
+        let issued = issued_for(&[]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
 
         drop(tokio::net::UnixStream::connect(&sock).await.unwrap());
         tokio::time::sleep(StdDuration::from_millis(300)).await;
@@ -516,7 +557,8 @@ mod tests {
         let addr = listener.tcp_addr().unwrap();
         let registry = Arc::new(ConnectedRuntimeRegistry::new());
         let cancel = CancellationToken::new();
-        serve_runtime_connections(listener, registry.clone(), secret(), cancel.clone());
+        let issued = issued_for(&["after-bad-peer"]);
+        serve_runtime_connections(listener, registry.clone(), issued, cancel.clone());
 
         // Connects, speaks no WebSocket, hangs up.
         drop(tokio::net::TcpStream::connect(addr).await.unwrap());
@@ -541,7 +583,7 @@ mod tests {
         serve_runtime_connections(
             listener,
             Arc::new(ConnectedRuntimeRegistry::new()),
-            secret(),
+            IssuedTokens::new(),
             cancel.clone(),
         );
         assert!(sock.exists());
