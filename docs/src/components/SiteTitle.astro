@@ -1,0 +1,68 @@
+---
+/**
+ * Replaces Starlight's site title so the header carries both identities: the
+ * wordmark returns to the docs home, and `horsie.dev` leaves for the marketing
+ * site. Two Pages projects, one property — the header is where that is made
+ * true for a reader.
+ *
+ * Deliberately self-contained: it renders no Starlight internals, so a
+ * Starlight upgrade cannot break it.
+ */
+const base = import.meta.env.BASE_URL;
+---
+
+<div class="horsie-site-title">
+  <a href={base} class="wordmark">horsie</a>
+  <span class="divider" aria-hidden="true">/</span>
+  <span class="section">docs</span>
+  <a href="https://horsie.dev" class="home">horsie.dev</a>
+</div>
+
+<style>
+  .horsie-site-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .wordmark {
+    font-weight: 600;
+    font-size: var(--sl-text-lg);
+    letter-spacing: -0.025em;
+    color: var(--sl-color-white);
+    text-decoration: none;
+  }
+
+  .divider,
+  .section {
+    color: var(--sl-color-gray-3);
+    font-size: var(--sl-text-sm);
+  }
+
+  .home {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-xs);
+    letter-spacing: 0.04em;
+    color: var(--sl-color-gray-3);
+    text-decoration: none;
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+    white-space: nowrap;
+  }
+
+  .home:hover {
+    color: var(--sl-color-white);
+    border-color: var(--sl-color-gray-4);
+  }
+
+  /* The header is tight on phones; the wordmark alone carries identity there. */
+  @media (max-width: 50rem) {
+    .divider,
+    .section,
+    .home {
+      display: none;
+    }
+  }
+</style>
