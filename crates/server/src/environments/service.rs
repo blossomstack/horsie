@@ -155,11 +155,21 @@ fn validate(input: &EnvironmentInput) -> Result<String, EnvironmentError> {
                 "env var name must not be empty".to_string(),
             ));
         }
-        // The server injects its own values into the same map — the plugin
-        // capability token, the synthetic HOME, the minted GitHub token. A user
-        // value that shadowed one would break provisioning in a way that reads
-        // as a broken runtime rather than a bad environment.
-        if name.starts_with("HORSIE_") || name == horsie_models::ENV_GITHUB_TOKEN {
+        // The server injects its own values into the same map — the dial
+        // token, the bundle manifest, the synthetic HOME. A user value that
+        // shadowed one would break provisioning in a way that reads as a broken
+        // runtime rather than a bad environment.
+        //
+        // `GIT_CONFIG_*` is reserved for the same reason from the other
+        // direction: the runtime overwrites it at startup to install its
+        // credential helper, so accepting one here would take a value the user
+        // set and silently discard it.
+        //
+        // `GITHUB_TOKEN` is deliberately *not* reserved any more. The server no
+        // longer mints one into the environment — git authenticates through the
+        // credential helper — so the name is the user's to use for their own
+        // tools again.
+        if name.starts_with("HORSIE_") || name.starts_with("GIT_CONFIG_") {
             return Err(EnvironmentError::Invalid(format!(
                 "env var name '{name}' is reserved by the server"
             )));
@@ -323,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn a_reserved_env_var_name_is_rejected() {
         let s = service().await;
-        for reserved in ["HORSIE_PROVISION", "HORSIE_ANYTHING", "GITHUB_TOKEN"] {
+        for reserved in ["HORSIE_PROVISION", "HORSIE_ANYTHING", "GIT_CONFIG_COUNT"] {
             let mut i = input("a", "fly");
             i.env_vars = Some(vec![EnvVar {
                 name: reserved.into(),

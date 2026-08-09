@@ -19,6 +19,7 @@ mod model_cards;
 mod plugins;
 mod routines;
 pub mod runtime_connect;
+mod runtime_credentials;
 mod runtime_vendors;
 mod sse;
 mod vendor_connect;
@@ -344,6 +345,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/runtime/connect",
             get(runtime_connect::runtime_connect),
+        )
+        .route(
+            "/api/runtime/github-credential",
+            get(runtime_credentials::github_credential),
         )
         .merge(credentials(state.auth.mode()))
         // Guards every route above. The SPA shell and its assets, added below,
@@ -1165,6 +1170,107 @@ mod tests {
         let res = app.oneshot(get("/api/memories")).await.unwrap();
         let all: Vec<MemoryView> = read_json(res).await;
         assert!(all.is_empty());
+    }
+
+    /// The credential route is reachable by something holding only a dial
+    /// token, and refuses everything it cannot justify.
+    ///
+    /// The status codes carry the point. `401` would mean `require_auth` ate
+    /// the request before the route ever saw it — which is precisely what
+    /// happened to `/api/runtime/connect` until it was allowlisted, and would
+    /// mean no runtime on an authenticated deployment could ever get a
+    /// credential. `403` means the route ran and said no.
+    #[tokio::test]
+    async fn a_github_credential_is_refused_without_a_verifiable_dial_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let app = app(state.clone());
+
+        let uri = "/api/runtime/github-credential?host=github.com&path=o/r";
+
+        // No bearer at all.
+        let res = app.clone().oneshot(get(uri)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // A well-formed token signed with a secret that is not this account's.
+        let forged = horsie_support::dial_token::mint(
+            b"not-this-accounts-secret",
+            &horsie_support::dial_token::DialClaims {
+                user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
+                runtime_id: "rt-1".to_string(),
+            },
+        );
+        let req = Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {forged}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // This account's real token, but naming a session that does not exist.
+        let token = dial_token_for(&state, "no-such-session").await;
+        let req = Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::FORBIDDEN,
+            "reaching the route is the point; 401 would mean the auth layer \
+             swallowed it before the route could check the token itself"
+        );
+
+        // A host this route does not serve, with an otherwise valid token.
+        let req = Request::builder()
+            .uri("/api/runtime/github-credential?host=gitlab.com&path=o/r")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A session that never asked to clone a repository cannot mint a
+    /// credential for it. The scope is the session's own `git_checkout` steps,
+    /// not the account's whole GitHub installation.
+    #[tokio::test]
+    async fn a_repository_the_session_never_checks_out_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let session = {
+            let services = services(&state).await;
+            let mut spec = crate::sessions::spec::SessionSpec::for_vendor("mock");
+            spec.provision
+                .push(crate::sessions::spec::ProvisionStepSpec {
+                    name: "checkout".into(),
+                    uses: "git_checkout".into(),
+                    with: vec![("url".into(), "https://github.com/o/wanted.git".into())],
+                });
+            services
+                .supervisor
+                .ask(
+                    |reply| crate::sessions::supervisor::SessionSupervisorCommand::Create {
+                        spec,
+                        created_at: 0,
+                        reply,
+                    },
+                )
+                .await
+                .unwrap()
+        };
+        let token = dial_token_for(&state, &session).await;
+        let app = app(state.clone());
+
+        let req = Request::builder()
+            .uri("/api/runtime/github-credential?host=github.com&path=o/other")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

@@ -139,9 +139,8 @@ impl RuntimeManager {
                 })
                 .collect(),
             // The environment's variables first; the server pushes its own
-            // (the minted GitHub token, below) after. A name that would shadow
-            // one cannot reach here — the environment service refuses it at
-            // save.
+            // (the dial token, below) after. A name that would shadow one
+            // cannot reach here — the environment service refuses it at save.
             env: spec
                 .env_vars
                 .iter()
@@ -168,33 +167,11 @@ impl RuntimeManager {
             ),
         });
 
-        // A fresh, scoped token authorizing this session's `git_checkout`
-        // provision steps. Never persisted.
-        if let Some(minter) = &self.deps.github_tokens {
-            let urls: Vec<String> = rt_spec
-                .provision
-                .iter()
-                .filter(|s| s.uses == "git_checkout")
-                .filter_map(|s| {
-                    s.with
-                        .iter()
-                        .find(|p| p.key == "url")
-                        .map(|p| p.value.clone())
-                })
-                .collect();
-            if !urls.is_empty() {
-                let token = minter
-                    .mint_for(&urls)
-                    .await
-                    .map_err(RuntimeError::Provision)?;
-                if let Some(token) = token {
-                    rt_spec.env.push(horsie_models::executor::EnvVar {
-                        name: horsie_models::ENV_GITHUB_TOKEN.to_string(),
-                        value: token,
-                    });
-                }
-            }
-        }
+        // No GitHub token travels here. A `git_checkout` of a private
+        // repository authenticates through the runtime's credential helper,
+        // which mints one per git operation against the dial token above —
+        // scoped to the same repositories this would have covered, but at the
+        // moment of use rather than an hour before it.
 
         // Resolve the session's selected bundles to fetch refs plus a scoped
         // token; the runtime reads both from its environment at startup.
@@ -757,8 +734,16 @@ mod tests {
         }
     }
 
+    /// No GitHub credential is assembled into the spec at all any more.
+    ///
+    /// This used to assert the opposite — that a token was minted fresh on
+    /// every create, because a cached one goes stale. That was the right worry
+    /// and the wrong fix: a token minted at create time is already stale by the
+    /// time a machine has been up an hour, and no vendor can rewrite a running
+    /// machine's environment to replace it. The runtime now mints per git
+    /// operation instead, so nothing here should be reaching for the minter.
     #[tokio::test]
-    async fn create_assembles_env_fresh_each_time() {
+    async fn no_github_credential_is_baked_into_the_spec() {
         let agent = FakeRuntimeVendor::builder("v")
             .serve_in_process()
             .await
@@ -776,34 +761,26 @@ mod tests {
             .push(crate::sessions::spec::ProvisionStepSpec {
                 name: "checkout".into(),
                 uses: "git_checkout".into(),
-                with: vec![("url".into(), "https://example.com/repo.git".into())],
+                with: vec![("url".into(), "https://github.com/o/repo.git".into())],
             });
 
-        m.create("s1", "v", &spec).await.expect("first create");
-        let first_token = agent
-            .last_create_request()
-            .expect("create request")
-            .env
-            .iter()
-            .find(|e| e.name == horsie_models::ENV_GITHUB_TOKEN)
-            .map(|e| e.value.clone())
-            .expect("a minted token must be on the wire");
-
-        m.create("s1", "v", &spec).await.expect("second create");
-        let second_token = agent
-            .last_create_request()
-            .expect("create request")
-            .env
-            .iter()
-            .find(|e| e.name == horsie_models::ENV_GITHUB_TOKEN)
-            .map(|e| e.value.clone())
-            .expect("a minted token must be on the wire");
-
-        assert_ne!(
-            first_token, second_token,
-            "credentials are short-lived and must be re-minted on every create, never cached"
+        m.create("s1", "v", &spec).await.expect("create");
+        let env = agent.last_create_request().expect("create request").env;
+        assert!(
+            !env.iter().any(|e| e.name == "GITHUB_TOKEN"),
+            "a git credential must not ride the environment: it expires there \
+             with nothing able to renew it"
         );
-        assert_eq!(minter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            env.iter()
+                .any(|e| e.name == horsie_models::ENV_CONNECT_TOKEN),
+            "the dial token is what the credential helper authenticates with"
+        );
+        assert_eq!(
+            minter.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "provisioning must not mint a credential nothing will use"
+        );
     }
 
     /// A substrate that has to boot something: `Starting` first, the outcome on

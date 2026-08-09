@@ -218,10 +218,6 @@ pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
 /// owner-only. It is a credential, so it travels the private channel.
 pub const ENV_CONNECT_TOKEN: &str = "HORSIE_CONNECT_TOKEN";
 
-/// Env var carrying a GitHub token used by `git_checkout` provision steps for
-/// github.com URLs.
-pub const ENV_GITHUB_TOKEN: &str = "GITHUB_TOKEN";
-
 /// JSON array of `{name, hash}` plugin-bundle refs the runtime fetches at
 /// startup (written by the server's plugin provisioner into the runtime env).
 ///

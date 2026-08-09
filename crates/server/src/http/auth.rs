@@ -46,6 +46,10 @@ fn is_public(path: &str) -> bool {
         // so leaving it here meant no cloud runtime could register on any
         // deployment that had authentication turned on at all.
         || path == "/api/runtime/connect"
+        // Same reasoning, same credential: the runtime's git credential helper
+        // presents a dial token this layer cannot check, and the route checks
+        // it itself.
+        || path == "/api/runtime/github-credential"
 }
 
 /// The account a delegating front layer has already authenticated.

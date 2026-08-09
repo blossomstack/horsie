@@ -3,8 +3,15 @@
 //! JSON in the `HORSIE_PROVISION` env var (vendor-injected, mirroring the
 //! hackamore env pattern). Fail closed: malformed JSON, an unknown step kind,
 //! or a failed command aborts provisioning with a human-readable error.
+//!
+//! **Nothing here handles credentials.** A `git_checkout` of a private
+//! repository authenticates through the credential helper this binary
+//! configured at startup, the same way every later git command in the workspace
+//! does. It used to pass a server-minted token as a one-shot
+//! `http.extraHeader`, which worked for exactly one clone: the token expired
+//! within the hour and nothing was left in `.git/config`, so a `git push` from
+//! the agent had no credential at all.
 
-use base64::Engine;
 use horsie_models::executor::ProvisionStep;
 
 use crate::workspace::WorkspaceRegistry;
@@ -28,11 +35,10 @@ pub fn steps_from_env(raw: Option<String>) -> Result<Vec<ProvisionStep>, String>
 pub async fn run_steps(
     registry: &WorkspaceRegistry,
     steps: &[ProvisionStep],
-    github_token: Option<&str>,
 ) -> Result<(), String> {
     for step in steps {
         match step.uses.as_str() {
-            "git_checkout" => git_checkout(registry, step, github_token)
+            "git_checkout" => git_checkout(registry, step)
                 .await
                 .map_err(|e| format!("provision step '{}' failed: {e}", step.name))?,
             other => {
@@ -82,24 +88,7 @@ fn validate_dir(dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_github(url: &str) -> bool {
-    url.strip_prefix("https://")
-        .map(|rest| rest.starts_with("github.com/"))
-        .unwrap_or(false)
-}
-
-/// `http.extraHeader` value for a GitHub token. Passed to git via one-shot
-/// `GIT_CONFIG_*` env vars, so the token never reaches argv or `.git/config`.
-fn github_auth_header(token: &str) -> String {
-    let b64 = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
-    format!("AUTHORIZATION: basic {b64}")
-}
-
-async fn git_checkout(
-    registry: &WorkspaceRegistry,
-    step: &ProvisionStep,
-    github_token: Option<&str>,
-) -> Result<(), String> {
+async fn git_checkout(registry: &WorkspaceRegistry, step: &ProvisionStep) -> Result<(), String> {
     let url = param(step, "url").ok_or("git_checkout requires a 'url' param")?;
     let dir = match param(step, "dir") {
         Some(d) if !d.is_empty() => d.to_string(),
@@ -113,11 +102,6 @@ async fn git_checkout(
     }
     let mut cmd = tokio::process::Command::new("git");
     cmd.arg("clone").arg(url).arg(&dir).current_dir(&ws);
-    if let (Some(token), true) = (github_token, is_github(url)) {
-        cmd.env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-            .env("GIT_CONFIG_VALUE_0", github_auth_header(token));
-    }
     run_git(cmd, "clone").await?;
     if let Some(r) = param(step, "ref").filter(|r| !r.is_empty()) {
         let mut co = tokio::process::Command::new("git");
@@ -254,11 +238,11 @@ mod tests {
             &[("url", url.as_str()), ("dir", "repo")],
         )];
 
-        run_steps(&reg, &steps, None).await.unwrap();
+        run_steps(&reg, &steps).await.unwrap();
         assert!(ws.path().join("repo/README.md").is_file());
 
         // Second run: the .git guard skips the clone instead of failing.
-        run_steps(&reg, &steps, None).await.unwrap();
+        run_steps(&reg, &steps).await.unwrap();
     }
 
     #[tokio::test]
@@ -273,7 +257,7 @@ mod tests {
             &[("url", url.as_str()), ("ref", "feature")],
         )];
 
-        run_steps(&reg, &steps, None).await.unwrap();
+        run_steps(&reg, &steps).await.unwrap();
         let dir_name = src
             .path()
             .file_name()
@@ -286,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_step_kind_fails_closed() {
         let ws = tempfile::tempdir().unwrap();
-        let err = run_steps(&registry(ws.path()), &[step("npm_install", &[])], None)
+        let err = run_steps(&registry(ws.path()), &[step("npm_install", &[])])
             .await
             .unwrap_err();
         assert!(err.contains("unknown kind 'npm_install'"), "{err}");
@@ -296,7 +280,7 @@ mod tests {
     async fn git_checkout_requires_url_and_validates_dir() {
         let ws = tempfile::tempdir().unwrap();
         let reg = registry(ws.path());
-        let err = run_steps(&reg, &[step("git_checkout", &[])], None)
+        let err = run_steps(&reg, &[step("git_checkout", &[])])
             .await
             .unwrap_err();
         assert!(err.contains("url"), "{err}");
@@ -308,7 +292,6 @@ mod tests {
                     "git_checkout",
                     &[("url", "https://x/y.git"), ("dir", bad)],
                 )],
-                None,
             )
             .await
             .unwrap_err();
@@ -325,21 +308,10 @@ mod tests {
                 "git_checkout",
                 &[("url", "file:///nonexistent-repo-xyz")],
             )],
-            None,
         )
         .await
         .unwrap_err();
         assert!(err.contains("git clone failed"), "{err}");
-    }
-
-    #[test]
-    fn github_auth_is_scoped_and_never_plain() {
-        assert!(is_github("https://github.com/org/repo"));
-        assert!(!is_github("https://gitlab.com/org/repo"));
-        assert!(!is_github("file:///tmp/x"));
-        let header = github_auth_header("tok-123");
-        assert!(header.starts_with("AUTHORIZATION: basic "));
-        assert!(!header.contains("tok-123"), "raw token must not appear");
     }
 
     #[test]
