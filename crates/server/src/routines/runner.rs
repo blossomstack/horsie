@@ -191,7 +191,6 @@ impl RoutineRunner {
 pub(crate) mod tests {
     use super::*;
     use crate::routines::service::tests::{Fixture, fixture, input};
-    use crate::runtime_vendor::RuntimeVendorLink;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{ServerDeps, SessionSpec};
     use crate::sessions::supervisor::SessionSupervisor;
@@ -218,9 +217,13 @@ pub(crate) mod tests {
             .serve_in_process()
             .await
             .expect("fake vendor");
-        let mut map: HashMap<String, Arc<RuntimeVendorLink>> = HashMap::new();
+        let mut map: HashMap<String, Arc<dyn crate::runtime_vendor::RuntimeVendor>> =
+            HashMap::new();
         if connected {
-            map.insert("mock".into(), vendor.link());
+            map.insert(
+                "mock".into(),
+                vendor.link() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+            );
         }
         let vendors = Arc::new(std::sync::RwLock::new(map));
         let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));

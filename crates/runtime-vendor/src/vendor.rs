@@ -1,9 +1,13 @@
-//! The reusable half of a runtime vendor agent.
+//! The client half of a runtime vendor: the process that dials a server.
 //!
-//! An agent owns runtime lifecycle for one vendor: it dials the server's
-//! `/api/vendor/connect`, announces itself, and thereafter serves
+//! A [`RuntimeVendorClient`] owns runtime lifecycle for one vendor: it dials the
+//! server's `/api/vendor/connect`, announces itself, and thereafter serves
 //! [`RuntimeVendorCommand`]s by driving a [`RuntimeProvider`] and relaying the
 //! runtime protocol, verbatim, to the runtimes that dialed its own listener.
+//!
+//! Named for the direction it faces. The server has a `RuntimeVendor` trait of
+//! its own, and this type is what sits on the far end of one of that trait's
+//! implementations — never an implementation of it.
 //!
 //! Only lifecycle is decoded here. Anything addressed to a runtime is forwarded
 //! untouched in both directions, so a new runtime capability needs no change in
@@ -189,7 +193,7 @@ struct LiveRuntime {
     transport: Arc<dyn RuntimeTransport>,
 }
 
-pub struct RuntimeVendor {
+pub struct RuntimeVendorClient {
     vendor_name: String,
     /// This process's identity, minted once and presented on every dial.
     ///
@@ -221,8 +225,15 @@ pub struct RuntimeVendor {
     /// constant so tests can run the reconnect path on a millisecond scale.
     backoff: Backoff,
     /// Whether a get for a runtime that is not live may rebuild it from its
-    /// persisted spec. See [`RuntimeVendor::with_respawnable_runtimes`].
+    /// persisted spec. See [`RuntimeVendorClient::with_respawnable_runtimes`].
     respawnable: bool,
+    /// Signs the bearer each spawned runtime presents on its dial-back.
+    ///
+    /// Minted per process and never persisted or configured: this vendor is the
+    /// only party that needs to mint or verify, so a random secret held in
+    /// memory is both sufficient and self-rotating — a restart invalidates
+    /// every outstanding token, and the runtimes it spawned died with it.
+    dial_secret: Arc<Vec<u8>>,
     runtimes: Arc<Mutex<HashMap<String, LiveRuntime>>>,
     /// One lock per runtime id, held for the whole of a lifecycle command.
     ///
@@ -255,7 +266,7 @@ fn client_request(
     Ok(request)
 }
 
-impl RuntimeVendor {
+impl RuntimeVendorClient {
     #[must_use]
     pub fn new(
         vendor_name: String,
@@ -278,6 +289,7 @@ impl RuntimeVendor {
             bundles: None,
             backoff: Backoff::default(),
             respawnable: false,
+            dial_secret: crate::runtime_vendor::new_dial_secret(),
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             lifecycle_locks: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -402,7 +414,7 @@ impl RuntimeVendor {
                     failures = failures.saturating_add(1);
                     let delay = backoff.next_delay();
                     note(&format!(
-                        "vendor agent: attempt {failures} failed: {why}; reconnecting in {:.1}s",
+                        "vendor process: attempt {failures} failed: {why}; reconnecting in {:.1}s",
                         delay.as_secs_f64()
                     ));
                     tokio::select! {
@@ -421,7 +433,7 @@ impl RuntimeVendor {
                     backoff.reset();
                     if connections > 1 {
                         note(&format!(
-                            "vendor agent: reconnected to {server_url} as \"{}\"",
+                            "vendor process: reconnected to {server_url} as \"{}\"",
                             agent.vendor_name
                         ));
                     }
@@ -448,7 +460,7 @@ impl RuntimeVendor {
             };
             let delay = backoff.next_delay();
             note(&format!(
-                "vendor agent: {reason}; reconnecting in {:.1}s",
+                "vendor process: {reason}; reconnecting in {:.1}s",
                 delay.as_secs_f64()
             ));
             // Cancellation must not have to wait out a 30s delay to be heard.
@@ -528,7 +540,7 @@ impl RuntimeVendor {
                     Err(e) => return Err(ConnectError::Transient(format!("link failed: {e}"))),
                 };
                 let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                    note("vendor agent: undecodable frame while awaiting registration, ignoring");
+                    note("vendor process: undecodable frame while awaiting registration, ignoring");
                     continue;
                 };
                 match inbound.command {
@@ -542,7 +554,7 @@ impl RuntimeVendor {
                     | RuntimeVendorCommand::DeleteRuntime(_)
                     | RuntimeVendorCommand::QueryRuntimes(_)
                     | RuntimeVendorCommand::Runtime(_) => {
-                        note("vendor agent: command before registration was answered, ignoring");
+                        note("vendor process: command before registration was answered, ignoring");
                     }
                 }
             }
@@ -574,7 +586,7 @@ impl RuntimeVendor {
                     // A failed write means the socket is gone; let the read
                     // half report it rather than racing it to a verdict.
                     if let Err(e) = sink.lock().await.send(Message::Ping(Vec::new().into())).await {
-                        note(&format!("vendor agent: heartbeat failed: {e}"));
+                        note(&format!("vendor process: heartbeat failed: {e}"));
                     }
                 }
                 next = stream.next() => {
@@ -588,7 +600,7 @@ impl RuntimeVendor {
                         Ok(Message::Close(_)) | Err(_) => return LinkEnd::Disconnected,
                     };
                     let Ok(inbound) = serde_json::from_str::<RuntimeVendorInboundMessage>(&text) else {
-                        note("vendor agent: undecodable command, ignoring");
+                        note("vendor process: undecodable command, ignoring");
                         continue;
                     };
                     // Each command runs on its own task: a bash tool call can
@@ -639,14 +651,17 @@ impl RuntimeVendor {
                 let _guard = lock.lock().await;
                 let resolved = if self.transport_for(&cmd.runtime_id).await.is_some() {
                     Ok(())
+                } else if self.respawnable {
+                    // The spec arrived with the request, so nothing had to be
+                    // written down for this to work — and the token in its
+                    // `env` is freshly minted rather than a replay of whatever
+                    // was on disk when the runtime was created.
+                    self.provision(&cmd.runtime_id, &cmd.spec).await
                 } else {
-                    match self.persisted_spec(&cmd.runtime_id) {
-                        Some(spec) => self.provision(&cmd.runtime_id, &spec).await,
-                        None => Err(format!(
-                            "no runtime '{}' on this vendor; it cannot be resumed",
-                            cmd.runtime_id
-                        )),
-                    }
+                    Err(format!(
+                        "no runtime '{}' on this vendor; it cannot be resumed",
+                        cmd.runtime_id
+                    ))
                 };
                 resolved.map(|()| {
                     RuntimeVendorEvent::GetRuntime(GetRuntimeResponse {
@@ -673,9 +688,9 @@ impl RuntimeVendor {
                 let lock = self.lifecycle_lock(&cmd.runtime_id).await;
                 let _guard = lock.lock().await;
                 self.halt(&cmd.runtime_id).await;
-                // The session is gone, so the record of how to rebuild its
-                // runtime goes with it, and so do its bundles — otherwise a
-                // deleted session's state would outlive it on disk forever.
+                // The session is gone, so its bundles and per-runtime state
+                // go with it — otherwise a deleted session's state would
+                // outlive it on disk forever.
                 self.forget_runtime_dirs(&cmd.runtime_id);
                 self.lifecycle_locks.lock().await.remove(&cmd.runtime_id);
                 Ok(RuntimeVendorEvent::DeleteRuntime(DeleteRuntimeResponse {
@@ -707,7 +722,7 @@ impl RuntimeVendor {
             // runs. Arriving here means the server sent one twice; there is
             // nothing to do with it and nothing to reply.
             RuntimeVendorCommand::VendorRegistered(_) | RuntimeVendorCommand::VendorRejected(_) => {
-                note("vendor agent: a registration verdict arrived on an established link");
+                note("vendor process: a registration verdict arrived on an established link");
                 return;
             }
         };
@@ -773,10 +788,14 @@ impl RuntimeVendor {
         // A previous incarnation may still be live (a re-create after a crash).
         self.halt(runtime_id).await;
 
-        // Recorded before the spawn, not after: a runtime that dies during
-        // provisioning is exactly the one a later get should be able to rebuild.
+        // The runtime mirrors its per-agent cwd and env into `agents.json`
+        // here. It cannot make this directory itself: under a sandbox the grant
+        // names the file by path, and creating the parent is a write the
+        // runtime deliberately does not have. Without it the mirror silently
+        // fails and a revived runtime forgets where each agent was working.
         if self.respawnable {
-            self.write_spec_file(runtime_id, request)?;
+            std::fs::create_dir_all(self.state_dir.join(runtime_id))
+                .map_err(|e| format!("create runtime state dir: {e}"))?;
         }
 
         // The vendor owns the sandbox policy: nothing about confinement
@@ -794,6 +813,20 @@ impl RuntimeVendor {
 
         let mut env = request.env.clone();
         env.extend(self.bundle_env(runtime_id));
+        // The runtime proves it is *this* runtime when it dials back. A vendor
+        // process serves one account by construction and verifies with a secret
+        // only it holds, so the account field carries this vendor's own name —
+        // enough to tell one vendor's listener from another's in a log.
+        env.push(EnvVar {
+            name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+            value: horsie_support::dial_token::mint(
+                &self.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: self.vendor_name.clone(),
+                    runtime_id: runtime_id.to_string(),
+                },
+            ),
+        });
 
         let config = RuntimeConfig {
             workspaces,
@@ -826,6 +859,16 @@ impl RuntimeVendor {
         Ok(())
     }
 
+    /// Sign dial-back tokens with this secret.
+    ///
+    /// Must be the same value the runtime listener verifies against; pair them
+    /// from one [`new_dial_secret`](crate::new_dial_secret) call.
+    #[must_use]
+    pub fn with_dial_secret(mut self, secret: Arc<Vec<u8>>) -> Self {
+        self.dial_secret = secret;
+        self
+    }
+
     /// Stop every runtime this agent owns. Used on shutdown.
     async fn halt_all(&self) {
         let live: Vec<(String, Arc<dyn RuntimeHandle>)> = {
@@ -834,7 +877,7 @@ impl RuntimeVendor {
         };
         for (id, handle) in live {
             if let Err(e) = handle.stop().await {
-                note(&format!("vendor agent: stopping runtime '{id}': {e}"));
+                note(&format!("vendor process: stopping runtime '{id}': {e}"));
             }
         }
     }
@@ -904,13 +947,14 @@ impl RuntimeVendor {
         self.plugins_root().map(|root| root.join(runtime_id))
     }
 
-    /// Remove bundle directories belonging to runtimes this agent can no longer
-    /// revive.
+    /// Remove every bundle directory at startup.
     ///
-    /// Called once at startup, where no runtime process is live by definition,
-    /// so anything without a persisted spec is crash debris. A vendor that
-    /// persists no specs at all cannot revive anything, and correctly loses
-    /// every directory here.
+    /// No runtime process is live at startup by definition, so all of it is
+    /// debris. It used to be sifted by which runtimes had a spec on disk; now
+    /// that a get carries its own spec, this agent has no opinion about which
+    /// runtimes still exist — and does not need one. Anything a later revive
+    /// wants is re-materialized from the spec the server sends, at the cost of
+    /// one re-fetch after an agent restart.
     ///
     /// Best-effort throughout: an unreadable root or an undeletable directory
     /// costs disk, and is not worth refusing to start over.
@@ -922,19 +966,12 @@ impl RuntimeVendor {
             return;
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(runtime_id) = name.to_str() else {
-                continue;
-            };
-            if self.spec_path(runtime_id).is_file() {
-                continue;
-            }
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
 
     /// Drop everything on disk belonging to a runtime whose session is gone:
-    /// the record of how to rebuild it, and the bundles it materialized.
+    /// its per-runtime state directory, and the bundles it materialized.
     ///
     /// Deliberately not called from `halt`. Stopping a process is not losing a
     /// session, and a hibernated runtime must find its bundles still there when
@@ -961,7 +998,7 @@ impl RuntimeVendor {
             && let Err(e) = std::fs::create_dir_all(&dir)
         {
             note(&format!(
-                "vendor agent: cannot create bundle dir {}: {e}",
+                "vendor process: cannot create bundle dir {}: {e}",
                 dir.display()
             ));
         }
@@ -994,56 +1031,10 @@ impl RuntimeVendor {
         self.state_dir.join(runtime_id).join("capabilities.json")
     }
 
-    /// Where this agent remembers what a runtime was made of.
-    fn spec_path(&self, runtime_id: &str) -> PathBuf {
-        self.state_dir.join(runtime_id).join("spec.json")
-    }
-
     /// Where the runtime's own process mirrors its per-agent cwd and env. This
     /// agent only supplies the path; it never reads the file.
     fn agents_path(&self, runtime_id: &str) -> PathBuf {
         self.state_dir.join(runtime_id).join("agents.json")
-    }
-
-    /// Remember what this runtime was made of, so a later get can rebuild it
-    /// without the server having to re-send anything.
-    ///
-    /// 0600 because the spec's `env` is where the server puts what it mints,
-    /// including the token a runtime fetches its bundles with — every vendor is
-    /// handed that, and this file sits on the same machine as the workspaces it
-    /// would grant access to.
-    ///
-    /// That token outlives its own validity here: a revive replays whatever was
-    /// written, expiry included. Nothing on the happy path re-fetches, so it is
-    /// unreachable rather than fixed — see blossomstack/horsie#242.
-    fn write_spec_file(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), String> {
-        let path = self.spec_path(runtime_id);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("create runtime state dir: {e}"))?;
-        }
-        let bytes = serde_json::to_vec(spec).map_err(|e| format!("encode runtime spec: {e}"))?;
-        std::fs::write(&path, bytes).map_err(|e| format!("write runtime spec: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
-    }
-
-    /// The spec a previous incarnation of this runtime was built from, if this
-    /// agent is allowed to rebuild it at all.
-    ///
-    /// An unreadable or malformed file reads as absent: the runtime is then
-    /// reported gone, which is the same answer this agent gave before it
-    /// persisted anything, and is safe.
-    fn persisted_spec(&self, runtime_id: &str) -> Option<RuntimeSpec> {
-        if !self.respawnable {
-            return None;
-        }
-        let bytes = std::fs::read(self.spec_path(runtime_id)).ok()?;
-        serde_json::from_slice(&bytes).ok()
     }
 }
 
@@ -1115,8 +1106,8 @@ mod tests {
         }
     }
 
-    fn agent() -> RuntimeVendor {
-        RuntimeVendor::new(
+    fn agent() -> RuntimeVendorClient {
+        RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1183,8 +1174,8 @@ mod tests {
     }
 
     /// Build an agent rooted at `state`, serving bundles out of `state/plugins`.
-    fn agent_with_bundles(state: &Path) -> RuntimeVendor {
-        RuntimeVendor::new(
+    fn agent_with_bundles(state: &Path) -> RuntimeVendorClient {
+        RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1199,26 +1190,21 @@ mod tests {
     }
 
     /// Boot is the one moment when "no runtime process is live" is guaranteed,
-    /// so the only question left is whether the runtime still exists at all —
-    /// and the spec file is the same record that decides whether it could be
-    /// revived.
+    /// so everything under the bundle root is debris. This agent no longer has
+    /// an opinion about which runtimes still exist — the spec that revives one
+    /// arrives with the get — so it keeps nothing.
     #[test]
-    fn boot_sweeps_bundle_dirs_with_no_surviving_spec() {
+    fn boot_sweeps_every_bundle_dir() {
         let state = tempfile::tempdir().expect("tempdir");
         let plugins = state.path().join("plugins");
-        std::fs::create_dir_all(plugins.join("kept/demo")).expect("mkdir");
-        std::fs::create_dir_all(plugins.join("orphan/demo")).expect("mkdir");
-        // `kept` is revivable: it has a persisted spec.
-        std::fs::create_dir_all(state.path().join("kept")).expect("mkdir");
-        std::fs::write(state.path().join("kept/spec.json"), b"{}").expect("write");
+        std::fs::create_dir_all(plugins.join("rt-1/demo")).expect("mkdir");
+        std::fs::create_dir_all(plugins.join("rt-2/demo")).expect("mkdir");
 
         agent_with_bundles(state.path()).sweep_plugin_dirs();
 
-        assert!(
-            plugins.join("kept/demo").is_dir(),
-            "a revivable runtime keeps its bundles"
-        );
-        assert!(!plugins.join("orphan").exists(), "crash debris is removed");
+        assert!(!plugins.join("rt-1").exists());
+        assert!(!plugins.join("rt-2").exists());
+        assert!(plugins.is_dir(), "the root itself survives");
     }
 
     /// Deleting a session takes its bundles; stopping a process must not.
@@ -1247,7 +1233,7 @@ mod tests {
     fn sweeping_without_bundles_is_a_noop() {
         let state = tempfile::tempdir().expect("tempdir");
         std::fs::write(state.path().join("keep-me"), b"x").expect("write");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1266,7 +1252,7 @@ mod tests {
     #[test]
     fn the_written_caps_file_grants_the_runtimes_own_plugins_dir_and_hook_path() {
         let state = tempfile::tempdir().expect("tempdir");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),
@@ -1313,7 +1299,7 @@ mod tests {
     #[test]
     fn the_written_caps_file_is_the_baseline_without_a_host_library() {
         let state = tempfile::tempdir().expect("tempdir");
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "test-vendor".to_string(),
             false,
             Arc::new(|_id: &str, _caps: Option<PathBuf>| Arc::new(NeverProvider)),

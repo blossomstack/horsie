@@ -1,0 +1,752 @@
+//! A runtime vendor backed by velos containers.
+//!
+//! Structurally the twin of [`fly`](crate::runtime_vendor::fly): everything
+//! substrate-shaped is behind [`ContainerApi`], so the ordering and the failure
+//! taxonomy are testable without a network, and a container is named
+//! `horsie-{runtime_id}` so nothing has to be written down to find it again.
+//!
+//! **This vendor cannot hibernate, and says so by doing nothing.** velos has no
+//! suspend — its API is create and delete — and deleting a container is not
+//! suspending it: it destroys the workspace and everything in flight to free a
+//! slot on a worker. So a hibernate here is advice declined, which the vendor
+//! contract explicitly allows and prefers. A Fly vendor stops its machine and
+//! keeps the volume; same trait, different capability, and the difference stays
+//! inside the implementations exactly as intended.
+//!
+//! The consequence is that a container only ever disappears because it died.
+//! So an acquisition that finds none answers `Gone` rather than scheduling a
+//! replacement — a fresh container would come up with an empty workspace, and
+//! handing that to a session that believes its work is still there is the one
+//! thing an acquisition must never do.
+//!
+//! **No orphan sweep.** The velos API this uses has no listing, so the default
+//! no-op [`RuntimeVendor::sweep_orphans`] applies. A leftover container is
+//! reclaimed by name on the next create, which is the same guarantee arriving
+//! later rather than a gap.
+
+use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
+use crate::runtime_vendor::velos_api::{ContainerApi, ContainerLaunchSpec, VelosError};
+use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
+use async_trait::async_trait;
+use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
+use horsie_runtime_vendor::{
+    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeHandleImpl, RuntimeProgress, RuntimeProgressSink,
+};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// How long a runtime has to be scheduled, provision and dial back.
+///
+/// Matches the vendor protocol's request ceiling rather than a typical HTTP
+/// timeout: a create with `git_checkout` steps legitimately runs for minutes.
+const READY_WINDOW: Duration = Duration::from_secs(900);
+
+/// How often the container's phase is checked while waiting for a dial-back.
+///
+/// The point is failing *fast*, not observing state: a container that crashed
+/// on a bad image will never dial back, and without this the acquisition would
+/// burn the whole `READY_WINDOW` before saying so.
+const PHASE_POLL: Duration = Duration::from_millis(750);
+
+/// The velos object name for a runtime. Deterministic — see the module docs.
+#[must_use]
+pub fn container_name(runtime_id: &str) -> String {
+    format!("horsie-{runtime_id}")
+}
+
+impl From<VelosError> for RuntimeVendorError {
+    fn from(e: VelosError) -> Self {
+        match e {
+            // velos answered and refused: a provisioning failure the session
+            // may retry. An unreachable velos is not the session's fault.
+            VelosError::Status { status, body } => {
+                let message = format!("{status}: {body}");
+                if status == 429 || status >= 500 {
+                    Self::Unavailable(message)
+                } else {
+                    Self::Provision(message)
+                }
+            }
+            VelosError::Request(m) => Self::Unavailable(m),
+        }
+    }
+}
+
+/// How this vendor schedules containers.
+pub struct VelosSettings {
+    /// OCI image bundling `horsie-runtime`, built without the sandbox feature —
+    /// the container is already the isolation boundary.
+    pub image: String,
+    /// Path to `horsie-runtime` inside the image.
+    pub runtime_bin: String,
+    /// Where in the container workspaces are allocated.
+    pub workspace_root: String,
+    /// The `ws://` URL a container reaches this server on, *from velos's
+    /// container network*. Not necessarily the address a browser uses.
+    pub callback_url: String,
+    pub cpu: u32,
+    pub memory_bytes: u64,
+}
+
+pub struct VelosRuntimeVendor<A: ContainerApi> {
+    name: String,
+    /// Shared rather than owned because the background wait outlives the call
+    /// that started it, and needs the API to poll the container's phase and to
+    /// delete one that will never connect.
+    api: Arc<A>,
+    settings: VelosSettings,
+    /// Where this account's runtimes land when they dial back.
+    connected: Arc<ConnectedRuntimeRegistry>,
+    /// Signs the token each container presents on its dial-back.
+    dial_secret: Arc<Vec<u8>>,
+    /// The account this vendor serves; travels in the dial token so the connect
+    /// route can resolve the right registry without a database read.
+    account: String,
+}
+
+impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
+    pub fn new(
+        name: String,
+        api: Arc<A>,
+        settings: VelosSettings,
+        connected: Arc<ConnectedRuntimeRegistry>,
+        dial_secret: Arc<Vec<u8>>,
+        account: String,
+    ) -> Self {
+        Self {
+            name,
+            api,
+            settings,
+            connected,
+            dial_secret,
+            account,
+        }
+    }
+
+    fn handle(
+        &self,
+        runtime_id: &str,
+        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+    ) -> Arc<dyn RuntimeHandle> {
+        // The registry reports liveness by presence — a dropped runtime is
+        // simply absent from it — so there is no flag anyone flips, and the
+        // handle says so rather than inventing a channel nobody holds.
+        Arc::new(RuntimeHandleImpl::unwatched(
+            runtime_id.to_string(),
+            transport,
+        ))
+    }
+
+    fn launch_spec(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<ContainerLaunchSpec, RuntimeVendorError> {
+        let workspaces = workspace_paths(&self.settings.workspace_root, &spec.workspaces)
+            .map_err(RuntimeVendorError::Provision)?;
+        let mut env: BTreeMap<String, String> = spec
+            .env
+            .iter()
+            .map(|v| (v.name.clone(), v.value.clone()))
+            .collect();
+        // The credential rides the environment, never argv: argv is readable by
+        // any process in the container through `ps`.
+        env.insert(
+            horsie_models::ENV_CONNECT_TOKEN.to_string(),
+            horsie_support::dial_token::mint(
+                &self.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: self.account.clone(),
+                    runtime_id: runtime_id.to_string(),
+                },
+            ),
+        );
+        // Encoding cannot fail for this type, and a container with no provision
+        // steps is a working container — so a failure drops the steps rather
+        // than the runtime.
+        if !spec.provision.is_empty()
+            && let Ok(json) = serde_json::to_string(&spec.provision)
+        {
+            env.insert(horsie_models::ENV_PROVISION.to_string(), json);
+        }
+        Ok(ContainerLaunchSpec {
+            image: self.settings.image.clone(),
+            command: build_runtime_command(
+                &self.settings.runtime_bin,
+                &self.settings.callback_url,
+                runtime_id,
+                &workspaces,
+            ),
+            env,
+            cpu: self.settings.cpu,
+            memory_bytes: self.settings.memory_bytes,
+        })
+    }
+
+    /// Schedule a container, reclaiming any left under the same name first.
+    ///
+    /// The delete is what makes a create idempotent after a crash: velos
+    /// rejects a duplicate name, and a container from a previous incarnation
+    /// can no longer dial anywhere useful.
+    async fn schedule(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+    ) -> Result<(), RuntimeVendorError> {
+        let name = container_name(runtime_id);
+        let _ = self.api.delete_container(&name).await;
+        self.api
+            .create_container(&name, &self.launch_spec(runtime_id, spec)?)
+            .await?;
+        Ok(())
+    }
+
+    /// Wait for the dial-back, then report `Ready` on the sink.
+    ///
+    /// Spawned only after the calling operation has returned, which is the
+    /// ordering rule the vendor contract requires: the return value is the
+    /// caller's first observation, and nothing may precede it.
+    fn finish_in_background(
+        &self,
+        runtime_id: &str,
+        waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
+        progress: RuntimeProgressSink,
+    ) {
+        let api = self.api.clone();
+        let connected = self.connected.clone();
+        let id = runtime_id.to_string();
+        tokio::spawn(async move {
+            let outcome = await_dial_back(api.as_ref(), &id, waiter).await;
+            let event = match outcome {
+                Ok(()) => match connected.runtime_transport(&id).await {
+                    Some(transport) => RuntimeProgress::Ready(Arc::new(
+                        RuntimeHandleImpl::unwatched(id.clone(), transport),
+                    )),
+                    None => RuntimeProgress::Gone {
+                        reason: "the runtime announced itself and then vanished".to_string(),
+                    },
+                },
+                Err(reason) => {
+                    // The container is not coming back, and leaving it costs a
+                    // slot on a worker for nothing.
+                    let _ = api.delete_container(&container_name(&id)).await;
+                    connected.remove(&id).await;
+                    RuntimeProgress::Gone { reason }
+                }
+            };
+            let _ = progress.try_send(RuntimeEvent {
+                runtime_id: id,
+                progress: event,
+            });
+        });
+    }
+}
+
+/// Race the dial-back against the deadline and against the container dying.
+///
+/// Free rather than a method because the background wait outlives the call that
+/// started it, and only needs the API.
+async fn await_dial_back<A: ContainerApi + ?Sized>(
+    api: &A,
+    runtime_id: &str,
+    waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    {
+        let name = container_name(runtime_id);
+        tokio::pin!(waiter);
+        let deadline = tokio::time::sleep(READY_WINDOW);
+        tokio::pin!(deadline);
+        let mut poll =
+            tokio::time::interval_at(tokio::time::Instant::now() + PHASE_POLL, PHASE_POLL);
+        loop {
+            tokio::select! {
+                res = &mut waiter => {
+                    return match res {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(message)) => Err(message),
+                        Err(_) => Err(
+                            "nothing is waiting for this runtime any more".to_string()
+                        ),
+                    };
+                }
+                () = &mut deadline => {
+                    return Err("the runtime never dialed back".to_string());
+                }
+                _ = poll.tick() => {
+                    // Only a *dead* phase ends the wait. `Unknown` is a worker
+                    // whose lease went briefly stale, and treating it as death
+                    // would destroy a container that was about to connect.
+                    if let Ok(Some(phase)) = api.container_phase(&name).await
+                        && phase.is_dead()
+                    {
+                        return Err(format!(
+                            "the container reached {phase:?} before connecting"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn capabilities(&self) -> RuntimeVendorCapabilities {
+        RuntimeVendorCapabilities {
+            supports_provisioning: true,
+        }
+    }
+
+    async fn create(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+        progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError> {
+        // Registered BEFORE the container is scheduled. A container that boots
+        // and dials back faster than this call returns would otherwise find
+        // nobody waiting, and the acquisition would hang until its window
+        // expired.
+        let waiter = self.connected.notify_when_ready(runtime_id).await;
+        self.schedule(runtime_id, spec).await?;
+        self.finish_in_background(runtime_id, waiter, progress);
+        Ok(RuntimeProgress::Starting {
+            detail: "the container is being scheduled".to_string(),
+        })
+    }
+
+    async fn get(
+        &self,
+        runtime_id: &str,
+        spec: &RuntimeSpec,
+        progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError> {
+        let _ = spec;
+        if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
+            return Ok(RuntimeProgress::Ready(self.handle(runtime_id, transport)));
+        }
+
+        // Not connected is not the same as not there, and conflating them was
+        // expensive: `schedule` deletes before it creates, so a `get` that
+        // rescheduled whenever the runtime was merely not connected yet
+        // destroyed the container its own `create` was still booting — and did
+        // it again on every retry, so a container slower than the retry
+        // interval could never converge.
+        //
+        // Two things say the runtime is on its way. A live phase means the
+        // container exists and is coming up. A pending waiter means a create is
+        // already watching for the dial-back, and this acquisition joins that
+        // wait rather than starting a rival container.
+        let alive = self
+            .api
+            .container_phase(&container_name(runtime_id))
+            .await?
+            .is_some_and(|phase| !phase.is_dead());
+        if alive || self.connected.is_awaited(runtime_id).await {
+            let waiter = self.connected.notify_when_ready(runtime_id).await;
+            self.finish_in_background(runtime_id, waiter, progress);
+            return Ok(RuntimeProgress::Starting {
+                detail: "the container is up; waiting for it to dial back".to_string(),
+            });
+        }
+
+        // No container, and this vendor never takes one away except on delete —
+        // so the runtime died with its worker, and its workspace went with it.
+        // Terminal, and deliberately not a create: rebuilding here would hand
+        // back an empty workspace to a session that believes it still holds
+        // work, which is the one thing an acquisition must never do.
+        Err(RuntimeVendorError::Gone(format!(
+            "no container for runtime '{runtime_id}'"
+        )))
+    }
+
+    async fn hibernate(
+        &self,
+        runtime_id: &str,
+        _progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError> {
+        // Declined, and that is a correct implementation of an advisory
+        // suspend. velos has no suspend: its API is create and delete, and
+        // deleting a container is not hibernating it — it destroys the
+        // workspace and everything in flight to save a slot on a worker.
+        // Keeping the runtime running costs compute; the alternative costs the
+        // user's work.
+        Ok(match self.connected.runtime_transport(runtime_id).await {
+            Some(transport) => RuntimeProgress::Ready(self.handle(runtime_id, transport)),
+            // Never `Stopped`: nothing was stopped. The container was left
+            // exactly as it was, and a later `get` is what discovers whether it
+            // is still coming up or gone.
+            None => RuntimeProgress::Starting {
+                detail: "velos cannot suspend; the container was left as it is".to_string(),
+            },
+        })
+    }
+
+    async fn delete(
+        &self,
+        runtime_id: &str,
+        _progress: RuntimeProgressSink,
+    ) -> Result<RuntimeProgress, RuntimeVendorError> {
+        self.api
+            .delete_container(&container_name(runtime_id))
+            .await?;
+        self.connected.remove(runtime_id).await;
+        Ok(RuntimeProgress::Gone {
+            reason: "the owning session was deleted".to_string(),
+        })
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::runtime_vendor::velos_api::ContainerPhase;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct FakeVelos {
+        calls: Mutex<Vec<String>>,
+        phase: Mutex<Option<ContainerPhase>>,
+        reject_create: bool,
+    }
+
+    impl FakeVelos {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ContainerApi for FakeVelos {
+        async fn create_container(
+            &self,
+            name: &str,
+            spec: &ContainerLaunchSpec,
+        ) -> Result<(), VelosError> {
+            self.calls.lock().unwrap().push(format!("create:{name}"));
+            if self.reject_create {
+                return Err(VelosError::Status {
+                    status: 422,
+                    body: "no such image".to_string(),
+                });
+            }
+            assert!(!spec.command.is_empty());
+            Ok(())
+        }
+        async fn delete_container(&self, name: &str) -> Result<(), VelosError> {
+            self.calls.lock().unwrap().push(format!("delete:{name}"));
+            Ok(())
+        }
+        async fn container_phase(&self, _name: &str) -> Result<Option<ContainerPhase>, VelosError> {
+            Ok(*self.phase.lock().unwrap())
+        }
+    }
+
+    fn vendor(
+        api: FakeVelos,
+    ) -> (
+        Arc<VelosRuntimeVendor<FakeVelos>>,
+        Arc<ConnectedRuntimeRegistry>,
+    ) {
+        let connected = Arc::new(ConnectedRuntimeRegistry::new());
+        (
+            Arc::new(VelosRuntimeVendor::new(
+                "velos".to_string(),
+                Arc::new(api),
+                VelosSettings {
+                    image: "ghcr.io/o/runtime:1".to_string(),
+                    runtime_bin: "horsie-runtime".to_string(),
+                    workspace_root: "/workspaces".to_string(),
+                    callback_url: "ws://horsie:8080/api/runtime/connect".to_string(),
+                    cpu: 1,
+                    memory_bytes: 1 << 30,
+                },
+                connected.clone(),
+                Arc::new(vec![0_u8; 32]),
+                "u1".to_string(),
+            )),
+            connected,
+        )
+    }
+
+    fn spec() -> RuntimeSpec {
+        RuntimeSpec {
+            workspaces: vec!["main".to_string()],
+            env: vec![],
+            provision: vec![],
+        }
+    }
+
+    fn sink() -> (
+        RuntimeProgressSink,
+        tokio::sync::mpsc::Receiver<RuntimeEvent>,
+    ) {
+        tokio::sync::mpsc::channel(8)
+    }
+
+    #[tokio::test]
+    async fn a_create_reclaims_the_name_before_scheduling() {
+        // velos rejects a duplicate name, so without the delete a re-create
+        // after a crash could never succeed.
+        let (v, _reg) = vendor(FakeVelos::default());
+        let (tx, _rx) = sink();
+        let progress = v.create("s1", &spec(), tx).await.unwrap();
+        assert!(matches!(progress, RuntimeProgress::Starting { .. }));
+        assert_eq!(
+            v.api.calls(),
+            vec![
+                "delete:horsie-s1".to_string(),
+                "create:horsie-s1".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_schedule_is_a_provisioning_failure() {
+        let (v, _reg) = vendor(FakeVelos {
+            reject_create: true,
+            ..FakeVelos::default()
+        });
+        let (tx, _rx) = sink();
+        assert!(matches!(
+            v.create("s1", &spec(), tx).await,
+            Err(RuntimeVendorError::Provision(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_get_for_a_connected_runtime_hands_it_straight_back() {
+        let (v, reg) = vendor(FakeVelos::default());
+        let (tx, _rx) = sink();
+        reg.register_transport(
+            "s1".to_string(),
+            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+        )
+        .await;
+        assert!(matches!(
+            v.get("s1", &spec(), tx).await,
+            Ok(RuntimeProgress::Ready(_))
+        ));
+        assert!(
+            v.api.calls().is_empty(),
+            "a live runtime must not be rebuilt"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_with_no_container_is_terminal_rather_than_a_rebuild() {
+        // Nothing takes a container away but a delete, so an absent one died.
+        // Scheduling a replacement would hand the session an empty workspace
+        // and call it the one it had.
+        let (v, _reg) = vendor(FakeVelos::default());
+        let (tx, _rx) = sink();
+        let Err(err) = v.get("s1", &spec(), tx).await else {
+            panic!("a get must never provision")
+        };
+        assert!(matches!(err, RuntimeVendorError::Gone(_)), "{err:?}");
+        assert!(
+            v.api.calls().is_empty(),
+            "a failed acquisition must not have built anything"
+        );
+    }
+
+    /// The failure this vendor could not recover from. `schedule` deletes
+    /// before it creates, so a `get` that rescheduled whenever the runtime was
+    /// merely *not connected yet* destroyed the container its own `create` was
+    /// still booting — and repeated the trick on every retry, so a container
+    /// slower than the retry interval never got to dial back at all.
+    #[tokio::test]
+    async fn a_get_never_destroys_a_container_that_is_still_booting() {
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
+        let (v, _reg) = vendor(api);
+
+        let (tx, _rx) = sink();
+        v.create("s1", &spec(), tx).await.unwrap();
+        let after_create = v.api.calls();
+
+        let (tx, _rx) = sink();
+        let progress = v.get("s1", &spec(), tx).await.unwrap();
+
+        assert!(matches!(progress, RuntimeProgress::Starting { .. }));
+        assert_eq!(
+            v.api.calls(),
+            after_create,
+            "a booting container must be waited for, never rebuilt"
+        );
+    }
+
+    /// The same protection when the substrate has not caught up: velos may not
+    /// report a phase for a container it accepted moments ago, and the create
+    /// already waiting for the dial-back is what says one exists.
+    #[tokio::test]
+    async fn a_get_joins_a_create_that_is_already_waiting() {
+        let (v, reg) = vendor(FakeVelos::default());
+        let (tx, _rx) = sink();
+        v.create("s1", &spec(), tx).await.unwrap();
+        let after_create = v.api.calls();
+        assert!(reg.is_awaited("s1").await);
+
+        let (tx, _rx) = sink();
+        v.get("s1", &spec(), tx).await.unwrap();
+
+        assert_eq!(
+            v.api.calls(),
+            after_create,
+            "an acquisition must join the create's wait, not start a rival container"
+        );
+    }
+
+    /// And both waiters are answered — the create's background task must not
+    /// see the acquisition's waiter as *its own* being cancelled, which is how
+    /// it used to conclude the runtime was unwanted and delete the container.
+    #[tokio::test]
+    async fn a_dial_back_answers_the_create_and_the_acquisition_alike() {
+        let (v, reg) = vendor(FakeVelos::default());
+        let (create_tx, mut create_rx) = sink();
+        v.create("s1", &spec(), create_tx).await.unwrap();
+        let (get_tx, mut get_rx) = sink();
+        v.get("s1", &spec(), get_tx).await.unwrap();
+        // Everything up to here, so the assertion below is about what the
+        // dial-back caused and not about the create's own name reclaim.
+        let scheduled = v.api.calls();
+
+        reg.register_transport(
+            "s1".to_string(),
+            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+        )
+        .await;
+
+        for rx in [&mut create_rx, &mut get_rx] {
+            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("both waiters must be answered")
+                .expect("the sink must stay open");
+            assert!(
+                matches!(event.progress, RuntimeProgress::Ready(_)),
+                "expected Ready, got {:?}",
+                event.progress
+            );
+        }
+        assert_eq!(
+            v.api.calls(),
+            scheduled,
+            "a runtime that dialled back must not be touched again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hibernate_leaves_the_container_alone() {
+        // Deleting a container is not suspending it. velos has no suspend, so
+        // the honest implementation of an advisory one is to decline — the
+        // contract says as much, and the alternative trades the user's work for
+        // a slot on a worker.
+        let (v, reg) = vendor(FakeVelos::default());
+        reg.register_transport(
+            "s1".to_string(),
+            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+        )
+        .await;
+
+        let (tx, _rx) = sink();
+        assert!(matches!(
+            v.hibernate("s1", tx).await,
+            Ok(RuntimeProgress::Ready(_))
+        ));
+
+        assert!(v.api.calls().is_empty(), "nothing may be destroyed here");
+        assert!(
+            reg.runtime_transport("s1").await.is_some(),
+            "a declined hibernate must leave the runtime reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_container_fails_the_acquisition_without_waiting_out_the_window() {
+        // Without the phase poll this would burn the full 15-minute window on a
+        // container that crashed on a bad image seconds after being scheduled.
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Failed);
+        let (v, _reg) = vendor(api);
+        let (tx, mut rx) = sink();
+        v.create("s1", &spec(), tx).await.unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an outcome must arrive well inside the ready window")
+            .expect("the sink must stay open");
+        assert!(matches!(event.progress, RuntimeProgress::Gone { .. }));
+        assert!(
+            v.api.calls().contains(&"delete:horsie-s1".to_string()),
+            "a container that will never connect must not be left running"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_container_in_an_unknown_phase_is_given_more_time() {
+        // `Unknown` is a worker whose lease went briefly stale. Treating it as
+        // death would destroy a container that was about to connect.
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Unknown);
+        let (v, _reg) = vendor(api);
+        let (tx, mut rx) = sink();
+        v.create("s1", &spec(), tx).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .is_err(),
+            "an unknown phase must not end the wait"
+        );
+    }
+
+    #[test]
+    fn the_dial_token_rides_the_environment_and_never_argv() {
+        let (v, _reg) = vendor(FakeVelos::default());
+        let launch = v.launch_spec("s1", &spec()).unwrap();
+        assert!(launch.env.contains_key(horsie_models::ENV_CONNECT_TOKEN));
+        let argv = launch.command.join(" ");
+        assert!(
+            !argv.contains(&launch.env[horsie_models::ENV_CONNECT_TOKEN]),
+            "argv is readable by any process through ps"
+        );
+    }
+
+    #[test]
+    fn provision_steps_ride_the_environment() {
+        let (v, _reg) = vendor(FakeVelos::default());
+        let launch = v
+            .launch_spec(
+                "s1",
+                &RuntimeSpec {
+                    provision: vec![horsie_models::executor::ProvisionStep {
+                        name: "checkout".to_string(),
+                        uses: "git_checkout".to_string(),
+                        with: vec![],
+                    }],
+                    ..spec()
+                },
+            )
+            .unwrap();
+        assert!(
+            launch.env[horsie_models::ENV_PROVISION].contains("git_checkout"),
+            "{:?}",
+            launch.env
+        );
+    }
+
+    #[test]
+    fn a_container_is_named_for_its_runtime_so_nothing_has_to_be_written_down() {
+        assert_eq!(container_name("abc-123"), "horsie-abc-123");
+    }
+}

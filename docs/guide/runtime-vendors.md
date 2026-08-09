@@ -16,19 +16,20 @@ attempt printed. Runtimes already running are kept alive across the gap — only
 stopping the agent stops them — but a turn that was in flight when the link
 dropped has to be sent again.
 
-The project ships two agents:
+Vendors come in two shapes, and the difference is who holds the configuration:
 
-| Agent | Where runtimes run | Who runs it | Repos & skill bundles |
+| Vendor | Where runtimes run | What you run | Repos & skill bundles |
 | --- | --- | --- | --- |
-| **`horsie connect`** | Your own machine | You | ✗ repos/bundles; ✓ skills from a CLI-installed library |
-| **`horsie-velos-runtime`** | velos-scheduled containers | You, once, near the server | ✓ supported |
+| **`horsie connect`** | Your own machine | A process, where the runtimes are | ✗ repos/bundles; ✓ skills from a CLI-installed library |
+| **velos** | velos-scheduled containers | Nothing — configured in Settings | ✓ supported |
+| **Fly** | Fly Machines | Nothing — configured in Settings | ✓ supported |
 
 > **Out of the box there is no vendor.** A session can be created, but it cannot
-> run a turn until an agent connects. Set one up below.
+> run a turn until one is configured or connects. Set one up below.
 
 ## Authorizing an agent
 
-A vendor agent has to prove who it is before the server will publish it — a
+A vendor process has to prove who it is before the server will publish it — a
 name like `local` is owned by whoever claimed it, so nobody else can take it
 over and start receiving your tool calls.
 
@@ -105,45 +106,40 @@ bundles a session selects — the runtime fetches them itself, which needs no
 workspace to have been provisioned — see
 [Skills & plugins](skills-and-plugins.md#skills-on-your-own-machine).
 
-## `horsie-velos-runtime` — managed container runtimes
+## Cloud vendors — managed containers and machines
 
-This agent provisions a fresh, isolated **container** per session on a
-[velos](https://github.com/blossomstack/velos) backend and tears it down when
-the session ends. It supports full provisioning: GitHub checkouts and skill
-bundles into the sandbox.
+Some vendors need no process of your own at all. The server talks to the
+substrate's API directly, so you configure them in **Settings → Runtimes →
+Cloud vendors** and they are usable on the next session, with nothing to deploy
+and nothing to restart.
 
-Run it wherever it can reach both the server and velos:
+Both provision fully: GitHub checkouts and skill bundles into the sandbox.
 
-```bash
-HORSIE_VELOS_TOKEN=... horsie-velos-runtime \
-  --server https://SERVER-HOST \
-  --name velos \
-  --velos-url http://velos.example:8080 \
-  --advertise AGENT-HOST:3790 \
-  --image ghcr.io/you/horsie-runtime:latest
-```
+**velos** schedules a container per session on a
+[velos](https://github.com/blossomstack/velos) backend. Fill in the velos
+server URL, an API token if your velos requires one, and the runtime image.
 
-This agent needs *two* tokens, and they are unrelated: `HORSIE_VELOS_TOKEN`
-authenticates it to **velos**, while `HORSIE_TOKEN` (a machine token) is how it
-authenticates to **horsie**. Prefer both as environment variables over
-`--velos-token`/`--token` so neither appears in argv. The agent verifies it at startup and exits if velos is unreachable or the
-token is rejected, rather than letting the first session discover it.
+**Fly** starts a Fly Machine per session. Fill in the Fly app (it must already
+exist — horsie creates machines, not apps), a Fly API token, and the runtime
+image.
 
-- `--advertise` — `host:port` this agent is reachable at **from velos's
-  container network**. Containers publish no inbound ports, so each container's
-  runtime dials *back* to the agent on this address, and fetches skill bundles
-  over it. It must be routable from velos's workers to wherever the agent runs.
-- `--listen` — where the agent binds that listener (default `0.0.0.0:3790`).
-- Advanced: `--runtime-bin`, `--workspace-root`, `--cpu`, `--memory-mib`,
-  `--connect-timeout-secs`.
+Both need a **callback URL**: the `ws://` or `wss://` address a sandbox reaches
+*your server* on, from wherever it runs. This is the one field with no sensible
+default, and the one worth getting right first — a sandbox that cannot dial back
+never becomes a runtime, and the session just waits. An address that only
+resolves on the server itself (`localhost`, `127.0.0.1`) is refused when you
+save, because inside a container that name means the container.
 
-**Build the runtime image** from `docker/horsie.Dockerfile` (target `runtime`) and push it where
-velos workers can pull it.
+**Build the runtime image** from `docker/horsie.Dockerfile` (target `runtime`)
+and push it where the substrate can pull it.
 
-**Ephemeral by design:** velos has no persistent volumes, so a session's
-workspace is temporary. Stopping a session deletes its container; the next
-message schedules a fresh one. Your session history is safe regardless — the
-durable transcript lives on the server.
+**What an idle session costs** differs, and it is the one place the two are not
+interchangeable. A Fly machine is stopped when its session goes cold and started
+again on the next message; it keeps its volume, so the session finds its
+workspace as it left it. velos has no way to stop a container — only to delete
+one, which would throw the workspace away — so an idle velos session keeps its
+container, and its compute, until the session is deleted. Your history is safe
+either way: the durable transcript lives on the server.
 
 ## Choosing a vendor per session
 
@@ -155,16 +151,23 @@ durable transcript lives on the server.
 
 ## Writing another vendor
 
-A vendor agent is a `RuntimeProvider` (spawn a process, schedule a container,
-call a cloud sandbox API) plus a `WorkspaceResolver` (turn a requested workspace
-*name* into a path the vendor owns). Both sit behind `RuntimeVendor` in the
-`horsie-runtime-vendor` crate, which owns the protocol, the runtime listener, and
-relaying the runtime protocol. `horsie-velos-runtime` is the worked example: it implements
-those two things and nothing else.
+There are two ways in, and which one you want depends on where the runtimes
+have to run.
+
+**In the server** — implement `RuntimeVendor` and `RuntimeHandle` (in the
+`horsie-runtime-vendor` crate) against your substrate's API, and add a variant
+to the settings union so it can be configured. Four methods: create, get,
+hibernate, delete. The velos and Fly vendors are the worked examples, and are
+deliberately structural twins — everything substrate-shaped sits behind one
+trait so the vendor's logic is testable without a network.
+
+**As your own process** — run `horsie connect` against a `RuntimeProvider` of
+your own if the runtimes must live somewhere the server cannot reach: a private
+network, a laptop, a machine holding credentials the server should not have.
 
 ## Upgrading from the old dial-in runtime
 
-Before vendor agents, a runtime dialed the server directly:
+Before vendor processes, a runtime dialed the server directly:
 
 ```bash
 # No longer works — the route is gone.
@@ -175,7 +178,13 @@ Every session shared that one runtime, which is why stopping a session couldn't
 tear anything down. Replace it with `horsie connect` as shown above; the
 `--workspace` flags carry over unchanged and `--runtime-id` becomes `--name`.
 
-If you configured velos in Settings, that form is gone. Move those values onto
-`horsie-velos-runtime` flags: **Server URL** → `--velos-url`, **Runtime image**
-→ `--image`, **Advertise address** → `--advertise`, **Token** →
-`HORSIE_VELOS_TOKEN`, and the advanced fields to their matching flags.
+If you ran `horsie-velos-runtime` as a separate process, it is gone: velos moved
+into the server. Configure it under Settings → Runtimes → **Cloud vendors**
+instead. The flags map across directly — `--velos-url` → **Server URL**,
+`--image` → **Runtime image**, `HORSIE_VELOS_TOKEN` → **API token**, and the
+sizing flags to their matching fields.
+
+The one that does *not* map is `--advertise`. That named the agent's own
+dial-back listener; there is no such listener now, because runtimes dial the
+server. Put your server's own externally-reachable `ws://`/`wss://` address in
+**Callback URL**.

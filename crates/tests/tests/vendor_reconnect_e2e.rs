@@ -1,7 +1,7 @@
-//! A vendor agent survives losing its link to the server.
+//! A vendor process survives losing its link to the server.
 //!
-//! Everything here is real: a real `RuntimeVendor` dialing a real
-//! `RuntimeVendorLink` over a real TCP WebSocket, published through the real
+//! Everything here is real: a real `RuntimeVendorClient` dialing a real
+//! `WebsocketRuntimeVendor` over a real TCP WebSocket, published through the real
 //! `RuntimeVendorRegistry`. The only fixture is the runtime itself, because a
 //! test that spawned `horsie-runtime` children would be measuring process
 //! startup rather than reconnection.
@@ -22,14 +22,15 @@ use horsie_models::runtime_vendor::{
 use horsie_runtime_client::{MockTransport, RuntimeClient};
 use horsie_runtime_vendor::{
     AgentExit, Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
-    RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendor, no_credential,
+    RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendorClient, no_credential,
 };
 use horsie_server::auth::Principal;
+use horsie_server::runtime_vendor::RuntimeVendor as _;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
 use horsie_server::runtime_vendor::{
-    RuntimeVendorLink, RuntimeVendorRegistry, RuntimeVendorTransport,
+    RuntimeVendorRegistry, RuntimeVendorTransport, WebsocketRuntimeVendor,
 };
-use horsie_server::sessions::spec::SharedVendors;
+use horsie_server::sessions::spec::RuntimeVendorMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -84,7 +85,9 @@ async fn serve_vendor_connections(registry: Arc<RuntimeVendorRegistry>) -> Socke
                 let Ok(ws) = tokio_tungstenite::accept_async(socket).await else {
                     return;
                 };
-                if let Ok(link) = RuntimeVendorLink::start(ws, Principal::Anonymous).await {
+                if let Ok(link) =
+                    WebsocketRuntimeVendor::start(ws, Principal::Anonymous, registry.links()).await
+                {
                     // Auth-disabled shape: one anonymous principal owns every
                     // name, so a reconnecting *process* still replaces its own
                     // entry — and, as of the name-collision gates, a second
@@ -155,13 +158,13 @@ fn bash(command: &str) -> ToolCall {
 /// rather than a notification because the agent reconnects on its own schedule
 /// and nothing in the production path announces it to a test.
 async fn await_vendor(
-    vendors: &SharedVendors,
+    links: &horsie_server::runtime_vendor::WebsocketVendorTable,
     name: &str,
     what: &str,
-    predicate: impl Fn(&Arc<RuntimeVendorLink>) -> bool,
-) -> Arc<RuntimeVendorLink> {
+    predicate: impl Fn(&Arc<WebsocketRuntimeVendor>) -> bool,
+) -> Arc<WebsocketRuntimeVendor> {
     for _ in 0..200 {
-        let published = vendors.read().unwrap().get(name).cloned();
+        let published = links.lock().unwrap().get(name).cloned();
         if let Some(link) = published
             && predicate(&link)
         {
@@ -172,13 +175,20 @@ async fn await_vendor(
     panic!("no vendor '{name}' that {what} after 5s");
 }
 
+/// A progress sink nothing reads: these tests assert on each operation's
+/// return value, which is its outcome.
+fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+    tokio::sync::mpsc::channel(8).0
+}
+
 // ── the test ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes() {
-    let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
-    let server =
-        serve_vendor_connections(Arc::new(RuntimeVendorRegistry::new(vendors.clone()))).await;
+    let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
+    let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
+    let links = registry.links();
+    let server = serve_vendor_connections(registry.clone()).await;
     let wire = Wire::open(server).await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -192,7 +202,7 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
         })
     };
     let workspaces = HashMap::from([("main".to_string(), tmp.path().to_path_buf())]);
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         "test-vendor".to_string(),
         false,
         provider,
@@ -213,9 +223,9 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
     let agent_task =
         tokio::spawn(async move { agent.run(&endpoint, no_credential(), agent_cancel).await });
 
-    let first = await_vendor(&vendors, "test-vendor", "registered", |_| true).await;
+    let first = await_vendor(&links, "test-vendor", "registered", |_| true).await;
     first
-        .create("rt-1", &runtime_spec_fixture("main"))
+        .create("rt-1", &runtime_spec_fixture("main").to_wire(), sink())
         .await
         .expect("the agent provisions a runtime over the first link");
 
@@ -223,12 +233,12 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
 
     // Nobody restarts the process: the same agent comes back on a new link,
     // which `RuntimeVendorRegistry::register` swaps in under the same name.
-    let second = await_vendor(&vendors, "test-vendor", "reconnected", |link| {
-        !Arc::ptr_eq(link, &first) && link.is_connected()
+    let second = await_vendor(&links, "test-vendor", "reconnected", |link| {
+        !Arc::ptr_eq(link, &first) && link.is_reachable()
     })
     .await;
     assert!(
-        !first.is_connected(),
+        !first.is_reachable(),
         "the link that was cut must be observably dead, not merely replaced"
     );
 
@@ -260,9 +270,10 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
 /// disconnected` and the model kept trying until it ran out of iterations.
 #[tokio::test]
 async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
-    let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
-    let server =
-        serve_vendor_connections(Arc::new(RuntimeVendorRegistry::new(vendors.clone()))).await;
+    let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
+    let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
+    let links = registry.links();
+    let server = serve_vendor_connections(registry.clone()).await;
     let wire = Wire::open(server).await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -276,7 +287,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
         })
     };
     let workspaces = HashMap::from([("main".to_string(), tmp.path().to_path_buf())]);
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         "test-vendor".to_string(),
         false,
         provider,
@@ -295,9 +306,9 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
     let agent_task =
         tokio::spawn(async move { agent.run(&endpoint, no_credential(), agent_cancel).await });
 
-    let first = await_vendor(&vendors, "test-vendor", "registered", |_| true).await;
+    let first = await_vendor(&links, "test-vendor", "registered", |_| true).await;
     first
-        .create("rt-1", &runtime_spec_fixture("main"))
+        .create("rt-1", &runtime_spec_fixture("main").to_wire(), sink())
         .await
         .expect("the agent provisions a runtime over the first link");
 
@@ -305,7 +316,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
     // the same registry the server keeps.
     let client = RuntimeClient::from_arc(
         Arc::new(RuntimeVendorTransport::new(
-            vendors.clone(),
+            links.clone(),
             "test-vendor".to_string(),
             "rt-1".to_string(),
         )),
@@ -317,8 +328,8 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
         .expect("first call");
 
     wire.cut();
-    await_vendor(&vendors, "test-vendor", "reconnected", |link| {
-        !Arc::ptr_eq(link, &first) && link.is_connected()
+    await_vendor(&links, "test-vendor", "reconnected", |link| {
+        !Arc::ptr_eq(link, &first) && link.is_reachable()
     })
     .await;
 
@@ -339,14 +350,15 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
 /// last round.
 #[tokio::test]
 async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
-    let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
-    let server =
-        serve_vendor_connections(Arc::new(RuntimeVendorRegistry::new(vendors.clone()))).await;
+    let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
+    let registry = Arc::new(RuntimeVendorRegistry::new(vendors.clone()));
+    let links = registry.links();
+    let server = serve_vendor_connections(registry.clone()).await;
 
     let tmp = tempfile::tempdir().unwrap();
     let endpoint = format!("ws://{server}/api/vendor/connect");
     let root = tmp.path().to_path_buf();
-    let build = move |dir: &str| -> RuntimeVendor {
+    let build = move |dir: &str| -> RuntimeVendorClient {
         let root = root.clone();
         let connected = Arc::new(ConnectedRuntimeRegistry::new());
         let provider: ProviderFactory = {
@@ -358,7 +370,7 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
             })
         };
         let workspaces = HashMap::from([("main".to_string(), root.clone())]);
-        RuntimeVendor::new(
+        RuntimeVendorClient::new(
             "horsie-local".to_string(),
             false,
             provider,
@@ -383,8 +395,8 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
         let cancel = cancel.clone();
         async move { first.run(&endpoint, no_credential(), cancel).await }
     });
-    let published = await_vendor(&vendors, "horsie-local", "registered", |link| {
-        link.is_connected()
+    let published = await_vendor(&links, "horsie-local", "registered", |link| {
+        link.is_reachable()
     })
     .await;
 
@@ -402,18 +414,13 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
     );
 
     // The incumbent is untouched: same link, still connected, still serving.
-    let held = vendors
-        .read()
-        .unwrap()
-        .get("horsie-local")
-        .cloned()
-        .unwrap();
+    let held = links.lock().unwrap().get("horsie-local").cloned().unwrap();
     assert!(
         Arc::ptr_eq(&held, &published),
         "the refused agent must not have displaced the published link"
     );
-    assert!(held.is_connected());
-    held.create("rt-1", &runtime_spec_fixture("main"))
+    assert!(held.is_reachable());
+    held.create("rt-1", &runtime_spec_fixture("main").to_wire(), sink())
         .await
         .expect("the incumbent still provisions runtimes");
 

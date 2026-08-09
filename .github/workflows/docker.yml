@@ -4,7 +4,6 @@ name: Docker
 # every push to main and every v* release tag:
 #   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI)
 #   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)
-#   - ghcr.io/<owner>/horsie-velos-runtime  (the vendor agent doing the scheduling)
 #
 # Mirrors the velos pipeline: auth via the workflow's OIDC-minted GITHUB_TOKEN
 # (no stored registry secret); OIDC also backs the keyless cosign signature and
@@ -64,15 +63,6 @@ jobs:
           platforms: linux/amd64
           push: false
           cache-from: type=gha,scope=docker-linux/amd64
-      - name: Build velos (no push)
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/horsie.Dockerfile
-          target: velos
-          platforms: linux/amd64
-          push: false
-          cache-from: type=gha,scope=docker-linux/amd64
 
   compose-validate:
     name: Validate docker-compose.yml
@@ -86,7 +76,7 @@ jobs:
         run: docker compose -f docker/docker-compose.yml config
 
   # One leg per arch. The server step builds the shared `build` stage (all
-  # three binaries) + web stage; the runtime and velos steps reuse it CACHED
+  # two binaries) + web stage; the runtime step reuses it CACHED
   # from this job's local buildkit instance, so deps compile once per arch
   # instead of three times.
   build:
@@ -138,17 +128,6 @@ jobs:
           platforms: ${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie-runtime,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=docker-${{ matrix.platform }}
-
-      - name: Build and push velos by digest
-        id: build-velos
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: docker/horsie.Dockerfile
-          target: velos
-          platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/horsie-velos-runtime,push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=docker-${{ matrix.platform }}
           # Single cache writer per scope, after all targets are built. mode=max
           # is required, not a nicety: the layer worth caching is the cooked
           # dependency layer inside the `build` stage (see horsie.Dockerfile),
@@ -157,18 +136,15 @@ jobs:
 
       - name: Export digests
         run: |
-          mkdir -p /tmp/digests/server /tmp/digests/runtime /tmp/digests/velos
+          mkdir -p /tmp/digests/server /tmp/digests/runtime
           server_digest="${{ steps.build-server.outputs.digest }}"
           runtime_digest="${{ steps.build-runtime.outputs.digest }}"
-          velos_digest="${{ steps.build-velos.outputs.digest }}"
           touch "/tmp/digests/server/${server_digest#sha256:}"
           touch "/tmp/digests/runtime/${runtime_digest#sha256:}"
-          touch "/tmp/digests/velos/${velos_digest#sha256:}"
 
-      # `key` (server|runtime|velos) — not `image` (horsie|horsie-runtime|
-      # horsie-velos-runtime) — so the merge job's download glob can't
-      # cross-match (horsie is a prefix of both others). Keys must stay
-      # mutually non-prefixing for the same reason.
+      # `key` (server|runtime) — not `image` (horsie|horsie-runtime) — so the
+      # merge job's download glob can't cross-match, `horsie` being a prefix of
+      # the other. Keys must stay mutually non-prefixing for the same reason.
       - name: Upload server digest
         uses: actions/upload-artifact@v7
         with:
@@ -182,14 +158,6 @@ jobs:
         with:
           name: digest-runtime-${{ strategy.job-index }}
           path: /tmp/digests/runtime/*
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload velos digest
-        uses: actions/upload-artifact@v7
-        with:
-          name: digest-velos-${{ strategy.job-index }}
-          path: /tmp/digests/velos/*
           if-no-files-found: error
           retention-days: 1
 
@@ -209,7 +177,6 @@ jobs:
         include:
           - { key: server,  image: horsie }
           - { key: runtime, image: horsie-runtime }
-          - { key: velos,   image: horsie-velos-runtime }
     steps:
       - name: Download digests
         uses: actions/download-artifact@v8

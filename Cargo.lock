@@ -1748,6 +1748,7 @@ dependencies = [
  "horsie-runtime-client",
  "horsie-server",
  "horsie-support",
+ "rand 0.10.2",
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
@@ -1808,6 +1809,7 @@ dependencies = [
  "async-trait",
  "axum",
  "hex",
+ "hmac",
  "horsie-models",
  "regex",
  "reqwest 0.12.28",
@@ -1818,29 +1820,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
-]
-
-[[package]]
-name = "horsie-velos-runtime"
-version = "0.1.6"
-dependencies = [
- "async-trait",
- "axum",
- "clap",
- "futures-util",
- "horsie-agentcore",
- "horsie-models",
- "horsie-runtime-vendor",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tokio-tungstenite",
- "tokio-util",
- "tracing",
- "uuid",
 ]
 
 [[package]]

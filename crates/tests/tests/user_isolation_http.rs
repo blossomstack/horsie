@@ -88,7 +88,7 @@ impl Fixture {
     }
 }
 
-/// Mint a token for a fresh account id and connect a vendor agent named
+/// Mint a token for a fresh account id and connect a vendor process named
 /// `runtime` for it. Both accounts use the *same* vendor name on purpose:
 /// that collision is the bug this whole change exists to make impossible.
 async fn account(users: &UserRegistry, store: &horsie_server::auth::AuthStore) -> Account {
@@ -116,7 +116,7 @@ async fn account(users: &UserRegistry, store: &horsie_server::auth::AuthStore) -
         .get(&user)
         .await
         .unwrap()
-        .vendor_agents
+        .connected_vendors
         .publish(vendor.link())
         .expect("`main` is unclaimed in every account, not just the first");
 
@@ -261,17 +261,37 @@ async fn the_same_vendor_name_in_two_accounts_is_two_runtimes() {
 
     let sa = f.services(&f.a).await;
     let sb = f.services(&f.b).await;
-    assert_eq!(sa.vendor_agents.connected_names(), vec!["main".to_string()]);
-    assert_eq!(sb.vendor_agents.connected_names(), vec!["main".to_string()]);
+    assert_eq!(
+        sa.connected_vendors.connected_names(),
+        vec!["main".to_string()]
+    );
+    assert_eq!(
+        sb.connected_vendors.connected_names(),
+        vec!["main".to_string()]
+    );
 
+    // Identity is a websocket-vendor property, so it is read from the typed
+    // table the registry publishes rather than from the trait.
     let (a_link, b_link) = (
-        sa.vendors.read().unwrap().get("main").cloned().unwrap(),
-        sb.vendors.read().unwrap().get("main").cloned().unwrap(),
+        sa.connected_vendors
+            .links()
+            .lock()
+            .unwrap()
+            .get("main")
+            .cloned()
+            .unwrap(),
+        sb.connected_vendors
+            .links()
+            .lock()
+            .unwrap()
+            .get("main")
+            .cloned()
+            .unwrap(),
     );
     assert_ne!(
         a_link.instance_id(),
         b_link.instance_id(),
-        "`main` must resolve to each account's own agent process"
+        "`main` must resolve to each account's own vendor process"
     );
 
     // Both accounts can create on it, which is the denial-of-service the flat

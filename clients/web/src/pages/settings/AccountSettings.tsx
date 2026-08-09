@@ -5,7 +5,7 @@ import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
 import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
-/** Long-lived tokens for headless vendor agents: a container, a CI runner, a
+/** Long-lived tokens for headless vendor processes: a container, a CI runner, a
  *  machine with nobody to approve a device code. */
 function MachineTokens() {
   const qc = useQueryClient();
@@ -42,7 +42,7 @@ function MachineTokens() {
       <div>
         <h2 className="section-title">Machine tokens</h2>
         <p className="mt-0.5 text-xs text-faint">
-          For runtime vendor agents that run unattended. On your own machine,
+          For runtime vendor processes that run unattended. On your own machine,
           <code className="mx-1">horsie auth login</code> is enough — use a
           token where nobody is there to approve one.
         </p>

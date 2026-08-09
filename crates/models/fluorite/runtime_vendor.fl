@@ -52,14 +52,19 @@ struct CreateRuntimeRequest { runtime_id: String, spec: RuntimeSpec }
 
 /// Hand back an existing runtime, resuming it if it was hibernated.
 ///
-/// Deliberately carries no spec: a get must never be able to provision. A
-/// vendor with no runtime under this id fails the request, and the server
-/// turns that into a terminally unrecoverable session rather than silently
-/// rebuilding a workspace the user believes still exists.
+/// Carries the spec because the server is the only durable holder of it. A
+/// vendor that wrote its own copy down would be a second owner of one fact,
+/// and the two would drift the moment a session's environment changed.
+///
+/// Carrying it is *not* permission to provision from nothing. A vendor with no
+/// runtime under this id still fails the request, and the server turns that
+/// into a terminally unrecoverable session rather than silently rebuilding a
+/// workspace the user believes still exists. The spec is how to rebuild a
+/// runtime the vendor knows it owns — never how to invent one.
 ///
 /// A get issued while a create for the same id is in flight must wait for that
 /// create to resolve, and concurrent gets must never yield two runtimes.
-struct GetRuntimeRequest { runtime_id: String }
+struct GetRuntimeRequest { runtime_id: String, spec: RuntimeSpec }
 
 /// Advisory: suspend this runtime if you can. A vendor that cannot suspend
 /// does nothing and keeps the runtime alive — that is a correct
@@ -163,3 +168,86 @@ union RuntimeVendorEvent {
 /// request_id echoes the request's for responses; a fresh UUID for
 /// unsolicited announcements (`Ready`, `RuntimeStateChanged`).
 struct RuntimeVendorOutboundMessage { request_id: String, event: RuntimeVendorEvent }
+
+// --- Configured vendors (settings API) ──────────────────────────────────────
+//
+// The types above describe a vendor that dials *in*. These describe one
+// configured in settings, which has nowhere to dial in from: its stored
+// configuration is the only evidence it exists.
+
+/// How a Fly Machines vendor builds machines.
+struct FlyVendorSettings {
+    /// The Fly app machines are created in. Must already exist — the server
+    /// creates machines, not apps.
+    app: String,
+    /// OCI image with `horsie-runtime` baked in.
+    image: String,
+    region: String,
+    /// Where in the machine workspaces are allocated.
+    workspace_root: String,
+    /// The `ws://`/`wss://` URL a machine reaches this server on. A bare origin
+    /// gains the connect path on save. An address that only resolves on the
+    /// server's own loopback is refused: a machine could never reach it, and
+    /// the failure would otherwise surface as an unexplained session timeout.
+    callback_url: String,
+    /// Give each runtime a volume, so a stopped one keeps its workspace.
+    volumes: bool,
+    cpu_kind: String,
+    cpus: u32,
+    memory_mb: u32,
+    volume_size_gb: u32,
+}
+
+/// How a velos vendor schedules containers.
+struct VelosVendorSettings {
+    /// The velos server root, e.g. `http://velos:8080`.
+    server_url: String,
+    /// OCI image bundling `horsie-runtime`, built without the sandbox feature —
+    /// the container is already the isolation boundary.
+    image: String,
+    /// Path to `horsie-runtime` inside the image.
+    runtime_bin: String,
+    /// Where in the container workspaces are allocated.
+    workspace_root: String,
+    /// The `ws://` URL a container reaches this server on, *from velos's
+    /// container network* — not necessarily the address a browser uses.
+    callback_url: String,
+    cpu: u32,
+    memory_mb: u32,
+}
+
+/// Per-kind settings. A union rather than a kind string plus optional structs,
+/// so a client cannot describe a vendor that has no settings — or two kinds'
+/// worth.
+///
+/// Adding a kind is a variant here plus a match arm on the server. What each
+/// substrate can do — Fly keeps a workspace across a hibernate, velos rebuilds
+/// it — stays inside its implementation and never reaches this type.
+#[type_tag = "kind"]
+union RuntimeVendorSettings {
+    Fly(FlyVendorSettings),
+    Velos(VelosVendorSettings),
+}
+
+/// A configured runtime vendor as shown to clients.
+struct RuntimeVendorConfigView {
+    /// The name sessions select by. Exclusive with the names dialled-in vendor
+    /// agents announce.
+    name: String,
+    settings: RuntimeVendorSettings,
+    /// Whether a credential is stored. The token itself never leaves the
+    /// server — a settings page that could read one back turns every session
+    /// cookie into a credential exfiltration path.
+    has_credential: bool,
+    /// Unix epoch seconds.
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create or fully replace a configured runtime vendor.
+struct RuntimeVendorConfigInput {
+    name: String,
+    settings: RuntimeVendorSettings,
+    /// Omit to keep the stored token. Required when creating.
+    credential: Option<String>,
+}

@@ -85,7 +85,7 @@ From here:
 
 ## Manual / advanced setup
 
-`horsie connect` is a **vendor agent**: it holds one connection to the server and spawns a `horsie-runtime` child per session. Running `horsie-runtime` by hand no longer connects it to a server — the runtime talks only to its agent now. Runtimes are sandboxed by default with the vendor's baseline capability spec (the agent probes sandbox support at startup and refuses to start on a host that can't be confined); pass `--no-sandbox` to run unsandboxed. See [Runtime vendors](runtime-vendors.md) for the full picture, including the managed **velos** option and how to write another vendor.
+`horsie connect` is a **vendor process**: it holds one connection to the server and spawns a `horsie-runtime` child per session. Running `horsie-runtime` by hand no longer connects it to a server — the runtime talks only to its agent now. Runtimes are sandboxed by default with the vendor's baseline capability spec (the agent probes sandbox support at startup and refuses to start on a host that can't be confined); pass `--no-sandbox` to run unsandboxed. See [Runtime vendors](runtime-vendors.md) for the full picture, including the managed **velos** option and how to write another vendor.
 
 Building the CLI from source instead of the install script:
 

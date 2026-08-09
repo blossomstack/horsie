@@ -1,20 +1,33 @@
-//! Tracks every connected vendor agent and mirrors it into the shared vendor
+//! Tracks every connected vendor process and mirrors it into the shared vendor
 //! map sessions select from.
 //!
 //! This deliberately mirrors [`LocalDaemonRegistry`](crate::runtime_vendor::LocalDaemonRegistry):
-//! the same `SharedVendors` map, the same publish-on-connect shape. The one
+//! the same `RuntimeVendorMap` map, the same publish-on-connect shape. The one
 //! difference is what a reconnect means — see [`RuntimeVendorRegistry::register`].
 
-use crate::runtime_vendor::RuntimeVendorLink;
-use crate::sessions::spec::SharedVendors;
+use crate::runtime_vendor::WebsocketRuntimeVendor;
+use crate::sessions::spec::RuntimeVendorMap;
+use std::collections::HashMap;
 use std::sync::{Arc, PoisonError};
+
+/// The websocket vendors a registry has published, keyed by name.
+///
+/// Typed rather than `dyn RuntimeVendor` because two things need more than the
+/// trait: name ownership turns on `owner`/`instance_id`, which describe a
+/// dialled-in process, and a handle relays by calling the link's `request`,
+/// which is the websocket vendor's own protocol. Keeping both here is what
+/// stops a websocket-only concern leaking into every implementation.
+pub type WebsocketVendorTable = Arc<std::sync::Mutex<HashMap<String, Arc<WebsocketRuntimeVendor>>>>;
 
 /// Why a registration was refused.
 #[derive(Debug, PartialEq)]
 pub enum RegisterError {
     /// A live link already answers to this name, and it belongs to another
-    /// agent process.
+    /// vendor process.
     NameTaken { by: String },
+    /// The name belongs to a vendor configured in settings. No process owns it,
+    /// so no reconnect rule can win it.
+    NameConfigured,
 }
 
 impl std::fmt::Display for RegisterError {
@@ -23,12 +36,15 @@ impl std::fmt::Display for RegisterError {
             Self::NameTaken { by } => {
                 write!(f, "that vendor name is already held by {by}")
             }
+            Self::NameConfigured => {
+                write!(f, "that vendor name belongs to a configured runtime vendor")
+            }
         }
     }
 }
 
 impl RegisterError {
-    /// What the refused agent is told.
+    /// What the refused vendor process is told.
     ///
     /// Deliberately not [`Display`](std::fmt::Display), which names the holder:
     /// that belongs in the server log, not in a message handed to whoever just
@@ -38,20 +54,35 @@ impl RegisterError {
     pub fn client_reason(&self, name: &str) -> String {
         match self {
             Self::NameTaken { .. } => {
-                format!("vendor name \"{name}\" is already in use by another agent")
+                format!(
+                    "runtime vendor name \"{name}\" is already in use by another vendor process"
+                )
+            }
+            Self::NameConfigured => {
+                format!("runtime vendor name \"{name}\" is configured on the server")
             }
         }
     }
 }
 
 pub struct RuntimeVendorRegistry {
-    vendors: SharedVendors,
+    vendors: RuntimeVendorMap,
+    /// The websocket vendors *this* registry published, kept typed.
+    ///
+    /// Name ownership turns on `owner` and `instance_id`, which are properties
+    /// of a dialled-in process and mean nothing to a vendor configured in
+    /// settings. Keeping them here rather than on the `RuntimeVendor` trait is
+    /// what stops a websocket-only concern leaking into every implementation.
+    published: WebsocketVendorTable,
 }
 
 impl RuntimeVendorRegistry {
     #[must_use]
-    pub fn new(vendors: SharedVendors) -> Self {
-        Self { vendors }
+    pub fn new(vendors: RuntimeVendorMap) -> Self {
+        Self {
+            vendors,
+            published: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     /// Publish a freshly handshaken link under the name it announced.
@@ -59,6 +90,9 @@ impl RuntimeVendorRegistry {
     /// A name is held by the process that claimed it, for as long as that
     /// process is connected. The gates, in order:
     ///
+    /// 0. A vendor *configured in settings* holds the name — refuse. Every rule
+    ///    below turns on which process owns a name, and a configured vendor has
+    ///    no process, so none of them can adjudicate this.
     /// 1. Nobody holds the name — publish.
     /// 2. A *different principal* holds it — refuse. This outranks the instance
     ///    id on purpose: an instance id is announced by the client and is not a
@@ -72,26 +106,40 @@ impl RuntimeVendorRegistry {
     ///    corpse must not hold a name; this covers the window between a read
     ///    loop ending and [`publish`](Self::publish)'s eviction task removing
     ///    the entry.
-    /// 5. Otherwise — refuse. Two live agents cannot share one name, whatever
+    /// 5. Otherwise — refuse. Two live processes cannot share one name, whatever
     ///    principal they present.
     ///
     /// With authentication disabled every principal is `Anonymous`, so gate 2
     /// never fires and 3–5 carry the whole policy.
-    pub fn register(&self, link: Arc<RuntimeVendorLink>) -> Result<(), RegisterError> {
+    pub fn register(&self, link: Arc<WebsocketRuntimeVendor>) -> Result<(), RegisterError> {
         let name = link.vendor_name().to_string();
+        let mut published = self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = vendors.get(&name) {
+        // Gate 0: a name in the map that this registry did not publish belongs
+        // to a vendor configured in settings. None of the rules below apply —
+        // they all turn on owning process, and a configured vendor has none.
+        if vendors.contains_key(&name) && !published.contains_key(&name) {
+            return Err(RegisterError::NameConfigured);
+        }
+        if let Some(existing) = published.get(&name) {
             let taken = || RegisterError::NameTaken {
                 by: existing.owner().to_db(),
             };
             if existing.owner() != link.owner() {
                 return Err(taken());
             }
-            if existing.instance_id() != link.instance_id() && existing.is_connected() {
+            if existing.instance_id() != link.instance_id() && existing.is_reachable() {
                 return Err(taken());
             }
         }
-        vendors.insert(name, link);
+        vendors.insert(
+            name.clone(),
+            link.clone() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
+        published.insert(name, link);
         Ok(())
     }
 
@@ -102,7 +150,10 @@ impl RuntimeVendorRegistry {
     /// the instance id: a reconnecting process replaces its own entry while
     /// carrying the same name and the same instance id, so anything coarser
     /// would let the dead socket's eviction take the live link down with it.
-    pub fn publish(self: &Arc<Self>, link: Arc<RuntimeVendorLink>) -> Result<(), RegisterError> {
+    pub fn publish(
+        self: &Arc<Self>,
+        link: Arc<WebsocketRuntimeVendor>,
+    ) -> Result<(), RegisterError> {
         self.register(link.clone())?;
         let registry = self.clone();
         tokio::spawn(async move {
@@ -110,7 +161,7 @@ impl RuntimeVendorRegistry {
             if registry.evict(&link) {
                 tracing::info!(
                     vendor = %link.vendor_name(),
-                    "vendor agent disconnected, name released"
+                    "runtime vendor disconnected, name released"
                 );
             }
         });
@@ -119,15 +170,28 @@ impl RuntimeVendorRegistry {
 
     /// Remove this link's name if this exact link still holds it. Returns
     /// whether it did.
-    fn evict(&self, link: &Arc<RuntimeVendorLink>) -> bool {
+    fn evict(&self, link: &Arc<WebsocketRuntimeVendor>) -> bool {
+        let mut published = self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut vendors = self.vendors.write().unwrap_or_else(PoisonError::into_inner);
-        match vendors.get(link.vendor_name()) {
+        match published.get(link.vendor_name()) {
             Some(held) if Arc::ptr_eq(held, link) => {
+                published.remove(link.vendor_name());
                 vendors.remove(link.vendor_name());
                 true
             }
             Some(_) | None => false,
         }
+    }
+
+    /// The typed table this registry publishes into, so a link can mint handles
+    /// that resolve their vendor by name on every call — which is what makes a
+    /// reconnect invisible to a turn already in flight.
+    #[must_use]
+    pub fn links(&self) -> WebsocketVendorTable {
+        self.published.clone()
     }
 
     /// Names currently published. Used by tests today; the settings view's
@@ -157,7 +221,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::RwLock;
 
-    fn empty_vendors() -> SharedVendors {
+    fn empty_vendors() -> RuntimeVendorMap {
         Arc::new(RwLock::new(HashMap::new()))
     }
 
@@ -178,6 +242,31 @@ mod tests {
         assert!(
             !vendor.capabilities().supports_provisioning,
             "the published vendor must carry what the agent announced"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_take_a_configured_vendors_name() {
+        // Sessions select a vendor by name and cannot tell the two kinds apart,
+        // so letting an agent shadow a configured vendor would silently move
+        // every session on that name onto someone's laptop.
+        let vendors = empty_vendors();
+        let configured = FakeRuntimeVendor::builder("fly")
+            .serve_in_process()
+            .await
+            .expect("configured stand-in");
+        vendors.write().unwrap().insert(
+            "fly".to_string(),
+            configured.link() as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
+        let registry = RuntimeVendorRegistry::new(vendors);
+        let agent = FakeRuntimeVendor::builder("fly")
+            .serve_in_process()
+            .await
+            .expect("agent");
+        assert_eq!(
+            registry.register(agent.link()),
+            Err(RegisterError::NameConfigured)
         );
     }
 
@@ -207,13 +296,15 @@ mod tests {
         // The published vendor must be the live one: a create routed through it
         // reaches the second agent, not the corpse of the first.
         let vendor = vendors.read().unwrap().get("same-name").cloned().unwrap();
+        let (progress, _rx) = tokio::sync::mpsc::channel(8);
         vendor
             .create(
                 "rt-1",
-                &crate::runtime_vendor::fake::runtime_spec_fixture("main"),
+                &crate::runtime_vendor::fake::runtime_spec_fixture("main").to_wire(),
+                progress,
             )
             .await
-            .expect("create must reach the live agent");
+            .expect("create must reach the live vendor");
         assert_eq!(second.signals(), vec!["create:rt-1".to_string()]);
         assert!(first.signals().is_empty(), "the dead link must not be used");
     }
@@ -280,13 +371,18 @@ mod tests {
         // The incumbent is untouched, and it is still the link a session would
         // be routed to.
         assert_eq!(registry.connected_names(), vec!["horsie-local".to_string()]);
-        let published = vendors
-            .read()
-            .unwrap()
-            .get("horsie-local")
-            .cloned()
-            .unwrap();
-        assert_eq!(published.instance_id(), mine.link().instance_id());
+        // Read from the typed table: identity is a websocket-vendor property,
+        // which is exactly why it is not on the `RuntimeVendor` trait.
+        assert_eq!(
+            registry
+                .links()
+                .lock()
+                .unwrap()
+                .get("horsie-local")
+                .map(|l| l.instance_id().to_string()),
+            Some(mine.link().instance_id().to_string()),
+            "the incumbent must still hold the name"
+        );
     }
 
     #[tokio::test]

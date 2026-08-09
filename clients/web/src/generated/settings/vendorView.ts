@@ -3,15 +3,14 @@ import { VendorCapabilities } from './vendorCapabilities';
 /**
  * A runtime vendor sessions can target.
  *
- * Every vendor is a connected agent now: the server holds no vendor
- * configuration and builds nothing, so this is a live roster rather than a
- * settings record. A vendor appears once its agent completes the handshake
- * and disappears when the link drops — there is no configured-but-inactive
- * state, so no config block and no build error to report.
+ * A live roster rather than a settings record: a vendor process appears once
+ * it completes the handshake and disappears when its link drops, and a vendor
+ * configured on the server appears as soon as it is saved. What a configured
+ * one is made of is not here — see `runtime_vendor.RuntimeVendorConfigView`.
  */
 export interface VendorView {
   /**
-   * The name the agent announced, which sessions select by.
+   * The name sessions select by.
    */
   name: string;
   /**
@@ -19,7 +18,7 @@ export interface VendorView {
    */
   isDefault: boolean;
   /**
-   * What the agent announced it can do with a session workspace.
+   * What this vendor can do with a session workspace.
    */
   capabilities: VendorCapabilities;
 }

@@ -71,6 +71,7 @@ fn checkout_step(url: &str, dir: &str) -> ProvisionStep {
 
 struct Assembly {
     provider: ProcessRuntimeProvider,
+    dial_secret: Arc<Vec<u8>>,
     _cancel_guard: tokio_util::sync::DropGuard,
 }
 
@@ -81,7 +82,13 @@ async fn assembly(sock_dir: &Path) -> Assembly {
         .await
         .unwrap();
     let cancel = CancellationToken::new();
-    serve_runtime_connections(listener, connected.clone(), cancel.clone());
+    let dial_secret = horsie_runtime_vendor::new_dial_secret();
+    serve_runtime_connections(
+        listener,
+        connected.clone(),
+        dial_secret.clone(),
+        cancel.clone(),
+    );
     let provider = ProcessRuntimeProvider::new(
         PathBuf::from(env!("CARGO_BIN_EXE_horsie-runtime")),
         RuntimeEndpoint::Unix(sock),
@@ -89,8 +96,27 @@ async fn assembly(sock_dir: &Path) -> Assembly {
     );
     Assembly {
         provider,
+        dial_secret,
         _cancel_guard: cancel.drop_guard(),
     }
+}
+
+/// The bearer a runtime presents on its dial-back.
+///
+/// These tests drive a provider directly rather than through a vendor, so they
+/// mint what a vendor would have injected. Without it the listener refuses the
+/// dial — which is the point of the token, and would otherwise look like a hang.
+fn dial_env(secret: &[u8], runtime_id: &str) -> Vec<horsie_models::executor::EnvVar> {
+    vec![horsie_models::executor::EnvVar {
+        name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
+        value: horsie_support::dial_token::mint(
+            secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: "test".to_string(),
+                runtime_id: runtime_id.to_string(),
+            },
+        ),
+    }]
 }
 
 fn config(ws: &Path, provision: Vec<ProvisionStep>) -> RuntimeConfig {
@@ -118,7 +144,10 @@ async fn provision_steps_clone_before_ready() {
         .provider
         .create(
             "rt-prov-1",
-            &config(ws.path(), vec![checkout_step(&url, "repo")]),
+            &RuntimeConfig {
+                env: dial_env(&a.dial_secret, "rt-prov-1"),
+                ..config(ws.path(), vec![checkout_step(&url, "repo")])
+            },
         )
         .await
         .expect("create with provision");
@@ -137,10 +166,13 @@ async fn provision_failure_reports_git_error() {
         .provider
         .create(
             "rt-prov-2",
-            &config(
-                ws.path(),
-                vec![checkout_step("file:///nonexistent-xyz", "repo")],
-            ),
+            &RuntimeConfig {
+                env: dial_env(&a.dial_secret, "rt-prov-2"),
+                ..config(
+                    ws.path(),
+                    vec![checkout_step("file:///nonexistent-xyz", "repo")],
+                )
+            },
         )
         .await;
     let err = match result {

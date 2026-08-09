@@ -26,7 +26,7 @@ export default async function globalSetup(): Promise<void> {
   const binDir = path.join(REPO_ROOT, "target", "debug");
   const serverBin = path.join(binDir, "horsie-server");
   const runtimeBin = path.join(binDir, "horsie-runtime");
-  // The vendor agent: sessions reach this machine only through it now.
+  // The vendor process: sessions reach this machine only through it now.
   const cliBin = path.join(binDir, "horsie");
   const mockBin = path.join(binDir, "async-llm-mock");
   const distDir = path.join(WEB_DIR, "dist");
@@ -259,7 +259,7 @@ export default async function globalSetup(): Promise<void> {
       throw new Error(`installing e2e-plugin: ${installed.status} ${await installed.text()}`);
     }
 
-    // `horsie connect` is the vendor agent: it dials the server and spawns one
+    // `horsie connect` is the vendor process: it dials the server and spawns one
     // `horsie-runtime` per session. Its skills are the bundles the server hands
     // each session, which the runtime fetches itself.
     const connectConfig = path.join(scratch, "..", "horsie-connect.json");

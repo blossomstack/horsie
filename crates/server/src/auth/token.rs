@@ -13,7 +13,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256};
 
 /// What a token authorizes. `Web` is a browser cookie session, `Access` and
-/// `Refresh` belong to the CLI, `Agent` to a headless vendor agent.
+/// `Refresh` belong to the CLI, `Agent` to a headless vendor process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Web,

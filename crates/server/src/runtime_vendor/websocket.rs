@@ -1,4 +1,4 @@
-//! One connected vendor agent's WebSocket, with request/reply correlation.
+//! One connected vendor process's WebSocket, with request/reply correlation.
 //!
 //! The agent owns runtime lifecycle; this link is the server's only handle on
 //! it. Every command carries a fresh `request_id`; the read loop matches each
@@ -7,7 +7,7 @@
 //! unmatched id as a protocol error.
 
 use crate::auth::Principal;
-use crate::runtime_vendor::{RuntimeSpec, VendorError};
+use crate::runtime_vendor::RuntimeVendorError;
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime_vendor::{
     CreateRuntimeRequest, DeleteRuntimeRequest, GetRuntimeRequest, HibernateRuntimeRequest,
@@ -43,13 +43,45 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900)
 
 type Waiters = Arc<Mutex<HashMap<String, oneshot::Sender<RuntimeVendorEvent>>>>;
 
-/// A sink that erases the socket type, so `RuntimeVendorLink` is not generic over the
+/// A sink that erases the socket type, so `WebsocketRuntimeVendor` is not generic over the
 /// transport once constructed.
 type BoxedSink = Box<
     dyn futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Send + Unpin,
 >;
 
-pub struct RuntimeVendorLink {
+/// Why a request did not produce an answer.
+///
+/// The distinction is load-bearing and used to be lost: a vendor that
+/// *answered* "I have no such runtime" is terminal for the owning session,
+/// while a link that died before answering says nothing about the runtime at
+/// all. Collapsing them made a disconnect during a resume look like a destroyed
+/// workspace and marked perfectly recoverable sessions `Unrecoverable`.
+#[derive(Debug)]
+pub enum RequestError {
+    /// The vendor answered, and the answer was a failure.
+    Refused(String),
+    /// The link died, or never answered in time. Always retryable.
+    Link(String),
+}
+
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(m) | Self::Link(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl From<RequestError> for RuntimeVendorError {
+    fn from(e: RequestError) -> Self {
+        match e {
+            RequestError::Refused(m) => Self::Provision(m),
+            RequestError::Link(m) => Self::Unavailable(m),
+        }
+    }
+}
+
+pub struct WebsocketRuntimeVendor {
     vendor_name: String,
     /// The announcing *process*. Two links carrying the same id are the same
     /// agent before and after a dropped socket; two carrying different ids are
@@ -72,17 +104,26 @@ pub struct RuntimeVendorLink {
     /// closes that race.
     closed: Arc<tokio::sync::watch::Sender<bool>>,
     /// The `Arc` this link lives in, held weakly so the link never keeps
-    /// itself alive. Needed because `create`/`attach` hand an owned `Arc` to
-    /// the transport and lifecycle handle they build.
-    this: std::sync::Weak<RuntimeVendorLink>,
+    /// itself alive.
+    this: std::sync::Weak<WebsocketRuntimeVendor>,
+    /// The account's vendor map, so a handle can resolve *the live link for
+    /// this vendor name* on every call rather than capturing this one. A
+    /// reconnect publishes a new link under the same name, and a handle that
+    /// captured the old one failed every remaining tool call in the turn
+    /// (#187).
+    vendors: crate::runtime_vendor::WebsocketVendorTable,
 }
 
-impl RuntimeVendorLink {
+impl WebsocketRuntimeVendor {
     /// Handshake on an accepted agent connection and start its read loop.
     ///
     /// The first message must be `RuntimeVendorEvent::Ready`; anything else (or
     /// silence past [`HANDSHAKE_TIMEOUT`]) drops the connection.
-    pub async fn start<S>(ws: WebSocketStream<S>, owner: Principal) -> Result<Arc<Self>, String>
+    pub async fn start<S>(
+        ws: WebSocketStream<S>,
+        owner: Principal,
+        vendors: crate::runtime_vendor::WebsocketVendorTable,
+    ) -> Result<Arc<Self>, String>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -137,6 +178,7 @@ impl RuntimeVendorLink {
             connected: connected.clone(),
             closed: closed.clone(),
             this: this.clone(),
+            vendors,
         });
 
         tokio::spawn(async move {
@@ -251,7 +293,7 @@ impl RuntimeVendorLink {
     }
 
     #[must_use]
-    pub fn is_connected(&self) -> bool {
+    pub fn is_reachable(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
 
@@ -260,8 +302,8 @@ impl RuntimeVendorLink {
     }
 
     async fn write(&self, msg: &RuntimeVendorInboundMessage) -> Result<(), String> {
-        if !self.is_connected() {
-            return Err("vendor agent disconnected".to_string());
+        if !self.is_reachable() {
+            return Err("vendor process disconnected".to_string());
         }
         let json = serde_json::to_string(msg).map_err(|e| format!("encode command: {e}"))?;
         self.sink
@@ -269,14 +311,14 @@ impl RuntimeVendorLink {
             .await
             .send(Message::Text(json.into()))
             .await
-            .map_err(|e| format!("send to vendor agent: {e}"))
+            .map_err(|e| format!("send to vendor process: {e}"))
     }
 
     /// Send a command and await the event carrying the same `request_id`.
     pub async fn request(
         &self,
         command: RuntimeVendorCommand,
-    ) -> Result<RuntimeVendorEvent, String> {
+    ) -> Result<RuntimeVendorEvent, RequestError> {
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.waiters.lock().await.insert(request_id.clone(), tx);
@@ -287,17 +329,21 @@ impl RuntimeVendorLink {
         };
         if let Err(e) = self.write(&msg).await {
             self.waiters.lock().await.remove(&request_id);
-            return Err(e);
+            return Err(RequestError::Link(e));
         }
 
         match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
-            Ok(Ok(RuntimeVendorEvent::RequestFailed(ev))) => Err(ev.message),
+            Ok(Ok(RuntimeVendorEvent::RequestFailed(ev))) => Err(RequestError::Refused(ev.message)),
             Ok(Ok(event)) => Ok(event),
             // The sender was dropped: the read loop exited, i.e. the socket died.
-            Ok(Err(_)) => Err("vendor agent disconnected".to_string()),
+            Ok(Err(_)) => Err(RequestError::Link(
+                "the runtime vendor disconnected".to_string(),
+            )),
             Err(_) => {
                 self.waiters.lock().await.remove(&request_id);
-                Err("timed out waiting for the vendor agent".to_string())
+                Err(RequestError::Link(
+                    "the runtime vendor did not answer in time".to_string(),
+                ))
             }
         }
     }
@@ -310,79 +356,97 @@ impl RuntimeVendorLink {
         })
         .await
     }
-
-    /// Translate the server-side spec into the wire request.
-    fn runtime_spec(spec: &RuntimeSpec) -> Result<WireRuntimeSpec, String> {
-        Ok(WireRuntimeSpec {
-            workspaces: spec.workspaces.iter().map(|w| w.name.clone()).collect(),
-            env: spec.env.clone(),
-            provision: spec.provision.clone(),
-        })
-    }
 }
 
-/// The vendor surface the session layer drives. These were a `RuntimeVendor`
-/// trait while the server had several vendor implementations of its own; every
-/// vendor is a connected agent now, so there is exactly one implementor and the
-/// trait was pure indirection.
-impl RuntimeVendorLink {
-    /// What the agent announced it can do with a session workspace.
-    #[must_use]
-    pub fn capabilities(&self) -> crate::runtime_vendor::VendorCapabilities {
-        crate::runtime_vendor::VendorCapabilities {
-            supports_provisioning: self.capabilities.supports_provisioning,
-        }
+#[async_trait::async_trait]
+impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
+    fn name(&self) -> &str {
+        &self.vendor_name
     }
 
-    /// Provision a brand-new runtime. Called exactly once per session, at
-    /// session creation; every later acquisition is [`Self::get`].
-    ///
-    /// Confirms the runtime exists and nothing more: the client that reaches it
-    /// is minted by [`RuntimeManager`](crate::runtime_manager::RuntimeManager),
-    /// over the vendor's *name* rather than this link, so it keeps working when
-    /// the agent reconnects on a new one.
-    pub async fn create(&self, runtime_id: &str, spec: &RuntimeSpec) -> Result<(), VendorError> {
+    fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+        self.capabilities.clone()
+    }
+
+    /// A dead socket is not a dead vendor: the process behind it re-dials and
+    /// publishes a fresh link under the same name, so a caller waits rather
+    /// than failing a turn.
+    fn is_reachable(&self) -> bool {
+        self.connected.load(Ordering::Relaxed)
+    }
+
+    /// Never reports intermediate progress, and that is not a shortcut: a
+    /// `horsie connect` process answers `CreateRuntime` only once its runtime
+    /// is up and has dialled back to it, so by the time this returns there is
+    /// nothing left to wait for.
+    async fn create(
+        &self,
+        runtime_id: &str,
+        spec: &WireRuntimeSpec,
+        _progress: horsie_runtime_vendor::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Unavailable(
-                "vendor link was dropped".to_string(),
+            return Err(RuntimeVendorError::Unavailable(
+                "the vendor link was dropped".to_string(),
             ));
         };
-        let wire_spec = Self::runtime_spec(spec).map_err(VendorError::Provision)?;
         me.request(RuntimeVendorCommand::CreateRuntime(CreateRuntimeRequest {
             runtime_id: runtime_id.to_string(),
-            spec: wire_spec,
+            spec: spec.clone(),
         }))
-        .await
-        .map_err(VendorError::Provision)?;
-        Ok(())
+        .await?;
+        Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
+            self.handle(runtime_id),
+        ))
     }
 
-    /// Confirm an existing runtime, resuming it if the agent hibernated it.
-    ///
-    /// Never provisions. A failure here means the agent has nothing under this
-    /// id, which is terminal for the owning session — see [`VendorError::Gone`].
-    pub async fn get(&self, runtime_id: &str) -> Result<(), VendorError> {
+    /// A failure here means the vendor has nothing under this id, which is
+    /// terminal for the owning session — rebuilding would silently destroy a
+    /// workspace the user believes still holds their work.
+    async fn get(
+        &self,
+        runtime_id: &str,
+        spec: &WireRuntimeSpec,
+        _progress: horsie_runtime_vendor::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
-            return Err(VendorError::Unavailable(
-                "vendor link was dropped".to_string(),
+            return Err(RuntimeVendorError::Unavailable(
+                "the vendor link was dropped".to_string(),
             ));
         };
-        if !me.is_connected() {
-            return Err(VendorError::Unavailable(
-                "vendor agent disconnected".to_string(),
+        if !me.is_reachable() {
+            return Err(RuntimeVendorError::Unavailable(
+                "the runtime vendor is disconnected".to_string(),
             ));
         }
+        // The spec travels with the get, so the vendor keeps no copy of its
+        // own. It is how to rebuild a runtime the vendor knows it owns, never
+        // permission to build one it does not.
         me.request(RuntimeVendorCommand::GetRuntime(GetRuntimeRequest {
             runtime_id: runtime_id.to_string(),
+            spec: spec.clone(),
         }))
         .await
-        .map_err(VendorError::Gone)?;
-        Ok(())
+        .map_err(|e| match e {
+            // The vendor answered: it has nothing under this id, and rebuilding
+            // would destroy work the user believes is still there.
+            RequestError::Refused(m) => RuntimeVendorError::Gone(m),
+            // The vendor never answered. That says nothing about the runtime,
+            // so the session stays recoverable and simply retries.
+            RequestError::Link(m) => RuntimeVendorError::Unavailable(m),
+        })?;
+        Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
+            self.handle(runtime_id),
+        ))
     }
 
-    /// Advisory suspend, best effort: a vendor that cannot suspend keeps the
-    /// runtime, and a vendor that is not there simply misses the hint.
-    pub async fn hibernate(&self, runtime_id: &str) {
+    /// Advisory. A vendor that is not there simply misses the hint, which is
+    /// why this reports `Stopped` rather than failing.
+    async fn hibernate(
+        &self,
+        runtime_id: &str,
+        _progress: horsie_runtime_vendor::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
         let _ = self
             .request(RuntimeVendorCommand::HibernateRuntime(
                 HibernateRuntimeRequest {
@@ -390,15 +454,40 @@ impl RuntimeVendorLink {
                 },
             ))
             .await;
+        Ok(horsie_runtime_vendor::RuntimeProgress::Stopped)
     }
 
-    /// The owning session was deleted; the agent decides the runtime's fate.
-    pub async fn delete(&self, runtime_id: &str) {
+    async fn delete(
+        &self,
+        runtime_id: &str,
+        _progress: horsie_runtime_vendor::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
         let _ = self
             .request(RuntimeVendorCommand::DeleteRuntime(DeleteRuntimeRequest {
                 runtime_id: runtime_id.to_string(),
             }))
             .await;
+        Ok(horsie_runtime_vendor::RuntimeProgress::Gone {
+            reason: "the owning session was deleted".to_string(),
+        })
+    }
+}
+
+impl WebsocketRuntimeVendor {
+    /// A handle bound to this vendor's *name*, not to this link.
+    ///
+    /// The transport re-resolves the name on every call, so a reconnect
+    /// mid-turn is invisible to the run already in flight.
+    fn handle(&self, runtime_id: &str) -> Arc<dyn crate::runtime_vendor::RuntimeHandle> {
+        Arc::new(horsie_runtime_vendor::RuntimeHandleImpl::new(
+            runtime_id.to_string(),
+            Arc::new(crate::runtime_vendor::RuntimeVendorTransport::new(
+                self.vendors.clone(),
+                self.vendor_name.clone(),
+                runtime_id.to_string(),
+            )),
+            self.closed.subscribe(),
+        ))
     }
 }
 
@@ -411,6 +500,21 @@ impl RuntimeVendorLink {
 )]
 mod tests {
     use super::*;
+    use crate::runtime_vendor::RuntimeSpec;
+    use crate::runtime_vendor::RuntimeVendor as _;
+
+    /// A vendor table of its own. Handles minted against it resolve back to
+    /// whatever the test publishes.
+    /// A progress sink nothing reads: these tests assert on the vendor's
+    /// return value, which is the operation's outcome.
+    fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+        tokio::sync::mpsc::channel(8).0
+    }
+
+    fn test_links() -> crate::runtime_vendor::WebsocketVendorTable {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
     use horsie_models::runtime_vendor::{
         QueryRuntimesResponse, RuntimeStateChanged, RuntimeVendorCapabilities, RuntimeVendorReady,
     };
@@ -466,13 +570,13 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
         assert_eq!(link.vendor_name(), "my-laptop");
         assert_eq!(link.instance_id(), "my-laptop-instance");
         assert!(!link.announced_capabilities().supports_provisioning);
-        assert!(link.is_connected());
+        assert!(link.is_reachable());
     }
 
     #[tokio::test(start_paused = true)]
@@ -485,15 +589,15 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
-        assert!(link.is_connected());
+        assert!(link.is_reachable());
 
         // Auto-advanced by the paused clock, not slept through.
         link.closed().await;
         assert!(
-            !link.is_connected(),
+            !link.is_reachable(),
             "a link with no frame inside the idle timeout must not keep its name"
         );
     }
@@ -515,13 +619,13 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
         // Well short of the idle timeout, but the point is the pings are seen
         // as liveness rather than skipped as noise.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(link.is_connected());
+        assert!(link.is_reachable());
     }
 
     #[tokio::test]
@@ -536,7 +640,8 @@ mod tests {
             .await;
             std::future::pending::<()>().await;
         });
-        let outcome = RuntimeVendorLink::start(server_ws, Principal::Anonymous).await;
+        let outcome =
+            WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links()).await;
         let Err(err) = outcome else {
             panic!("a non-Ready first message must be rejected");
         };
@@ -570,7 +675,7 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
         let event = link
@@ -601,10 +706,10 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
-        let Err(err) = link.create("rt-1", &spec_fixture()).await else {
+        let Err(err) = link.create("rt-1", &spec_fixture().to_wire(), sink()).await else {
             panic!("a RequestFailed reply must surface as an error");
         };
         assert!(format!("{err}").contains("ghost"), "{err}");
@@ -619,7 +724,7 @@ mod tests {
             drop(agent_ws);
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
         let err = link
@@ -628,9 +733,12 @@ mod tests {
             ))
             .await
             .expect_err("a hung-up agent must fail the request, not hang");
-        assert!(err.to_lowercase().contains("disconnect"), "{err}");
+        assert!(
+            matches!(err, RequestError::Link(_)),
+            "a dead socket is a link failure, not a refusal: {err}"
+        );
         for _ in 0..50 {
-            if !link.is_connected() {
+            if !link.is_reachable() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -672,12 +780,14 @@ mod tests {
             }
         });
 
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
-        link.create("rt-1", &spec_fixture()).await.expect("create");
-        link.hibernate("rt-1").await;
-        link.delete("rt-1").await;
+        link.create("rt-1", &spec_fixture().to_wire(), sink())
+            .await
+            .expect("create");
+        let _ = link.hibernate("rt-1", sink()).await;
+        let _ = link.delete("rt-1", sink()).await;
 
         assert_eq!(
             seen.lock().unwrap().as_slice(),
@@ -697,7 +807,7 @@ mod tests {
             send_event(&mut agent_ws, "boot", boot("fixed-dir", false)).await;
             std::future::pending::<()>().await;
         });
-        let link = RuntimeVendorLink::start(server_ws, Principal::Anonymous)
+        let link = WebsocketRuntimeVendor::start(server_ws, Principal::Anonymous, test_links())
             .await
             .expect("handshake");
         assert!(

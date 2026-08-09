@@ -114,7 +114,7 @@ mod tests {
     use horsie_models::settings::{ModelInput, ProviderInput};
 
     /// One account, configured far enough that a routine can actually start a
-    /// session: a provider, a model, an agent preset, and a `mock` vendor agent
+    /// session: a provider, a model, an agent preset, and a `mock` vendor process
     /// published in *its own* map.
     struct Account {
         services: Arc<UserServices>,
@@ -198,7 +198,7 @@ mod tests {
                 .serve_in_process()
                 .await
                 .expect("fake vendor");
-            services.vendor_agents.publish(v.link()).unwrap();
+            services.connected_vendors.publish(v.link()).unwrap();
             Some(v)
         } else {
             None

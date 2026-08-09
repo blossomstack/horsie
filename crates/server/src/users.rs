@@ -16,7 +16,7 @@ use crate::db::Db;
 use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
 use crate::sessions::spec::ServerDeps;
-use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
+use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
 use horsie_actor::{ActorRef, Journal, spawn_root};
 use horsie_models::model_cards::ModelCardInput;
@@ -70,7 +70,7 @@ pub struct UserServices {
     /// so a caller that needs to look at one does not have to reach through a
     /// service that happens to own it.
     pub provider_registry: SharedProviderRegistry,
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
     pub model_cards: Arc<model_cards::ModelCardStore>,
     pub chatgpt: Arc<crate::config::chatgpt_login::ChatGptLoginService>,
     pub github: Arc<crate::github::GithubService>,
@@ -82,11 +82,26 @@ pub struct UserServices {
     pub routine_runner: Arc<crate::routines::RoutineRunner>,
     pub environments: Arc<crate::environments::EnvironmentService>,
     pub workflows: Arc<crate::workflows::WorkflowService>,
-    /// Where this account's vendor agents publish themselves. A name claimed
+    /// Where this account's vendor processes publish themselves. A name claimed
     /// here is claimed for this account only, so `main` is available to
     /// everyone — and no session can select another account's runtime, because
     /// it is not in the map it reads.
-    pub vendor_agents: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    pub connected_vendors: Arc<crate::runtime_vendor::RuntimeVendorRegistry>,
+    /// This account's runtime vendors that are *configured* rather than dialled
+    /// in. A cloud vendor has nothing to announce itself from, so its row is
+    /// the only record it exists; this service is what rebuilds it at boot.
+    pub runtime_vendors: Arc<crate::runtime_vendor::RuntimeVendorConfigService>,
+    /// Where this account's runtimes land when they dial `/api/runtime/connect`.
+    ///
+    /// One per account rather than one per server: the dial token names the
+    /// account, so there is no lookup to get wrong, and a transport can never
+    /// be resolved across accounts even if two of them somehow shared a
+    /// runtime id.
+    pub connected_runtimes: Arc<horsie_runtime_vendor::ConnectedRuntimeRegistry>,
+    /// Signs this account's dial-back tokens. See [`OpenedConfig::dial_secret`].
+    ///
+    /// [`OpenedConfig::dial_secret`]: crate::config::store::OpenedConfig::dial_secret
+    pub dial_secret: Arc<Vec<u8>>,
 }
 
 /// Build one account's services on the shared deployment tier.
@@ -157,9 +172,23 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         opened.store.clone(),
     ));
 
-    let vendor_agents = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
+    let connected_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
+    let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
+    let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
+        crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
+        user.as_str().to_string(),
+        opened.vendors.clone(),
+        // The registry's own table, so the two publishers of one map can see
+        // each other's names rather than silently overwriting them.
+        connected_vendors.links(),
+        connected_runtimes.clone(),
+        opened.dial_secret.clone(),
+    ));
+    // Before anything can select a vendor: a session started early would
+    // otherwise be told its configured vendor does not exist.
+    runtime_vendors.publish_all().await;
     let runtimes = Arc::new(crate::runtime_manager::RuntimeManager::new(
         crate::runtime_manager::RuntimeDeps {
             vendors: opened.vendors.clone(),
@@ -189,12 +218,37 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         journal,
     );
 
+    // Destroy substrate left over from sessions that no longer exist. Deleting a
+    // session already tells its vendor; this covers the case where the vendor
+    // was unreachable at the time, and the machine has been billing ever since.
+    //
+    // Detached, because it makes network calls and an account's first request
+    // must not wait on a cloud API. Skipped entirely if the session list cannot
+    // be read: a partial list would mark live runtimes as orphans and destroy
+    // their workspaces.
+    {
+        let supervisor = supervisor.clone();
+        let runtime_vendors = runtime_vendors.clone();
+        let user = user.clone();
+        tokio::spawn(async move {
+            let Ok(sessions) = supervisor
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+            else {
+                tracing::warn!(user = %user, "orphan sweep skipped: the session list is unreadable");
+                return;
+            };
+            let live = sessions.into_iter().map(|(id, _, _)| id).collect();
+            runtime_vendors.sweep_orphans(&live).await;
+        });
+    }
+
     let routine_runner = Arc::new(crate::routines::RoutineRunner::new(
         routines.clone(),
         agents.clone(),
         environments.clone(),
         opened.store.clone(),
-        vendor_agents.clone(),
+        connected_vendors.clone(),
         supervisor.clone(),
     ));
 
@@ -216,7 +270,10 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         routine_runner,
         environments,
         workflows,
-        vendor_agents,
+        connected_vendors,
+        runtime_vendors,
+        connected_runtimes,
+        dial_secret: opened.dial_secret.clone(),
     }))
 }
 
@@ -252,7 +309,23 @@ impl UserRegistry {
         &self.shared
     }
 
+    /// Whether this account has been touched, without touching it.
+    ///
+    /// For assertions about what a request *did not* build: every other way of
+    /// asking would build the thing being asked about.
+    #[must_use]
+    pub fn is_built(&self, user: &UserId) -> bool {
+        self.users
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(user)
+    }
+
     /// This account's services, building them if this is its first touch.
+    ///
+    /// **Get-or-create.** Every caller has to have established that the account
+    /// is real first — a request that reaches here with an unverified,
+    /// caller-supplied id is a way to spawn a supervisor per stranger.
     pub async fn get(&self, user: &UserId) -> Result<Arc<UserServices>, String> {
         let cell = {
             let mut users = self

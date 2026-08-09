@@ -140,7 +140,11 @@ pub async fn invoke_agent(
     .await?;
     // Checked on the *resolved* vendor, which only exists once the environment
     // has been read: a named environment carries its own.
-    if !state.vendor_agents.connected_names().contains(&spec.vendor) {
+    if !state
+        .connected_vendors
+        .connected_names()
+        .contains(&spec.vendor)
+    {
         return Err(Api::unprocessable(format!(
             "runtime vendor '{}' is not connected",
             spec.vendor

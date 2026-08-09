@@ -3,7 +3,7 @@
 //!
 //! The browser authenticates by cookie rather than a header because it has no
 //! choice: both event streams use the native `EventSource`, which cannot set
-//! headers. Non-browser callers (the CLI, vendor agents) send
+//! headers. Non-browser callers (the CLI, vendor processes) send
 //! `Authorization: Bearer` and are accepted by the same code path.
 
 use crate::auth::{DeviceError, LoginError, Principal};
@@ -39,6 +39,13 @@ fn is_public(path: &str) -> bool {
         || path == "/api/device/auth/token"
         || path == "/api/device/auth/refresh"
         || path.starts_with("/api/plugin-artifacts/")
+        // Public to *this* layer only. A runtime holds no session credential
+        // and never will — it presents a per-account HMAC dial token, which
+        // `verify` below has no way to check and would answer 401 to. The route
+        // authenticates its own caller and refuses anything it cannot verify,
+        // so leaving it here meant no cloud runtime could register on any
+        // deployment that had authentication turned on at all.
+        || path == "/api/runtime/connect"
 }
 
 /// The account a delegating front layer has already authenticated.

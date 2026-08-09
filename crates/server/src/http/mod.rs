@@ -18,8 +18,10 @@ mod messages;
 mod model_cards;
 mod plugins;
 mod routines;
+pub mod runtime_connect;
+mod runtime_vendors;
 mod sse;
-pub mod vendor_connect;
+mod vendor_connect;
 mod workflows;
 
 use crate::auth::{AuthService, Principal};
@@ -287,6 +289,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/agents/{name}/invoke", post(agents::invoke_agent))
         .route(
+            "/api/runtime-vendors",
+            get(runtime_vendors::list_runtime_vendors),
+        )
+        .route(
+            "/api/runtime-vendors/{name}",
+            put(runtime_vendors::put_runtime_vendor).delete(runtime_vendors::delete_runtime_vendor),
+        )
+        .route(
             "/api/environments",
             get(environments::list_environments).post(environments::create_environment),
         )
@@ -331,6 +341,10 @@ pub fn app(state: AppState) -> Router {
             post(workflows::retry_step),
         )
         .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
+        .route(
+            "/api/runtime/connect",
+            get(runtime_connect::runtime_connect),
+        )
         .merge(credentials(state.auth.mode()))
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
@@ -381,7 +395,7 @@ mod tests {
     }
 
     /// The real composition root, on a throwaway database, with one fake
-    /// vendor agent published under `mock` in the bootstrap account.
+    /// vendor process published under `mock` in the bootstrap account.
     ///
     /// Deliberately built through `UserRegistry` rather than by assembling a
     /// bundle by hand: what these tests exercise is what a request actually
@@ -420,7 +434,7 @@ mod tests {
         state
     }
 
-    /// Publish a fake vendor agent as `mock` in the state's anonymous account,
+    /// Publish a fake vendor process as `mock` in the state's anonymous account,
     /// which is who every unauthenticated request resolves to.
     async fn publish_mock_vendor(state: &AppState) {
         let agent = FakeRuntimeVendor::builder("mock")
@@ -429,7 +443,7 @@ mod tests {
             .expect("fake agent");
         services(state)
             .await
-            .vendor_agents
+            .connected_vendors
             .publish(agent.link())
             .expect("mock is unclaimed in a fresh account");
     }
@@ -1562,11 +1576,200 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Dial `/api/runtime/connect` with `token`, announce `announced`, and
+    /// return the socket so the caller controls when it closes.
+    async fn dial_runtime(
+        addr: std::net::SocketAddr,
+        token: &str,
+        announced: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        tokio_tungstenite::tungstenite::Error,
+    > {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/api/runtime/connect")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await?;
+        let ready = serde_json::to_string(&horsie_models::runtime::RuntimeOutboundMessage::Ready(
+            horsie_models::runtime::RuntimeReady {
+                runtime_id: announced.to_string(),
+            },
+        ))
+        .unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(ready.into()))
+            .await
+            .unwrap();
+        Ok(ws)
+    }
+
+    /// Bind and serve, returning the address. Named apart from the existing
+    /// `serve` helper below, which answers with a URL string instead.
+    async fn serve_state(state: AppState) -> std::net::SocketAddr {
+        let router = app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_dials_in_is_registered_for_its_own_account() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let services = services(&state).await;
+        let token = horsie_support::dial_token::mint(
+            &services.dial_secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: services.user.as_str().to_string(),
+                runtime_id: "s1".to_string(),
+            },
+        );
+        let addr = serve_state(state).await;
+
+        let _ws = dial_runtime(addr, &token, "s1").await.expect("dial");
+        for _ in 0..100 {
+            if services
+                .connected_runtimes
+                .runtime_transport("s1")
+                .await
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the runtime never registered");
+    }
+
+    #[tokio::test]
+    async fn a_runtime_with_no_token_is_refused_before_the_upgrade() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addr = serve_state(test_state(&tmp).await).await;
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/runtime/connect"))
+                .await
+                .is_err(),
+            "an unauthenticated runtime must never reach a websocket"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_cannot_register_a_runtime_it_does_not_name() {
+        // The property the token buys. Before it, whoever announced an id first
+        // received that runtime's relayed tool calls.
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let services = services(&state).await;
+        let token = horsie_support::dial_token::mint(
+            &services.dial_secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: services.user.as_str().to_string(),
+                runtime_id: "mine".to_string(),
+            },
+        );
+        let addr = serve_state(state).await;
+
+        let _ws = dial_runtime(addr, &token, "someone-elses")
+            .await
+            .expect("dial");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            services
+                .connected_runtimes
+                .runtime_transport("someone-elses")
+                .await
+                .is_none(),
+            "a token for 'mine' must not register 'someone-elses'"
+        );
+    }
+
+    /// The dial-back has to work on a deployment that has authentication on —
+    /// which is every hosted one, and the only kind with cloud vendors to dial
+    /// back from. A runtime holds no session credential, so `require_auth` used
+    /// to answer 401 before this handler ever ran, and no Fly or velos machine
+    /// could register at all. Both non-`Off` modes, because they refuse for
+    /// different reasons: `Password` fails to verify the bearer, `Delegated`
+    /// finds no identity attached.
+    #[tokio::test]
+    async fn a_runtime_dials_in_on_a_deployment_with_authentication_on() {
+        for mode in [
+            crate::auth::AuthMode::Password,
+            crate::auth::AuthMode::Delegated,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut state = test_state(&tmp).await;
+            state.auth = Arc::new(crate::auth::AuthService::new(
+                crate::auth::AuthStore::new(crate::db::testing::db().await),
+                crate::auth::AuthDeps {
+                    mode,
+                    state_dir: tmp.path().to_path_buf(),
+                },
+            ));
+            let services = services(&state).await;
+            let token = horsie_support::dial_token::mint(
+                &services.dial_secret,
+                &horsie_support::dial_token::DialClaims {
+                    user_id: services.user.as_str().to_string(),
+                    runtime_id: "s1".to_string(),
+                },
+            );
+            let addr = serve_state(state).await;
+
+            let _ws = dial_runtime(addr, &token, "s1")
+                .await
+                .unwrap_or_else(|e| panic!("a dial under {mode:?} must be accepted: {e}"));
+            let mut registered = false;
+            for _ in 0..100 {
+                if services
+                    .connected_runtimes
+                    .runtime_transport("s1")
+                    .await
+                    .is_some()
+                {
+                    registered = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            assert!(registered, "the runtime never registered under {mode:?}");
+        }
+    }
+
+    /// Building an account is not free — a supervisor, a dial secret, a sweep
+    /// task — and the account a token names is a *claim* until its tag checks
+    /// out. Resolving the claim through the get-or-create registry meant a
+    /// stranger could mint accounts by dialling in a loop with nonsense.
+    #[tokio::test]
+    async fn a_token_for_an_account_that_does_not_exist_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = test_state(&tmp).await;
+        let users = state.users.clone();
+        let addr = serve_state(state).await;
+
+        assert!(
+            dial_runtime(addr, "ghost.s1.deadbeef", "s1").await.is_err(),
+            "a token no secret can verify must never reach a websocket"
+        );
+        assert!(
+            !users.is_built(&crate::auth::UserId::new("ghost")),
+            "an unverified claim must not have built an account"
+        );
+    }
+
     #[tokio::test]
     async fn a_connected_agent_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let router = app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2317,6 +2520,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_vendors_crud_over_http() {
+        use horsie_models::runtime_vendor::{RuntimeVendorConfigView, RuntimeVendorSettings};
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        let settings = |callback: &str| {
+            // Unions are adjacently tagged across this protocol: a variant name
+            // in `kind`, its payload in `value`.
+            serde_json::json!({
+                "kind": "Fly",
+                "value": {
+                    "app": "horsie-runtimes",
+                    "image": "ghcr.io/o/runtime:1",
+                    "region": "iad",
+                    "workspaceRoot": "/workspaces",
+                    "callbackUrl": callback,
+                    "volumes": true,
+                    "cpuKind": "shared",
+                    "cpus": 1,
+                    "memoryMb": 1024,
+                    "volumeSizeGb": 10,
+                }
+            })
+        };
+        let body = serde_json::json!({
+            "name": "fly",
+            "settings": settings("wss://horsie.example.com"),
+            "credential": "fly-token",
+        });
+
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/runtime-vendors/fly", &body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: RuntimeVendorConfigView = read_json(res).await;
+        assert!(v.has_credential, "the token was stored");
+        let RuntimeVendorSettings::Fly(fly) = v.settings else {
+            panic!("a fly vendor must round-trip as one")
+        };
+        assert_eq!(
+            fly.callback_url, "wss://horsie.example.com/api/runtime/connect",
+            "a bare origin gains the connect path"
+        );
+
+        // The token is never readable back, however it is asked for.
+        let res = app
+            .clone()
+            .oneshot(get("/api/runtime-vendors"))
+            .await
+            .unwrap();
+        let list: Vec<RuntimeVendorConfigView> = read_json(res).await;
+        assert_eq!(list.len(), 1);
+        assert!(list[0].has_credential);
+        assert!(
+            !serde_json::to_string(&list[0])
+                .unwrap()
+                .contains("fly-token"),
+            "a stored credential must never be serialised back to a client"
+        );
+
+        // An edit may omit the credential, since the client cannot read it.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/runtime-vendors/fly",
+                &serde_json::json!({
+                    "name": "fly",
+                    "settings": settings("wss://horsie.example.com/relay"),
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v: RuntimeVendorConfigView = read_json(res).await;
+        assert!(
+            v.has_credential,
+            "an omitted credential keeps the stored one"
+        );
+
+        // A callback only the server itself can reach is refused at save time.
+        let res = app
+            .clone()
+            .oneshot(put_json(
+                "/api/runtime-vendors/local-only",
+                &serde_json::json!({
+                    "name": "local-only",
+                    "settings": settings("ws://localhost:8080"),
+                    "credential": "t",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let res = app
+            .clone()
+            .oneshot(delete("/api/runtime-vendors/fly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let res = app
+            .oneshot(delete("/api/runtime-vendors/fly"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn environments_crud_over_http() {
         use horsie_models::environments::EnvironmentView;
         let tmp = tempfile::tempdir().unwrap();
@@ -2806,7 +3119,7 @@ mod tests {
         );
     }
 
-    /// Bring up a real listener so vendor agents can dial a real WS upgrade.
+    /// Bring up a real listener so vendor processes can dial a real WS upgrade.
     async fn serve(router: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2833,7 +3146,7 @@ mod tests {
     async fn a_vendor_dial_without_a_credential_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let (state, _pw) = auth_state(&tmp).await;
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         // The dial fails at the HTTP layer — a 401, not a completed upgrade
@@ -2859,7 +3172,7 @@ mod tests {
         // A valid credential of the wrong kind: right principal, but a cookie
         // has no business being a machine.
         let web = state.auth.login(&pw).await.unwrap();
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
@@ -2881,7 +3194,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let agents = services(&state).await.vendor_agents.clone();
+        let agents = services(&state).await.connected_vendors.clone();
         let url = serve(app(state)).await;
 
         let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")

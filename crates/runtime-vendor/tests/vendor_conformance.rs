@@ -3,7 +3,7 @@
 //! The server-side conformance tests drive `FakeRuntimeVendor`, whose command
 //! loop is sequential — a blocked create genuinely blocks its socket read, so
 //! those tests pass without any locking at all and say nothing about the agent
-//! that ships. This one dials a real `RuntimeVendor::run` over a real
+//! that ships. This one dials a real `RuntimeVendorClient::run` over a real
 //! WebSocket, where every command dispatches on its own task, and holds it to
 //! the same promises:
 //!
@@ -27,11 +27,21 @@ use horsie_models::executor::RuntimeConfig;
 use horsie_runtime_client::{MockTransport, RuntimeTransport};
 use horsie_runtime_vendor::{
     AgentExit, ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus,
-    RuntimeHandle, RuntimeProvider, RuntimeVendor,
+    RuntimeHandle, RuntimeProvider, RuntimeVendorClient,
 };
 use horsie_server::auth::Principal;
-use horsie_server::runtime_vendor::{RuntimeSpec, RuntimeVendorLink, VendorError, WorkspaceSpec};
+use horsie_server::runtime_vendor::RuntimeVendor as _;
+use horsie_server::runtime_vendor::{
+    RuntimeSpec, RuntimeVendorError, WebsocketRuntimeVendor, WorkspaceSpec,
+};
 use std::collections::HashMap;
+
+/// A progress sink nothing reads: the conformance suite asserts on each
+/// operation's return value, which is its outcome.
+fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+    tokio::sync::mpsc::channel(8).0
+}
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,7 +107,7 @@ impl RuntimeProvider for GatedProvider {
 // ── harness ──────────────────────────────────────────────────────────────────
 
 struct Agent {
-    link: Arc<RuntimeVendorLink>,
+    link: Arc<WebsocketRuntimeVendor>,
     cancel: CancellationToken,
     /// The transports this incarnation's runtimes dialed back on, so a test can
     /// tell a live runtime from a stopped one.
@@ -147,7 +157,7 @@ impl Machine {
         self.dir.path().join("state")
     }
 
-    /// Bring up a real `RuntimeVendor` dialing a one-shot WebSocket endpoint,
+    /// Bring up a real `RuntimeVendorClient` dialing a one-shot WebSocket endpoint,
     /// and hand back the server-side link the session server would hold.
     async fn start(
         &self,
@@ -163,7 +173,9 @@ impl Machine {
                 .await
                 .expect("websocket upgrade");
             // Auth-disabled shape: every principal is anonymous.
-            let link = RuntimeVendorLink::start(ws, Principal::Anonymous)
+            let links: horsie_server::runtime_vendor::WebsocketVendorTable =
+                std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let link = WebsocketRuntimeVendor::start(ws, Principal::Anonymous, links.clone())
                 .await
                 .expect("handshake");
             // The agent waits to be told it is published before it serves, so a
@@ -179,7 +191,7 @@ impl Machine {
         let mut workspaces = HashMap::new();
         workspaces.insert("main".to_string(), self.dir.path().to_path_buf());
 
-        let agent = RuntimeVendor::new(
+        let agent = RuntimeVendorClient::new(
             "conformance".to_string(),
             true,
             Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
@@ -229,10 +241,14 @@ async fn get_after_create_returns_a_runtime() {
     let (_machine, agent) = start_agent(None).await;
     agent
         .link
-        .create("rt-1", &agent.spec())
+        .create("rt-1", &agent.spec().to_wire(), sink())
         .await
         .expect("create");
-    agent.link.get("rt-1").await.expect("get after create");
+    agent
+        .link
+        .get("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("get after create");
 }
 
 #[tokio::test]
@@ -240,18 +256,21 @@ async fn get_without_create_is_gone_and_provisions_nothing() {
     let (_machine, agent) = start_agent(None).await;
     let err = agent
         .link
-        .get("rt-unknown")
+        .get("rt-unknown", &agent.spec().to_wire(), sink())
         .await
         .expect_err("a get must never provision");
     assert!(
-        matches!(err, VendorError::Gone(_)),
+        matches!(err, RuntimeVendorError::Gone(_)),
         "an absent runtime is Gone, not Unavailable: {err:?}"
     );
     // And having said so, it still holds nothing: a second get repeats it
     // rather than finding something the first one created.
     assert!(matches!(
-        agent.link.get("rt-unknown").await,
-        Err(VendorError::Gone(_))
+        agent
+            .link
+            .get("rt-unknown", &agent.spec().to_wire(), sink())
+            .await,
+        Err(RuntimeVendorError::Gone(_))
     ));
 }
 
@@ -260,15 +279,15 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
     let (_machine, agent) = start_agent(None).await;
     agent
         .link
-        .create("rt-1", &agent.spec())
+        .create("rt-1", &agent.spec().to_wire(), sink())
         .await
         .expect("create");
-    agent.link.hibernate("rt-1").await;
+    let _ = agent.link.hibernate("rt-1", sink()).await;
     // A process cannot be suspended and re-entered, so this agent keeps the
     // runtime — and the session it belongs to is still resumable.
     agent
         .link
-        .get("rt-1")
+        .get("rt-1", &agent.spec().to_wire(), sink())
         .await
         .expect("get after an advisory hibernate");
 }
@@ -277,9 +296,9 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
 
 /// A vendor with nothing configured, for the credential tests: they never get
 /// as far as needing a provider or a workspace.
-fn bare_vendor() -> RuntimeVendor {
+fn bare_vendor() -> RuntimeVendorClient {
     let connected = Arc::new(ConnectedRuntimeRegistry::new());
-    RuntimeVendor::new(
+    RuntimeVendorClient::new(
         "creds".to_string(),
         false,
         Arc::new(move |_id: &str, _caps: Option<PathBuf>| {
@@ -401,7 +420,7 @@ async fn a_respawnable_runtime_outlives_the_agent_process() {
     let first = machine.start(None, true).await;
     first
         .link
-        .create("rt-1", &first.spec())
+        .create("rt-1", &first.spec().to_wire(), sink())
         .await
         .expect("create");
     drop(first);
@@ -409,7 +428,7 @@ async fn a_respawnable_runtime_outlives_the_agent_process() {
     let second = machine.start(None, true).await;
     second
         .link
-        .get("rt-1")
+        .get("rt-1", &second.spec().to_wire(), sink())
         .await
         .expect("a get after an agent restart must rebuild, not report it gone");
     assert!(second.is_live("rt-1").await);
@@ -424,7 +443,7 @@ async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
     let first = machine.start(None, false).await;
     first
         .link
-        .create("rt-1", &first.spec())
+        .create("rt-1", &first.spec().to_wire(), sink())
         .await
         .expect("create");
     drop(first);
@@ -432,10 +451,10 @@ async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
     let second = machine.start(None, false).await;
     let err = second
         .link
-        .get("rt-1")
+        .get("rt-1", &second.spec().to_wire(), sink())
         .await
         .expect_err("a provisioning vendor must not silently rebuild a workspace");
-    assert!(matches!(err, VendorError::Gone(_)), "{err:?}");
+    assert!(matches!(err, RuntimeVendorError::Gone(_)), "{err:?}");
 }
 
 /// Hibernate is where the respawn path earns its keep in normal operation: the
@@ -446,37 +465,69 @@ async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
     let agent = machine.start(None, true).await;
     agent
         .link
-        .create("rt-1", &agent.spec())
+        .create("rt-1", &agent.spec().to_wire(), sink())
         .await
         .expect("create");
     assert!(agent.is_live("rt-1").await);
 
-    agent.link.hibernate("rt-1").await;
+    let _ = agent.link.hibernate("rt-1", sink()).await;
     assert!(
         !agent.is_live("rt-1").await,
         "an agent that can rebuild the runtime should take the hint"
     );
 
-    agent.link.get("rt-1").await.expect("a get resumes it");
+    agent
+        .link
+        .get("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("a get resumes it");
     assert!(agent.is_live("rt-1").await);
 }
 
-/// A deleted session must not leave the means to rebuild its runtime lying
-/// around: the directory is the record, so it goes with the session.
+/// A deleted session's per-runtime state goes with it, rather than accumulating
+/// on the agent's disk for the life of the process.
 #[tokio::test]
 async fn delete_removes_the_runtimes_state_directory() {
     let machine = Machine::new();
     let agent = machine.start(None, true).await;
     agent
         .link
-        .create("rt-1", &agent.spec())
+        .create("rt-1", &agent.spec().to_wire(), sink())
         .await
         .expect("create");
     let dir = machine.state_dir().join("rt-1");
-    assert!(dir.join("spec.json").exists(), "create records the spec");
+    assert!(dir.exists(), "create makes the runtime a state directory");
 
-    agent.link.delete("rt-1").await;
-    assert!(!dir.exists(), "delete takes the record with it");
+    let _ = agent.link.delete("rt-1", sink()).await;
+    assert!(!dir.exists(), "delete takes it with it");
+}
+
+/// The point of putting the spec on the get: no agent-side copy is consulted,
+/// so a runtime revives against what the server holds now rather than against
+/// whatever was recorded when it was created.
+#[tokio::test]
+async fn a_get_revives_from_the_spec_it_carries() {
+    let machine = Machine::new();
+    let agent = machine.start(None, true).await;
+    agent
+        .link
+        .create("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("create");
+    let _ = agent.link.hibernate("rt-1", sink()).await;
+
+    // Nothing on this agent's disk describes rt-1 any more.
+    assert!(
+        !machine.state_dir().join("rt-1/spec.json").exists(),
+        "the agent must keep no copy of the spec"
+    );
+
+    agent
+        .link
+        .get("rt-1", &agent.spec().to_wire(), sink())
+        .await
+        .expect("the carried spec is enough to revive it");
+    assert!(agent.is_live("rt-1").await);
 }
 
 /// The promise `lifecycle_locks` exists to keep. The real agent dispatches every
@@ -491,14 +542,14 @@ async fn get_during_an_in_flight_create_waits_for_it() {
     let creating = {
         let link = agent.link.clone();
         let spec = agent.spec();
-        tokio::spawn(async move { link.create("rt-1", &spec).await })
+        tokio::spawn(async move { link.create("rt-1", &spec.to_wire(), sink()).await })
     };
     // Let the create reach the provider and park there.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let getting = {
         let link = agent.link.clone();
-        tokio::spawn(async move { link.get("rt-1").await })
+        tokio::spawn(async move { link.get("rt-1", &agent.spec().to_wire(), sink()).await })
     };
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(

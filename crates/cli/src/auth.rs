@@ -496,7 +496,7 @@ pub async fn server_requires_auth(server: &str) -> bool {
 /// again should do about it.
 ///
 /// A one-shot command can flatten all three into a `Result` and exit. A
-/// long-lived vendor agent cannot: it has to tell "the server is down right
+/// long-lived vendor process cannot: it has to tell "the server is down right
 /// now" (wait, try again) from "this login is finished" (stop and say so), and
 /// before this distinction existed it treated both as neither — retrying a dead
 /// token every 30 seconds forever.
@@ -744,7 +744,7 @@ mod tests {
         ));
     }
 
-    /// The distinction the vendor agent's reconnect loop depends on. An issuer
+    /// The distinction the vendor process's reconnect loop depends on. An issuer
     /// that cannot be reached says nothing about whether the credential is
     /// still good, so it must neither be reported dead nor — worse — discarded:
     /// that would turn every server restart into a forced re-login.

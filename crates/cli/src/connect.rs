@@ -1,4 +1,4 @@
-//! `horsie connect`: run this machine as a **runtime vendor agent**.
+//! `horsie connect`: run this machine as a **runtime vendor process**.
 //!
 //! It holds one outbound WebSocket to the session server and spawns one
 //! `horsie-runtime` child per session, each dialing this process's own unix
@@ -16,7 +16,7 @@ use horsie_models::capabilities::{
 };
 use horsie_runtime_vendor::{
     AgentExit, ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
-    RuntimeListenerServer, RuntimeVendor, SandboxPolicy, serve_runtime_connections,
+    RuntimeListenerServer, RuntimeVendorClient, SandboxPolicy, serve_runtime_connections,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -224,7 +224,7 @@ fn runtime_socket_path(state_dir: &Path) -> PathBuf {
     state_dir.join(format!("vendor-runtimes-{}.sock", std::process::id()))
 }
 
-/// Run this machine as a vendor agent until the socket closes or the process is
+/// Run this machine as a vendor process until the socket closes or the process is
 /// interrupted.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -282,7 +282,7 @@ pub async fn run(
     if background {
         return Err(CliError::Validation(
             "--background is no longer supported: `horsie connect` is now a long-lived \
-             vendor agent that supervises one runtime per session. Run it under your \
+             vendor process that supervises one runtime per session. Run it under your \
              process manager (systemd, launchd, tmux) so its lifetime and logs are managed \
              explicitly."
                 .to_string(),
@@ -306,7 +306,13 @@ pub async fn run(
         .await
         .map_err(|e| CliError::Executor(format!("bind runtime socket: {e}")))?;
     let cancel = CancellationToken::new();
-    serve_runtime_connections(listener, connected.clone(), cancel.clone());
+    let dial_secret = horsie_runtime_vendor::new_dial_secret();
+    serve_runtime_connections(
+        listener,
+        connected.clone(),
+        dial_secret.clone(),
+        cancel.clone(),
+    );
 
     let bin = runtime_bin.to_path_buf();
     let sock_for_provider = socket.clone();
@@ -324,7 +330,7 @@ pub async fn run(
             Arc::new(p)
         });
 
-    let agent = RuntimeVendor::new(
+    let agent = RuntimeVendorClient::new(
         vendor_name.to_string(),
         // A fixed, user-owned directory: no repo checkout, no bundle install.
         false,
@@ -333,6 +339,7 @@ pub async fn run(
         Arc::new(FixedWorkspaces::new(table.clone())),
         state_dir.join("runtimes"),
     )
+    .with_dial_secret(dial_secret)
     .with_sandbox(sandbox)
     // The workspaces this agent serves are the user's own directories, which
     // exist whether or not a runtime does. So a runtime here is just a process:

@@ -2,7 +2,6 @@
 //! types in `horsie_models::session` — wire formats evolve at the speed of the
 //! API contract, these evolve at the speed of data migrations.
 
-use crate::runtime_vendor::RuntimeVendorLink;
 use horsie_agentcore::LlmProvider;
 use horsie_models::session::SessionStatusKind;
 use serde::{Deserialize, Serialize};
@@ -15,10 +14,16 @@ use std::sync::{Arc, RwLock};
 /// never held across an `.await`.
 pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>;
 
-/// Runtime vendors keyed by name, behind a shared lock so a settings-API vendor
-/// edit can activate/reconfigure/retire a vendor without a restart. Read once
-/// per provision call in [`crate::sessions::session_actor::SessionActor::vendor`].
-pub type SharedVendors = Arc<RwLock<HashMap<String, Arc<RuntimeVendorLink>>>>;
+/// Runtime vendors keyed by name, behind a shared lock so a settings edit can
+/// activate, reconfigure or retire one without a restart. Read once per
+/// provision call in [`crate::sessions::session_actor::SessionActor::vendor`].
+///
+/// Not "Shared": since per-account services there is one of these per account,
+/// so a name saying "shared" would read as deployment-wide — the opposite of
+/// what it is, on the type where being wrong means running tool calls on
+/// someone else's machine.
+pub type RuntimeVendorMap =
+    Arc<RwLock<HashMap<String, Arc<dyn crate::runtime_vendor::RuntimeVendor>>>>;
 
 /// A session's unique id (a UUID string). Equals the agent session uuid, so
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.
@@ -141,6 +146,35 @@ pub struct SessionSpec {
 }
 
 impl SessionSpec {
+    /// A minimal spec naming one vendor, for tests that only care which vendor
+    /// a call is routed to.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn for_vendor(vendor: &str) -> Self {
+        Self {
+            name: None,
+            agent: AgentSettings {
+                model: "m".into(),
+                allowed_tools: None,
+                use_plugins: None,
+                max_iterations: None,
+                max_retries: 0,
+                mcp_servers: vec![],
+                memory_spaces: vec![],
+                thinking_effort: None,
+                max_concurrent_subagents: None,
+            },
+            workspaces: vec![],
+            provision: vec![],
+            vendor: vendor.to_string(),
+            plugins: vec![],
+            origin: SessionOrigin::User,
+            workflow: None,
+            environment: None,
+            env_vars: vec![],
+        }
+    }
+
     /// The routine this session is a run of, if any.
     pub fn routine(&self) -> Option<&str> {
         match &self.origin {
@@ -251,7 +285,7 @@ pub struct ServerDeps {
     /// LLM providers keyed by the session's `model`, swappable at runtime.
     pub provider_registry: SharedProviderRegistry,
     /// Runtime vendors keyed by the session spec's `vendor` name.
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
     /// Mints short-lived GitHub tokens for repo provisioning; `None` when the
     /// deployment has no GitHub integration wired.
     pub github_tokens: Option<Arc<dyn crate::github::GithubTokenMinter>>,

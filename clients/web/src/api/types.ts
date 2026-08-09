@@ -5,6 +5,7 @@ export * from "../generated/agents";
 export * from "../generated/auth";
 export * from "../generated/capabilities";
 export * from "../generated/environments";
+export * from "../generated/runtime_vendor";
 export * from "../generated/executor";
 export * from "../generated/github";
 export * from "../generated/hooks";

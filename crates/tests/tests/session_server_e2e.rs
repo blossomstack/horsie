@@ -16,7 +16,7 @@ use horsie_agentcore::LlmProvider;
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_server::db::Db;
 use horsie_server::http::{AppState, app};
-use horsie_server::runtime_vendor::RuntimeVendorLink;
+use horsie_server::runtime_vendor::WebsocketRuntimeVendor;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::clock::TestClock;
 use horsie_server::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
@@ -74,7 +74,7 @@ fn provider_at(url: &str) -> Arc<dyn LlmProvider> {
 /// and a single LLM provider "mock" pointing at `mock_url`.
 async fn start_server(
     journal_dir: &Path,
-    vendor: Arc<RuntimeVendorLink>,
+    vendor: Arc<WebsocketRuntimeVendor>,
     mock_url: &str,
 ) -> Server {
     start_server_with(journal_dir, Some(vendor), mock_url, None).await
@@ -85,7 +85,7 @@ async fn start_server(
 /// offload happens exactly when the test sends `Tick` and never by surprise.
 async fn start_server_with(
     journal_dir: &Path,
-    vendor: Option<Arc<RuntimeVendorLink>>,
+    vendor: Option<Arc<WebsocketRuntimeVendor>>,
     mock_url: &str,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
@@ -96,7 +96,7 @@ async fn start_server_with(
 /// the seam a test needs to drive a wire other than Anthropic's.
 async fn start_server_on(
     journal_dir: &Path,
-    vendor: Option<Arc<RuntimeVendorLink>>,
+    vendor: Option<Arc<WebsocketRuntimeVendor>>,
     provider: Arc<dyn LlmProvider>,
     clock: Option<Arc<TestClock>>,
 ) -> Server {

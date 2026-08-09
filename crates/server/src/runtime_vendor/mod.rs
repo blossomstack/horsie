@@ -1,27 +1,44 @@
 //! The runtime vendor layer.
 //!
-//! A vendor is an external agent process that owns runtime lifecycle; the agent
-//! loop always stays server-side, and vendors only provide tool execution, a
-//! workspace, and a lifecycle. Every user action on a session translates into
-//! exactly one explicit vendor signal (`create` / `attach` / `stop` / `delete`),
-//! never an implicit side effect.
+//! A runtime vendor owns runtime lifecycle; the agent loop always stays
+//! server-side, and vendors only provide tool execution, a workspace, and a
+//! lifecycle. Every user action on a session translates into exactly one
+//! explicit vendor signal, never an implicit side effect.
 //!
-//! There is one vendor type — [`RuntimeVendorLink`], the server's end of a connected
-//! agent's WebSocket. The `RuntimeVendor` trait this module used to define was
-//! pure indirection once the in-process vendors were deleted.
+//! The contract itself — [`RuntimeVendor`] and [`RuntimeHandle`] — lives in
+//! `horsie-runtime-vendor`, because the same two traits describe both sides of
+//! the wire: this server drives a [`WebsocketRuntimeVendor`] that relays to a
+//! `horsie connect` process, and that process drives a vendor of its own.
+//!
+//! [`WebsocketRuntimeVendor`] is one implementation, not the only shape a vendor
+//! can have. An earlier revision deleted the trait as "pure indirection" when
+//! every vendor was a socket; it stops being indirection the moment one is not.
 
-/// A scriptable vendor agent for tests only — never compiled into a production
-/// build. Available to this crate's own tests (`cfg(test)`) and to external test
-/// crates that opt in via the `test-util` feature.
+pub mod config;
+/// A scriptable runtime vendor for tests only — never compiled into a
+/// production build. Available to this crate's own tests (`cfg(test)`) and to
+/// external test crates that opt in via the `test-util` feature.
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
-mod link;
+pub mod fly;
+pub mod fly_api;
 mod registry;
+pub mod runtime_command;
 mod transport;
+pub mod velos;
+pub mod velos_api;
+mod websocket;
 
-pub use link::RuntimeVendorLink;
-pub use registry::{RegisterError, RuntimeVendorRegistry};
+pub use config::{
+    RuntimeVendorConfigService, RuntimeVendorRow, RuntimeVendorStore, StoredFlySettings,
+    StoredVendorSettings,
+};
+pub use horsie_models::runtime_vendor::RuntimeVendorCapabilities;
+pub use horsie_runtime_vendor::runtime_vendor::{RuntimeHandle, RuntimeVendor};
+pub use horsie_runtime_vendor::{RuntimeProgress, RuntimeVendorError};
+pub use registry::{RegisterError, RuntimeVendorRegistry, WebsocketVendorTable};
 pub use transport::RuntimeVendorTransport;
+pub use websocket::WebsocketRuntimeVendor;
 
 /// A session workspace request. The directory is always vendor-allocated
 /// (velos: inside the container; local: the connected daemon's own dir), so a
@@ -29,18 +46,6 @@ pub use transport::RuntimeVendorTransport;
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkspaceSpec {
     pub name: String,
-}
-
-/// What a vendor can do with a session's workspace, announced by the vendor
-/// itself so the server and UI never branch on vendor name/kind. Extensible:
-/// add a field here and each vendor declares its own value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VendorCapabilities {
-    /// The vendor provisions a fresh workspace it owns — cloning repos,
-    /// installing skill bundles, running provision steps. A vendor that runs
-    /// in a fixed, user-owned directory (e.g. the shared local daemon)
-    /// provisions nothing and announces `false`.
-    pub supports_provisioning: bool,
 }
 
 /// Everything a vendor needs to provision (or revive) a runtime for a session.
@@ -56,18 +61,19 @@ pub struct RuntimeSpec {
     pub env: Vec<horsie_models::executor::EnvVar>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum VendorError {
-    /// A create could not provision the runtime. The session can try again.
-    #[error("provision failed: {0}")]
-    Provision(String),
-    /// A live vendor has no runtime under this id and cannot produce one.
-    /// Terminal for the session — the alternative would be silently rebuilding
-    /// a workspace the user believes still exists.
-    #[error("runtime is gone: {0}")]
-    Gone(String),
-    /// The vendor itself is unreachable: not registered, or its socket is
-    /// dead. Always retryable, and never to be confused with [`Self::Gone`].
-    #[error("vendor unavailable: {0}")]
-    Unavailable(String),
+impl RuntimeSpec {
+    /// The wire shape the vendor contract speaks.
+    ///
+    /// The server models a workspace as a named request and the wire as a bare
+    /// name, so this is where the two meet. Kept as a conversion rather than
+    /// collapsing the types because a workspace request is due to grow fields
+    /// (size, retention) that mean nothing on the wire.
+    #[must_use]
+    pub fn to_wire(&self) -> horsie_models::runtime_vendor::RuntimeSpec {
+        horsie_models::runtime_vendor::RuntimeSpec {
+            workspaces: self.workspaces.iter().map(|w| w.name.clone()).collect(),
+            env: self.env.clone(),
+            provision: self.provision.clone(),
+        }
+    }
 }

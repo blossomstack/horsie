@@ -1,20 +1,23 @@
 //! Database-backed [`ConfigStore`]. Owns the settings database, builds the live
-//! provider registry and the runtime vendors from it, and applies edits:
-//! provider/model/default-vendor changes swap the live registry (next turn
-//! sees them); vendor changes reconcile the live vendor map immediately — an
-//! active vendor is reconfigured in place, a new/previously-inactive one is
-//! built. No vendor edit needs a restart: velos vendors share the server-wide
-//! runtime-connection registry, so there is no per-vendor listener to rebind.
+//! provider registry from it, and applies edits: provider/model/default-vendor
+//! changes swap the live registry, so the next turn sees them.
 //!
-//! Vendors are generic — a `vendors(name, kind, config)` table plus a
-//! kind-tagged config union — so a new vendor kind is a new match arm, not a
-//! schema change. The database itself is SQLite or PostgreSQL, selected by
-//! `database.url`; see `crate::db`.
+//! It does **not** own runtime vendors. It holds the vendor map only to render
+//! the settings view; the two things that write it are
+//! [`RuntimeVendorRegistry`] (agents that dial in) and
+//! [`RuntimeVendorConfigService`] (vendors configured in settings). Neither
+//! needs a restart to take effect.
+//!
+//! The database itself is SQLite or PostgreSQL, selected by `database.url`; see
+//! `crate::db`.
+//!
+//! [`RuntimeVendorRegistry`]: crate::runtime_vendor::RuntimeVendorRegistry
+//! [`RuntimeVendorConfigService`]: crate::runtime_vendor::RuntimeVendorConfigService
 
 use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
-use crate::sessions::spec::{SharedProviderRegistry, SharedVendors};
+use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
 use horsie_llm_providers::anthropic::AnthropicProvider;
@@ -44,7 +47,13 @@ pub struct StoreDeps {
 pub struct OpenedConfig {
     pub store: Arc<DbConfigStore>,
     pub registry: SharedProviderRegistry,
-    pub vendors: SharedVendors,
+    pub vendors: RuntimeVendorMap,
+    /// Signs the dial-back token every runtime this account owns presents.
+    ///
+    /// Generated once and kept, rather than derived per runtime: rotating this
+    /// one value invalidates every outstanding token at once, and there is no
+    /// per-runtime row to migrate or expire.
+    pub dial_secret: Arc<Vec<u8>>,
     /// The migrated connection pool, shared with feature stores (e.g. GitHub)
     /// that persist into the same settings DB.
     pub db: Db,
@@ -87,7 +96,7 @@ pub struct DbConfigStore {
     default_vendor: RwLock<String>,
     /// The live vendor roster, written by connected agents rather than by this
     /// store. Read here only to render the settings view.
-    vendors: SharedVendors,
+    vendors: RuntimeVendorMap,
     info: ServerInfo,
 }
 
@@ -129,10 +138,12 @@ impl DbConfigStore {
         let registry: SharedProviderRegistry =
             Arc::new(RwLock::new(build_registry(&provs, &mods, &chatgpt)?));
 
-        // The server builds no vendors: every vendor is an agent that dials in
-        // and publishes itself into this map. It starts empty at boot and is
-        // never repopulated from the database.
-        let vendors: SharedVendors = Arc::new(RwLock::new(HashMap::new()));
+        // Empty here, and filled by its two writers: agents that dial in, and
+        // `RuntimeVendorConfigService` replaying the `runtime_vendors` table.
+        // This store never builds a vendor of its own.
+        let vendors: RuntimeVendorMap = Arc::new(RwLock::new(HashMap::new()));
+
+        let dial_secret = load_or_create_dial_secret(&db, &user).await?;
 
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
@@ -154,6 +165,7 @@ impl DbConfigStore {
             store,
             registry,
             vendors,
+            dial_secret,
             db,
         })
     }
@@ -945,8 +957,15 @@ fn trimmed(v: &Option<String>) -> Option<String> {
 
 // ── projections ──────────────────────────────────────────────────────────────
 
-/// Map a vendor's announced (domain) capabilities to the settings-wire view.
-fn vendor_caps_view(caps: crate::runtime_vendor::VendorCapabilities) -> VendorCapabilities {
+/// Map a vendor's announced capabilities to the settings-wire view.
+///
+/// Two wire types rather than one because they answer to different contracts:
+/// the vendor protocol's is what a vendor announces about itself, and the
+/// settings view's is what the UI renders. They agree today and are free to
+/// diverge.
+fn vendor_caps_view(
+    caps: horsie_models::runtime_vendor::RuntimeVendorCapabilities,
+) -> VendorCapabilities {
     VendorCapabilities {
         supports_provisioning: caps.supports_provisioning,
     }
@@ -1079,6 +1098,67 @@ where
         });
     }
     Ok(out)
+}
+
+/// This account's dial secret, creating it on first use.
+///
+/// `begin_write`, not `begin`: this reads the setting and then writes it when
+/// absent, and a deferred transaction that upgrades to a write that late loses
+/// to any writer that committed in between — SQLite answers `database is
+/// locked` and no busy timeout retries it.
+async fn load_or_create_dial_secret(db: &Db, user: &UserId) -> Result<Arc<Vec<u8>>, String> {
+    let mut tx = db.begin_write().await.map_err(|e| e.to_string())?;
+    if let Some(existing) = read_setting(db, &mut *tx, user, RUNTIME_DIAL_SECRET_KEY)
+        .await
+        .map_err(|e| e.to_string())?
+        && let Ok(bytes) = hex::decode(&existing)
+        && !bytes.is_empty()
+    {
+        return Ok(Arc::new(bytes));
+    }
+    let mut secret = vec![0u8; 32];
+    rand::fill(&mut secret[..]);
+    let sql = db.q(
+        "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
+         ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+    );
+    sqlx::query(&sql)
+        .bind(user.as_str())
+        .bind(RUNTIME_DIAL_SECRET_KEY)
+        .bind(hex::encode(&secret))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Arc::new(secret))
+}
+
+/// Settings key holding this account's hex-encoded dial secret.
+const RUNTIME_DIAL_SECRET_KEY: &str = "runtime_dial_secret";
+
+/// An account's dial secret if it has one, **never creating it**.
+///
+/// The read a dial-back needs, and the reason it is not
+/// [`load_or_create_dial_secret`]. A token names its own account, and that name
+/// is unverified until the secret it points at has checked the tag — so the
+/// lookup that fetches the secret must not be the thing that brings the account
+/// into being. Reaching for the account's services instead would: building one
+/// spawns a supervisor, a sweep task and a secret, which is a lot of machinery
+/// for `Bearer whatever.x.y` to conjure out of a stranger.
+///
+/// `None` means "no such account, or one that has never had a runtime", and
+/// both answer the caller the same way: refuse.
+pub async fn dial_secret_of(db: &Db, user: &UserId) -> Result<Option<Arc<Vec<u8>>>, String> {
+    let Some(hex) = read_setting(db, db.pool(), user, RUNTIME_DIAL_SECRET_KEY)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    Ok(hex::decode(&hex)
+        .ok()
+        .filter(|b| !b.is_empty())
+        .map(Arc::new))
 }
 
 async fn read_setting<'e, E>(

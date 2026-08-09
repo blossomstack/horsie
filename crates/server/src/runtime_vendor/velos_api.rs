@@ -3,6 +3,11 @@
 //! Scope is deliberately tiny — the vendor only ever *schedules* a container
 //! (whose command dials back to us), *observes* its phase to fail fast, and
 //! *reclaims* it. No watch streams, no listing, no status writes.
+//!
+//! The missing listing is why `VelosRuntimeVendor` takes the default (no-op)
+//! `sweep_orphans`: it has no way to ask velos what it owns. A container is
+//! reclaimed by name on the next create instead, which is the same guarantee
+//! arriving later.
 
 use async_trait::async_trait;
 use horsie_agentcore::Secret;

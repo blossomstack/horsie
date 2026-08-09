@@ -1,6 +1,6 @@
 //! Fetch the session's selected plugin bundles at startup and unpack them into
 //! a plugins dir the existing scanner reads. The server injects a manifest of
-//! `{name, hash}` refs plus a bearer token via env, and the vendor agent adds
+//! `{name, hash}` refs plus a bearer token via env, and the vendor process adds
 //! the base URL its runtimes can reach the server at plus the directory to
 //! unpack into; the runtime GETs each zip over its own outbound connection,
 //! verifies the content hash, and materializes the tree.

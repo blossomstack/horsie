@@ -1,4 +1,4 @@
-//! `GET /api/vendor/connect` — the one endpoint runtime *vendor agents* dial.
+//! `GET /api/vendor/connect` — the one endpoint runtime *vendor processes* dial.
 //!
 //! Distinct from `/api/runtime/connect`, which *runtimes* dial and which this
 //! design retires in a later change. An agent that completes the handshake is
@@ -7,7 +7,7 @@
 //! We perform a *raw* WebSocket upgrade (not axum's `WebSocketUpgrade`, whose
 //! `WebSocket` type can't be handed to `tokio_tungstenite`) so the upgraded
 //! connection can be wrapped in a `WebSocketStream` and driven by
-//! [`RuntimeVendorLink::start`] — the same mechanics `runtime_connect.rs` uses.
+//! [`WebsocketRuntimeVendor::start`] — the same mechanics `runtime_connect.rs` uses.
 
 use crate::auth::{Principal, TokenKind};
 use crate::http::AppState;
@@ -49,7 +49,7 @@ async fn authenticate(
             StatusCode::UNAUTHORIZED,
             axum::Json(horsie_models::session_api::ApiError {
                 code: "unauthorized".to_string(),
-                message: "a vendor agent must present an access or machine token".to_string(),
+                message: "a vendor process must present an access or machine token".to_string(),
             }),
         )
             .into_response()
@@ -121,7 +121,7 @@ pub async fn vendor_connect(
         Principal::User(id) => id.clone(),
     };
     let agents = match state.users.get(&owner_id).await {
-        Ok(services) => services.vendor_agents.clone(),
+        Ok(services) => services.connected_vendors.clone(),
         Err(e) => {
             tracing::error!(user = %owner_id, error = %e, "resolving a vendor's account failed");
             return (
@@ -138,7 +138,13 @@ pub async fn vendor_connect(
                 let ws =
                     WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
                         .await;
-                match crate::runtime_vendor::RuntimeVendorLink::start(ws, owner).await {
+                match crate::runtime_vendor::WebsocketRuntimeVendor::start(
+                    ws,
+                    owner,
+                    agents.links(),
+                )
+                .await
+                {
                     Ok(link) => {
                         let name = link.vendor_name().to_string();
                         match agents.publish(link.clone()) {
@@ -153,7 +159,7 @@ pub async fn vendor_connect(
                                 tracing::info!(
                                     vendor = %name,
                                     instance = %link.instance_id(),
-                                    "vendor agent connected"
+                                    "vendor process connected"
                                 );
                             }
                             // Tell the agent why, then drop the link, which
@@ -165,12 +171,12 @@ pub async fn vendor_connect(
                                 tracing::warn!(
                                     vendor = %name,
                                     error = %e,
-                                    "refused a vendor agent claiming a name already in use"
+                                    "refused a vendor process claiming a name already in use"
                                 );
                             }
                         }
                     }
-                    Err(e) => tracing::warn!(error = %e, "vendor agent handshake failed"),
+                    Err(e) => tracing::warn!(error = %e, "vendor process handshake failed"),
                 }
             }
             Err(e) => tracing::warn!(error = %e, "vendor_connect: websocket upgrade failed"),
