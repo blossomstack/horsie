@@ -96,7 +96,7 @@ Writing either side never destroys the other's keys.
 
 ## What is not here
 
-Providers, models, runtime vendors, the default vendor, GitHub, MCP servers,
+Providers, models, runtime vendors, the default runtime vendor, GitHub, MCP servers,
 skill bundles, agent presets, environments, routines, workflows and memory are
 **not** in `config.json`. They live in the settings database and are managed
 from the UI.
