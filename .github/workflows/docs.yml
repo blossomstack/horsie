@@ -46,10 +46,31 @@ jobs:
         working-directory: docs
         run: bun run build
 
+      # A fork's PR has no access to secrets, and the token did not exist at
+      # all until docs.horsie.dev was provisioned. Neither is a defect in the
+      # docs, so a preview build says so and stops. On main it *is* a defect:
+      # the site would silently stop being published.
+      - name: Check for deploy credentials
+        id: creds
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set — docs.horsie.dev cannot be published."
+            exit 1
+          fi
+          echo "::warning::CLOUDFLARE_API_TOKEN is not set — skipping the preview deploy."
+
       # A pull request gets its own preview URL, so a docs change is reviewed
       # as a rendered page rather than as diff hunks. Only main deploys to
       # production.
       - name: Deploy
+        if: steps.creds.outputs.present == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
