@@ -14,6 +14,8 @@ pub mod routines;
 pub mod runtime_manager;
 pub mod runtime_vendor;
 pub mod sessions;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
 pub mod users;
 mod wire_redact;
 pub mod workflows;

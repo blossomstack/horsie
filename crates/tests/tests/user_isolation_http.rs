@@ -22,11 +22,8 @@
 )]
 
 use horsie_server::auth::{Principal, TokenKind, UserId};
-use horsie_server::db::Db;
-use horsie_server::http::{AppState, app};
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
-use horsie_server::sessions::supervisor::SupervisorConfig;
-use horsie_server::users::{Shared, UserRegistry};
+use horsie_server::users::UserRegistry;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -128,53 +125,22 @@ async fn account(users: &UserRegistry, store: &horsie_server::auth::AuthStore) -
 
 async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap().keep();
-    let db = Db::open(&format!("sqlite://{}/config.db", dir.display()), 5)
-        .await
-        .unwrap();
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(db.clone()),
-        horsie_server::auth::AuthDeps {
-            mode: horsie_server::auth::AuthMode::Password,
-            state_dir: dir.clone(),
-        },
-    ));
-    let shared = Arc::new(Shared {
-        db: db.clone(),
-        artifacts: Arc::new(horsie_server::plugins::ArtifactStore::new(
-            dir.join("artifacts"),
-        )),
-        info: horsie_models::settings::ServerInfo {
-            config_path: String::new(),
-            database: String::new(),
-            state_dir: String::new(),
-            data_dir: String::new(),
-            plugins_dir: String::new(),
-            version: "test".into(),
-        },
-        model_card_seed: Arc::new(Vec::new()),
-        model_card_seed_marker: horsie_server::config::model_cards::seed_marker(&[]),
-        anonymous: UserId::bootstrap(),
-        supervisor: SupervisorConfig::default(),
-    });
-    let users = Arc::new(UserRegistry::new(shared.clone()));
-    let store = horsie_server::auth::AuthStore::new(db);
+    // The default backend, not a SQLite file: nothing here restarts, so this
+    // suite has no reason to pin one — and taking the default means the
+    // PostgreSQL CI run covers the isolation queries too.
+    let built = horsie_server::testing::state(&dir)
+        .auth(horsie_server::auth::AuthMode::Password)
+        .build()
+        .await;
+    let users = built.state.users.clone();
+
+    // Two tokens rather than two `auth_users` rows: `create_user` enforces the
+    // single-account rule this repo ships with, and a token *is* the scope.
+    let store = horsie_server::auth::AuthStore::new(built.state.shared.db.clone());
     let a = account(&users, &store).await;
     let b = account(&users, &store).await;
 
-    let state = AppState {
-        auth,
-        shared,
-        users: users.clone(),
-        web_dir: None,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    // No wait for the accept loop: the socket is listening from `bind`, so a
-    // connection made before `serve` first polls it waits in the backlog rather
-    // than being refused.
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app(state)).await;
-    });
+    let (addr, task) = built.serve().await;
 
     Fixture {
         addr,
