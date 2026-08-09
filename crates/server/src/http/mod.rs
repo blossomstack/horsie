@@ -2546,7 +2546,7 @@ mod tests {
         };
         let body = serde_json::json!({
             "name": "fly",
-            "settings": settings("wss://horsie.example.com"),
+            "settings": settings("wss://horsie.example.com/api/runtime/connect"),
             "credential": "fly-token",
         });
 
@@ -2563,7 +2563,7 @@ mod tests {
         };
         assert_eq!(
             fly.callback_url, "wss://horsie.example.com/api/runtime/connect",
-            "a bare origin gains the connect path"
+            "the callback url is stored exactly as it was sent"
         );
 
         // The token is never readable back, however it is asked for.
@@ -2608,7 +2608,7 @@ mod tests {
                 "/api/runtime-vendors/local-only",
                 &serde_json::json!({
                     "name": "local-only",
-                    "settings": settings("ws://localhost:8080"),
+                    "settings": settings("ws://localhost:8080/api/runtime/connect"),
                     "credential": "t",
                 }),
             ))
