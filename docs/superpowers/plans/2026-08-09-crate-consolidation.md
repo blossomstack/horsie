@@ -565,14 +565,21 @@ Expected: PASS, exit 0, listing exactly six crates: `horsie`, `horsie-agentcore`
 
 This is the only check that catches a path dependency missing its `version =` key, which is the classic way a workspace refactor breaks publishing without breaking the build. `horsie-runtime-host` is the one at real risk: it is newly publishable and carries a path-only dev-dependency on `horsie-server`, which cargo must strip.
 
+Use `cargo package --no-verify`, not `cargo publish --dry-run`. The dry-run's *verify* phase builds the packaged tarball against the registry, which cannot work for a chained workspace whose crates are not all published yet — it answers a question we cannot ask locally. `--no-verify` still validates the manifest, which is the question we can ask.
+
 ```bash
 for c in horsie-models horsie-support horsie-agentcore horsie-runtime-host horsie-runtime horsie; do
-  echo "=== $c"
-  cargo publish --dry-run -p "$c" --allow-dirty 2>&1 | tail -5
+  printf "%-22s " "$c"
+  out=$(cargo package --no-verify -p "$c" --allow-dirty 2>&1)
+  if echo "$out" | grep -q "Packaged"; then echo "OK"; else
+    echo "FAIL"; echo "$out" | grep -E "error|Caused|no matching" | head -3 | sed 's/^/    /'
+  fi
 done
 ```
 
-Expected: each ends in `Packaged N files`. A failure naming `horsie-support` or `horsie-runtime-host` as "not found in registry" is expected and fine for the *dependent* crates — those two do not exist on crates.io yet, and Task 4's note covers it. Any failure about a *missing version field* is a real bug: add `version = "0.1.6"` to that path dependency.
+Expected: `horsie-models`, `horsie-support` and `horsie-agentcore` report OK. The other three fail with `no matching package named horsie-support` / `horsie-runtime-host` **found on the crates.io index** — that is the bootstrap condition, not a defect: neither crate exists on the registry yet. Any failure mentioning a *missing version field* is a real bug: add `version = "0.1.6"` to that path dependency.
+
+**A second finding came out of running this**, recorded in `CONTRIBUTING.md` rather than fixed here: `cargo publish --dry-run -p horsie-support` fails to compile against the `horsie-models 0.1.6` currently on crates.io, because that published crate predates the renames. Since `publish.yml` skips any version already on the registry, tagging `v0.1.6` would keep the stale `horsie-models` and then fail building `horsie-support` against it. The next tag must be `v0.1.7` or later. This is pre-existing on `main` and not caused by these merges.
 
 - [ ] **Step 6: Commit**
 
@@ -730,4 +737,9 @@ The spec's "what does not change" section is honoured by omission — no task to
 
 **Three assumptions checked and corrected before publishing this plan.** `make e2e` does not exist — the e2e suite runs from `clients/web` via `bun run test:e2e`, and the web client installs with bun rather than npm. `shellcheck.yml` does not glob `scripts/*.sh`; its run step is hardcoded to `scripts/install.sh` and needs the new script added by name. And the `crate::` rewrite in Task 2 touches 77 paths, four of which are root re-exports rather than sibling modules — they resolve anyway, but the plan now says so rather than leaving the implementer to discover it.
 
-**One risk worth naming.** Task 2 Step 4's blanket `s/\bcrate::/super::/g` across `agent_loop/*.rs` is the only edit in this plan that could silently produce a wrong-but-compiling path. It is safe here because every `crate::` path in the old crate resolved to a sibling of those nine modules, and Step 5 builds immediately to confirm. A reviewer should still read that hunk of the diff rather than skim it.
+**One risk worth naming — and it fired.** Task 2 Step 4's blanket `s/\bcrate::/super::/g` across `agent_loop/*.rs` was the one edit here that could silently produce a wrong path. Two things went wrong in execution, both caught:
+
+- **BSD `sed` does not support `\b`**, so the rewrite silently changed nothing. `perl -pi -e` was used instead. Any `\b` in this plan needs perl on macOS.
+- **`super::` is wrong inside a nested `mod tests`**, where it names the enclosing module rather than the crate root. `cargo build -p horsie-server` passed anyway, because it does not compile `#[cfg(test)]` code; only `cargo clippy --all-targets` caught it. The fix was `crate::` → **`crate::agent_loop::`**, which is depth-independent and correct at any nesting level. It also leaves the 13 pre-existing idiomatic `use super::*;` lines untouched, which a reverse rewrite would have destroyed.
+
+The lesson for a future refactor of this shape: rewrite to an absolute path, not a relative one, and do not trust a plain `cargo build` to validate it.

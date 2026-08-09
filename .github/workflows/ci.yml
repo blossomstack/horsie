@@ -49,6 +49,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
+      - name: Publish surface
+        run: ./scripts/check-publish-surface.sh
+
       - name: Tests
         run: cargo test --locked --workspace --all-features
 
