@@ -1,0 +1,41 @@
+---
+title: horsie server
+description: Self-hosted LLM agent sessions in your browser — durable, inspectable, and running tools on hardware you chose.
+kind: explanation
+template: splash
+hero:
+  tagline: Run LLM agents as durable chat sessions in your browser, with tools executing on a machine you chose.
+  actions:
+    - text: Quickstart
+      link: /start-here/quickstart/
+      icon: right-arrow
+    - text: What horsie is
+      link: /start-here/what-horsie-is/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/blossomstack/horsie
+      variant: minimal
+      icon: external
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Start a session" icon="rocket">
+    Install the server, add a model, give it somewhere to run tools, and chat.
+    [Quickstart](/start-here/quickstart/)
+  </Card>
+  <Card title="Choose where tools run" icon="setting">
+    On your own machine over a dialed-out connection, or on containers the
+    server creates for each session.
+    [Runtimes](/operating/local-runtime/)
+  </Card>
+  <Card title="Run work unattended" icon="seti:clock">
+    Save an agent and a prompt as a routine, or chain agents into a workflow
+    graph. [Routines](/using/routines/) · [Workflows](/using/workflows/)
+  </Card>
+  <Card title="Understand the design" icon="open-book">
+    Why sessions survive a restart, and why runtimes dial out instead of being
+    dialed into. [How it works](/internals/sessions-and-durability/)
+  </Card>
+</CardGrid>
