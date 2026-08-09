@@ -122,12 +122,12 @@ async fn start_server_on(
     clock: Option<Arc<TestClock>>,
 ) -> Server {
     // `db_at` rather than a fresh database: a restart test is only a restart if
-    // the second incarnation comes up on the journal the first one wrote. That
-    // pins this suite to SQLite, which is also what makes every test here —
-    // including the restart ones — exercise real snapshots and compaction on
-    // the production default backend.
+    // the second incarnation comes up on the journal the first one wrote. It
+    // takes its backend from the environment like everything else, so this
+    // suite — the heaviest user of snapshots and compaction — is part of the
+    // PostgreSQL run rather than pinned to SQLite.
     let built = horsie_server::testing::state(journal_dir)
-        .db(horsie_server::testing::db_at(journal_dir).await)
+        .db(horsie_server::db::testing::db_at(journal_dir).await)
         // With a clock the test drives the idle policy itself: no background
         // ticker, so an offload happens exactly when it sends `Tick`.
         .supervisor(match clock {

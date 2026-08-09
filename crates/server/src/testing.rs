@@ -22,7 +22,7 @@ use crate::plugins::ArtifactStore;
 use crate::sessions::supervisor::SupervisorConfig;
 use crate::users::{Shared, UserRegistry, UserServices};
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A built deployment: the state a request resolves through, and the account it
@@ -200,13 +200,3 @@ fn info() -> horsie_models::settings::ServerInfo {
     }
 }
 
-/// A SQLite database at a fixed path, so a later incarnation can reopen it.
-///
-/// [`crate::db::testing::db`] hands out a fresh database per call and picks its
-/// backend from the environment; a restart test needs the *same* one twice, and
-/// says so here rather than by reaching for a URL of its own.
-pub async fn db_at(dir: &Path) -> Db {
-    Db::open(&format!("sqlite://{}/config.db", dir.display()), 5)
-        .await
-        .expect("open the test database")
-}
