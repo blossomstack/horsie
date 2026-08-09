@@ -312,8 +312,12 @@ pub fn normalise_callback(url: &str) -> Result<String, String> {
             "a machine cannot reach '{host}' — the callback url must be an address reachable from outside this server"
         ));
     }
+    // `trim_end_matches`, not a bare concatenation: a url written with a
+    // trailing slash has an empty path, and appending to it produced
+    // `wss://host//api/runtime/connect`, which axum will not route — so every
+    // runtime dialled a 404 and the vendor looked broken for a stray keystroke.
     Ok(if path.is_empty() {
-        format!("{url}{CONNECT_PATH}")
+        format!("{}{CONNECT_PATH}", url.trim_end_matches('/'))
     } else {
         url.to_string()
     })
@@ -765,6 +769,17 @@ mod tests {
         // server root and gets a 404 it cannot explain.
         assert_eq!(
             normalise_callback("wss://horsie.example.com").unwrap(),
+            "wss://horsie.example.com/api/runtime/connect"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_double_up() {
+        // A stray keystroke used to produce `//api/runtime/connect`, which axum
+        // will not route — so every runtime dialled a 404 and the vendor looked
+        // broken rather than mistyped.
+        assert_eq!(
+            normalise_callback("wss://horsie.example.com/").unwrap(),
             "wss://horsie.example.com/api/runtime/connect"
         );
     }
