@@ -221,12 +221,18 @@ back as a server route: one port, TLS and reverse proxies for free.
    the substrate. The race this closes is the one velos's provider documents.
 2. The machine boots and dials `GET /api/runtime/connect`.
 3. The route authenticates the bearer, which is **self-describing**:
-   `{user_id, runtime_id}` plus an HMAC tag over both. No database read is
-   needed to know where the socket belongs. A sandbox learning its own account
-   id is not a disclosure — it is that account's own sandbox.
-4. The route resolves the account through `UserRegistry::get(user_id)`, upgrades
-   the socket, and hands it to that account's manager, which builds the handle
-   and moves the runtime to `Live`.
+   `{user_id, runtime_id}` plus an HMAC tag over both, parsed from the right so
+   a dotted account or vendor name is not a malformed token. A sandbox learning
+   its own account id is not a disclosure — it is that account's own sandbox.
+4. The account is a *claim* until the tag checks out, so the only thing done
+   with it first is a bare settings read for that account's dial secret —
+   never `UserRegistry::get`, which builds the account when it is absent and
+   would let a stranger's token spawn a supervisor per request. Once the tag
+   verifies, the route resolves the account, upgrades the socket, and hands it
+   to that account's registry.
+5. The route sits **outside** `require_auth`'s credential check. A runtime holds
+   no session credential; the dial token is the whole authentication, and the
+   middleware would 401 it on any deployment with authentication enabled.
 
 Per-account rather than server-wide keeps this inside the scoping discipline of
 #217/#233, and costs nothing because the token already carries the account.
@@ -348,6 +354,14 @@ under the same `runtime_id`, the manager replaces the handle rather than
 refusing a duplicate, and a call in flight when the machine froze fails cleanly
 instead of hanging the turn.
 
+**A vendor that cannot suspend declines.** velos has no stop: its API is create
+and delete, and deleting a container is not suspending it — it destroys the
+workspace and everything in flight to free a slot on a worker. So velos leaves
+the container running and pays the compute, which is the bargain the contract
+already prefers. The consequence is that a velos container only ever disappears
+because it died, so an acquisition that finds none answers `Gone` rather than
+scheduling a replacement with an empty workspace.
+
 ## Orphans (#243)
 
 A machine whose session no longer exists is found by listing `horsie-*` on the
@@ -355,6 +369,17 @@ substrate and comparing against the sessions table — one sweep per configured
 vendor, in a single list call. Deleting a session already
 tells its vendor; the sweep covers the case where the vendor was unreachable at
 the time.
+
+Volumes are swept the same way and separately, because Fly does not cascade: a
+volume outlives the machine that mounted it, and one whose create half-failed
+outlives a machine that never existed. A volume name is a group label rather
+than an identifier, so the sweep compares against the names live runtimes *would*
+use — a collision costs a leaked volume rather than a destroyed workspace.
+
+One failure does not end a sweep. Everything it touches has been billing longer
+than it should, and aborting on the first stuck object — discarding what had
+already been reclaimed — let one undeletable machine keep every other orphan
+alive indefinitely.
 
 ## Phasing
 

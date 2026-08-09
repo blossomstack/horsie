@@ -133,12 +133,13 @@ save, because inside a container that name means the container.
 **Build the runtime image** from `docker/horsie.Dockerfile` (target `runtime`)
 and push it where the substrate can pull it.
 
-**What survives a stop** differs, and it is the one place the two are not
-interchangeable. A Fly machine keeps a volume, so a resumed session finds its
-workspace as it left it. velos has no volumes: stopping a session deletes its
-container, and the next message schedules a fresh one that re-runs the session's
-provisioning. Your history is safe either way — the durable transcript lives on
-the server.
+**What an idle session costs** differs, and it is the one place the two are not
+interchangeable. A Fly machine is stopped when its session goes cold and started
+again on the next message; it keeps its volume, so the session finds its
+workspace as it left it. velos has no way to stop a container — only to delete
+one, which would throw the workspace away — so an idle velos session keeps its
+container, and its compute, until the session is deleted. Your history is safe
+either way: the durable transcript lives on the server.
 
 ## Choosing a vendor per session
 
