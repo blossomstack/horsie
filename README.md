@@ -6,6 +6,11 @@ An agent is a model plus a harness — the loop that assembles context, calls th
 model, decides whether a tool call is allowed, runs it, and writes down what
 happened. `horsie-server` is the harness. You bring the model.
 
+The harness is the part worth owning. Models change, and so do the terms you
+can run them under; when the harness is yours, swapping one is a setting rather
+than a migration, and your sessions, history and scheduled work stay where they
+are.
+
 It gives you what a managed agent service gives you — durable sessions, a
 sandbox per session, scheduled and unattended runs, a full record of every run —
 on infrastructure you own, with model keys you hold. Open it in a browser, pick
