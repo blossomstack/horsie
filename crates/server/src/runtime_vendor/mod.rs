@@ -6,7 +6,7 @@
 //! explicit vendor signal, never an implicit side effect.
 //!
 //! The contract itself — [`RuntimeVendor`] and [`RuntimeHandle`] — lives in
-//! `horsie-runtime-vendor`, because the same two traits describe both sides of
+//! `horsie-runtime-host`, because the same two traits describe both sides of
 //! the wire: this server drives a [`WebsocketRuntimeVendor`] that relays to a
 //! `horsie connect` process, and that process drives a vendor of its own.
 //!
