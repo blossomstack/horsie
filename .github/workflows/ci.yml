@@ -152,6 +152,36 @@ jobs:
             exit 1
           fi
 
+  # Deliberately NOT path-filtered. A filtered job never reports on a PR that
+  # does not touch docs/, and a required check that never reports stays pending
+  # forever. It is seconds of work; running it always is cheaper than the
+  # confusion.
+  docs:
+    name: Docs (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: bun install --frozen-lockfile
+
+      # The frontmatter contract and the framing rules from
+      # docs/src/content/docs/contributing/writing-docs.md.
+      - name: Prose lint
+        working-directory: docs
+        run: bun run lint:prose
+
+      # Also validates the content schema and every internal link and anchor.
+      - name: Build
+        working-directory: docs
+        run: bun run build
+
   web-unit:
     name: Web unit tests (Vitest)
     runs-on: ubuntu-latest
