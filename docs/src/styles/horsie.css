@@ -100,6 +100,17 @@ pre,
   border: 1px solid var(--sl-color-hairline-light);
 }
 
+/*
+ * Starlight rotates a decorative hue per card icon — amber, violet, green,
+ * magenta. horsie's palette is one accent on a neutral chassis, so a
+ * four-colour rosette reads as a different product. One tone, all cards.
+ */
+.card .icon {
+  background-color: var(--sl-color-bg-inline-code);
+  color: var(--sl-color-text-accent);
+  border: 1px solid var(--sl-color-hairline);
+}
+
 /* Tables carry most of the reference pages; give them a readable grid. */
 .sl-markdown-content th {
   font-family: var(--sl-font-mono);
