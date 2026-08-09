@@ -20,7 +20,7 @@ PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build-cli
-.PHONY: build-cli build-server build test fmt fmt-check clippy deny check ts-types web web-build install-cli uninstall-cli install-server uninstall-server clean help
+.PHONY: build-cli build-server build test fmt fmt-check clippy deny check ts-types web web-build docs docs-check install-cli uninstall-cli install-server uninstall-server clean help
 
 ## build-cli: build the horsie CLI + its sandboxed runtime child ($(PROFILE))
 build-cli:
@@ -66,6 +66,14 @@ web:
 ## web-build: typecheck + production-build the web UI (needs bun)
 web-build:
 	cd clients/web && bun install && bun run generate-types && bun run build
+
+## docs: run the documentation site dev server (needs bun)
+docs:
+	cd docs && bun install && bun run dev
+
+## docs-check: prose lint + build the documentation site (needs bun)
+docs-check:
+	cd docs && bun install && bun run check
 
 ## install-cli: build + install horsie and horsie-runtime into $(BINDIR)
 install-cli: build-cli

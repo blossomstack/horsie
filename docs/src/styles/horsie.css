@@ -1,0 +1,122 @@
+/*
+ * horsie's palette, mapped onto Starlight's theme variables.
+ *
+ * The values come from `DESIGN.md` at the repo root, which is the product's
+ * design record and the source of truth for both this site and horsie.dev.
+ * Change a colour there first, then here — never the other way round.
+ *
+ * Dark is the product's native mode (the app is a dark instrument panel), so
+ * dark is defined first and light is derived from it.
+ */
+
+:root {
+  /* Archivo for prose, Martian Mono for anything the machine said. */
+  --sl-font: "Archivo Variable", system-ui, -apple-system, sans-serif;
+  --sl-font-mono: "Martian Mono Variable", ui-monospace, SFMono-Regular,
+    monospace;
+
+  /* Martian Mono runs wide; the app narrows it rather than shrinking it. */
+  --horsie-mono-width: "wdth" 87.5;
+}
+
+/* Dark — chassis, panel, legend. */
+:root,
+:root[data-theme="dark"] {
+  --sl-color-white: oklch(0.98 0.008 90);
+  --sl-color-gray-1: oklch(0.93 0.008 90); /* legend */
+  --sl-color-gray-2: oklch(0.83 0.01 90);
+  --sl-color-gray-3: oklch(0.71 0.012 90); /* legend-dim */
+  --sl-color-gray-4: oklch(0.5 0.01 255);
+  --sl-color-gray-5: oklch(0.325 0.008 255); /* rule */
+  --sl-color-gray-6: oklch(0.235 0.006 255); /* panel */
+  --sl-color-black: oklch(0.155 0.006 255); /* screen */
+
+  --sl-color-accent-low: oklch(0.32 0.075 42); /* orange-quiet */
+  --sl-color-accent: oklch(0.688 0.196 42); /* orange */
+  --sl-color-accent-high: oklch(0.85 0.11 42);
+
+  --sl-color-bg: oklch(0.19 0.005 255); /* chassis */
+  --sl-color-bg-nav: oklch(0.235 0.006 255);
+  --sl-color-bg-sidebar: oklch(0.235 0.006 255);
+  --sl-color-bg-inline-code: oklch(0.285 0.007 255); /* panel-raised */
+  --sl-color-bg-accent: oklch(0.688 0.196 42);
+
+  --sl-color-hairline: oklch(0.325 0.008 255);
+  --sl-color-hairline-light: oklch(0.285 0.007 255);
+  --sl-color-hairline-shade: oklch(0.155 0.006 255);
+
+  --sl-color-text-accent: oklch(0.8 0.15 42);
+  --sl-color-text-invert: oklch(0.19 0.02 42); /* orange-ink */
+}
+
+/*
+ * Light — the same hues under a paper ground. The accent darkens: the app's
+ * orange sits on a near-black chassis and does not carry AA contrast on white.
+ */
+:root[data-theme="light"] {
+  --sl-color-white: oklch(0.22 0.008 255);
+  --sl-color-gray-1: oklch(0.28 0.008 255);
+  --sl-color-gray-2: oklch(0.4 0.008 255);
+  --sl-color-gray-3: oklch(0.5 0.01 255);
+  --sl-color-gray-4: oklch(0.66 0.01 255);
+  --sl-color-gray-5: oklch(0.87 0.005 255);
+  --sl-color-gray-6: oklch(0.945 0.004 255);
+  --sl-color-gray-7: oklch(0.975 0.003 255);
+  --sl-color-black: oklch(1 0 0);
+
+  --sl-color-accent-low: oklch(0.93 0.05 42);
+  --sl-color-accent: oklch(0.53 0.17 42);
+  --sl-color-accent-high: oklch(0.38 0.13 42);
+
+  --sl-color-bg: oklch(1 0 0);
+  --sl-color-bg-nav: oklch(0.975 0.003 255);
+  --sl-color-bg-sidebar: oklch(0.975 0.003 255);
+  --sl-color-bg-inline-code: oklch(0.945 0.004 255);
+
+  --sl-color-hairline: oklch(0.87 0.005 255);
+  --sl-color-hairline-light: oklch(0.93 0.004 255);
+  --sl-color-hairline-shade: oklch(0.87 0.005 255);
+
+  --sl-color-text-accent: oklch(0.53 0.17 42);
+  --sl-color-text-invert: oklch(1 0 0);
+}
+
+/* Monospace, everywhere it appears, gets the narrowed width axis. */
+code,
+kbd,
+pre,
+.sl-markdown-content code {
+  font-variation-settings: var(--horsie-mono-width);
+}
+
+/*
+ * Inline code is a label, not a block quote: keep it tight and let the
+ * surrounding prose set the rhythm.
+ */
+.sl-markdown-content :not(pre) > code {
+  font-size: 0.875em;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  border: 1px solid var(--sl-color-hairline-light);
+}
+
+/*
+ * Starlight rotates a decorative hue per card icon — amber, violet, green,
+ * magenta. horsie's palette is one accent on a neutral chassis, so a
+ * four-colour rosette reads as a different product. One tone, all cards.
+ */
+.card .icon {
+  background-color: var(--sl-color-bg-inline-code);
+  color: var(--sl-color-text-accent);
+  border: 1px solid var(--sl-color-hairline);
+}
+
+/* Tables carry most of the reference pages; give them a readable grid. */
+.sl-markdown-content th {
+  font-family: var(--sl-font-mono);
+  font-variation-settings: var(--horsie-mono-width);
+  font-size: var(--sl-text-xs);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--sl-color-gray-2);
+}

@@ -1,0 +1,81 @@
+# Publish docs.horsie.dev. The docs live in this repo so that a behaviour
+# change and its documentation land in the same commit; this is what puts them
+# on the web.
+#
+# Direct upload with wrangler, not Cloudflare's git integration — the Pages
+# GitHub App isn't authorized for the org. The `horsie-docs` Pages project, the
+# docs.horsie.dev custom domain, and the scoped deploy token are defined in the
+# infrastructure repo.
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        working-directory: docs
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        working-directory: docs
+        run: bun run build
+
+      # A fork's PR has no access to secrets, and the token did not exist at
+      # all until docs.horsie.dev was provisioned. Neither is a defect in the
+      # docs, so a preview build says so and stops. On main it *is* a defect:
+      # the site would silently stop being published.
+      - name: Check for deploy credentials
+        id: creds
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN is not set — docs.horsie.dev cannot be published."
+            exit 1
+          fi
+          echo "::warning::CLOUDFLARE_API_TOKEN is not set — skipping the preview deploy."
+
+      # A pull request gets its own preview URL, so a docs change is reviewed
+      # as a rendered page rather than as diff hunks. Only main deploys to
+      # production.
+      - name: Deploy
+        if: steps.creds.outputs.present == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: b2fe9a8f417529fe6c6a247a70bc1a65
+          command: >-
+            pages deploy docs/dist
+            --project-name=horsie-docs
+            --branch=${{ github.event_name == 'pull_request' && github.head_ref || 'main' }}

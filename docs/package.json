@@ -1,0 +1,21 @@
+{
+  "name": "horsie-docs",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "lint:prose": "node scripts/lint-prose.mjs",
+    "check": "bun run lint:prose && bun run build"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.7",
+    "@fontsource-variable/archivo": "^5.2.5",
+    "@fontsource-variable/martian-mono": "^5.2.5",
+    "astro": "^7.2.0",
+    "sharp": "^0.35.3",
+    "starlight-links-validator": "^0.25.2"
+  }
+}

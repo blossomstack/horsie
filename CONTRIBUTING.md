@@ -33,6 +33,17 @@ tests opt out per file.
 before a non-trivial change — it explains why the codebase looks the way it
 does.
 
+## Documentation
+
+The docs at [docs.horsie.dev](https://docs.horsie.dev) are built from `docs/`
+in this repository, so a change that alters behaviour changes its pages in the
+same PR. `make docs` previews them locally and `make docs-check` runs the same
+gate CI does.
+
+How they are structured, what each kind of page may contain, and the wording
+rules CI enforces are in
+[Writing docs](https://docs.horsie.dev/contributing/writing-docs/).
+
 ## Licence of contributions
 
 Unless you state otherwise, contributions are submitted under the terms of the
