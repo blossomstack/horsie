@@ -1670,6 +1670,42 @@ mod tests {
         assert!(list.servers.is_empty());
     }
 
+    /// The two upsert-style resources do **not** agree on what deleting a name
+    /// that is not there means, and nothing said so until this pair of tests.
+    ///
+    /// `runtime-vendors` reports the miss (`404`); `mcp/servers` returns `200`
+    /// and deletes nothing, because its handler returns `Result<(), Api>` and
+    /// its store never reports whether a row matched. Neither is wrong on its
+    /// own — but a client cannot learn one from the other, so both are written
+    /// down here. They are also why these two keep no shared CRUD contract:
+    /// they have the shape in common and not the semantics.
+    #[tokio::test]
+    async fn deleting_an_unknown_runtime_vendor_reports_the_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let res = app
+            .oneshot(delete("/api/runtime-vendors/never-existed"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deleting_an_unknown_mcp_server_is_silently_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+        let res = app
+            .oneshot(delete("/api/mcp/servers/never-existed"))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "asserted as it behaves, not as it ought to: this is the asymmetry \
+             with /api/runtime-vendors, and changing it is an API decision"
+        );
+    }
+
     #[tokio::test]
     async fn mcp_connect_on_non_oauth_is_unprocessable_and_callback_needs_code() {
         let tmp = tempfile::tempdir().unwrap();
