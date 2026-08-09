@@ -3,7 +3,7 @@ name = "horsie-runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
 description = "Sandboxed per-job runtime child for horsie"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 
 [[bin]]
@@ -15,8 +15,8 @@ default = ["sandbox"]
 sandbox = ["dep:nono"]
 
 [dependencies]
-horsie-models = { version = "0.1.6", path = "../models" }
-horsie-support = { version = "0.1.6", path = "../support" }
+horsie-models = { version = "0.2.0", path = "../models" }
+horsie-support = { version = "0.2.0", path = "../support" }
 tokio         = { workspace = true, features = ["process", "net"] }
 tokio-tungstenite = { workspace = true }
 futures-util  = { workspace = true }

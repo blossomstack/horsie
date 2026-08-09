@@ -1,6 +1,6 @@
 [package]
 name = "horsie"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/blossomstack/horsie"
@@ -11,9 +11,9 @@ name = "horsie"
 path = "src/main.rs"
 
 [dependencies]
-horsie-models = { version = "0.1.6", path = "../models" }
-horsie-runtime-host = { version = "0.1.6", path = "../runtime-host" }
-horsie-support = { version = "0.1.6", path = "../support", features = ["git"] }
+horsie-models = { version = "0.2.0", path = "../models" }
+horsie-runtime-host = { version = "0.2.0", path = "../runtime-host" }
+horsie-support = { version = "0.2.0", path = "../support", features = ["git"] }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
