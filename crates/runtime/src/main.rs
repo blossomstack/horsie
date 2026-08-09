@@ -296,14 +296,6 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     // Taken before `cli` is partially moved into the workspace registry below.
     let state_file = cli.state_file.clone();
 
-    // In-sandbox hackamore self-provisioning — under the same confinement as the
-    // job and before the message loop. Fail closed: a daemon that injected
-    // hackamore env expects a provisioned runtime, so any failure fails the job.
-    if let Err(e) = horsie_runtime::provision::provision_from_env().await {
-        eprintln!("hackamore provisioning failed: {e}");
-        std::process::exit(4);
-    }
-
     // Provision steps (vendor-injected JSON). Parsed before connecting so a
     // malformed payload fails fast; executed after connecting so failures are
     // reported over the wire instead of as a silent death.

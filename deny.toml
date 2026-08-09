@@ -56,7 +56,5 @@ allow-wildcard-paths = true
 # Only crates.io and explicitly allowed git sources are permitted.
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = [
-    # hackamore-agent: in-process hackamore provisioning for the sandboxed runtime.
-    "https://github.com/blossomstack/hackamore",
-]
+# Every dependency comes from crates.io; no git sources are permitted.
+allow-git = []

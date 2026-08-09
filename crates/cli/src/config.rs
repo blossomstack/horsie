@@ -11,7 +11,7 @@ pub const DEFAULT_SERVER: &str = "https://auth.horsie.dev";
 ///
 /// All fields default, so `HorsieConfig::default()` is a valid empty config
 /// (default storage/runtime). Old config files written for the daemon (with
-/// providers/models/sandbox/hackamore/...) still parse: serde ignores unknown
+/// providers/models/sandbox/...) still parse: serde ignores unknown
 /// JSON fields.
 #[derive(Debug, Default, Deserialize)]
 pub struct HorsieConfig {

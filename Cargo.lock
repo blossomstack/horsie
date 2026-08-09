@@ -912,17 +912,6 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "derive-new"
-version = "0.5.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3418329ca0ad70234b9735dc4ceed10af4df60eff9c8e7b06cb5e520d92c3535"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "derive-new"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2cdc8d50f426189eef89dac62fabfa0abb27d5cc008f25bf4156a0203325becc"
@@ -1205,36 +1194,10 @@ dependencies = [
 
 [[package]]
 name = "fluorite"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3ae4d88c3c3f0c96bcff37728d5f477ad68a73457129c017a0f00e627689943"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "fluorite"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa1a708aa357ab6988d028a36fcd254f16eed5a79e3363b49a2999fdce7c8bc"
 dependencies = [
- "serde",
-]
-
-[[package]]
-name = "fluorite_codegen"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f9a8900cd5943a8adaefd9b8bea8ac090207396a1b34b5702d01aa5e1c8b608"
-dependencies = [
- "anyhow",
- "ariadne",
- "askama",
- "chumsky",
- "clap",
- "derive-new 0.7.0",
- "fluorite 0.6.2",
- "logos",
  "serde",
 ]
 
@@ -1249,8 +1212,8 @@ dependencies = [
  "askama",
  "chumsky",
  "clap",
- "derive-new 0.7.0",
- "fluorite 0.7.0",
+ "derive-new",
+ "fluorite",
  "logos",
  "serde",
 ]
@@ -1508,31 +1471,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hackamore-agent"
-version = "0.1.0"
-source = "git+https://github.com/blossomstack/hackamore?rev=df526a5474e5a9e6296660365bc24f409ce3e66a#df526a5474e5a9e6296660365bc24f409ce3e66a"
-dependencies = [
- "clap",
- "hackamore-models",
- "reqwest 0.12.28",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "hackamore-models"
-version = "0.1.0"
-source = "git+https://github.com/blossomstack/hackamore?rev=df526a5474e5a9e6296660365bc24f409ce3e66a#df526a5474e5a9e6296660365bc24f409ce3e66a"
-dependencies = [
- "derive-new 0.5.9",
- "fluorite 0.6.2",
- "fluorite_codegen 0.6.2",
- "schemars 1.2.2",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1685,9 +1623,9 @@ dependencies = [
 name = "horsie-models"
 version = "0.1.6"
 dependencies = [
- "derive-new 0.7.0",
- "fluorite 0.7.0",
- "fluorite_codegen 0.7.0",
+ "derive-new",
+ "fluorite",
+ "fluorite_codegen",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -1703,7 +1641,6 @@ dependencies = [
  "clap",
  "futures-util",
  "glob",
- "hackamore-agent",
  "hex",
  "horsie-models",
  "horsie-runtime-vendor",
@@ -1938,7 +1875,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3232,7 +3168,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -4304,17 +4239,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
-]
-
-[[package]]
-name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
@@ -5082,15 +5006,6 @@ name = "webpki-root-certs"
 version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d46a5a140e6f7afeccd8eae97eff335163939eac8b929834875168b29b3d267"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
 dependencies = [
  "rustls-pki-types",
 ]

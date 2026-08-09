@@ -129,7 +129,7 @@ pub mod workflow {
 }
 
 // `large_enum_variant`: `DaemonRequest::Submit` carries the full `SubmitRequest`
-// (workflow + caps + hackamore policy) and is intrinsically larger than the other
+// (workflow + caps) and is intrinsically larger than the other
 // control variants. The enum is fluorite-generated, so boxing the variant isn't
 // available here; the size is acceptable for a one-shot control message.
 // `large_enum_variant` here too: `AgentStreamEvent::Appended` carries a
