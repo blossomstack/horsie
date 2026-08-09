@@ -14,13 +14,10 @@ use async_llm::mock::MockLlmServer;
 use horsie_actor::ActorRef;
 use horsie_agentcore::LlmProvider;
 use horsie_llm_providers::anthropic::AnthropicProvider;
-use horsie_server::db::Db;
-use horsie_server::http::{AppState, app};
 use horsie_server::runtime_vendor::WebsocketRuntimeVendor;
 use horsie_server::runtime_vendor::fake::FakeRuntimeVendor;
 use horsie_server::sessions::clock::TestClock;
 use horsie_server::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
-use horsie_server::users::{Shared, UserRegistry};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -124,88 +121,41 @@ async fn start_server_on(
     provider: Arc<dyn LlmProvider>,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
-    // The e2e suite runs on the production default backend, so every test here
-    // — including the restart ones — exercises real snapshots and compaction.
-    let db = Db::open(&format!("sqlite://{}/config.db", journal_dir.display()), 5)
-        .await
-        .unwrap();
-    // Auth off: this suite drives the HTTP API without a credential, and a
-    // disabled deployment is a supported configuration. Authenticated coverage
-    // lives in the server crate's own HTTP tests.
-    let auth = Arc::new(horsie_server::auth::AuthService::new(
-        horsie_server::auth::AuthStore::new(db.clone()),
-        horsie_server::auth::AuthDeps {
-            mode: horsie_server::auth::AuthMode::Off,
-            state_dir: journal_dir.to_path_buf(),
-        },
-    ));
-    auth.bootstrap().await.unwrap();
-    let account = auth.sole_user().await.unwrap().expect("bootstrapped");
-
-    let shared = Arc::new(Shared {
-        db,
-        artifacts: Arc::new(horsie_server::plugins::ArtifactStore::new(
-            journal_dir.join("plugin-artifacts"),
-        )),
-        info: horsie_models::settings::ServerInfo {
-            config_path: String::new(),
-            database: String::new(),
-            state_dir: String::new(),
-            data_dir: String::new(),
-            plugins_dir: String::new(),
-            version: "test".into(),
-        },
-        model_card_seed: Arc::new(Vec::new()),
-        model_card_seed_marker: horsie_server::config::model_cards::seed_marker(&[]),
-        anonymous: account.clone(),
+    // `db_at` rather than a fresh database: a restart test is only a restart if
+    // the second incarnation comes up on the journal the first one wrote. That
+    // pins this suite to SQLite, which is also what makes every test here —
+    // including the restart ones — exercise real snapshots and compaction on
+    // the production default backend.
+    let built = horsie_server::testing::state(journal_dir)
+        .db(horsie_server::testing::db_at(journal_dir).await)
         // With a clock the test drives the idle policy itself: no background
         // ticker, so an offload happens exactly when it sends `Tick`.
-        supervisor: match clock {
+        .supervisor(match clock {
             Some(clock) => SupervisorConfig {
                 clock,
                 idle_timeout: Duration::from_secs(180),
                 tick_interval: None,
             },
             None => SupervisorConfig::default(),
-        },
-    });
-    let users = Arc::new(UserRegistry::new(shared.clone()));
-    let services = users.get(&account).await.unwrap();
+        })
+        .build()
+        .await;
 
     // The doubles go into the account's own registry and vendor map — the same
     // handles its supervisor and runtime manager read.
-    services
-        .provider_registry
-        .write()
-        .unwrap()
-        .insert("mock".into(), provider);
+    built.insert_provider("mock", provider).await;
     if let Some(vendor) = vendor {
-        services
-            .vendors
-            .write()
-            .unwrap()
-            .insert("mock".into(), vendor);
+        built.publish_vendor("mock", vendor).await;
     }
 
+    let services = built.services().await;
     let supervisor = services.supervisor.clone();
-    let state = AppState {
-        auth,
-        shared,
-        users,
-        web_dir: None,
-    };
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    // No wait for the accept loop: the socket is listening from `bind`, so a
-    // connection made before `serve` first polls it waits in the backlog rather
-    // than being refused.
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app(state)).await;
-    });
+    let vendors = services.connected_vendors.clone();
+    let (addr, task) = built.serve().await;
     Server {
         addr,
         supervisor,
-        vendors: services.connected_vendors.clone(),
+        vendors,
         task,
     }
 }

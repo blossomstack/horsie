@@ -388,54 +388,12 @@ mod tests {
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
     use tower::util::ServiceExt;
 
-    fn test_info() -> horsie_models::settings::ServerInfo {
-        horsie_models::settings::ServerInfo {
-            config_path: String::new(),
-            database: String::new(),
-            state_dir: String::new(),
-            data_dir: String::new(),
-            plugins_dir: String::new(),
-            version: "test".into(),
-        }
-    }
-
     /// The real composition root, on a throwaway database, with one fake
     /// vendor process published under `mock` in the bootstrap account.
-    ///
-    /// Deliberately built through `UserRegistry` rather than by assembling a
-    /// bundle by hand: what these tests exercise is what a request actually
-    /// resolves, including the lazy build.
     async fn test_state(tmp: &tempfile::TempDir) -> AppState {
-        let db = crate::db::testing::db().await;
-        // Auth off: every pre-existing test builds unauthenticated requests,
-        // and a disabled deployment is a real supported configuration, not a
-        // test-only escape. `auth_state` turns it on.
-        let auth = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(db.clone()),
-            crate::auth::AuthDeps {
-                mode: crate::auth::AuthMode::Off,
-                state_dir: tmp.path().to_path_buf(),
-            },
-        ));
-        let shared = Arc::new(Shared {
-            db,
-            artifacts: Arc::new(crate::plugins::ArtifactStore::new(
-                tmp.path().join("plugins"),
-            )),
-            info: test_info(),
-            model_card_seed: Arc::new(Vec::new()),
-            model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
-            anonymous: crate::auth::UserId::bootstrap(),
-            supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
-        });
-        let state = AppState {
-            auth,
-            users: Arc::new(UserRegistry::new(shared.clone())),
-            shared,
-            web_dir: None,
-        };
-        publish_mock_vendor(&state).await;
-        state
+        let built = crate::testing::state(tmp.path()).build().await;
+        publish_mock_vendor(&built.state).await;
+        built.state
     }
 
     /// The dial token a runtime of the state's anonymous account would hold.
@@ -487,23 +445,17 @@ mod tests {
     /// `test_state` with authentication enabled and the admin account
     /// bootstrapped. Returns the state and the generated password.
     ///
-    /// Gives auth its own database rather than reaching through the
-    /// `Arc<dyn ConfigStore>` trait object for the one `test_state` opened —
-    /// the auth tables live alongside the config tables in production, but auth
-    /// has no business widening the config trait to get at them, and no
-    /// assertion here spans both.
+    /// One database for the whole deployment, as in production: the auth tables
+    /// live alongside the config tables, and a second pool for auth alone would
+    /// hide any assertion that spans both.
     async fn auth_state(tmp: &tempfile::TempDir) -> (AppState, String) {
-        let mut state = test_state(tmp).await;
-        let svc = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(crate::db::testing::db().await),
-            crate::auth::AuthDeps {
-                mode: crate::auth::AuthMode::Password,
-                state_dir: tmp.path().to_path_buf(),
-            },
-        ));
-        let password = svc.bootstrap().await.unwrap().expect("bootstrapped");
-        state.auth = svc;
-        (state, password)
+        let built = crate::testing::state(tmp.path())
+            .auth(crate::auth::AuthMode::Password)
+            .build()
+            .await;
+        publish_mock_vendor(&built.state).await;
+        let password = built.initial_password.expect("bootstrapped");
+        (built.state, password)
     }
 
     /// The `Set-Cookie` session value from a login response.
@@ -1971,15 +1923,12 @@ mod tests {
     /// Built by hand rather than through `auth_state`: what makes this mode
     /// what it is, is that no credential of horsie's own exists.
     async fn delegated_state(tmp: &tempfile::TempDir) -> AppState {
-        let mut state = test_state(tmp).await;
-        state.auth = Arc::new(crate::auth::AuthService::new(
-            crate::auth::AuthStore::new(crate::db::testing::db().await),
-            crate::auth::AuthDeps {
-                mode: crate::auth::AuthMode::Delegated,
-                state_dir: tmp.path().to_path_buf(),
-            },
-        ));
-        state
+        let built = crate::testing::state(tmp.path())
+            .auth(crate::auth::AuthMode::Delegated)
+            .build()
+            .await;
+        publish_mock_vendor(&built.state).await;
+        built.state
     }
 
     /// The failure that would not announce itself.
