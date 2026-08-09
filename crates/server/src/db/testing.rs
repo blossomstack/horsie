@@ -19,6 +19,7 @@
 use crate::db::Db;
 use sqlx::AssertSqlSafe;
 use sqlx::any::AnyPoolOptions;
+use std::path::Path;
 use uuid::Uuid;
 
 /// A fresh, migrated, empty database on the backend this run selected.
@@ -80,30 +81,80 @@ pub async fn unmigrated_sqlite() -> sqlx::AnyPool {
 /// a cleanup pass keyed on a name prefix would race other test binaries running
 /// concurrently under `cargo test`.
 pub async fn postgres() -> Option<Db> {
+    named_postgres(&format!("horsie_test_{}", Uuid::new_v4().simple())).await
+}
+
+/// The database belonging to `dir`, on whichever backend this run selected.
+///
+/// **Reopenable**, which is the whole point: calling this twice for the same
+/// directory hands back the *same* database, and that is what a restart test
+/// means by a second incarnation coming up on the journal the first one wrote.
+/// [`db`] cannot serve that — it makes a fresh database per call.
+///
+/// Before this existed, the suites that restart a server opened
+/// `sqlite://<dir>/config.db` themselves. That worked, but it pinned them to
+/// SQLite: the PostgreSQL CI run went straight past the end-to-end tests, which
+/// are the heaviest users of the journal's snapshot and compaction paths.
+pub async fn db_at(dir: &Path) -> Db {
+    match named_postgres(&database_name_for(dir)).await {
+        Some(db) => db,
+        None => Db::open(&format!("sqlite://{}/config.db", dir.display()), 5)
+            .await
+            .expect("open the test sqlite database"),
+    }
+}
+
+/// A PostgreSQL database of exactly this name, created if it is not there yet.
+///
+/// `CREATE DATABASE` has no `IF NOT EXISTS`, so this asks first. The race that
+/// implies — two callers creating the same name at once — cannot happen: a name
+/// is either a fresh UUID or derived from one test's own directory.
+async fn named_postgres(name: &str) -> Option<Db> {
     let base = std::env::var("HORSIE_TEST_POSTGRES_URL")
         .ok()
         .filter(|s| !s.is_empty())?;
 
     sqlx::any::install_default_drivers();
-    let name = format!("horsie_test_{}", Uuid::new_v4().simple());
     let admin = AnyPoolOptions::new()
         .max_connections(1)
         .connect(&base)
         .await
         .unwrap_or_else(|e| panic!("connect to HORSIE_TEST_POSTGRES_URL: {e}"));
-    // The database name is generated here, never user input, so interpolating
-    // it is safe — and `CREATE DATABASE` takes no bind parameters anyway.
-    sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
-        .execute(&admin)
+    let exists = sqlx::query("SELECT 1 FROM pg_database WHERE datname = $1")
+        .bind(name)
+        .fetch_optional(&admin)
         .await
-        .unwrap_or_else(|e| panic!("create test database {name}: {e}"));
+        .unwrap_or_else(|e| panic!("look for test database {name}: {e}"))
+        .is_some();
+    if !exists {
+        // The name is generated here, never user input, so interpolating it is
+        // safe — and `CREATE DATABASE` takes no bind parameters anyway.
+        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .unwrap_or_else(|e| panic!("create test database {name}: {e}"));
+    }
     admin.close().await;
 
     Some(
-        Db::open(&swap_database(&base, &name), 5)
+        Db::open(&swap_database(&base, name), 5)
             .await
             .unwrap_or_else(|e| panic!("open test database {name}: {e}")),
     )
+}
+
+/// A stable, legal PostgreSQL database name for `dir`.
+///
+/// FNV-1a over the path: the mapping only has to be deterministic and collision
+/// -free among the temp directories of one run, and a hash keeps the result
+/// inside PostgreSQL's 63-byte identifier limit whatever the path length.
+fn database_name_for(dir: &Path) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in dir.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("horsie_test_at_{hash:016x}")
 }
 
 /// Replace the database component of a PostgreSQL URL, preserving any query

@@ -121,37 +121,16 @@ impl Toolbox for FixedToolbox {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// Agent receives a plain text response and returns Completed with that text.
-#[tokio::test]
-async fn test_simple_text_completion() {
-    let mock = MockLlmServer::builder()
-        .response("Hello, world!")
-        .build()
-        .await;
-    let provider = Arc::new(provider_at(&mock.url()));
-    let mut agent = Agent::builder(
-        provider,
-        Arc::new(horsie_agentcore::EmptyToolbox),
-        "test-conversation",
-    )
-    .build()
-    .unwrap();
-    let sink = CollectSink::new();
-
-    let output = agent
-        .run(AgentInput::user_message("msg-1", "hi"), &sink, cancel())
-        .await
-        .unwrap();
-
-    assert!(
-        matches!(output.result, AgentResult::Completed(CompletedOutput { ref text }) if text == "Hello, world!")
-    );
-}
+// A plain text turn over this wire is `provider_conformance.rs`'s
+// `conformance_plain_text_turn`, which makes the same assertions against every
+// provider rather than only this one. What lives here is what that suite
+// deliberately does not cover: the agent's event sequence, its handoff and
+// retry behaviour, and the ids that tie a tool call to its result.
 
 /// Event sequence for a single-turn text response must be exactly:
 /// InputMessage → MessageStart → TextChunk(s) → MessageStop → MessageComplete → RunComplete
 #[tokio::test]
-async fn test_text_turn_event_sequence() {
+async fn a_text_turn_emits_its_events_in_order() {
     let mock = MockLlmServer::builder().response("done").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
     let mut agent = Agent::builder(
@@ -189,7 +168,7 @@ async fn test_text_turn_event_sequence() {
 
 /// TextChunk events carry the right message_id and the assembled text matches the response.
 #[tokio::test]
-async fn test_text_chunks_message_id_and_content() {
+async fn text_chunks_carry_the_message_id_and_reassemble_the_text() {
     let mock = MockLlmServer::builder()
         .response_stream(["Hello", " ", "world"])
         .build()
@@ -240,7 +219,7 @@ async fn test_text_chunks_message_id_and_content() {
 
 /// Agent performs a tool call cycle: tool call → tool execution → follow-up text.
 #[tokio::test]
-async fn test_tool_call_cycle() {
+async fn a_tool_is_dispatched_with_the_arguments_the_model_sent() {
     let mock = MockLlmServer::builder()
         .tool_call("search", serde_json::json!({"q": "rust"}))
         .response("found it")
@@ -280,7 +259,7 @@ async fn test_tool_call_cycle() {
 /// MessageStart → TextBlockStart → TextChunk(s) → ContentBlockStop → MessageStop → MessageComplete
 /// RunComplete
 #[tokio::test]
-async fn test_tool_turn_event_sequence() {
+async fn a_tool_turn_emits_its_events_in_order() {
     let mock = MockLlmServer::builder()
         .tool_call("lookup", serde_json::json!({"id": 1}))
         .response("here is the result")
@@ -334,7 +313,7 @@ async fn test_tool_turn_event_sequence() {
 /// Tool call IDs are consistent: ToolCallStart, ToolExecuting, ToolComplete
 /// all carry the same tool_call_id.
 #[tokio::test]
-async fn test_tool_call_id_consistency() {
+async fn one_tool_call_id_ties_the_start_the_execution_and_the_result() {
     let mock = MockLlmServer::builder()
         .tool_call("calc", serde_json::json!({"x": 7}))
         .response("result: 7")
@@ -395,7 +374,7 @@ async fn test_tool_call_id_consistency() {
 
 /// MessageComplete carries the full assembled message with the correct role and content.
 #[tokio::test]
-async fn test_message_complete_contains_full_message() {
+async fn message_complete_carries_the_whole_assistant_message() {
     let mock = MockLlmServer::builder()
         .response("the answer")
         .build()
@@ -445,7 +424,7 @@ async fn test_message_complete_contains_full_message() {
 
 /// RunComplete carries accumulated usage and correct iteration count.
 #[tokio::test]
-async fn test_run_complete_usage_and_iterations() {
+async fn run_complete_reports_the_iteration_count_and_the_usage() {
     // Two iterations: first a tool call, then text.
     let mock = MockLlmServer::builder()
         .tool_call("noop", serde_json::json!({}))
@@ -483,7 +462,7 @@ async fn test_run_complete_usage_and_iterations() {
 
 /// Agent with a handoff tool returns Handoff result immediately without executing the tool.
 #[tokio::test]
-async fn test_agent_handoff() {
+async fn a_handoff_ends_the_run_naming_the_tool_and_its_input() {
     let mock = MockLlmServer::builder()
         .tool_call("delegate", serde_json::json!({"task": "summarise"}))
         .build()
@@ -526,7 +505,7 @@ async fn test_agent_handoff() {
 
 /// Exactly one RunComplete event is emitted per run() call.
 #[tokio::test]
-async fn test_exactly_one_run_complete() {
+async fn a_run_emits_run_complete_exactly_once() {
     let mock = MockLlmServer::builder().response("ok").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
     let mut agent = Agent::builder(
@@ -553,7 +532,7 @@ async fn test_exactly_one_run_complete() {
 
 /// Retry on 529 overload: the agent transparently retries and succeeds.
 #[tokio::test]
-async fn test_agent_transparent_retry_on_overload() {
+async fn an_overload_is_retried_without_the_caller_seeing_it() {
     let mock = MockLlmServer::builder()
         .error(529, "overloaded_error")
         .response("recovered")
@@ -581,7 +560,7 @@ async fn test_agent_transparent_retry_on_overload() {
 
 /// Cancellation before the first provider call returns AgentError::Cancelled.
 #[tokio::test]
-async fn test_cancellation() {
+async fn a_cancelled_run_ends_as_cancelled() {
     let mock = MockLlmServer::builder().response("never").build().await;
     let provider = Arc::new(provider_at(&mock.url()));
     let toolbox = FixedToolbox::new("t", serde_json::json!(null));

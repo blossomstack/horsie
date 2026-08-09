@@ -122,12 +122,12 @@ async fn start_server_on(
     clock: Option<Arc<TestClock>>,
 ) -> Server {
     // `db_at` rather than a fresh database: a restart test is only a restart if
-    // the second incarnation comes up on the journal the first one wrote. That
-    // pins this suite to SQLite, which is also what makes every test here —
-    // including the restart ones — exercise real snapshots and compaction on
-    // the production default backend.
+    // the second incarnation comes up on the journal the first one wrote. It
+    // takes its backend from the environment like everything else, so this
+    // suite — the heaviest user of snapshots and compaction — is part of the
+    // PostgreSQL run rather than pinned to SQLite.
     let built = horsie_server::testing::state(journal_dir)
-        .db(horsie_server::testing::db_at(journal_dir).await)
+        .db(horsie_server::db::testing::db_at(journal_dir).await)
         // With a clock the test drives the idle policy itself: no background
         // ticker, so an offload happens exactly when it sends `Tick`.
         .supervisor(match clock {
@@ -382,6 +382,25 @@ async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want:
             panic!("timed out waiting for {want} finished turns; the agent has finished {got}");
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
+/// Poll `probe` until it yields a value, or give up after 10s.
+///
+/// For the one-off waits that used to be written inline as a bounded `for` loop
+/// with a bare `break` — those said how many times to look rather than what they
+/// were looking for, and a few reported nothing at all when they gave up. The
+/// named waits above keep their own bodies on purpose: each reports the last
+/// thing it saw, which is what makes a CI failure readable.
+async fn wait_until<T>(what: &str, mut probe: impl AsyncFnMut() -> Option<T>) -> T {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        assert!(start.elapsed() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -1713,18 +1732,14 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
         // The turn must reach a terminal state. Which one depends on where the
         // hangup lands, but "still Running forever" is the failure this guards:
         // #61 item 2 was a session pinning a transport that could never answer.
-        let mut settled = None;
-        for _ in 0..200 {
-            match get_status(&client, &server.addr, &id).await.as_deref() {
-                Some("Running") | None => {}
-                Some(other) => {
-                    settled = Some(other.to_string());
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let settled = settled.expect("the turn never left Running after the agent hung up");
+        let settled = wait_until(
+            "the turn to leave Running after the agent hung up",
+            async || match get_status(&client, &server.addr, &id).await.as_deref() {
+                Some("Running") | None => None,
+                Some(other) => Some(other.to_string()),
+            },
+        )
+        .await;
         assert!(
             matches!(settled.as_str(), "Idle" | "Failed" | "Unrecoverable"),
             "expected a terminal status, got {settled}"
@@ -1781,16 +1796,11 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         // genuinely arrive: the fake records it before blocking on its gate, and
         // `RuntimeClient` tracks a call before sending it, so an arrival here means
         // `cancel_in_flight` has something to find.
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while agent.tool_agent_ids().is_empty() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the tool call never reached the runtime, so there was nothing to \
-                 cancel (signals seen: {:?})",
-                agent.signals()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until(
+            "the tool call to reach the runtime, so there is something to cancel",
+            async || (!agent.tool_agent_ids().is_empty()).then_some(()),
+        )
+        .await;
 
         let res = client
             .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
@@ -1807,19 +1817,11 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         // Releasing the gate only lets the fake's own task get scheduled to
         // read it back off the socket and record it, which can lag this
         // task by a beat; poll rather than assert immediately.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if !agent.cancelled_calls().is_empty() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "Stop must propagate a cancel to the runtime; the sandbox never heard \
-                 about it (signals seen: {:?})",
-                agent.signals()
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        wait_until(
+            "Stop to propagate a cancel the sandbox actually hears",
+            async || (!agent.cancelled_calls().is_empty()).then_some(()),
+        )
+        .await;
 
         server.shutdown().await;
     })
@@ -2194,17 +2196,16 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
 
     clock.advance(Duration::from_secs(600));
     let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
-    for _ in 0..100 {
-        if agent.signals().contains(&format!("hibernate:{id}")) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(
-        agent.signals().contains(&format!("hibernate:{id}")),
-        "an idle session is unloaded and its runtime hibernated: {:?}",
-        agent.signals()
-    );
+    wait_until(
+        "an idle session to be unloaded and its runtime hibernated",
+        async || {
+            agent
+                .signals()
+                .contains(&format!("hibernate:{id}"))
+                .then_some(())
+        },
+    )
+    .await;
     // Unloading loses nothing a reader can see: opening the session again
     // reports the status its journal recorded.
     wait_status(&client, &server.addr, &id, "Idle").await;

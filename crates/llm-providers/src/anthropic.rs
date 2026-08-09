@@ -921,7 +921,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_to_api_role_user() {
+    fn to_api_role_user() {
         assert!(matches!(
             AnthropicProvider::to_api_role(&horsie_models::agent::Role::User),
             MessageRole::User
@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_api_role_assistant() {
+    fn to_api_role_assistant() {
         assert!(matches!(
             AnthropicProvider::to_api_role(&horsie_models::agent::Role::Assistant),
             MessageRole::Assistant
@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_api_role_tool_maps_to_user() {
+    fn to_api_role_tool_maps_to_user() {
         assert!(matches!(
             AnthropicProvider::to_api_role(&horsie_models::agent::Role::Tool),
             MessageRole::User
@@ -945,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parts_to_api_content_text() {
+    fn parts_to_api_content_text() {
         let parts = vec![ContentPart::Text(TextPart {
             text: "hello".into(),
         })];
@@ -958,7 +958,7 @@ mod tests {
     /// about it. Pinned against the literal string, not just `to_wire_text`,
     /// so a change to the format has to be a deliberate edit here.
     #[test]
-    fn test_parts_to_api_content_subagent_result_is_a_text_block() {
+    fn parts_to_api_content_subagent_result_is_a_text_block() {
         let parts = vec![ContentPart::SubAgentResult(
             horsie_models::agent::SubAgentResultPart {
                 subagent_id: "id".into(),
@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parts_to_api_content_tool_result() {
+    fn parts_to_api_content_tool_result() {
         let parts = vec![ContentPart::ToolResult(
             horsie_models::agent::ToolResultPart {
                 tool_call_id: "tc1".into(),
@@ -990,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parts_to_api_content_thinking_echoes_signature() {
+    fn parts_to_api_content_thinking_echoes_signature() {
         let parts = vec![ContentPart::Thinking(ThinkingPart {
             text: "think".into(),
             signature: Some("sig123".into()),
