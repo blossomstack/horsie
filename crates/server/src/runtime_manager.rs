@@ -12,10 +12,14 @@
 //! provision, so no later code path can silently rebuild a workspace the user
 //! believes still exists.
 //!
-//! Nothing here waits, and nothing here knows a create is in flight. That
-//! belongs to the session, which journals the attempt and refuses to start a
-//! turn until it has an answer: a wait that survives the process dying
-//! mid-create, which one held in a map beside this manager could not.
+//! **A create does not wait; an acquisition does.** Nothing here knows a create
+//! is in flight — that belongs to the session, which journals the attempt and
+//! refuses to start a turn until it has an answer, a wait that survives the
+//! process dying mid-create where one held in a map beside this manager could
+//! not. [`RuntimeManager::get`] is the other case: a vendor whose substrate
+//! boots a machine answers `Starting` and reports the outcome on a progress
+//! sink, so somebody has to read that sink, and the caller asking for a client
+//! is the only one who needs the answer.
 
 use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
@@ -54,6 +58,14 @@ pub struct RuntimeDeps {
 /// Dropping is correct: progress is advisory and the call's return value is the
 /// outcome, so a consumer falling behind must never stall a provision.
 const PROGRESS_BUFFER: usize = 32;
+
+/// How long an acquisition waits for a runtime to become reachable.
+///
+/// Above every vendor's own ready window on purpose, so the vendor is always
+/// the one that gives up first and says why. This is the backstop for a vendor
+/// that drops its sink without ever reporting an outcome — without it such a
+/// vendor would park a turn forever.
+const ACQUIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(960);
 
 pub struct RuntimeManager {
     deps: RuntimeDeps,
@@ -208,14 +220,14 @@ impl RuntimeManager {
     ) -> Result<(), RuntimeError> {
         let link = self.vendor(vendor)?;
         let rt_spec = self.runtime_spec(session, spec).await?;
+        // Not awaited to `Ready`, unlike an acquisition. A create's job is to
+        // get the substrate to accept the runtime; the session journals that it
+        // happened and the first `get` is what waits for it to come up — a wait
+        // that survives this process dying, which one held here would not.
         let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
         link.create(session, &rt_spec.to_wire(), progress)
             .await
-            .map_err(|e: RuntimeVendorError| match e {
-                RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
-                RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
-                RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
-            })?;
+            .map_err(Self::vendor_error)?;
         Ok(())
     }
 
@@ -235,30 +247,81 @@ impl RuntimeManager {
         spec: &SessionSpec,
     ) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
-        // Re-assembled rather than cached, exactly as `create` does: the GitHub
-        // and plugin tokens in it are short-lived, and a stale one is worse
-        // than none.
+        // The receiver is held for the whole acquisition, not dropped on the
+        // way out. A vendor whose substrate has to boot a machine answers
+        // `Starting` and finishes on this sink — so dropping it closed the one
+        // channel the eventual `Ready` had to arrive on, and every Fly or velos
+        // acquisition failed as "not reachable yet" no matter how long the
+        // runtime had been up.
+        let (progress, mut rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
         let rt_spec = self.runtime_spec(session, spec).await?;
-        let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
-        let progress_now = link
+        let first = link
             .get(session, &rt_spec.to_wire(), progress)
             .await
-            .map_err(|e| match e {
-                RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
-                RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
-                RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
-            })?;
-        // Every vendor that exists today answers `get` with a runtime already
-        // reachable. A vendor that needs to boot one reports `Pending` and is
-        // driven to `Ready` over the sink — wiring that up is the next change,
-        // so refusing here is honest rather than silently handing back a client
-        // to a runtime that is not up.
-        let horsie_runtime_vendor::RuntimeProgress::Ready(handle) = progress_now else {
-            return Err(RuntimeError::Unavailable(
-                "the runtime is not reachable yet".to_string(),
-            ));
-        };
+            .map_err(Self::vendor_error)?;
+        let handle = Self::await_ready(session, first, &mut rx).await?;
         Ok(Self::client(session, handle))
+    }
+
+    fn vendor_error(e: RuntimeVendorError) -> RuntimeError {
+        match e {
+            RuntimeVendorError::Gone(m) => RuntimeError::Gone(m),
+            RuntimeVendorError::Unavailable(m) => RuntimeError::Unavailable(m),
+            RuntimeVendorError::Provision(m) => RuntimeError::Provision(m),
+        }
+    }
+
+    /// Follow an acquisition from its first observation to a runtime that can
+    /// be talked to.
+    ///
+    /// The vendor contract makes this a plain fold: the return value *is* the
+    /// first event, and every later one arrives on the sink in order, so there
+    /// is nothing to reconcile — only a state to walk until it settles.
+    ///
+    /// Events for another runtime are ignored rather than trusted: one account
+    /// has one sink, and a vendor is free to report on anything it owns.
+    async fn await_ready(
+        session: &str,
+        first: horsie_runtime_vendor::RuntimeProgress,
+        rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_vendor::RuntimeEvent>,
+    ) -> Result<Arc<dyn crate::runtime_vendor::RuntimeHandle>, RuntimeError> {
+        use horsie_runtime_vendor::RuntimeProgress as P;
+        let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
+        let mut progress = first;
+        loop {
+            match progress {
+                P::Ready(handle) => return Ok(handle),
+                // Terminal, and the reason travels: a session whose runtime is
+                // gone has to be able to say so rather than retry forever.
+                P::Gone { reason } => return Err(RuntimeError::Gone(reason)),
+                // Not terminal. A vendor that reports a runtime stopped during
+                // an acquisition is one that could not revive it this time.
+                P::Stopped | P::Stopping => {
+                    return Err(RuntimeError::Unavailable(format!(
+                        "runtime '{session}' went down during the acquisition"
+                    )));
+                }
+                P::Requested | P::Starting { .. } | P::Provisioning { .. } => {}
+            }
+            let event = tokio::time::timeout_at(deadline, rx.recv()).await;
+            progress = match event {
+                Ok(Some(event)) if event.runtime_id == session => event.progress,
+                Ok(Some(_)) => continue,
+                // The vendor dropped the sink without ever reporting an
+                // outcome. Retryable rather than terminal: it says nothing
+                // about the runtime, only about the vendor.
+                Ok(None) => {
+                    return Err(RuntimeError::Unavailable(format!(
+                        "the vendor stopped reporting on runtime '{session}'"
+                    )));
+                }
+                Err(_) => {
+                    return Err(RuntimeError::Unavailable(format!(
+                        "runtime '{session}' was not reachable within the acquisition window"
+                    )));
+                }
+            };
+        }
     }
 
     /// A client over the handle the vendor just returned.
@@ -660,6 +723,175 @@ mod tests {
             "credentials are short-lived and must be re-minted on every create, never cached"
         );
         assert_eq!(minter.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A substrate that has to boot something: `Starting` first, the outcome on
+    /// the sink later. Every cloud vendor in the tree behaves this way, and no
+    /// websocket-backed double can stand in for one — a `horsie connect` link
+    /// only ever answers once its runtime is already up.
+    struct BootingVendor {
+        outcome: std::sync::Mutex<Option<horsie_runtime_vendor::RuntimeProgress>>,
+    }
+
+    impl BootingVendor {
+        fn with(outcome: horsie_runtime_vendor::RuntimeProgress) -> Arc<Self> {
+            Arc::new(Self {
+                outcome: std::sync::Mutex::new(Some(outcome)),
+            })
+        }
+
+        /// Never reports an outcome at all, the way a vendor whose background
+        /// task died does.
+        fn silent() -> Arc<Self> {
+            Arc::new(Self {
+                outcome: std::sync::Mutex::new(None),
+            })
+        }
+
+        fn ready() -> Arc<Self> {
+            Self::with(horsie_runtime_vendor::RuntimeProgress::Ready(Arc::new(
+                StubHandle,
+            )))
+        }
+    }
+
+    #[derive(Debug)]
+    struct StubHandle;
+
+    #[async_trait::async_trait]
+    impl crate::runtime_vendor::RuntimeHandle for StubHandle {
+        fn id(&self) -> &str {
+            "s1"
+        }
+        async fn relay(
+            &self,
+            _: horsie_models::runtime::RuntimeInboundMessage,
+        ) -> Result<
+            horsie_models::runtime::RuntimeOutboundMessage,
+            horsie_runtime_client::TransportError,
+        > {
+            Err(horsie_runtime_client::TransportError::Disconnected)
+        }
+        async fn relay_oneway(
+            &self,
+            _: horsie_models::runtime::RuntimeInboundMessage,
+        ) -> Result<(), horsie_runtime_client::TransportError> {
+            Ok(())
+        }
+        async fn closed(&self) {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime_vendor::RuntimeVendor for BootingVendor {
+        fn name(&self) -> &str {
+            "booting"
+        }
+        fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+            horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+                supports_provisioning: true,
+            }
+        }
+        async fn create(
+            &self,
+            _: &str,
+            _: &horsie_models::runtime_vendor::RuntimeSpec,
+            _: horsie_runtime_vendor::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_vendor::RuntimeProgress::Starting {
+                detail: "booting".into(),
+            })
+        }
+        async fn get(
+            &self,
+            runtime_id: &str,
+            _spec: &horsie_models::runtime_vendor::RuntimeSpec,
+            progress: horsie_runtime_vendor::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+            let outcome = self.outcome.lock().unwrap().take();
+            let id = runtime_id.to_string();
+            // After the return value is built, per the ordering rule.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                if let Some(progress_step) = outcome {
+                    let _ = progress
+                        .send(horsie_runtime_vendor::RuntimeEvent {
+                            runtime_id: id,
+                            progress: progress_step,
+                        })
+                        .await;
+                }
+            });
+            Ok(horsie_runtime_vendor::RuntimeProgress::Starting {
+                detail: "the machine is up; waiting for it to dial back".into(),
+            })
+        }
+        async fn hibernate(
+            &self,
+            _: &str,
+            _: horsie_runtime_vendor::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_vendor::RuntimeProgress::Stopped)
+        }
+        async fn delete(
+            &self,
+            _: &str,
+            _: horsie_runtime_vendor::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_vendor::RuntimeProgress::Gone {
+                reason: "deleted".into(),
+            })
+        }
+    }
+
+    fn published_vendor(vendor: Arc<dyn crate::runtime_vendor::RuntimeVendor>) -> RuntimeVendorMap {
+        let mut map = HashMap::new();
+        map.insert("v".to_string(), vendor);
+        Arc::new(RwLock::new(map))
+    }
+
+    /// The failure that made every cloud vendor unusable. A vendor whose
+    /// substrate boots a machine answers `Starting` and reports `Ready` on the
+    /// sink — and the sink's receiver was dropped on the way out of this call,
+    /// so the `Ready` went into a closed channel and every acquisition failed
+    /// as "not reachable yet", however long the runtime had been up.
+    #[tokio::test]
+    async fn an_acquisition_follows_a_booting_runtime_to_ready() {
+        let vendor = BootingVendor::ready();
+        let m = manager(published_vendor(vendor));
+        m.get("s1", "v", &SessionSpec::for_vendor("v"))
+            .await
+            .expect("a runtime that comes up on the sink must be handed back");
+    }
+
+    /// The other half of the fold: a vendor that gives up says so, and says it
+    /// terminally, so the session stops retrying a runtime that is not coming
+    /// back.
+    #[tokio::test]
+    async fn an_acquisition_that_ends_gone_is_terminal() {
+        let vendor = BootingVendor::with(horsie_runtime_vendor::RuntimeProgress::Gone {
+            reason: "the machine never dialed back".into(),
+        });
+        let m = manager(published_vendor(vendor));
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
+            panic!("a runtime reported gone must not yield a client")
+        };
+        assert!(
+            matches!(&err, RuntimeError::Gone(m) if m.contains("never dialed back")),
+            "{err:?}"
+        );
+    }
+
+    /// A vendor that drops its sink without ever reporting is retryable, not
+    /// terminal: it says nothing about the runtime, only about the vendor.
+    #[tokio::test]
+    async fn a_vendor_that_stops_reporting_leaves_the_session_recoverable() {
+        let m = manager(published_vendor(BootingVendor::silent()));
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
+            panic!("a silent vendor must not yield a client")
+        };
+        assert!(matches!(err, RuntimeError::Unavailable(_)), "{err:?}");
     }
 
     #[tokio::test]
