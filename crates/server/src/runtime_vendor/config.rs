@@ -27,8 +27,8 @@ use std::sync::{Arc, PoisonError};
 
 const COLS: &str = "name, kind, settings, credential, created_at, updated_at";
 
-/// The path on this server that runtimes dial. Appended when an operator gives
-/// a bare origin, which is the shape they will reach for.
+/// The path on this server that runtimes dial. Named in the error a callback
+/// URL without one earns, since that is the whole of what is missing.
 const CONNECT_PATH: &str = "/api/runtime/connect";
 
 /// How a Fly vendor builds machines: the *storage* shape.

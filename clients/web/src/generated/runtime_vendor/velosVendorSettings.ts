@@ -23,6 +23,7 @@ export interface VelosVendorSettings {
   /**
    * The `ws://` URL a container reaches this server on, *from velos's
    * container network* — not necessarily the address a browser uses.
+   * Includes the connect path, as on a Fly vendor.
    */
   callbackUrl: string;
   cpu: number;
