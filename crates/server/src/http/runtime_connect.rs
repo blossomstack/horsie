@@ -127,7 +127,7 @@ pub async fn runtime_connect(
                 // The verified id, never the announced one: a token authorises
                 // exactly one runtime, and this is what stops an authenticated
                 // peer registering as a different one.
-                horsie_runtime_vendor::handle_runtime_connection(ws, registry, runtime_id).await;
+                horsie_runtime_host::handle_runtime_connection(ws, registry, runtime_id).await;
             }
             Err(e) => tracing::warn!(error = %e, "a runtime connection failed to upgrade"),
         }

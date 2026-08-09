@@ -65,7 +65,7 @@ impl Toolbox for CompositeToolbox {
 /// identically, so an agent, an `allowed_tools` allowlist and a hook matcher all
 /// see one vocabulary whichever path a tool came from.
 pub struct PluginMcpToolbox {
-    client: horsie_runtime_client::RuntimeClient,
+    client: horsie_runtime_host::RuntimeClient,
     tools: Vec<horsie_models::runtime::PluginMcpTool>,
 }
 
@@ -74,7 +74,7 @@ impl PluginMcpToolbox {
     /// `provide()`, alongside the workspace scan.
     #[must_use]
     pub fn new(
-        client: horsie_runtime_client::RuntimeClient,
+        client: horsie_runtime_host::RuntimeClient,
         tools: Vec<horsie_models::runtime::PluginMcpTool>,
     ) -> Self {
         Self { client, tools }
@@ -200,8 +200,8 @@ mod tests {
     /// server's own JSON Schema carried through.
     #[test]
     fn plugin_mcp_tools_become_specs() {
-        let client = horsie_runtime_client::RuntimeClient::new(
-            horsie_runtime_client::testkit::MockTransport::ok(""),
+        let client = horsie_runtime_host::RuntimeClient::new(
+            horsie_runtime_host::testkit::MockTransport::ok(""),
             "agent",
         );
         let tb = PluginMcpToolbox::new(
@@ -233,8 +233,8 @@ mod tests {
     /// to a runtime that would have to refuse it anyway.
     #[tokio::test]
     async fn an_unknown_plugin_mcp_tool_is_refused_locally() {
-        let client = horsie_runtime_client::RuntimeClient::new(
-            horsie_runtime_client::testkit::MockTransport::ok(""),
+        let client = horsie_runtime_host::RuntimeClient::new(
+            horsie_runtime_host::testkit::MockTransport::ok(""),
             "agent",
         );
         let tb = PluginMcpToolbox::new(client, Vec::new());
@@ -361,8 +361,8 @@ mod tests {
     #[tokio::test]
     async fn an_admin_server_outranks_a_plugin_of_the_same_name() {
         let plugin: Arc<dyn Toolbox> = Arc::new(PluginMcpToolbox::new(
-            horsie_runtime_client::RuntimeClient::new(
-                horsie_runtime_client::testkit::MockTransport::ok(""),
+            horsie_runtime_host::RuntimeClient::new(
+                horsie_runtime_host::testkit::MockTransport::ok(""),
                 "agent",
             ),
             vec![horsie_models::runtime::PluginMcpTool {

@@ -1,8 +1,8 @@
-use crate::agent_actor::UsageTotal;
-use crate::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::agent_actor::UsageTotal;
+use crate::agent_loop::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
-use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
+use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 pub const CONCLUDE_TOOL: &str = "conclude";
 
 /// The subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
-/// [`AgentParams::from_def`](crate::AgentParams::from_def) actually need: tool
+/// [`AgentParams::from_def`](crate::agent_loop::AgentParams::from_def) actually need: tool
 /// shape and turn-shape, and nothing about *where this agent sits*. A workflow
 /// step builds one from its definition and preset; an interactive session
 /// builds one from its settings.
@@ -49,7 +49,7 @@ pub struct AskedQuestion {
     pub question: String,
 }
 
-/// A terminal outcome an [`AgentActor`](crate::AgentActor) reports to whoever
+/// A terminal outcome an [`AgentActor`](crate::agent_loop::AgentActor) reports to whoever
 /// spawned it — the workflow that orchestrates it, or an interactive session.
 #[derive(Debug, Clone)]
 pub enum AgentOutcome {
@@ -92,7 +92,7 @@ pub enum AgentOutcome {
     },
 }
 
-/// Where an [`AgentActor`](crate::AgentActor) delivers its [`AgentOutcome`].
+/// Where an [`AgentActor`](crate::agent_loop::AgentActor) delivers its [`AgentOutcome`].
 /// Implemented by the workflow (mapping outcomes into its own commands) and by
 /// the session server; keeps the agent decoupled from any one parent's command
 /// enum.
@@ -104,7 +104,7 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// The per-run contexts an agent run executes within — the provider it calls,
 /// the toolbox it acts through, and the system prompt that frames it. Produced
 /// fresh by [`ContextProvider::provide`] at the top of every run. The timer /
-/// `task_list` wrappers are layered on by the [`AgentActor`](crate::AgentActor)
+/// `task_list` wrappers are layered on by the [`AgentActor`](crate::agent_loop::AgentActor)
 /// itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
@@ -133,7 +133,7 @@ pub struct StartTurn {
     pub prompt: Option<String>,
 }
 
-/// Provides the per-run [`Contexts`] an [`AgentActor`](crate::AgentActor) needs.
+/// Provides the per-run [`Contexts`] an [`AgentActor`](crate::agent_loop::AgentActor) needs.
 ///
 /// `provide` is called on the run's *spawned task* — never an actor mailbox — at
 /// the top of every run path (fresh input, resume, timer wake). Implementations
@@ -166,7 +166,7 @@ pub trait ContextProvider: Send + Sync {
     ///
     /// Returns the records to journal, and optionally a rewritten prompt. Their
     /// consequences are read off them by the caller — the agent translates the
-    /// context and [`crate::start_blocked`] reads a refusal — so this never
+    /// context and [`crate::agent_loop::start_blocked`] reads a refusal — so this never
     /// decides anything itself.
     async fn start_hooks(&self, turn: StartTurn) -> Result<TurnPreparation, ContextError> {
         let _ = turn;
@@ -249,7 +249,7 @@ impl ContextProvider for FixedContextProvider {
     }
 }
 
-/// Resources injected into an [`AgentActor`](crate::AgentActor) at spawn. Holds
+/// Resources injected into an [`AgentActor`](crate::agent_loop::AgentActor) at spawn. Holds
 /// only cheap, stable wiring — the volatile per-run contexts (provider, toolbox,
 /// prompt) are obtained lazily via [`ContextProvider::provide`], so spawning is
 /// free of any runtime/MCP/scan work.
@@ -544,14 +544,15 @@ impl Toolbox for AgentToolbox {
             let requested_ws = input.get("workspace").and_then(Value::as_str);
             // Shared plugin library: addressed by the reserved `horsie_shared` name,
             // resolved against the shared skill set (not a job workspace).
-            if requested_ws == Some(crate::workspace::SHARED_WORKSPACE) {
+            if requested_ws == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
                             .to_string(),
                     ));
                 }
-                let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
+                let (_, shared) =
+                    crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
                 return match shared.skills.get(requested) {
                     Some(skill) => Ok(Value::String(skill_body(skill))),
                     None => Err(ToolCallError::InvalidInput(format!(
@@ -561,8 +562,12 @@ impl Toolbox for AgentToolbox {
                 };
             }
             let ws_name = self.resolve_workspace(requested_ws)?;
-            let (ws, _) =
-                crate::workspace::scan(&self.runtime_client, Some(ws_name.clone()), false).await;
+            let (ws, _) = crate::agent_loop::workspace::scan(
+                &self.runtime_client,
+                Some(ws_name.clone()),
+                false,
+            )
+            .await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
                     "workspace '{ws_name}' is not available"
@@ -582,27 +587,31 @@ impl Toolbox for AgentToolbox {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             // Shared-only view.
-            if filter.as_deref() == Some(crate::workspace::SHARED_WORKSPACE) {
+            if filter.as_deref() == Some(crate::agent_loop::workspace::SHARED_WORKSPACE) {
                 if !self.use_plugins {
                     return Err(ToolCallError::InvalidInput(
                         "the shared plugin library 'horsie_shared' is not enabled for this agent"
                             .to_string(),
                     ));
                 }
-                let (_, shared) = crate::workspace::scan(&self.runtime_client, None, true).await;
-                return Ok(Value::String(crate::workspace::shared_inspect(
+                let (_, shared) =
+                    crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
+                return Ok(Value::String(crate::agent_loop::workspace::shared_inspect(
                     &shared.skills,
                     shared.root.as_deref(),
                 )));
             }
-            let (ws, shared) =
-                crate::workspace::scan(&self.runtime_client, filter.clone(), self.use_plugins)
-                    .await;
-            let mut out = crate::workspace::inspect_result(&ws);
+            let (ws, shared) = crate::agent_loop::workspace::scan(
+                &self.runtime_client,
+                filter.clone(),
+                self.use_plugins,
+            )
+            .await;
+            let mut out = crate::agent_loop::workspace::inspect_result(&ws);
             // Append the shared library when listing everything for an opted-in agent.
             if self.use_plugins && filter.is_none() {
                 out.push_str("\n\n");
-                out.push_str(&crate::workspace::shared_inspect(
+                out.push_str(&crate::agent_loop::workspace::shared_inspect(
                     &shared.skills,
                     shared.root.as_deref(),
                 ));
@@ -618,7 +627,7 @@ impl Toolbox for AgentToolbox {
 /// absolute because that is the only addressing those tools take — and because a
 /// shared skill's directory is not under any workspace, so nothing else would
 /// resolve it.
-fn skill_body(skill: &crate::workspace::Skill) -> String {
+fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
     match &skill.dir {
         Some(dir) => format!(
             "{}\n\n[resources] This skill's files are in {}/. \
@@ -675,7 +684,7 @@ impl Toolbox for FilteredToolbox {
 )]
 mod tests {
     use super::*;
-    use horsie_runtime_client::MockTransport;
+    use horsie_runtime_host::MockTransport;
 
     fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> AgentRunDef {
         AgentRunDef {

@@ -7,7 +7,7 @@
 //! four fields.
 //!
 //! No actors and no I/O, so the decision is unit-testable against a hand-built
-//! queue. [`AgentActor`](crate::AgentActor) owns the queue; this owns the rule.
+//! queue. [`AgentActor`](crate::agent_loop::AgentActor) owns the queue; this owns the rule.
 
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
@@ -142,7 +142,7 @@ impl std::fmt::Display for AnswerError {
 /// business, checked before this is ever asked, because a run in flight is not a
 /// fact about the queue.
 #[must_use]
-pub fn queued_turn(inbox: &[Incoming], asks: &[crate::AskedQuestion]) -> Option<Turn> {
+pub fn queued_turn(inbox: &[Incoming], asks: &[crate::agent_loop::AskedQuestion]) -> Option<Turn> {
     if inbox.is_empty() {
         return None;
     }
@@ -175,7 +175,7 @@ pub fn queued_turn(inbox: &[Incoming], asks: &[crate::AskedQuestion]) -> Option<
 /// because nothing has been journaled yet.
 pub fn answered_turn(
     inbox: &[Incoming],
-    asks: &[crate::AskedQuestion],
+    asks: &[crate::agent_loop::AskedQuestion],
     answers: Vec<AskAnswer>,
 ) -> Result<Turn, AnswerError> {
     let pending: std::collections::HashSet<String> =
@@ -240,7 +240,7 @@ mod tests {
     //! The queue rule: what merges, what waits, and what a park does and does
     //! not survive.
     use super::*;
-    use crate::AskedQuestion;
+    use crate::agent_loop::AskedQuestion;
 
     fn user(id: &str, text: &str) -> Incoming {
         Incoming::User {

@@ -14,7 +14,7 @@ use crate::error::CliError;
 use horsie_models::capabilities::{
     Access, BlockNetwork, CapabilitySpec, Grant, NetworkPolicy, WorkingDirGrant,
 };
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     AgentExit, ConnectedRuntimeRegistry, FixedWorkspaces, ProcessRuntimeProvider, RuntimeEndpoint,
     RuntimeListenerServer, RuntimeVendorClient, SandboxPolicy, serve_runtime_connections,
 };
@@ -246,7 +246,7 @@ pub async fn run(
     // lives an hour, an established link is never re-authenticated, and this
     // process is expected to run for days. The one-shot resolve above is only
     // for the pre-flight below.
-    let credential: horsie_runtime_vendor::CredentialProvider = {
+    let credential: horsie_runtime_host::CredentialProvider = {
         let server = server.to_string();
         Arc::new(move || {
             let server = server.clone();
@@ -254,10 +254,10 @@ pub async fn run(
                 match crate::auth::resolve_token_outcome(&server).await {
                     crate::auth::TokenOutcome::Token(t) => Ok(t),
                     crate::auth::TokenOutcome::Transient(m) => {
-                        Err(horsie_runtime_vendor::CredentialError::Transient(m))
+                        Err(horsie_runtime_host::CredentialError::Transient(m))
                     }
                     crate::auth::TokenOutcome::Dead(m) => {
-                        Err(horsie_runtime_vendor::CredentialError::Dead(format!(
+                        Err(horsie_runtime_host::CredentialError::Dead(format!(
                             "{m} — run `horsie auth login --server {server}`"
                         )))
                     }
@@ -308,13 +308,13 @@ pub async fn run(
     let cancel = CancellationToken::new();
     // Shared with the vendor below, which files each token the server minted
     // before it spawns the runtime that presents it.
-    let issued = horsie_runtime_vendor::IssuedTokens::new();
+    let issued = horsie_runtime_host::IssuedTokens::new();
     serve_runtime_connections(listener, connected.clone(), issued.clone(), cancel.clone());
 
     let bin = runtime_bin.to_path_buf();
     let sock_for_provider = socket.clone();
     let registry_for_provider = connected.clone();
-    let provider: horsie_runtime_vendor::ProviderFactory =
+    let provider: horsie_runtime_host::ProviderFactory =
         Arc::new(move |_runtime_id: &str, caps: Option<PathBuf>| {
             let mut p = ProcessRuntimeProvider::new(
                 bin.clone(),
@@ -344,7 +344,7 @@ pub async fn run(
     // than provisioning. Without this, Ctrl-C on this command would leave every
     // session it was serving permanently unrecoverable.
     .with_respawnable_runtimes(true)
-    .with_bundles(horsie_runtime_vendor::BundleDelivery {
+    .with_bundles(horsie_runtime_host::BundleDelivery {
         // The runtimes run on this machine, so whatever address reaches the
         // server from here reaches it from them.
         base_url: server.trim_end_matches('/').to_string(),

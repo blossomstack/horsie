@@ -20,11 +20,11 @@
 //! that relays to a `horsie connect` process, and that process drives a vendor
 //! of its own.
 
+use crate::TransportError;
 use crate::error::RuntimeError;
 use async_trait::async_trait;
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
-use horsie_runtime_client::TransportError;
 use std::sync::Arc;
 
 /// Where a runtime is, as its vendor currently understands it.
@@ -236,7 +236,7 @@ pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
 /// split [`RuntimeTransport`] already makes.
 pub struct RuntimeHandleImpl {
     runtime_id: String,
-    transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+    transport: Arc<dyn crate::RuntimeTransport>,
     /// Flipped by whoever owns the connection when it can no longer be reached,
     /// or absent when nothing is in a position to notice — see
     /// [`RuntimeHandleImpl::unwatched`].
@@ -247,7 +247,7 @@ impl RuntimeHandleImpl {
     #[must_use]
     pub fn new(
         runtime_id: String,
-        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+        transport: Arc<dyn crate::RuntimeTransport>,
         closed: tokio::sync::watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -269,10 +269,7 @@ impl RuntimeHandleImpl {
     /// So this waits forever instead. Saying "I cannot tell you" costs a
     /// parked task; saying "it is dead" costs a live runtime.
     #[must_use]
-    pub fn unwatched(
-        runtime_id: String,
-        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
-    ) -> Self {
+    pub fn unwatched(runtime_id: String, transport: Arc<dyn crate::RuntimeTransport>) -> Self {
         Self {
             runtime_id,
             transport,
@@ -335,11 +332,11 @@ impl RuntimeHandle for RuntimeHandleImpl {
 /// it keeps `RuntimeHandle` free to be about a *runtime* while `RuntimeTransport`
 /// stays about *bytes*.
 ///
-/// [`RuntimeTransport`]: horsie_runtime_client::RuntimeTransport
+/// [`RuntimeTransport`]: crate::RuntimeTransport
 pub struct RuntimeHandleTransport(pub Arc<dyn RuntimeHandle>);
 
 #[async_trait]
-impl horsie_runtime_client::RuntimeTransport for RuntimeHandleTransport {
+impl crate::RuntimeTransport for RuntimeHandleTransport {
     async fn relay(
         &self,
         message: RuntimeInboundMessage,
@@ -578,7 +575,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl horsie_runtime_client::RuntimeTransport for RecordingTransport {
+    impl crate::RuntimeTransport for RecordingTransport {
         async fn relay(
             &self,
             _: RuntimeInboundMessage,

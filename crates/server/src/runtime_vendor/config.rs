@@ -20,7 +20,7 @@ use crate::runtime_vendor::fly_api::{FlyHttpApi, FlyMachineSize};
 use crate::runtime_vendor::velos::{VelosRuntimeVendor, VelosSettings};
 use crate::runtime_vendor::{RuntimeVendor, WebsocketVendorTable};
 use crate::sessions::spec::RuntimeVendorMap;
-use horsie_runtime_vendor::ConnectedRuntimeRegistry;
+use horsie_runtime_host::ConnectedRuntimeRegistry;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::sync::{Arc, PoisonError};

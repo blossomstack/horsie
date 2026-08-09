@@ -1,3 +1,4 @@
+pub mod agent_loop;
 pub mod agents;
 pub mod auth;
 pub mod boot;

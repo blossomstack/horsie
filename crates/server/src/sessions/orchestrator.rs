@@ -3,7 +3,7 @@
 //!
 //! Turns are not among them. An agent holds its own queue and decides when that
 //! queue becomes a turn, so what used to be `main_turn` is now
-//! [`horsie_workflow::queued_turn`], asked by the agent against its own state.
+//! [`crate::agent_loop::queued_turn`], asked by the agent against its own state.
 //! What is left here is delivery: the session owns the forest, so it is the only
 //! thing that knows a child's result is owed to a parent, and its job ends at
 //! putting that result in the parent's queue.

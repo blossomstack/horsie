@@ -11,7 +11,7 @@
 )]
 
 use horsie_models::executor::{ProvisionStep, RuntimeConfig, StepParam, WorkspaceConfig};
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     ConnectedRuntimeRegistry, ProcessRuntimeProvider, RuntimeEndpoint, RuntimeListenerServer,
     RuntimeProvider, serve_runtime_connections,
 };
@@ -71,7 +71,7 @@ fn checkout_step(url: &str, dir: &str) -> ProvisionStep {
 
 struct Assembly {
     provider: ProcessRuntimeProvider,
-    issued: Arc<horsie_runtime_vendor::IssuedTokens>,
+    issued: Arc<horsie_runtime_host::IssuedTokens>,
     _cancel_guard: tokio_util::sync::DropGuard,
 }
 
@@ -82,7 +82,7 @@ async fn assembly(sock_dir: &Path) -> Assembly {
         .await
         .unwrap();
     let cancel = CancellationToken::new();
-    let issued = horsie_runtime_vendor::IssuedTokens::new();
+    let issued = horsie_runtime_host::IssuedTokens::new();
     serve_runtime_connections(listener, connected.clone(), issued.clone(), cancel.clone());
     let provider = ProcessRuntimeProvider::new(
         PathBuf::from(env!("CARGO_BIN_EXE_horsie-runtime")),
@@ -103,7 +103,7 @@ async fn assembly(sock_dir: &Path) -> Assembly {
 /// do both halves themselves. Without it the listener refuses the dial — which
 /// is the point of the token, and would otherwise look like a hang.
 fn dial_env(
-    issued: &horsie_runtime_vendor::IssuedTokens,
+    issued: &horsie_runtime_host::IssuedTokens,
     runtime_id: &str,
 ) -> Vec<horsie_models::executor::EnvVar> {
     let token = format!("dial-token-for-{runtime_id}");

@@ -20,7 +20,7 @@ use horsie_agentcore::{
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
-use horsie_workflow::{
+use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRuntimeContext, FixedContextProvider,
 };
@@ -223,7 +223,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         session_id,
         ready: true,
     };
-    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+    let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
         output_schema: None,
         allow_ask_user: false,
@@ -239,7 +239,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
         .tell(AgentCommand::Enqueue {
-            item: horsie_workflow::Incoming::User {
+            item: horsie_server::agent_loop::Incoming::User {
                 id: "m1".into(),
                 text: "carry on".into(),
             },
@@ -320,7 +320,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             // makes the answer below answerable — a park is durable agent
             // state now, not something the session holds on the agent's behalf.
             AgentDomainEvent::AskRecorded {
-                asks: vec![horsie_workflow::AskedQuestion {
+                asks: vec![horsie_server::agent_loop::AskedQuestion {
                     tool_call_id: Some("ask-1".into()),
                     question: "which commands?".into(),
                 }],
@@ -342,7 +342,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         session_id,
         ready: true,
     };
-    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+    let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
         output_schema: None,
         allow_ask_user: false,
@@ -359,7 +359,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
     agent
         .tell(AgentCommand::Answer {
-            answers: vec![horsie_workflow::AskAnswer {
+            answers: vec![horsie_server::agent_loop::AskAnswer {
                 tool_call_id: "ask-1".into(),
                 text: "validate, daemon, job".into(),
             }],
@@ -381,7 +381,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // history by now, so this is what every later turn would carry forever.
     agent
         .tell(AgentCommand::Enqueue {
-            item: horsie_workflow::Incoming::User {
+            item: horsie_server::agent_loop::Incoming::User {
                 id: "m2".into(),
                 text: "carry on".into(),
             },
@@ -425,10 +425,11 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
     /// A provider that never returns — a wedged runtime or a silent MCP server.
     struct HangingContextProvider;
     #[async_trait]
-    impl horsie_workflow::ContextProvider for HangingContextProvider {
+    impl horsie_server::agent_loop::ContextProvider for HangingContextProvider {
         async fn provide(
             &self,
-        ) -> Result<horsie_workflow::Contexts, horsie_workflow::ContextError> {
+        ) -> Result<horsie_server::agent_loop::Contexts, horsie_server::agent_loop::ContextError>
+        {
             std::future::pending().await
         }
     }
@@ -444,7 +445,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             session_id,
             ready: true,
         };
-        let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+        let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
             system_prompt: None,
             output_schema: None,
             allow_ask_user: false,
@@ -458,7 +459,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         let agent = spawn_root(AgentActor::new(ctx, params), journal);
         agent
             .tell(AgentCommand::Enqueue {
-                item: horsie_workflow::Incoming::User {
+                item: horsie_server::agent_loop::Incoming::User {
                     id: "m3".into(),
                     text: "start something that wedges".into(),
                 },
@@ -521,7 +522,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         session_id,
         ready: true,
     };
-    let mut params = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+    let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
         output_schema: None,
         allow_ask_user: false,
@@ -578,7 +579,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         session_id,
         ready: true,
     };
-    let mut params2 = AgentParams::from_def(&horsie_workflow::AgentRunDef {
+    let mut params2 = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
         output_schema: None,
         allow_ask_user: false,

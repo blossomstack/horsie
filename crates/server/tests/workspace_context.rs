@@ -11,8 +11,8 @@
 )]
 
 use horsie_models::runtime::{ScannedFile, WorkspaceScan};
-use horsie_runtime_client::{MockTransport, RuntimeClient};
-use horsie_workflow::{
+use horsie_runtime_host::{MockTransport, RuntimeClient};
+use horsie_server::agent_loop::{
     AgentRunDef, DefaultToolboxFactory, ToolboxFactory, compose_system_prompt, scan_workspace,
 };
 

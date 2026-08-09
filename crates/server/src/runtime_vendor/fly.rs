@@ -19,7 +19,7 @@ use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_pa
 use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     ConnectedRuntimeRegistry, RuntimeEvent, RuntimeHandleImpl, RuntimeProgress, RuntimeProgressSink,
 };
 use std::sync::Arc;
@@ -200,7 +200,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
     fn handle(
         &self,
         runtime_id: &str,
-        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+        transport: Arc<dyn horsie_runtime_host::RuntimeTransport>,
     ) -> Arc<dyn RuntimeHandle> {
         // The registry reports liveness by presence — a dropped runtime is
         // simply absent from it — so there is no flag anyone flips, and the

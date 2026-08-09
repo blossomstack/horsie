@@ -5,6 +5,7 @@ repository = "https://github.com/blossomstack/horsie"
 description = "Actor primitives with durable journaling for horsie"
 version = "0.1.6"
 edition = "2024"
+publish = false # only horsie-server consumes it, and the server does not ship via crates.io
 
 [features]
 # Exposes `testkit` (FaultyJournal) to other crates.

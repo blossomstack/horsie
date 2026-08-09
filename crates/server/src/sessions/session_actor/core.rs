@@ -8,11 +8,11 @@
 use super::CoreCommand;
 use super::component::Component;
 use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
+use crate::agent_loop::AgentCommand;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
-use horsie_workflow::AgentCommand;
 
 /// Longest auto-derived session title, in characters.
 const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;

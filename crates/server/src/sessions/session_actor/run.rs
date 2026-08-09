@@ -15,6 +15,7 @@ use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, RunCommand, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, TurnEnd,
 };
+use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::orchestrator::StepStart;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
@@ -22,7 +23,6 @@ use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
 use horsie_models::now_ms;
-use horsie_workflow::{AgentCommand, Incoming};
 use serde_json::Value;
 use tokio::sync::oneshot;
 use uuid::Uuid;

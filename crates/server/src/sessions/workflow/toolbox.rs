@@ -9,9 +9,9 @@
 //! what makes the call terminal, so reaching `execute` means something upstream
 //! stopped treating it as one.
 
+use crate::agent_loop::{CONCLUDE_TOOL, conclude_tool_spec};
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
-use horsie_workflow::{CONCLUDE_TOOL, conclude_tool_spec};
 use serde_json::Value;
 use std::sync::Arc;
 

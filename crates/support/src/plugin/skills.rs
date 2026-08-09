@@ -44,7 +44,7 @@ pub fn skill_dirs(plugin_root: &Path, manifest: Option<&PluginManifest>) -> Vec<
 ///
 /// `None` when either is missing: a skill a picker cannot label and a model
 /// cannot choose between is not one. Deliberately the same two fields, read the
-/// same way, as the runtime-side reader in `horsie_workflow` — the server and
+/// same way, as the runtime-side reader in `horsie_server::agent_loop` — the server and
 /// the runtime must agree about what a skill is.
 #[must_use]
 pub fn parse(content: &str) -> Option<(String, String)> {

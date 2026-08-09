@@ -13,4 +13,4 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck scripts/install.sh
+      - run: shellcheck scripts/install.sh scripts/check-publish-surface.sh

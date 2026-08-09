@@ -18,10 +18,10 @@ use super::{
     context::{SessionAgentKind, SessionContextProvider},
     *,
 };
+use crate::agent_loop::{ContextProvider, StartTurn};
 use crate::sessions::spec::AgentSettings;
 use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
-use horsie_workflow::{ContextProvider, StartTurn};
 use std::sync::PoisonError;
 
 pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
@@ -643,7 +643,7 @@ pub(super) async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, t
         .unwrap()
 }
 
-pub(super) fn user_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
+pub(super) fn user_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
     page.messages()
         .filter(|m| m.role == horsie_agentcore::Role::User)
         .flat_map(|m| m.parts.iter())
@@ -660,7 +660,7 @@ pub(super) fn user_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
 /// A user message's subagent-result parts, rendered the way the wire sees
 /// them — the counterpart to `user_texts` now that a result is a part of
 /// its own rather than text merged into what the person said.
-pub(super) fn subagent_texts(page: &horsie_workflow::LogPage) -> Vec<String> {
+pub(super) fn subagent_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
     page.messages()
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
@@ -698,7 +698,7 @@ pub(super) fn hook_record(plugin: &str, call: &str) -> HookRecord {
 pub(super) async fn agent_history(
     session: &ActorRef<SessionCommand>,
     agent_id: Option<String>,
-) -> horsie_workflow::LogPage {
+) -> crate::agent_loop::LogPage {
     session
         .ask(|reply| {
             SessionCommand::Read(ReadCommand::PageLog {
@@ -713,7 +713,7 @@ pub(super) async fn agent_history(
         .expect("agent history")
 }
 
-pub(super) fn hook_ids(page: &horsie_workflow::LogPage) -> Vec<String> {
+pub(super) fn hook_ids(page: &crate::agent_loop::LogPage) -> Vec<String> {
     page.entries
         .iter()
         .filter_map(|e| match &e.body {
@@ -1233,7 +1233,7 @@ pub(super) fn typed_provider(
     }
 }
 
-pub(super) async fn main_history(session: &ActorRef<SessionCommand>) -> horsie_workflow::LogPage {
+pub(super) async fn main_history(session: &ActorRef<SessionCommand>) -> crate::agent_loop::LogPage {
     session
         .ask(|reply| {
             SessionCommand::Read(ReadCommand::PageLog {

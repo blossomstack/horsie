@@ -16,6 +16,8 @@ use super::{
     SessionDomainEvent, SessionState,
     context::{SessionAgentKind, SessionContextProvider},
 };
+use crate::agent_loop::AgentCommand;
+use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::sessions::spec::SessionStatus;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
@@ -24,8 +26,6 @@ use horsie_models::{
     hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome},
     runtime::{ServerHookEvent, StopInput, SubagentStopInput},
 };
-use horsie_workflow::AgentCommand;
-use horsie_workflow::{AgentOutcome, AgentOutcomeSink, Incoming};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -74,7 +74,7 @@ impl SessionHookSink {
 }
 
 #[async_trait]
-impl horsie_runtime_client::HookSink for SessionHookSink {
+impl horsie_runtime_host::HookSink for SessionHookSink {
     async fn record(&self, hooks: Vec<HookRecord>) {
         // A halt is read here rather than in the session's `HooksRan` handler
         // so that handler stays what it says it is: pure routing into an

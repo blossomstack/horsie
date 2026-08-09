@@ -11,10 +11,10 @@ use super::{
     AgentUsageEntry, CommandEffect, MAIN_AGENT_ID, ReadCommand, SessionActor, SessionDomainEvent,
     SessionSnapshot, SessionState, SessionUsageStats,
 };
+use crate::agent_loop::AgentCommand;
+use crate::agent_loop::AgentUsageSnapshot;
+use crate::agent_loop::UsageTotal;
 use horsie_actor::ActorContext;
-use horsie_workflow::AgentCommand;
-use horsie_workflow::AgentUsageSnapshot;
-use horsie_workflow::UsageTotal;
 
 /// Reads.
 pub(super) struct Reads;
@@ -270,7 +270,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::Read(ReadCommand::ReadLog {
                     agent_id: None,
-                    after: Some(horsie_workflow::Cursor {
+                    after: Some(crate::agent_loop::Cursor {
                         entry_seq: 0,
                         delta_seq: 0,
                     }),

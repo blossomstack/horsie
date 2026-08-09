@@ -15,6 +15,7 @@
 //! backfill loop here, no `Resync` frame, and no capacity constant to tune —
 //! the overflow those existed to handle cannot occur.
 
+use crate::agent_loop::Cursor;
 use crate::http::Scope;
 use crate::http::error::Api;
 use crate::sessions::supervisor::SessionSupervisorCommand;
@@ -25,7 +26,6 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use horsie_models::session::{MessageDelta, MessageFrame, MessageWindow};
 use horsie_models::session_api::MessagesPage;
-use horsie_workflow::Cursor;
 use serde::Deserialize;
 use std::convert::Infallible;
 use tokio::sync::mpsc;

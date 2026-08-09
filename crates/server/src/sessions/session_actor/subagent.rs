@@ -16,13 +16,13 @@ use super::{
     AgentAction, AgentPlan, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
     SessionState, SubAgentCommand, TurnEnd,
 };
+use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::subagents::{
     INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, TreeOwner,
 };
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_models::now_ms;
-use horsie_workflow::{AgentCommand, Incoming};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 

@@ -7,13 +7,13 @@
 //! makes sub-spawning work), carrying the *calling* agent's identity so
 //! spawns are attributed to the right parent.
 
+use crate::agent_loop::AgentCatalog;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::session_actor::SubAgentCommand;
 use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorRef;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
-use horsie_workflow::AgentCatalog;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -310,7 +310,7 @@ mod tests {
 
     /// A catalogue of one, built the way a real scan builds it.
     fn catalog_of(name: &str, description: &str) -> AgentCatalog {
-        std::iter::once(horsie_workflow::CatalogAgent {
+        std::iter::once(crate::agent_loop::CatalogAgent {
             plugin: "fd".into(),
             def: horsie_support::plugin::agents::PluginAgentDef {
                 name: name.into(),

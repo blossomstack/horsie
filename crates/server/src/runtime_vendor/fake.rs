@@ -938,7 +938,7 @@ mod tests {
     use super::*;
     use crate::runtime_vendor::RuntimeVendor as _;
 
-    use horsie_runtime_client::RuntimeTransport;
+    use horsie_runtime_host::RuntimeTransport;
 
     #[tokio::test]
     async fn fake_agent_answers_scan_so_session_provisioning_cannot_hang() {
@@ -979,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn the_agent_id_survives_the_trip_across_the_vendor_link() {
         use horsie_models::runtime::{BashInput, ToolCall};
-        use horsie_runtime_client::RuntimeClient;
+        use horsie_runtime_host::RuntimeClient;
 
         let agent = FakeRuntimeVendor::builder("test-agent")
             .serve_in_process()
