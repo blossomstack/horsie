@@ -1379,14 +1379,28 @@ mod tests {
         assert!(o.registry.read().unwrap().contains_key("m"));
     }
 
-    /// The provider crates all read a key out of the process environment when
-    /// none is passed. A blank provider row must never reach that fallback: it
-    /// would spend a credential the operator never attached to this provider.
+    /// The gate itself: a row with no usable key is an error, so nothing ever
+    /// reaches the provider crate's `new()` — which is where the fallback to
+    /// `ANTHROPIC_API_KEY` and friends lives.
+    ///
+    /// Asserted on `required_key` rather than by planting a key in the process
+    /// environment and watching it go unused. The environment is not on this
+    /// path at all: `required_key` refuses before anything could consult it, so
+    /// a planted variable proved nothing about the refusal — while `set_var`
+    /// races every concurrent `getenv` in a binary whose tests share a process.
+    #[test]
+    fn a_provider_without_a_key_is_refused_before_any_fallback() {
+        for missing in [None, Some("")] {
+            let err = required_key("p", missing).expect_err("a key-less provider must not build");
+            assert!(err.contains("no API key"), "unhelpful error: {err}");
+            assert!(err.contains('p'), "the error names the provider: {err}");
+        }
+        assert!(required_key("p", Some("sk-configured")).is_ok());
+    }
+
+    /// And the seed path goes through that gate rather than around it.
     #[tokio::test]
-    async fn a_provider_without_a_key_is_rejected_rather_than_reading_the_environment() {
-        // SAFETY: single-threaded test process section; the value is removed
-        // again before any other provider test could observe it.
-        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-from-the-environment") };
+    async fn seeding_a_key_less_provider_fails_with_the_gates_error() {
         let o = open().await;
 
         let err = o
@@ -1394,7 +1408,6 @@ mod tests {
             .seed(vec![provider("p", None)], vec![model("m", "p")])
             .await
             .expect_err("a key-less provider must not build");
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
 
         assert!(err.contains("no API key"), "unhelpful error: {err}");
         assert!(err.contains('p'), "the error names the provider: {err}");
