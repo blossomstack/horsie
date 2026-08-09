@@ -10,10 +10,12 @@ A **cloud vendor** is a row in your settings. The server talks to the
 substrate's API directly, so there is no process of yours to deploy and nothing
 to restart — fill the row in and the next session can use it.
 
-Each session gets its own container or machine, its own filesystem, and its own
-checkouts, and it is torn down when the session is deleted. That is the
-difference from [the local runtime](/operating/local-runtime/), which serves
-directories you already own.
+Each session gets its own sandbox — container or machine — with its own
+filesystem and its own checkouts, torn down when the session is deleted. That
+per-session isolation is the difference from
+[the local runtime](/operating/local-runtime/), where every session shares the
+directories you already own. It is the reason to reach for one: ten sessions on
+ten branches that do not fight.
 
 Two kinds ship today. Both check out GitHub repositories and load skill
 bundles.

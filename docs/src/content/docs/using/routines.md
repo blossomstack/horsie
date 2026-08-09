@@ -14,6 +14,23 @@ Use one for the work you would otherwise remember to ask for. Triage the issue
 queue every morning. Re-run the flaky suite hourly and summarise what broke.
 Sweep a repository for stale dependencies once a week.
 
+## It is not a CI job
+
+The resemblance to CI is close enough to be worth naming, because the
+difference is the reason to use this instead.
+
+A CI run **is** a process. Its state lives in that process, so when it ends all
+that survives is a log, and the only thing you can do with a failed one is read
+the log and run it again from the top.
+
+A routine run is a [session](/using/sessions/). It is an append-only record, so
+a run that failed at 3am is something you open the next morning and *continue*:
+read exactly which tool call went wrong, see the raw output it got, send a
+message, or fix the prompt and re-run knowing what happened. A run that stopped
+half way did not lose the half it did.
+
+That is the whole argument. Everything below is mechanics.
+
 ## What one is made of
 
 ```text

@@ -100,6 +100,19 @@ const RULES = [
       "the local runtime runs on the reader's own machine and dials out. Framing it as the server host inverts the whole point.",
   },
   {
+    id: "competitor",
+    // Other agent harnesses are never named in these docs — not to compare
+    // against, not to credit, not in passing. Capitalised on purpose: the
+    // lowercase `codex` in `auth.openai.com/codex/device` is a URL a reader
+    // has to type, and `.claude-plugin/` is a directory name in the bundle
+    // format. Those are facts about things you configure, not references to a
+    // product.
+    pattern:
+      /\b(?:Claude Code|OpenCode|Open Code|Codex|Cursor|Aider|Devin|Windsurf|Cline|Copilot|Goose)\b/g,
+    message:
+      "these docs never name another agent harness. Describe the thing itself — \"the upstream plugin specification\", \"the subscription backend\".",
+  },
+  {
     id: "docs-guide-path",
     pattern: /docs\/guide\//g,
     message: "that directory no longer exists — link to a page on this site.",

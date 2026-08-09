@@ -6,8 +6,8 @@ sidebar:
   order: 2
 ---
 
-`horsie connect` turns the machine you run it on into a runtime source. It
-dials *out* to the server and holds the connection open; the server never
+`horsie connect` turns the machine you run it on into a source of sandboxes.
+It dials *out* to the server and holds the connection open; the server never
 connects to you, so there is no inbound port and no firewall change.
 
 Use it when the agent should work on files that already exist somewhere — a

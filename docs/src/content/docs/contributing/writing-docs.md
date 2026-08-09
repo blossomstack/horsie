@@ -127,7 +127,35 @@ workflow skills union, the eight of thirty-one hook events, the velos idle
 cost. A reader who finds a limitation you hid stops trusting the parts you
 described accurately.
 
+**Never name another agent harness.** Not to compare against, not to credit,
+not in passing. Describe the thing itself instead — "the upstream plugin
+specification", "the subscription backend". The linter enforces this on the
+capitalised product names; the lowercase `codex` in a URL a reader has to type,
+and the `.claude-plugin/` directory in the bundle format, are facts about things
+you configure and are left alone.
+
 **No market, positioning or competitor material.** These are product docs.
+
+**Use the field's vocabulary, and use it precisely.** These docs are written in
+the terms the space has settled on, because a reader who knows one system should
+be able to read this one. The load-bearing ones:
+
+| Term | Means here |
+| --- | --- |
+| **harness** | the loop that decides what happens next — `horsie-server` |
+| **agent** | a reusable configuration: model, instructions, tools, skills |
+| **session** | one running agent and the append-only record of what it did |
+| **sandbox** | the isolated place tool calls execute — a *runtime* |
+| **checkpoint** | resumable state: a journal snapshot, or a hibernated sandbox |
+| **trace** | the surface a run is reviewed on — the transcript |
+| **inner / outer harness** | what ships, versus what a user assembles on top |
+| **compaction** | keeping the working set small as the record grows |
+| **progressive disclosure** | loading a skill's body only when it is picked |
+
+Do not invent a synonym for one of these, and do not use one loosely. "Runtime"
+and "sandbox" are the same object seen from two sides — horsie's API says
+runtime, the field says sandbox, and a page may use either as long as it is
+consistent within itself.
 
 **Link, do not duplicate.** Two copies of a fact become two versions of it. If
 you are about to explain something a page already explains, link to it.
