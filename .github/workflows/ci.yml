@@ -119,8 +119,7 @@ jobs:
       # The `fluorite` CLI that generates the TypeScript types is shipped by the
       # `fluorite_codegen` crate (the `fluorite` crate itself is a library). Pin
       # to the EXACT workspace codegen version so the drift check is deterministic
-      # — bump this in lockstep with the `fluorite_codegen` workspace dep. Node is
-      # preinstalled on the GitHub-hosted runner.
+      # — bump this in lockstep with the `fluorite_codegen` workspace dep.
       - name: Install fluorite CLI
         run: cargo install fluorite_codegen --version =0.7.0
 
@@ -130,12 +129,10 @@ jobs:
           curl -fsSL https://bun.sh/install | bash
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
-      # BOTH generated trees. They are committed, and they are generated from
-      # different schema lists — `clients/web` additionally covers github, mcp,
-      # memory, model_cards, plugins and runtime_vendor — so checking one leaves
-      # the other free to go stale. Nothing else regenerates the web tree: the
-      # web jobs build against whatever is committed.
-      - name: Regenerate and typecheck
+      # The generated tree is committed and nothing else regenerates it: the web
+      # jobs build against whatever is checked in. Without this the schemas and
+      # the types they generate can diverge silently.
+      - name: Regenerate
         run: make types
 
       # `git diff` alone misses a generated file that is new and untracked, and
@@ -144,7 +141,7 @@ jobs:
       # `git status --porcelain` covers modified, deleted and untracked alike.
       - name: Fail on uncommitted drift
         run: |
-          drift="$(git status --porcelain clients/ts/src/generated clients/web/src/generated)"
+          drift="$(git status --porcelain clients/web/src/generated)"
           if [ -n "$drift" ]; then
             echo "generated types are out of sync with crates/models/fluorite:"
             echo "$drift"
