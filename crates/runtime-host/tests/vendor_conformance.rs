@@ -24,11 +24,11 @@
 
 use async_trait::async_trait;
 use horsie_models::executor::RuntimeConfig;
-use horsie_runtime_client::{MockTransport, RuntimeTransport};
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     AgentExit, ConnectedRuntimeRegistry, CredentialProvider, FixedWorkspaces, HealthStatus,
     RuntimeHandle, RuntimeProvider, RuntimeVendorClient,
 };
+use horsie_runtime_host::{MockTransport, RuntimeTransport};
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::RuntimeVendor as _;
 use horsie_server::runtime_vendor::{
@@ -38,7 +38,7 @@ use std::collections::HashMap;
 
 /// A progress sink nothing reads: the conformance suite asserts on each
 /// operation's return value, which is its outcome.
-fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+fn sink() -> horsie_runtime_host::RuntimeProgressSink {
     tokio::sync::mpsc::channel(8).0
 }
 
@@ -61,11 +61,11 @@ struct StoppableHandle {
 
 #[async_trait]
 impl RuntimeHandle for StoppableHandle {
-    async fn stop(&self) -> Result<(), horsie_runtime_vendor::RuntimeError> {
+    async fn stop(&self) -> Result<(), horsie_runtime_host::RuntimeError> {
         self.connected.remove(&self.runtime_id).await;
         Ok(())
     }
-    async fn health_check(&self) -> Result<HealthStatus, horsie_runtime_vendor::RuntimeError> {
+    async fn health_check(&self) -> Result<HealthStatus, horsie_runtime_host::RuntimeError> {
         Ok(HealthStatus::Healthy)
     }
 }
@@ -84,7 +84,7 @@ impl RuntimeProvider for GatedProvider {
         &self,
         id: &str,
         _config: &RuntimeConfig,
-    ) -> Result<Arc<dyn RuntimeHandle>, horsie_runtime_vendor::RuntimeError> {
+    ) -> Result<Arc<dyn RuntimeHandle>, horsie_runtime_host::RuntimeError> {
         if let Some(gate) = &self.gate {
             let mut gate = gate.clone();
             while !*gate.borrow_and_update() {
@@ -312,7 +312,7 @@ fn bare_vendor() -> RuntimeVendorClient {
         PathBuf::from("/nonexistent"),
     )
     // Milliseconds, so a test can watch several attempts go by.
-    .with_backoff(horsie_runtime_vendor::Backoff::new(
+    .with_backoff(horsie_runtime_host::Backoff::new(
         Duration::from_millis(5),
         Duration::from_millis(5),
     ))
@@ -359,7 +359,7 @@ async fn the_credential_is_resolved_on_every_attempt() {
 async fn a_dead_credential_ends_the_run() {
     let credential: CredentialProvider = Arc::new(|| {
         Box::pin(async {
-            Err(horsie_runtime_vendor::CredentialError::Dead(
+            Err(horsie_runtime_host::CredentialError::Dead(
                 "logged out".to_string(),
             ))
         })
@@ -383,7 +383,7 @@ async fn a_transient_credential_failure_keeps_retrying() {
     let credential: CredentialProvider = Arc::new(move || {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async {
-            Err(horsie_runtime_vendor::CredentialError::Transient(
+            Err(horsie_runtime_host::CredentialError::Transient(
                 "issuer unreachable".to_string(),
             ))
         })

@@ -115,7 +115,7 @@ vendors, configured cloud vendors, and your saved
 
 ## Adding another kind
 
-Implement `RuntimeVendor` and `RuntimeHandle` in the `horsie-runtime-vendor`
+Implement `RuntimeVendor` and `RuntimeHandle` in the `horsie-runtime-host`
 crate against your substrate's API, and add a variant to the settings union so
 it can be configured. Four lifecycle methods: create, get, hibernate, delete.
 

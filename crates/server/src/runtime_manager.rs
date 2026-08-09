@@ -24,7 +24,7 @@
 use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
 use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
-use horsie_runtime_client::RuntimeClient;
+use horsie_runtime_host::RuntimeClient;
 use std::sync::Arc;
 
 /// What can go wrong acquiring a runtime, split by what the session should do
@@ -281,10 +281,10 @@ impl RuntimeManager {
     /// has one sink, and a vendor is free to report on anything it owns.
     async fn await_ready(
         session: &str,
-        first: horsie_runtime_vendor::RuntimeProgress,
-        rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_vendor::RuntimeEvent>,
+        first: horsie_runtime_host::RuntimeProgress,
+        rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_host::RuntimeEvent>,
     ) -> Result<Arc<dyn crate::runtime_vendor::RuntimeHandle>, RuntimeError> {
-        use horsie_runtime_vendor::RuntimeProgress as P;
+        use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
         let mut progress = first;
         loop {
@@ -341,7 +341,7 @@ impl RuntimeManager {
         handle: Arc<dyn crate::runtime_vendor::RuntimeHandle>,
     ) -> RuntimeClient {
         RuntimeClient::from_arc(
-            Arc::new(horsie_runtime_vendor::RuntimeHandleTransport(handle)),
+            Arc::new(horsie_runtime_host::RuntimeHandleTransport(handle)),
             session,
         )
     }
@@ -788,11 +788,11 @@ mod tests {
     /// websocket-backed double can stand in for one — a `horsie connect` link
     /// only ever answers once its runtime is already up.
     struct BootingVendor {
-        outcome: std::sync::Mutex<Option<horsie_runtime_vendor::RuntimeProgress>>,
+        outcome: std::sync::Mutex<Option<horsie_runtime_host::RuntimeProgress>>,
     }
 
     impl BootingVendor {
-        fn with(outcome: horsie_runtime_vendor::RuntimeProgress) -> Arc<Self> {
+        fn with(outcome: horsie_runtime_host::RuntimeProgress) -> Arc<Self> {
             Arc::new(Self {
                 outcome: std::sync::Mutex::new(Some(outcome)),
             })
@@ -807,7 +807,7 @@ mod tests {
         }
 
         fn ready() -> Arc<Self> {
-            Self::with(horsie_runtime_vendor::RuntimeProgress::Ready(Arc::new(
+            Self::with(horsie_runtime_host::RuntimeProgress::Ready(Arc::new(
                 StubHandle,
             )))
         }
@@ -826,14 +826,14 @@ mod tests {
             _: horsie_models::runtime::RuntimeInboundMessage,
         ) -> Result<
             horsie_models::runtime::RuntimeOutboundMessage,
-            horsie_runtime_client::TransportError,
+            horsie_runtime_host::TransportError,
         > {
-            Err(horsie_runtime_client::TransportError::Disconnected)
+            Err(horsie_runtime_host::TransportError::Disconnected)
         }
         async fn relay_oneway(
             &self,
             _: horsie_models::runtime::RuntimeInboundMessage,
-        ) -> Result<(), horsie_runtime_client::TransportError> {
+        ) -> Result<(), horsie_runtime_host::TransportError> {
             Ok(())
         }
         async fn closed(&self) {
@@ -855,9 +855,9 @@ mod tests {
             &self,
             _: &str,
             _: &horsie_models::runtime_vendor::RuntimeSpec,
-            _: horsie_runtime_vendor::RuntimeProgressSink,
-        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
-            Ok(horsie_runtime_vendor::RuntimeProgress::Starting {
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Starting {
                 detail: "booting".into(),
             })
         }
@@ -865,8 +865,8 @@ mod tests {
             &self,
             runtime_id: &str,
             _spec: &horsie_models::runtime_vendor::RuntimeSpec,
-            progress: horsie_runtime_vendor::RuntimeProgressSink,
-        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+            progress: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
             let outcome = self.outcome.lock().unwrap().take();
             let id = runtime_id.to_string();
             // After the return value is built, per the ordering rule.
@@ -874,30 +874,30 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                 if let Some(progress_step) = outcome {
                     let _ = progress
-                        .send(horsie_runtime_vendor::RuntimeEvent {
+                        .send(horsie_runtime_host::RuntimeEvent {
                             runtime_id: id,
                             progress: progress_step,
                         })
                         .await;
                 }
             });
-            Ok(horsie_runtime_vendor::RuntimeProgress::Starting {
+            Ok(horsie_runtime_host::RuntimeProgress::Starting {
                 detail: "the machine is up; waiting for it to dial back".into(),
             })
         }
         async fn hibernate(
             &self,
             _: &str,
-            _: horsie_runtime_vendor::RuntimeProgressSink,
-        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
-            Ok(horsie_runtime_vendor::RuntimeProgress::Stopped)
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Stopped)
         }
         async fn delete(
             &self,
             _: &str,
-            _: horsie_runtime_vendor::RuntimeProgressSink,
-        ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
-            Ok(horsie_runtime_vendor::RuntimeProgress::Gone {
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Gone {
                 reason: "deleted".into(),
             })
         }
@@ -928,7 +928,7 @@ mod tests {
     /// back.
     #[tokio::test]
     async fn an_acquisition_that_ends_gone_is_terminal() {
-        let vendor = BootingVendor::with(horsie_runtime_vendor::RuntimeProgress::Gone {
+        let vendor = BootingVendor::with(horsie_runtime_host::RuntimeProgress::Gone {
             reason: "the machine never dialed back".into(),
         });
         let m = manager(published_vendor(vendor));

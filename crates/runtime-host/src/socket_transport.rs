@@ -1,8 +1,8 @@
+use crate::{RuntimeTransport, TransportError, inbound_call_id, outbound_call_id};
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
-use horsie_runtime_client::{RuntimeTransport, TransportError, inbound_call_id, outbound_call_id};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};

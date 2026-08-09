@@ -18,6 +18,7 @@
 //! (turn a requested workspace *name* into a path this vendor owns). A new
 //! vendor implements those two and reuses this loop verbatim.
 
+use crate::RuntimeTransport;
 use crate::{
     connected_registry::ConnectedRuntimeRegistry,
     error::CredentialError,
@@ -34,7 +35,6 @@ use horsie_models::runtime_vendor::{
     RuntimeVendorCapabilities, RuntimeVendorCommand, RuntimeVendorEvent,
     RuntimeVendorInboundMessage, RuntimeVendorOutboundMessage, RuntimeVendorReady,
 };
-use horsie_runtime_client::RuntimeTransport;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

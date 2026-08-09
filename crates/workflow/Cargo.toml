@@ -9,7 +9,7 @@ edition = "2024"
 [dependencies]
 horsie-actor = { version = "0.1.6", path = "../actor" }
 horsie-agentcore = { version = "0.1.6", path = "../agentcore" }
-horsie-runtime-client = { version = "0.1.6", path = "../runtime-client" }
+horsie-runtime-host = { version = "0.1.6", path = "../runtime-host" }
 horsie-support = { version = "0.1.6", path = "../support" }
 horsie-models = { version = "0.1.6", path = "../models" }
 async-trait    = { workspace = true }
@@ -24,7 +24,7 @@ futures-util   = { workspace = true }
 
 [dev-dependencies]
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
-horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
+horsie-runtime-host = { path = "../runtime-host", features = ["test-util"] }
 async-trait  = { workspace = true }
 
 [lints]

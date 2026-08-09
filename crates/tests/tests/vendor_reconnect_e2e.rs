@@ -19,11 +19,11 @@ use horsie_models::runtime::{BashInput, ToolCall};
 use horsie_models::runtime_vendor::{
     QueryRuntimesRequest, RuntimeVendorCommand, RuntimeVendorEvent,
 };
-use horsie_runtime_client::{MockTransport, RuntimeClient};
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     AgentExit, Backoff, ConnectedRuntimeRegistry, FixedWorkspaces, HealthStatus, ProviderFactory,
     RuntimeError, RuntimeHandle, RuntimeProvider, RuntimeVendorClient, no_credential,
 };
+use horsie_runtime_host::{MockTransport, RuntimeClient};
 use horsie_server::auth::Principal;
 use horsie_server::runtime_vendor::RuntimeVendor as _;
 use horsie_server::runtime_vendor::fake::runtime_spec_fixture;
@@ -177,7 +177,7 @@ async fn await_vendor(
 
 /// A progress sink nothing reads: these tests assert on each operation's
 /// return value, which is its outcome.
-fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+fn sink() -> horsie_runtime_host::RuntimeProgressSink {
     tokio::sync::mpsc::channel(8).0
 }
 

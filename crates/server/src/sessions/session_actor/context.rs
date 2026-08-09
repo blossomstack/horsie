@@ -31,7 +31,7 @@ use horsie_models::{
         UserPromptExpansionInput, UserPromptSubmitInput,
     },
 };
-use horsie_runtime_client::RuntimeClient;
+use horsie_runtime_host::RuntimeClient;
 use horsie_workflow::{
     AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
     StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
@@ -895,8 +895,8 @@ mod tests {
 
     #[test]
     fn a_subagent_gets_its_own_runtime_identity() {
-        let client = horsie_runtime_client::RuntimeClient::new(
-            horsie_runtime_client::MockTransport::ok(""),
+        let client = horsie_runtime_host::RuntimeClient::new(
+            horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );
         let main = scoped_client(&SessionAgentKind::Main, client.clone());

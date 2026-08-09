@@ -29,7 +29,7 @@ use crate::runtime_vendor::velos_api::{ContainerApi, ContainerLaunchSpec, VelosE
 use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
-use horsie_runtime_vendor::{
+use horsie_runtime_host::{
     ConnectedRuntimeRegistry, RuntimeEvent, RuntimeHandleImpl, RuntimeProgress, RuntimeProgressSink,
 };
 use std::collections::BTreeMap;
@@ -118,7 +118,7 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
     fn handle(
         &self,
         runtime_id: &str,
-        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+        transport: Arc<dyn horsie_runtime_host::RuntimeTransport>,
     ) -> Arc<dyn RuntimeHandle> {
         // The registry reports liveness by presence — a dropped runtime is
         // simply absent from it — so there is no flag anyone flips, and the
@@ -528,7 +528,7 @@ mod tests {
         let (tx, _rx) = sink();
         reg.register_transport(
             "s1".to_string(),
-            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+            Arc::new(horsie_runtime_host::MockTransport::ok("")),
         )
         .await;
         assert!(matches!(
@@ -621,7 +621,7 @@ mod tests {
 
         reg.register_transport(
             "s1".to_string(),
-            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+            Arc::new(horsie_runtime_host::MockTransport::ok("")),
         )
         .await;
 
@@ -652,7 +652,7 @@ mod tests {
         let (v, reg) = vendor(FakeVelos::default());
         reg.register_transport(
             "s1".to_string(),
-            Arc::new(horsie_runtime_client::MockTransport::ok("")),
+            Arc::new(horsie_runtime_host::MockTransport::ok("")),
         )
         .await;
 

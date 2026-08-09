@@ -74,7 +74,7 @@ impl SessionHookSink {
 }
 
 #[async_trait]
-impl horsie_runtime_client::HookSink for SessionHookSink {
+impl horsie_runtime_host::HookSink for SessionHookSink {
     async fn record(&self, hooks: Vec<HookRecord>) {
         // A halt is read here rather than in the session's `HooksRan` handler
         // so that handler stays what it says it is: pure routing into an

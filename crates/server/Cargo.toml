@@ -8,7 +8,7 @@ publish = false # internal application crate, never published to crates.io
 [features]
 # Exposes `vendor::mock::MockVendor` to external test crates. Off by default, so
 # a production build of horsie-server never contains a mock runtime vendor.
-test-util = ["horsie-runtime-client/test-util"]
+test-util = ["horsie-runtime-host/test-util"]
 
 [dependencies]
 horsie-models          = { path = "../models" }
@@ -17,8 +17,7 @@ horsie-actor           = { path = "../actor" }
 horsie-agentcore       = { path = "../agentcore" }
 horsie-llm-providers   = { path = "../llm-providers" }
 horsie-workflow        = { path = "../workflow" }
-horsie-runtime-vendor  = { path = "../runtime-vendor" }
-horsie-runtime-client  = { path = "../runtime-client" }
+horsie-runtime-host    = { path = "../runtime-host" }
 clap              = { version = "4", features = ["derive"] }
 sqlx              = { workspace = true }
 axum              = { workspace = true }
@@ -59,7 +58,7 @@ tower    = { version = "0.5", features = ["util"] }
 # MockProvider/scripted completions for subagent routing tests; production
 # builds never see the testkit.
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
-horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
+horsie-runtime-host = { path = "../runtime-host", features = ["test-util"] }
 # `db::testing` and the SqlJournal suite live behind this crate's own
 # `test-util`, which integration tests do not otherwise enable.
 horsie-server = { path = ".", features = ["test-util"] }

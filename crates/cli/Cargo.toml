@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 horsie-models = { version = "0.1.6", path = "../models" }
-horsie-runtime-vendor = { version = "0.1.6", path = "../runtime-vendor" }
+horsie-runtime-host = { version = "0.1.6", path = "../runtime-host" }
 horsie-support = { version = "0.1.6", path = "../support", features = ["git"] }
 clap            = { version = "4", features = ["derive"] }
 serde           = { workspace = true }

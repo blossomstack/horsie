@@ -383,8 +383,8 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
         &self,
         runtime_id: &str,
         spec: &WireRuntimeSpec,
-        _progress: horsie_runtime_vendor::RuntimeProgressSink,
-    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+        _progress: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
             return Err(RuntimeVendorError::Unavailable(
                 "the vendor link was dropped".to_string(),
@@ -395,7 +395,7 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
             spec: spec.clone(),
         }))
         .await?;
-        Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
+        Ok(horsie_runtime_host::RuntimeProgress::Ready(
             self.handle(runtime_id),
         ))
     }
@@ -407,8 +407,8 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
         &self,
         runtime_id: &str,
         spec: &WireRuntimeSpec,
-        _progress: horsie_runtime_vendor::RuntimeProgressSink,
-    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+        _progress: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
             return Err(RuntimeVendorError::Unavailable(
                 "the vendor link was dropped".to_string(),
@@ -435,7 +435,7 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
             // so the session stays recoverable and simply retries.
             RequestError::Link(m) => RuntimeVendorError::Unavailable(m),
         })?;
-        Ok(horsie_runtime_vendor::RuntimeProgress::Ready(
+        Ok(horsie_runtime_host::RuntimeProgress::Ready(
             self.handle(runtime_id),
         ))
     }
@@ -445,8 +445,8 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
     async fn hibernate(
         &self,
         runtime_id: &str,
-        _progress: horsie_runtime_vendor::RuntimeProgressSink,
-    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+        _progress: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
         let _ = self
             .request(RuntimeVendorCommand::HibernateRuntime(
                 HibernateRuntimeRequest {
@@ -454,20 +454,20 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
                 },
             ))
             .await;
-        Ok(horsie_runtime_vendor::RuntimeProgress::Stopped)
+        Ok(horsie_runtime_host::RuntimeProgress::Stopped)
     }
 
     async fn delete(
         &self,
         runtime_id: &str,
-        _progress: horsie_runtime_vendor::RuntimeProgressSink,
-    ) -> Result<horsie_runtime_vendor::RuntimeProgress, RuntimeVendorError> {
+        _progress: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
         let _ = self
             .request(RuntimeVendorCommand::DeleteRuntime(DeleteRuntimeRequest {
                 runtime_id: runtime_id.to_string(),
             }))
             .await;
-        Ok(horsie_runtime_vendor::RuntimeProgress::Gone {
+        Ok(horsie_runtime_host::RuntimeProgress::Gone {
             reason: "the owning session was deleted".to_string(),
         })
     }
@@ -479,7 +479,7 @@ impl WebsocketRuntimeVendor {
     /// The transport re-resolves the name on every call, so a reconnect
     /// mid-turn is invisible to the run already in flight.
     fn handle(&self, runtime_id: &str) -> Arc<dyn crate::runtime_vendor::RuntimeHandle> {
-        Arc::new(horsie_runtime_vendor::RuntimeHandleImpl::new(
+        Arc::new(horsie_runtime_host::RuntimeHandleImpl::new(
             runtime_id.to_string(),
             Arc::new(crate::runtime_vendor::RuntimeVendorTransport::new(
                 self.vendors.clone(),
@@ -507,7 +507,7 @@ mod tests {
     /// whatever the test publishes.
     /// A progress sink nothing reads: these tests assert on the vendor's
     /// return value, which is the operation's outcome.
-    fn sink() -> horsie_runtime_vendor::RuntimeProgressSink {
+    fn sink() -> horsie_runtime_host::RuntimeProgressSink {
         tokio::sync::mpsc::channel(8).0
     }
 

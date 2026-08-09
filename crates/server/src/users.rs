@@ -94,7 +94,7 @@ pub struct UserServices {
     /// account, so there is no lookup to get wrong, and a transport can never
     /// be resolved across accounts even if two of them somehow shared a
     /// runtime id.
-    pub connected_runtimes: Arc<horsie_runtime_vendor::ConnectedRuntimeRegistry>,
+    pub connected_runtimes: Arc<horsie_runtime_host::ConnectedRuntimeRegistry>,
     /// Signs this account's dial-back tokens. See [`OpenedConfig::dial_secret`].
     ///
     /// [`OpenedConfig::dial_secret`]: crate::config::store::OpenedConfig::dial_secret
@@ -171,7 +171,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let connected_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
-    let connected_runtimes = Arc::new(horsie_runtime_vendor::ConnectedRuntimeRegistry::new());
+    let connected_runtimes = Arc::new(horsie_runtime_host::ConnectedRuntimeRegistry::new());
     let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
         crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
         opened.vendors.clone(),

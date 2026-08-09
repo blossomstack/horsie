@@ -11,11 +11,10 @@ publish = false # internal application crate, never published to crates.io
 async-llm = { workspace = true, features = ["mock"] }
 
 [dev-dependencies]
-horsie-runtime-client = { path = "../runtime-client", features = ["test-util"] }
+horsie-runtime-host = { path = "../runtime-host", features = ["test-util"] }
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-llm-providers = { path = "../llm-providers" }
 horsie-server = { path = "../server", features = ["test-util"] }
-horsie-runtime-vendor = { path = "../runtime-vendor" }
 horsie-actor = { path = "../actor" }
 horsie-workflow = { path = "../workflow" }
 horsie-models = { path = "../models" }

@@ -23,7 +23,7 @@ use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{
     RuntimeRelayRequest, RuntimeVendorCommand, RuntimeVendorEvent,
 };
-use horsie_runtime_client::{RuntimeTransport, TransportError};
+use horsie_runtime_host::{RuntimeTransport, TransportError};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 

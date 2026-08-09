@@ -2,7 +2,7 @@ use crate::agent_actor::UsageTotal;
 use crate::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
-use horsie_runtime_client::{RuntimeClient, add_runtime_tools};
+use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -675,7 +675,7 @@ impl Toolbox for FilteredToolbox {
 )]
 mod tests {
     use super::*;
-    use horsie_runtime_client::MockTransport;
+    use horsie_runtime_host::MockTransport;
 
     fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> AgentRunDef {
         AgentRunDef {
