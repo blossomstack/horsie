@@ -253,8 +253,10 @@ pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
 pub struct RuntimeHandleImpl {
     runtime_id: String,
     transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
-    /// Flipped by whoever owns the connection when it can no longer be reached.
-    closed: tokio::sync::watch::Receiver<bool>,
+    /// Flipped by whoever owns the connection when it can no longer be reached,
+    /// or absent when nothing is in a position to notice — see
+    /// [`RuntimeHandleImpl::unwatched`].
+    closed: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl RuntimeHandleImpl {
@@ -267,7 +269,30 @@ impl RuntimeHandleImpl {
         Self {
             runtime_id,
             transport,
-            closed,
+            closed: Some(closed),
+        }
+    }
+
+    /// A handle whose runtime nothing watches for closure.
+    ///
+    /// For a vendor whose registry reports liveness by *presence*: a dropped
+    /// runtime is simply absent from it, and there is no flag anyone flips. The
+    /// alternative was a `watch` channel whose sender was dropped on the spot,
+    /// which is worse than it looks — `wait_for` returns `Err` the moment its
+    /// sender goes, so [`closed`](RuntimeHandle::closed) resolved *immediately*
+    /// and reported every runtime dead the instant it was asked.
+    ///
+    /// So this waits forever instead. Saying "I cannot tell you" costs a
+    /// parked task; saying "it is dead" costs a live runtime.
+    #[must_use]
+    pub fn unwatched(
+        runtime_id: String,
+        transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
+    ) -> Self {
+        Self {
+            runtime_id,
+            transport,
+            closed: None,
         }
     }
 }
@@ -276,7 +301,7 @@ impl std::fmt::Debug for RuntimeHandleImpl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeHandleImpl")
             .field("runtime_id", &self.runtime_id)
-            .field("closed", &*self.closed.borrow())
+            .field("closed", &self.closed.as_ref().map(|rx| *rx.borrow()))
             .finish_non_exhaustive()
     }
 }
@@ -299,14 +324,23 @@ impl RuntimeHandle for RuntimeHandleImpl {
     }
 
     async fn closed(&self) {
-        let mut rx = self.closed.clone();
+        let Some(mut rx) = self.closed.clone() else {
+            // Nothing watches this runtime. Never resolve rather than resolve
+            // now — see `unwatched`.
+            return std::future::pending().await;
+        };
         // Checked before waiting, not after: a handle whose runtime died before
         // anyone asked must still answer immediately, and `wait_for` alone
         // would miss a flip that happened before this clone.
         if *rx.borrow() {
             return;
         }
-        let _ = rx.wait_for(|closed| *closed).await;
+        // A dropped sender means nobody is left to report a closure, which is
+        // not the same as a closure. Waiting on is the safe reading: treating
+        // it as closed would have every caller drop a runtime that is fine.
+        if rx.wait_for(|closed| *closed).await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
 }
 
@@ -610,6 +644,40 @@ mod tests {
             .await
             .expect("closed() should resolve once the connection is marked dead")
             .unwrap();
+    }
+
+    /// The bug a dropped sender hid. A vendor whose registry reports liveness
+    /// by presence has no flag to flip, and the stand-in was a `watch` channel
+    /// whose sender was dropped on the spot — so `wait_for` errored at once and
+    /// `closed()` reported every live runtime dead the instant it was asked.
+    #[tokio::test]
+    async fn an_unwatched_handle_never_claims_its_runtime_died() {
+        let handle =
+            RuntimeHandleImpl::unwatched("s1".to_string(), Arc::new(RecordingTransport::default()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), handle.closed())
+                .await
+                .is_err(),
+            "a handle with nothing watching it must not answer 'closed'"
+        );
+    }
+
+    /// Same property when the watcher goes away mid-life: nobody is left to
+    /// report a closure, which is not the same as a closure.
+    #[tokio::test]
+    async fn a_dropped_watcher_is_not_a_closed_runtime() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let handle = RuntimeHandleImpl::new(
+            "s1".to_string(),
+            Arc::new(RecordingTransport::default()),
+            rx,
+        );
+        drop(tx);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), handle.closed())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -68,13 +68,24 @@ pub fn shell_quote(s: &str) -> String {
 /// Rejects anything that could escape the root. A workspace name reaches here
 /// from session config, and `..` in one would put an agent's writes wherever it
 /// liked inside the container.
-#[must_use]
-pub fn workspace_paths(root: &str, names: &[String]) -> Vec<(String, String)> {
+///
+/// Refusing rather than filtering. A dropped name is not a smaller runtime, it
+/// is a runtime the session asked for and did not get: the agent comes up, the
+/// workspace it was told to work in is simply absent, and the first tool call
+/// fails somewhere with no connection to the name that caused it. The caller
+/// gets to say so instead.
+pub fn workspace_paths(root: &str, names: &[String]) -> Result<Vec<(String, String)>, String> {
     let root = root.trim_end_matches('/');
     names
         .iter()
-        .filter(|n| !n.is_empty() && !n.contains('/') && !n.contains(".."))
-        .map(|n| (n.clone(), format!("{root}/{n}")))
+        .map(|n| {
+            if n.is_empty() || n.contains('/') || n.contains("..") {
+                return Err(format!(
+                    "workspace name '{n}' is not usable as a directory under '{root}'"
+                ));
+            }
+            Ok((n.clone(), format!("{root}/{n}")))
+        })
         .collect()
 }
 
@@ -123,19 +134,32 @@ mod tests {
 
     #[test]
     fn a_workspace_name_cannot_escape_its_root() {
-        let paths = workspace_paths(
-            "/workspaces/",
-            &[
-                "main".to_string(),
-                "..".to_string(),
-                "a/b".to_string(),
-                "../etc".to_string(),
-                String::new(),
-            ],
-        );
+        for bad in ["..", "a/b", "../etc", ""] {
+            assert!(
+                workspace_paths("/workspaces/", &[bad.to_string()]).is_err(),
+                "{bad:?} must not become a path"
+            );
+        }
+    }
+
+    /// Refused, not filtered. Dropping the name silently produced a runtime
+    /// missing a workspace its session had asked for — the agent came up, the
+    /// directory was simply absent, and the failure surfaced later as a tool
+    /// call against a path nothing explained.
+    #[test]
+    fn one_bad_name_fails_the_whole_set_rather_than_vanishing() {
+        let names = ["main".to_string(), "../etc".to_string()];
+        let Err(message) = workspace_paths("/workspaces", &names) else {
+            panic!("a traversing name must fail the call")
+        };
+        assert!(message.contains("../etc"), "{message}");
+    }
+
+    #[test]
+    fn a_trailing_slash_on_the_root_does_not_double_up() {
         assert_eq!(
-            paths,
-            vec![("main".to_string(), "/workspaces/main".to_string())]
+            workspace_paths("/workspaces/", &["main".to_string()]),
+            Ok(vec![("main".to_string(), "/workspaces/main".to_string())])
         );
     }
 }

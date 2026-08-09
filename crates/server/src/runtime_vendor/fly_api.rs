@@ -219,6 +219,26 @@ pub fn all_machines(list: &Value) -> Vec<(String, Machine)> {
         .collect()
 }
 
+/// Every volume in a list response, as `(id, name)`.
+///
+/// Skips an entry missing either, for the same reason [`all_machines`] does:
+/// its only caller deletes things, and a volume it cannot name is one it must
+/// not reason about.
+#[must_use]
+pub fn all_volumes(list: &Value) -> Vec<(String, String)> {
+    let Some(items) = list.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|v| {
+            let id = v.get("id").and_then(Value::as_str)?;
+            let name = v.get("name").and_then(Value::as_str)?;
+            Some((id.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
 fn id_of(value: &Value) -> Result<String, FlyError> {
     value
         .get("id")
@@ -294,6 +314,25 @@ impl FlyApi for FlyHttpApi {
             Err(e) => Err(e),
         }
     }
+
+    async fn volumes(&self) -> Result<Vec<(String, String)>, FlyError> {
+        let body = self.send(self.client.get(self.url("/volumes"))).await?;
+        Ok(all_volumes(&body))
+    }
+
+    async fn delete_volume(&self, volume_id: &str) -> Result<(), FlyError> {
+        let result = self
+            .send(
+                self.client
+                    .delete(self.url(&format!("/volumes/{volume_id}"))),
+            )
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(FlyError::Rejected(m)) if m.starts_with("404") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -352,6 +391,20 @@ mod tests {
             &FlyMachineSize::default(),
         );
         assert_eq!(body["config"]["mounts"], json!([]));
+    }
+
+    #[test]
+    fn volumes_are_read_as_id_and_name_and_a_nameless_one_is_skipped() {
+        let list = serde_json::json!([
+            {"id": "vol_1", "name": "horsie_s1"},
+            {"id": "vol_2"},
+            {"name": "horsie_s3"},
+        ]);
+        assert_eq!(
+            all_volumes(&list),
+            vec![("vol_1".to_string(), "horsie_s1".to_string())],
+            "a volume the sweep cannot name is one it must not delete"
+        );
     }
 
     #[test]

@@ -141,10 +141,21 @@ pub trait FlyApi: Send + Sync {
     async fn machines(&self) -> Result<Vec<(String, Machine)>, FlyError>;
     async fn start(&self, machine_id: &str) -> Result<(), FlyError>;
     async fn stop(&self, machine_id: &str) -> Result<(), FlyError>;
-    /// Destroy the machine and any volume it mounted. Idempotent: a machine
-    /// that is already gone is success, because delete is what the caller
-    /// wanted either way.
+    /// Destroy the machine. Idempotent: a machine that is already gone is
+    /// success, because delete is what the caller wanted either way.
+    ///
+    /// Deliberately *not* its volume. Fly does not cascade, and the caller has
+    /// to delete volumes separately — see [`Self::delete_volume`].
     async fn destroy(&self, machine_id: &str) -> Result<(), FlyError>;
+    /// Every volume in the app, as `(id, name)`.
+    ///
+    /// By name rather than by machine, because a volume outlives the machine
+    /// that mounted it and can outlive one that was never created at all: a
+    /// create that made the volume and then failed to make the machine leaves
+    /// one nothing else names.
+    async fn volumes(&self) -> Result<Vec<(String, String)>, FlyError>;
+    /// Destroy a volume. Idempotent, like [`Self::destroy`].
+    async fn delete_volume(&self, volume_id: &str) -> Result<(), FlyError>;
 }
 
 /// How this vendor builds machines.
@@ -210,15 +221,50 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         runtime_id: &str,
         transport: Arc<dyn horsie_runtime_client::RuntimeTransport>,
     ) -> Arc<dyn RuntimeHandle> {
-        // A closed-signal the registry owns would be better, but the registry
-        // reports liveness by presence: a dropped runtime is simply absent.
-        // Until it carries a watch, this handle is closed only when replaced.
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        Arc::new(RuntimeHandleImpl::new(
+        // The registry reports liveness by presence — a dropped runtime is
+        // simply absent from it — so there is no flag anyone flips, and the
+        // handle says so rather than inventing a channel nobody holds.
+        Arc::new(RuntimeHandleImpl::unwatched(
             runtime_id.to_string(),
             transport,
-            rx,
         ))
+    }
+
+    /// Delete every volume this runtime's creates have left behind.
+    ///
+    /// By name, and *all* of them: a Fly volume name is a group label rather
+    /// than an identifier, so a runtime rebuilt after a half-failed create has
+    /// more than one volume under the same name, and only the last is mounted.
+    async fn delete_volumes_of(&self, runtime_id: &str) -> Result<(), RuntimeVendorError> {
+        let wanted = volume_name(runtime_id);
+        for (id, name) in self.api.volumes().await? {
+            if name == wanted {
+                self.api.delete_volume(&id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete every horsie volume whose runtime no longer exists.
+    ///
+    /// Compares against the names the *live* runtimes would have rather than
+    /// inverting a volume name, which cannot be done: [`volume_name`] lowercases,
+    /// substitutes and truncates. Two runtimes can therefore share a name, and
+    /// the comparison is deliberately the safe way round — a name any live
+    /// runtime would use is kept, so a collision costs a leaked volume rather
+    /// than a destroyed workspace.
+    async fn sweep_volumes(
+        &self,
+        live: &std::collections::HashSet<String>,
+    ) -> Result<(), FlyError> {
+        let live_names: std::collections::HashSet<String> =
+            live.iter().map(|id| volume_name(id)).collect();
+        for (id, name) in self.api.volumes().await? {
+            if name.starts_with("horsie_") && !live_names.contains(&name) {
+                self.api.delete_volume(&id).await?;
+            }
+        }
+        Ok(())
     }
 
     fn spec_for(
@@ -226,8 +272,9 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         runtime_id: &str,
         spec: &RuntimeSpec,
         volume: Option<String>,
-    ) -> MachineSpec {
-        let workspaces = workspace_paths(&self.settings.workspace_root, &spec.workspaces);
+    ) -> Result<MachineSpec, RuntimeVendorError> {
+        let workspaces = workspace_paths(&self.settings.workspace_root, &spec.workspaces)
+            .map_err(RuntimeVendorError::Provision)?;
         let mut env: Vec<(String, String)> = spec
             .env
             .iter()
@@ -248,7 +295,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         {
             env.push((horsie_models::ENV_PROVISION.to_string(), json));
         }
-        MachineSpec {
+        Ok(MachineSpec {
             name: machine_name(runtime_id),
             image: self.settings.image.clone(),
             region: self.settings.region.clone(),
@@ -260,7 +307,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             ),
             env,
             mount: volume.map(|id| (id, self.settings.workspace_root.clone())),
-        }
+        })
     }
 
     /// Wait for the runtime to dial back, then report `Ready` on the sink.
@@ -280,14 +327,9 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             let outcome = tokio::time::timeout(READY_WINDOW, waiter).await;
             let event = match outcome {
                 Ok(Ok(Ok(()))) => match connected.runtime_transport(&id).await {
-                    Some(transport) => {
-                        let (_tx, rx) = tokio::sync::watch::channel(false);
-                        RuntimeProgress::Ready(Arc::new(RuntimeHandleImpl::new(
-                            id.clone(),
-                            transport,
-                            rx,
-                        )))
-                    }
+                    Some(transport) => RuntimeProgress::Ready(Arc::new(
+                        RuntimeHandleImpl::unwatched(id.clone(), transport),
+                    )),
                     None => RuntimeProgress::Gone {
                         reason: "the runtime announced itself and then vanished".to_string(),
                     },
@@ -341,7 +383,7 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             None
         };
         self.api
-            .create_machine(&self.spec_for(runtime_id, spec, volume))
+            .create_machine(&self.spec_for(runtime_id, spec, volume)?)
             .await?;
 
         self.finish_in_background(runtime_id, waiter, progress);
@@ -383,6 +425,8 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
                 "the machine is resuming"
             }
         };
+        // Unused: a Fly machine keeps its volume across a hibernate, so
+        // resuming one needs nothing rebuilt from the spec.
         let _ = spec;
 
         self.finish_in_background(runtime_id, waiter, progress);
@@ -396,6 +440,12 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         live: &std::collections::HashSet<String>,
     ) -> Result<Vec<String>, RuntimeVendorError> {
         let mut swept = Vec::new();
+        // One stuck object must not shield every other from the sweep. The
+        // whole point of this pass is that things have already been billing for
+        // longer than they should, and aborting on the first failure — while
+        // discarding the ids already swept — meant one undeletable machine kept
+        // the rest alive indefinitely.
+        let mut failure = None;
         for (name, machine) in self.api.machines().await? {
             // Two filters, and both matter. The prefix means a shared app keeps
             // its other machines; the `live` check means a machine whose
@@ -408,11 +458,34 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             if live.contains(runtime_id) {
                 continue;
             }
-            self.api.destroy(&machine.id).await?;
-            self.connected.remove(runtime_id).await;
-            swept.push(runtime_id.to_string());
+            match self.api.destroy(&machine.id).await {
+                Ok(()) => {
+                    self.connected.remove(runtime_id).await;
+                    swept.push(runtime_id.to_string());
+                }
+                Err(e) => failure = Some(e),
+            }
         }
-        Ok(swept)
+
+        // Volumes are swept by name, not through the machines above: Fly does
+        // not cascade a delete, and a volume can outlive every machine that
+        // ever referenced it — including one whose machine create failed after
+        // the volume was made. Nothing else would ever name that volume again.
+        match self.sweep_volumes(live).await {
+            Ok(()) => {}
+            Err(e) => failure = Some(e),
+        }
+
+        match failure {
+            // The ids that *were* swept are the return value either way; the
+            // error says the pass was incomplete, not that it did nothing.
+            Some(e) if swept.is_empty() => Err(e.into()),
+            Some(e) => {
+                tracing::warn!(error = %e, swept = swept.len(), "the orphan sweep was incomplete");
+                Ok(swept)
+            }
+            None => Ok(swept),
+        }
     }
 
     async fn hibernate(
@@ -436,6 +509,11 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         if let Some(machine) = self.api.machine_by_name(&machine_name(runtime_id)).await? {
             self.api.destroy(&machine.id).await?;
         }
+        // After the machine, never before: Fly refuses to delete a volume that
+        // is still attached. And never skipped because the machine was already
+        // gone — a volume survives its machine, and one nobody deletes bills
+        // for its full size forever.
+        self.delete_volumes_of(runtime_id).await?;
         self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Gone {
             reason: "the owning session was deleted".to_string(),
@@ -461,11 +539,21 @@ mod tests {
         volumes: Mutex<Vec<String>>,
         reject_create: bool,
         unreachable: bool,
+        /// Machine ids whose destroy fails, so a test can hold one object stuck
+        /// and watch what the sweep does with the rest.
+        undeletable: Vec<String>,
     }
 
     impl FakeFly {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
+        }
+        fn volume_names(&self) -> Vec<String> {
+            self.volumes.lock().unwrap().clone()
+        }
+        fn with_volume(self, runtime_id: &str) -> Self {
+            self.volumes.lock().unwrap().push(volume_name(runtime_id));
+            self
         }
         fn with_machine(self, runtime_id: &str, state: MachineState) -> Self {
             self.machines.lock().unwrap().push((
@@ -528,6 +616,27 @@ mod tests {
         }
         async fn destroy(&self, id: &str) -> Result<(), FlyError> {
             self.calls.lock().unwrap().push(format!("destroy:{id}"));
+            if self.undeletable.iter().any(|u| u == id) {
+                return Err(FlyError::Rejected("machine is busy".to_string()));
+            }
+            self.machines.lock().unwrap().retain(|(_, m)| m.id != id);
+            Ok(())
+        }
+        async fn volumes(&self) -> Result<Vec<(String, String)>, FlyError> {
+            Ok(self
+                .volumes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|name| (format!("vol-{name}"), name.clone()))
+                .collect())
+        }
+        async fn delete_volume(&self, id: &str) -> Result<(), FlyError> {
+            self.calls.lock().unwrap().push(format!("rm-volume:{id}"));
+            self.volumes
+                .lock()
+                .unwrap()
+                .retain(|name| format!("vol-{name}") != id);
             Ok(())
         }
     }
@@ -649,6 +758,87 @@ mod tests {
         assert!(v.api.calls().is_empty(), "got {:?}", v.api.calls());
     }
 
+    /// Fly does not cascade. Deleting only the machine left a volume behind
+    /// billing at its full size, for every runtime, forever.
+    #[tokio::test]
+    async fn deleting_a_runtime_deletes_its_volume_too() {
+        let (v, _reg) = vendor(
+            FakeFly::default()
+                .with_machine("s1", MachineState::Stopped)
+                .with_volume("s1"),
+            true,
+        );
+        let (tx, _rx) = sink();
+        v.delete("s1", tx).await.unwrap();
+        assert!(
+            v.api.volume_names().is_empty(),
+            "the volume outlived its machine: {:?}",
+            v.api.volume_names()
+        );
+    }
+
+    /// And a volume outlives the machine that mounted it, so "no machine" is
+    /// not "nothing to clean up" — a create that made the volume and then
+    /// failed to make the machine leaves one nothing else ever names.
+    #[tokio::test]
+    async fn a_volume_with_no_machine_is_still_deleted() {
+        let (v, _reg) = vendor(FakeFly::default().with_volume("s1"), true);
+        let (tx, _rx) = sink();
+        v.delete("s1", tx).await.unwrap();
+        assert!(v.api.volume_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sweep_reclaims_orphaned_volumes_and_keeps_live_ones() {
+        let (v, _reg) = vendor(
+            FakeFly::default()
+                .with_machine("s2", MachineState::Stopped)
+                .with_volume("s1")
+                .with_volume("s2"),
+            true,
+        );
+        let live = std::collections::HashSet::from(["s1".to_string()]);
+        v.sweep_orphans(&live).await.unwrap();
+        assert_eq!(
+            v.api.volume_names(),
+            vec![volume_name("s1")],
+            "a live runtime's volume must survive the sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_never_touches_a_volume_that_is_not_ours() {
+        let fake = FakeFly::default();
+        fake.volumes.lock().unwrap().push("pgdata".to_string());
+        let (v, _reg) = vendor(fake, true);
+        let live = std::collections::HashSet::new();
+        v.sweep_orphans(&live).await.unwrap();
+        assert_eq!(v.api.volume_names(), vec!["pgdata".to_string()]);
+    }
+
+    /// One stuck object must not shield the rest. Everything here has already
+    /// been billing longer than it should, and aborting on the first failure —
+    /// discarding what was swept along the way — meant one undeletable machine
+    /// kept every other orphan alive indefinitely.
+    #[tokio::test]
+    async fn a_sweep_that_cannot_destroy_one_machine_still_destroys_the_others() {
+        let (v, _reg) = vendor(
+            FakeFly {
+                undeletable: vec!["m-s2".to_string()],
+                ..FakeFly::default()
+            }
+            .with_machine("s2", MachineState::Started)
+            .with_machine("s3", MachineState::Started),
+            false,
+        );
+        let live = std::collections::HashSet::new();
+        assert_eq!(
+            v.sweep_orphans(&live).await.unwrap(),
+            vec!["s3".to_string()],
+            "the machine that could be destroyed must be reported as swept"
+        );
+    }
+
     #[test]
     fn a_machine_name_round_trips_to_its_runtime_id() {
         assert_eq!(runtime_id_of(&machine_name("s1")), Some("s1"));
@@ -679,7 +869,7 @@ mod tests {
             }],
             ..spec()
         };
-        let machine = v.spec_for("s1", &spec, None);
+        let machine = v.spec_for("s1", &spec, None).unwrap();
         let provision = machine
             .env
             .iter()
