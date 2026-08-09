@@ -17,7 +17,7 @@ the [fluorite](https://github.com/blossomstack/fluorite)-generated protocol type
 | Server state   | TanStack Query                                     |
 | Live updates   | native `EventSource` (SSE)                          |
 | Markdown       | react-markdown + remark-gfm + rehype-highlight (lazy) |
-| Protocol types | fluorite → `src/generated` (`@horsie/types` schemas) |
+| Protocol types | fluorite → `src/generated` (from `crates/models/fluorite`) |
 
 ## Prerequisites
 
