@@ -7,7 +7,6 @@ use super::artifact::ArtifactStore;
 use super::ingest::{self, IngestTarget, Ingested, ParsedMarketplace, PluginBundle};
 use super::marketplace_store::{MarketplaceRow, MarketplaceStore};
 use super::store::{PluginRow, PluginStore};
-use super::token;
 use super::{PluginArtifactRef, PluginProvisioner};
 use horsie_models::plugins::{
     CatalogEntryView, InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput,
@@ -16,9 +15,6 @@ use horsie_models::plugins::{
 use horsie_support::plugin::source_location;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Capability-token lifetime; covers provisioning (incl. re-attach) with margin.
-const TOKEN_TTL_SECS: u64 = 3600;
 
 /// Where a bundle came from, for the `plugins` row. Both halves or neither: a
 /// bundle either came through a catalogue or did not.
@@ -34,7 +30,6 @@ pub struct PluginService {
     /// the hash of their own bytes, so there is one file per bundle version on
     /// the whole deployment.
     artifacts: Arc<ArtifactStore>,
-    token_secret: Arc<Vec<u8>>,
 }
 
 impl PluginService {
@@ -42,14 +37,28 @@ impl PluginService {
         store: PluginStore,
         marketplaces: MarketplaceStore,
         artifacts: Arc<ArtifactStore>,
-        token_secret: Arc<Vec<u8>>,
     ) -> Self {
         Self {
             store,
             marketplaces,
             artifacts,
-            token_secret,
         }
+    }
+
+    /// Every artifact hash this account has installed.
+    ///
+    /// The artifact route's authorization check. Deliberately the *account's*
+    /// rows rather than the deployment's: `ArtifactStore` is shared by content
+    /// across every account, so asking it what exists would answer for all of
+    /// them at once.
+    pub async fn installed_hashes(&self) -> Result<std::collections::HashSet<String>, String> {
+        Ok(self
+            .store
+            .list()
+            .await?
+            .into_iter()
+            .map(|row| row.artifact_hash)
+            .collect())
     }
 
     pub async fn list(&self) -> Result<Vec<PluginView>, String> {
@@ -409,10 +418,6 @@ impl PluginProvisioner for PluginService {
         Ok(refs)
     }
 
-    fn mint_token(&self, session_id: &str, hashes: &[String]) -> String {
-        token::sign(&self.token_secret, session_id, hashes, TOKEN_TTL_SECS)
-    }
-
     async fn catalog(
         &self,
         names: &[String],
@@ -543,7 +548,6 @@ mod tests {
             PluginStore::new(db.clone(), crate::auth::UserId::new("1")),
             MarketplaceStore::new(db, crate::auth::UserId::new("1")),
             artifacts.clone(),
-            Arc::new(b"secret".to_vec()),
         );
         (svc, artifacts, tmp)
     }
@@ -740,7 +744,8 @@ mod tests {
         assert_eq!(view.name, "demo");
         assert_eq!(view.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
 
-        // Artifact resolves + is fetchable-by-hash; token authorizes it.
+        // Artifact resolves + is fetchable-by-hash, and the account's installed
+        // set is what the artifact route authorizes against.
         let refs = svc.resolve(&["demo".into()]).await.unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(
@@ -749,13 +754,9 @@ mod tests {
             "the ref carries the content hash; the agent builds the URL from it"
         );
         assert!(artifacts.path(&refs[0].hash).is_file());
-        let tok = svc.mint_token("s", &[refs[0].hash.clone()]);
-        assert!(
-            artifacts
-                .verify_token(b"secret", &tok, &refs[0].hash)
-                .is_ok()
-        );
-        assert!(artifacts.verify_token(b"secret", &tok, "deadbeef").is_err());
+        let installed = svc.installed_hashes().await.unwrap();
+        assert!(installed.contains(&refs[0].hash));
+        assert!(!installed.contains("deadbeef"));
 
         // Unknown name errors.
         assert!(svc.resolve(&["nope".into()]).await.is_err());

@@ -139,7 +139,6 @@ mod tests {
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("artifacts"),
             )),
-            artifact_secret: Arc::new(b"test-secret".to_vec()),
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),

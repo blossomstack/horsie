@@ -221,17 +221,11 @@ impl RuntimeManager {
                     .resolve(&names)
                     .await
                     .map_err(RuntimeError::Provision)?;
-                let hashes: Vec<String> = refs.iter().map(|r| r.hash.clone()).collect();
-                let token = prov.mint_token(session, &hashes);
                 let manifest = serde_json::to_string(&refs)
                     .map_err(|e| RuntimeError::Provision(e.to_string()))?;
                 rt_spec.env.push(horsie_models::executor::EnvVar {
                     name: horsie_models::ENV_PLUGIN_MANIFEST.to_string(),
                     value: manifest,
-                });
-                rt_spec.env.push(horsie_models::executor::EnvVar {
-                    name: horsie_models::ENV_PLUGINS_TOKEN.to_string(),
-                    value: token,
                 });
             }
         }
@@ -691,10 +685,6 @@ mod tests {
                 .collect())
         }
 
-        fn mint_token(&self, session_id: &str, _hashes: &[String]) -> String {
-            format!("token-for-{session_id}")
-        }
-
         async fn default_names(&self) -> Vec<String> {
             vec![]
         }
@@ -737,9 +727,11 @@ mod tests {
             manifest.contains("hash-of-superpowers"),
             "the manifest names the selected bundle: {manifest}"
         );
-        assert_eq!(
-            env(horsie_models::ENV_PLUGINS_TOKEN).as_deref(),
-            Some("token-for-s1")
+        // No bundle credential travels beside it any more: the runtime
+        // authenticates its fetch with the dial token it already holds.
+        assert!(
+            env(horsie_models::ENV_CONNECT_TOKEN).is_some(),
+            "the dial token is what authorizes the fetch now"
         );
     }
 

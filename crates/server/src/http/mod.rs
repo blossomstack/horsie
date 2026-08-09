@@ -417,7 +417,6 @@ mod tests {
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("plugins"),
             )),
-            artifact_secret: Arc::new(b"test-secret".to_vec()),
             info: test_info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
@@ -432,6 +431,29 @@ mod tests {
         };
         publish_mock_vendor(&state).await;
         state
+    }
+
+    /// The dial token a runtime of the state's anonymous account would hold.
+    ///
+    /// Built from that account's real `runtime_dial_secret`, so it verifies the
+    /// same way a live runtime's does — the point being that the artifact route
+    /// now accepts exactly one thing, and it is the credential the runtime
+    /// already has.
+    async fn dial_token_for(state: &AppState, runtime_id: &str) -> String {
+        let account = crate::auth::UserId::bootstrap();
+        // Building the account is what creates its secret on first use.
+        let _ = state.users.get(&account).await.unwrap();
+        let secret = crate::config::dial_secret_of(&state.shared.db, &account)
+            .await
+            .unwrap()
+            .expect("the account has a dial secret once it has been built");
+        horsie_support::dial_token::mint(
+            &secret,
+            &horsie_support::dial_token::DialClaims {
+                user_id: account.as_str().to_string(),
+                runtime_id: runtime_id.to_string(),
+            },
+        )
     }
 
     /// Publish a fake vendor process as `mock` in the state's anonymous account,
@@ -1186,7 +1208,7 @@ mod tests {
 
         let state = test_state(&tmp).await;
         let plugins = services(&state).await.plugins.clone();
-        let app = app(state);
+        let app = app(state.clone());
 
         // Empty to start.
         let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
@@ -1214,7 +1236,8 @@ mod tests {
         let list: Vec<PluginView> = read_json(res).await;
         assert_eq!(list.len(), 1);
 
-        // Artifact fetch: 403 without a token, 200 with a valid bearer.
+        // Artifact fetch: 403 without a bearer, 200 with this account's own
+        // runtime's dial token.
         let refs = plugins.resolve(&["demo".into()]).await.unwrap();
         let hash = refs[0].hash.clone();
         let res = app
@@ -1223,7 +1246,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
-        let token = plugins.mint_token("s", std::slice::from_ref(&hash));
+        let token = dial_token_for(&state, "rt-1").await;
         let req = Request::builder()
             .uri(format!("/api/plugin-artifacts/{hash}.zip"))
             .header("authorization", format!("Bearer {token}"))
@@ -1231,6 +1254,33 @@ mod tests {
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+
+        // A hash this account never installed is refused even with a valid
+        // token — the boundary the old deployment-global secret did not have.
+        let req = Request::builder()
+            .uri("/api/plugin-artifacts/deadbeef.zip")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+        // A well-formed token signed with the wrong secret is refused, and
+        // refused the same way — the route never confirms an account exists.
+        let forged = horsie_support::dial_token::mint(
+            b"not-this-accounts-secret",
+            &horsie_support::dial_token::DialClaims {
+                user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
+                runtime_id: "rt-1".to_string(),
+            },
+        );
+        let req = Request::builder()
+            .uri(format!("/api/plugin-artifacts/{hash}.zip"))
+            .header("authorization", format!("Bearer {forged}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
         // Delete.
         let res = app.oneshot(delete("/api/plugins/demo")).await.unwrap();

@@ -123,7 +123,6 @@ async fn start_server_on(
         artifacts: Arc::new(horsie_server::plugins::ArtifactStore::new(
             journal_dir.join("plugin-artifacts"),
         )),
-        artifact_secret: Arc::new(b"e2e-secret".to_vec()),
         info: horsie_models::settings::ServerInfo {
             config_path: String::new(),
             database: String::new(),

@@ -241,9 +241,6 @@ pub const ENV_PLUGIN_MANIFEST: &str = "HORSIE_PLUGIN_MANIFEST";
 /// while bundles were the only caller.
 pub const ENV_SERVER_URL: &str = "HORSIE_SERVER_URL";
 
-/// Bearer token the runtime presents when fetching bundle artifacts.
-pub const ENV_PLUGINS_TOKEN: &str = "HORSIE_PLUGINS_TOKEN";
-
 /// Directory the runtime unpacks fetched bundles into and scans as its
 /// plugins_dir. One per runtime: the runtime scans the whole directory, so a
 /// shared one would show a session another session's skills.
