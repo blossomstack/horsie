@@ -47,8 +47,8 @@ in as `admin` with the password the first boot printed, and add a provider and
 a model under **Settings → Models** — a fresh server has none, and sessions
 cannot run a turn without one.
 
-Then give sessions somewhere to run tools. On the machine holding the code you
-want the agent to work on:
+Then give it a sandbox. On the machine holding the code you want the agent to
+work on:
 
 ```bash
 curl -fsSL https://get.horsie.dev | sh
@@ -57,12 +57,12 @@ horsie auth login --server http://localhost:3789
 horsie connect --server http://localhost:3789 --workspace .
 ```
 
-That registers the current directory and holds a connection open, spawning one
-runtime process per session. Keep it running for as long as you want that
-machine reachable — or configure a cloud vendor in Settings and skip it
-entirely.
+That registers the current directory and holds a connection open, dialling
+*out*, so there is no port to open. It spawns one sandbox per session. Keep it
+running for as long as you want that machine reachable — or configure a cloud
+vendor in Settings and skip it entirely.
 
-Back in the UI: **New** → pick a model and a runtime → send a message.
+Back in the UI: **New** → pick a model and a sandbox → send a message.
 
 The full walkthrough is [the quickstart](https://docs.horsie.dev/start-here/quickstart/).
 
@@ -81,6 +81,7 @@ covered in
 | --- | --- |
 | [Quickstart](https://docs.horsie.dev/start-here/quickstart/) | From nothing to a running session |
 | [Sessions](https://docs.horsie.dev/using/sessions/) | The chat view and per-session options |
+| [Routines](https://docs.horsie.dev/using/routines/) | Scheduled and API-triggered runs, and why they are not CI jobs |
 | [Deploying the server](https://docs.horsie.dev/operating/deploying/) | Docker, Render, Fly, PostgreSQL, building from source |
 | [The local runtime](https://docs.horsie.dev/operating/local-runtime/) | `horsie connect` on your own machine |
 | [Cloud runtime vendors](https://docs.horsie.dev/operating/cloud-vendors/) | Fly Machines and velos, configured in Settings |
