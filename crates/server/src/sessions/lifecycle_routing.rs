@@ -286,7 +286,7 @@ mod tests {
             E::UsageRecorded {
                 at_ms: 1,
                 agent_id: "main".into(),
-                usage_total: horsie_workflow::UsageTotal::default(),
+                usage_total: crate::agent_loop::UsageTotal::default(),
             },
             E::SubAgentSpawned {
                 at_ms: 1,

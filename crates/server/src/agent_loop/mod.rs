@@ -1,4 +1,4 @@
-//! The agent loop on top of the event-sourced `actor` runtime.
+//! The agent loop, on top of the event-sourced `actor` runtime.
 //!
 //! An [`AgentActor`] runs one agent: it calls the provider, executes tools
 //! through a [`Toolbox`](horsie_agentcore::Toolbox), and reports a terminal
@@ -7,7 +7,9 @@
 //!
 //! Sequencing several agents — an interactive session's main agent and its
 //! subagents, or a workflow run's steps — belongs to the owner that spawns
-//! them, not here.
+//! them, not here. That owner is [`crate::sessions`]; the workflow *graph*
+//! feature that schedules runs is [`crate::workflows`], which is a different
+//! thing despite the adjacent name.
 
 mod agent_actor;
 mod agent_log;

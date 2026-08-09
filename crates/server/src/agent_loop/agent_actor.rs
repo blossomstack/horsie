@@ -1,4 +1,4 @@
-use crate::context::{
+use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
 };
 use async_trait::async_trait;
@@ -93,9 +93,9 @@ pub enum AgentCommand {
     /// so a caller that must know an accepted message will survive a crash
     /// (`POST /sessions/:id/messages`) can wait for that rather than trust a
     /// mailbox. Whether it becomes a turn is this agent's own decision, taken
-    /// immediately afterwards; see [`crate::queued_turn`].
+    /// immediately afterwards; see [`crate::agent_loop::queued_turn`].
     Enqueue {
-        item: crate::Incoming,
+        item: crate::agent_loop::Incoming,
         ack: Option<tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>>,
     },
     /// Answer every question this agent is parked on, at once.
@@ -104,8 +104,8 @@ pub enum AgentCommand {
     /// nothing is journaled. A half-answered park could not resume anyway — the
     /// next provider call would carry a `tool_use` with no result.
     Answer {
-        answers: Vec<crate::AskAnswer>,
-        reply: tokio::sync::oneshot::Sender<Result<(), crate::AnswerError>>,
+        answers: Vec<crate::agent_loop::AskAnswer>,
+        reply: tokio::sync::oneshot::Sender<Result<(), crate::agent_loop::AnswerError>>,
     },
     /// Internal: reconsider whether the queue may start a turn now. Sent after
     /// anything that could have changed the answer.
@@ -142,26 +142,28 @@ pub enum AgentCommand {
     ArmTimer {
         label: String,
         message: String,
-        kind: crate::timers::TimerKind,
+        kind: crate::agent_loop::timers::TimerKind,
         after_secs: u64,
-        reply: tokio::sync::oneshot::Sender<crate::timers::TimerId>,
+        reply: tokio::sync::oneshot::Sender<crate::agent_loop::timers::TimerId>,
     },
     /// List active timers.
     ListTimers {
-        reply: tokio::sync::oneshot::Sender<Vec<crate::timers::TimerView>>,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::agent_loop::timers::TimerView>>,
     },
     /// Cancel one or all timers; replies with the ids actually removed.
     CancelTimer {
-        selector: crate::timers::CancelSelector,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::timers::TimerId>>,
+        selector: crate::agent_loop::timers::CancelSelector,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::agent_loop::timers::TimerId>>,
     },
     /// Internal: a timer's sleep elapsed.
-    TimerFired { id: crate::timers::TimerId },
+    TimerFired {
+        id: crate::agent_loop::timers::TimerId,
+    },
     /// Apply a `task_list` mutation (or just render `list`); durable like
     /// timers. Replies with the rendered list, or an error message if the
     /// action was rejected (unknown id, out-of-range position, ...).
     TaskListOp {
-        action: crate::task_list::TaskListAction,
+        action: crate::agent_loop::task_list::TaskListAction,
         reply: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
     /// Read forward from a cursor: durable entries plus, when the caller has
@@ -171,7 +173,7 @@ pub enum AgentCommand {
     /// `None` means "from the very beginning", which is what a client with no
     /// position at all asks for.
     ReadLog {
-        after: Option<crate::agent_log::Cursor>,
+        after: Option<crate::agent_loop::agent_log::Cursor>,
         reply: tokio::sync::oneshot::Sender<ReadOutcome>,
     },
     /// Read a window *backwards* from a cursor — scroll-back. Separate from
@@ -180,7 +182,7 @@ pub enum AgentCommand {
     PageLog {
         before: Option<u64>,
         max: usize,
-        reply: tokio::sync::oneshot::Sender<crate::agent_log::LogPage>,
+        reply: tokio::sync::oneshot::Sender<crate::agent_loop::agent_log::LogPage>,
     },
     /// Record something that happened to the session in this agent's log.
     ///
@@ -221,7 +223,7 @@ pub enum AgentCommand {
 /// step decides nothing about what the turn consumes, it only learns what the
 /// hooks said.
 pub struct PreparedStart {
-    pub turn: crate::Turn,
+    pub turn: crate::agent_loop::Turn,
     /// Records to journal before the turn snapshots its history — which is the
     /// whole reason this round-trip exists. Empty when no hook fired.
     pub records: Vec<horsie_models::hooks::HookRecord>,
@@ -236,7 +238,7 @@ pub enum AbandonedStart {
     Blocked(String),
     /// Preparation could not complete — no runtime, most likely. The same
     /// failure `provide` would have reported one step later.
-    Failed(crate::ContextError),
+    Failed(crate::agent_loop::ContextError),
 }
 
 /// What a live reader gets for one step forward.
@@ -262,7 +264,7 @@ pub struct ReadOutcome {
     /// starts from the beginning and the caller must discard what it holds.
     pub reset_deltas: bool,
     /// Where the caller now is.
-    pub cursor: crate::agent_log::Cursor,
+    pub cursor: crate::agent_loop::agent_log::Cursor,
 }
 
 /// What a cursorless replay covered.
@@ -274,7 +276,7 @@ pub struct ReplayWindow {
 
 impl ReadOutcome {
     /// Nothing new — the reader is exactly where the agent is.
-    fn nothing(cursor: crate::agent_log::Cursor) -> Self {
+    fn nothing(cursor: crate::agent_loop::agent_log::Cursor) -> Self {
         Self {
             window: None,
             entries: Vec::new(),
@@ -338,18 +340,18 @@ pub enum AgentDomainEvent {
     },
     /// A timer was armed.
     TimerArmed {
-        record: crate::timers::TimerRecord,
+        record: crate::agent_loop::timers::TimerRecord,
         at_ms: u64,
     },
     /// One or more timers were cancelled.
     TimerCancelled {
-        ids: Vec<crate::timers::TimerId>,
+        ids: Vec<crate::agent_loop::timers::TimerId>,
         at_ms: u64,
     },
     /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for a
     /// recurring timer (so the fold stays pure); `None` removes a one-shot.
     TimerFired {
-        id: crate::timers::TimerId,
+        id: crate::agent_loop::timers::TimerId,
         next_fire_at_unix_ms: Option<u64>,
         at_ms: u64,
     },
@@ -361,7 +363,7 @@ pub enum AgentDomainEvent {
     /// resulting state, not a delta — mirrors `MessageComplete`/`ToolComplete`,
     /// so replay never needs to re-derive or re-validate a past mutation.
     TaskListChanged {
-        snapshot: crate::task_list::TaskListState,
+        snapshot: crate::agent_loop::task_list::TaskListState,
         at_ms: u64,
     },
     /// Something that happened to the session, recorded here so there is one
@@ -382,7 +384,7 @@ pub enum AgentDomainEvent {
     /// accepted message a promise: it survives a crash and is still owed an
     /// answer.
     Received {
-        item: crate::Incoming,
+        item: crate::agent_loop::Incoming,
         at_ms: u64,
     },
     /// A turn began, consuming these queue items — and, if the agent was parked,
@@ -399,7 +401,7 @@ pub enum AgentDomainEvent {
     /// than one per question: they are asked together and answered together, so
     /// there is never a moment when only some of them are pending.
     AskRecorded {
-        asks: Vec<crate::AskedQuestion>,
+        asks: Vec<crate::agent_loop::AskedQuestion>,
         at_ms: u64,
     },
 }
@@ -443,22 +445,22 @@ pub struct AgentState {
     /// timers are — an accepted message is a promise, and a crash must not
     /// forget it.
     #[serde(default)]
-    pub inbox: Vec<crate::Incoming>,
+    pub inbox: Vec<crate::agent_loop::Incoming>,
     /// Every question this agent is parked on, oldest first. A turn may ask
     /// several at once, and the run cannot resume until all of them have a
     /// result.
     #[serde(default)]
-    pub asks: Vec<crate::AskedQuestion>,
+    pub asks: Vec<crate::agent_loop::AskedQuestion>,
     /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
     #[serde(default)]
-    pub timers: Vec<crate::timers::TimerRecord>,
+    pub timers: Vec<crate::agent_loop::timers::TimerRecord>,
     /// True while the agent has parked itself awaiting a timer (no run in flight).
     #[serde(default)]
     pub parked: bool,
     /// The agent's task list — durable so it survives an actor restart exactly
-    /// like timers do; see `crate::task_list`.
+    /// like timers do; see `crate::agent_loop::task_list`.
     #[serde(default)]
-    pub task_list: crate::task_list::TaskListState,
+    pub task_list: crate::agent_loop::task_list::TaskListState,
     /// Cumulative token usage across every completed run — durable agent state,
     /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
     /// total can't overflow the per-turn `u32` wire counters. Answers the
@@ -554,7 +556,7 @@ pub struct AgentUsageSnapshot {
 /// which is why none of it rides on a history page.
 #[derive(Debug, Clone, Default)]
 pub struct AgentStateView {
-    pub tasks: Vec<crate::task_list::TaskRecord>,
+    pub tasks: Vec<crate::agent_loop::task_list::TaskRecord>,
     pub usage_total: UsageTotal,
     pub last_turn_usage: Option<Usage>,
     pub context_tokens: u32,
@@ -645,14 +647,14 @@ impl AgentState {
     /// The only way to obtain a `Vec<Message>` from state. `self.history` cannot
     /// be handed to a provider because the element types differ, so every kind of
     /// entry must state what, if anything, it shows the model;
-    /// [`crate::hook_translation::translate`] is where that is decided, in one
+    /// [`crate::agent_loop::hook_translation::translate`] is where that is decided, in one
     /// exhaustive match, and any future non-model entry inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
         self.log
             .iter()
             .filter_map(|e| match &e.body {
                 AgentLogBody::Llm(m) => Some(m.clone()),
-                AgentLogBody::Hook(h) => crate::hook_translation::translate(h),
+                AgentLogBody::Hook(h) => crate::agent_loop::hook_translation::translate(h),
                 // Every lifecycle variant, present and future. This arm is the
                 // reason `Lifecycle` is one union rather than nine flattened
                 // ones: provider isolation cannot be forgotten for a variant
@@ -690,7 +692,7 @@ impl AgentState {
     #[must_use]
     pub fn read_from(
         &self,
-        after: Option<crate::agent_log::Cursor>,
+        after: Option<crate::agent_loop::agent_log::Cursor>,
         deltas: &[String],
     ) -> ReadOutcome {
         let tail = self.tail_seq();
@@ -698,7 +700,7 @@ impl AgentState {
             // No position at all: the newest window, capped. A long-running
             // session must not resend its whole history on every open, and the
             // caller is told when the cap bit so it can page back for the rest.
-            let (entries, truncated) = crate::agent_log::replay_window(&self.log);
+            let (entries, truncated) = crate::agent_loop::agent_log::replay_window(&self.log);
             return ReadOutcome {
                 window: Some(ReplayWindow {
                     has_more_before: truncated,
@@ -707,20 +709,21 @@ impl AgentState {
                 entries: entries.to_vec(),
                 deltas: deltas.to_vec(),
                 reset_deltas: false,
-                cursor: crate::agent_log::Cursor {
+                cursor: crate::agent_loop::agent_log::Cursor {
                     entry_seq: tail.unwrap_or(0),
                     delta_seq: deltas.len(),
                 },
             };
         };
 
-        let entries = crate::agent_log::page_after(&self.log, cursor.entry_seq).to_vec();
+        let entries =
+            crate::agent_loop::agent_log::page_after(&self.log, cursor.entry_seq).to_vec();
         if !entries.is_empty() {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
             return ReadOutcome {
                 window: None,
-                cursor: crate::agent_log::Cursor {
+                cursor: crate::agent_loop::agent_log::Cursor {
                     entry_seq: entries.last().map_or(cursor.entry_seq, |e| e.seq),
                     delta_seq: 0,
                 },
@@ -736,7 +739,7 @@ impl AgentState {
                 entries: Vec::new(),
                 deltas: deltas.to_vec(),
                 reset_deltas: true,
-                cursor: crate::agent_log::Cursor {
+                cursor: crate::agent_loop::agent_log::Cursor {
                     entry_seq: cursor.entry_seq,
                     delta_seq: deltas.len(),
                 },
@@ -752,7 +755,7 @@ impl AgentState {
             entries: Vec::new(),
             deltas: deltas[cursor.delta_seq..].to_vec(),
             reset_deltas: false,
-            cursor: crate::agent_log::Cursor {
+            cursor: crate::agent_loop::agent_log::Cursor {
                 entry_seq: cursor.entry_seq,
                 delta_seq: deltas.len(),
             },
@@ -1006,7 +1009,7 @@ impl AgentActor {
         if self.busy() || !self.ready {
             return Vec::new();
         }
-        match crate::queued_turn(&state.inbox, &state.asks) {
+        match crate::agent_loop::queued_turn(&state.inbox, &state.asks) {
             Some(turn) => self.begin_turn(turn, state, ctx).await,
             None => Vec::new(),
         }
@@ -1021,7 +1024,7 @@ impl AgentActor {
     /// tell-then-persist has always had, and the direction to err in.
     async fn begin_turn(
         &mut self,
-        turn: crate::Turn,
+        turn: crate::agent_loop::Turn,
         state: &AgentState,
         ctx: &ActorContext<Self>,
     ) -> Vec<AgentDomainEvent> {
@@ -1040,7 +1043,7 @@ impl AgentActor {
             })
             .await;
 
-        let start = crate::StartTurn {
+        let start = crate::agent_loop::StartTurn {
             // An agent that has never spoken to a provider is starting up;
             // anything else was folded from a journal. Read off the *LLM*
             // entries rather than the log, which a queued message alone already
@@ -1077,11 +1080,12 @@ impl AgentActor {
         tokio::spawn(async move {
             let prepared = match provider.start_hooks(start).await {
                 Ok(prep) => PreparedStart {
-                    abandon: crate::start_blocked(&prep.records).map(AbandonedStart::Blocked),
+                    abandon: crate::agent_loop::start_blocked(&prep.records)
+                        .map(AbandonedStart::Blocked),
                     records: prep.records,
                     // A rewritten prompt replaces the turn's input; an absent
                     // one leaves what the user actually sent.
-                    turn: crate::Turn {
+                    turn: crate::agent_loop::Turn {
                         message: prep.message.or(turn.message),
                         ..turn
                     },
@@ -1116,7 +1120,7 @@ impl AgentActor {
             records,
             abandon,
         } = prepared;
-        let crate::Turn {
+        let crate::agent_loop::Turn {
             message,
             subagent_results,
             results,
@@ -1571,7 +1575,7 @@ impl AgentActor {
     /// and no flag has to remember anything.
     async fn handle_timer_fired(
         &mut self,
-        id: crate::timers::TimerId,
+        id: crate::agent_loop::timers::TimerId,
         state: &AgentState,
         ctx: &ActorContext<Self>,
     ) -> CommandEffect<AgentDomainEvent> {
@@ -1583,7 +1587,7 @@ impl AgentActor {
         let now = now_ms();
         // Re-arm recurring; remove one-shot.
         let next_fire_at_unix_ms = match record.kind {
-            crate::timers::TimerKind::Recurring => {
+            crate::agent_loop::timers::TimerKind::Recurring => {
                 let next = now.saturating_add(record.interval_secs.saturating_mul(1000));
                 spawn_timer_sleep(
                     ctx.self_ref(),
@@ -1592,12 +1596,12 @@ impl AgentActor {
                 );
                 Some(next)
             }
-            crate::timers::TimerKind::OneShot => None,
+            crate::agent_loop::timers::TimerKind::OneShot => None,
         };
         // Derived from the timer and its fire count, never generated: the fold
         // must reproduce the same id on replay, which a uuid could not.
         let received = AgentDomainEvent::Received {
-            item: crate::Incoming::Timer {
+            item: crate::agent_loop::Incoming::Timer {
                 id: format!("{id}:{display_count}"),
                 message: record.wake_message(display_count),
             },
@@ -1750,7 +1754,7 @@ impl EventSourcedActor for AgentActor {
                 // session records a subagent's news on this very log, and a
                 // wake becomes the turn's own input message — so surfacing
                 // them here would render the same fact twice.
-                if let crate::Incoming::User { id, text } = &item {
+                if let crate::agent_loop::Incoming::User { id, text } = &item {
                     state.push(
                         at_ms,
                         AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(QueuedLifecycle {
@@ -1862,10 +1866,10 @@ impl EventSourcedActor for AgentActor {
                 // A run in flight means the questions are already gone — a turn
                 // beginning is what clears them — so there is nothing to answer.
                 if self.busy() {
-                    let _ = reply.send(Err(crate::AnswerError::NothingPending));
+                    let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
                 }
-                match crate::answered_turn(&state.inbox, &state.asks, answers) {
+                match crate::agent_loop::answered_turn(&state.inbox, &state.asks, answers) {
                     Ok(turn) => {
                         let _ = reply.send(Ok(()));
                         CommandEffect::persist(self.begin_turn(turn, state, ctx).await)
@@ -1925,7 +1929,7 @@ impl EventSourcedActor for AgentActor {
                 reply,
             } => {
                 let now = now_ms();
-                let record = crate::timers::TimerRecord::arm(
+                let record = crate::agent_loop::timers::TimerRecord::arm(
                     label,
                     message,
                     kind,
@@ -1951,11 +1955,11 @@ impl EventSourcedActor for AgentActor {
                 CommandEffect::none()
             }
             AgentCommand::CancelTimer { selector, reply } => {
-                let ids: Vec<crate::timers::TimerId> = match selector {
-                    crate::timers::CancelSelector::All => {
+                let ids: Vec<crate::agent_loop::timers::TimerId> = match selector {
+                    crate::agent_loop::timers::CancelSelector::All => {
                         state.timers.iter().map(|t| t.id.clone()).collect()
                     }
-                    crate::timers::CancelSelector::One(id) => {
+                    crate::agent_loop::timers::CancelSelector::One(id) => {
                         if state.timers.iter().any(|t| t.id == id) {
                             vec![id]
                         } else {
@@ -2023,7 +2027,9 @@ impl EventSourcedActor for AgentActor {
                 CommandEffect::none()
             }
             AgentCommand::PageLog { before, max, reply } => {
-                let _ = reply.send(crate::agent_log::page_before(&state.log, before, max));
+                let _ = reply.send(crate::agent_loop::agent_log::page_before(
+                    &state.log, before, max,
+                ));
                 CommandEffect::none()
             }
             AgentCommand::GetUsage { reply } => {
@@ -2128,7 +2134,7 @@ fn new_message_id() -> String {
 /// is ignored there, so an un-cancellable sleep task is harmless.
 fn spawn_timer_sleep(
     self_ref: ActorRef<AgentCommand>,
-    id: crate::timers::TimerId,
+    id: crate::agent_loop::timers::TimerId,
     delay: std::time::Duration,
 ) {
     tokio::spawn(async move {
@@ -2148,7 +2154,7 @@ struct TimerToolbox {
 impl Toolbox for TimerToolbox {
     fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.extend(crate::timers::timer_tool_specs());
+        specs.extend(crate::agent_loop::timers::timer_tool_specs());
         specs
     }
 
@@ -2158,7 +2164,7 @@ impl Toolbox for TimerToolbox {
         input: Value,
         tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
-        use crate::timers::{CancelSelector, TimerId, TimerKind};
+        use crate::agent_loop::timers::{CancelSelector, TimerId, TimerKind};
         use horsie_agentcore::ToolCallError;
         match name {
             "set_timer" => {
@@ -2243,7 +2249,7 @@ impl Toolbox for TimerToolbox {
 /// Wraps an agent's toolbox, adding the always-available `task_list` tool. It
 /// executes by `ask`ing the owning [`AgentActor`] (never forwarded to the
 /// sandboxed runtime), so its state is durable -- journaled and replayed
-/// exactly like timers (see `crate::task_list`).
+/// exactly like timers (see `crate::agent_loop::task_list`).
 struct TaskListToolbox {
     inner: Arc<dyn Toolbox>,
     actor: ActorRef<AgentCommand>,
@@ -2253,7 +2259,7 @@ struct TaskListToolbox {
 impl Toolbox for TaskListToolbox {
     fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.push(crate::task_list::task_list_tool_spec());
+        specs.push(crate::agent_loop::task_list::task_list_tool_spec());
         specs
     }
 
@@ -2264,10 +2270,10 @@ impl Toolbox for TaskListToolbox {
         tool_call_id: &str,
     ) -> Result<Value, horsie_agentcore::ToolCallError> {
         use horsie_agentcore::ToolCallError;
-        if name != crate::task_list::TASK_LIST_TOOL {
+        if name != crate::agent_loop::task_list::TASK_LIST_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
-        let action = crate::task_list::TaskListAction::from_input(&input)?;
+        let action = crate::agent_loop::task_list::TaskListAction::from_input(&input)?;
         let result = self
             .actor
             .ask(|reply| AgentCommand::TaskListOp { action, reply })
@@ -2720,9 +2726,11 @@ mod tests {
     // bookkeeping and never start a run.
     struct StubContext;
     #[async_trait]
-    impl crate::ContextProvider for StubContext {
-        async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
-            Err(crate::ContextError::retryable("no context"))
+    impl crate::agent_loop::ContextProvider for StubContext {
+        async fn provide(
+            &self,
+        ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+            Err(crate::agent_loop::ContextError::retryable("no context"))
         }
     }
     struct StubParent;
@@ -2806,7 +2814,7 @@ mod tests {
     /// after the fold, with the resulting message already in state.
     #[tokio::test]
     async fn an_observer_sees_durable_appends_with_folded_state() {
-        use crate::{ContextError, ContextProvider, Contexts};
+        use crate::agent_loop::{ContextError, ContextProvider, Contexts};
         use horsie_actor::{InMemoryJournal, Journal, spawn_root};
 
         struct NoContext;
@@ -2904,9 +2912,11 @@ mod tests {
 
         struct MockContext(Arc<MockProvider>);
         #[async_trait]
-        impl crate::ContextProvider for MockContext {
-            async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
-                Ok(crate::Contexts {
+        impl crate::agent_loop::ContextProvider for MockContext {
+            async fn provide(
+                &self,
+            ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+                Ok(crate::agent_loop::Contexts {
                     provider: self.0.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
@@ -2944,7 +2954,7 @@ mod tests {
 
         agent
             .tell(AgentCommand::Enqueue {
-                item: crate::Incoming::User {
+                item: crate::agent_loop::Incoming::User {
                     id: "m1".into(),
                     text: "hi".into(),
                 },
@@ -3009,7 +3019,7 @@ mod tests {
             llm: Arc<MockProvider>,
             records: Vec<HookRecord>,
             enabled: bool,
-            seen: Mutex<Vec<crate::StartTurn>>,
+            seen: Mutex<Vec<crate::agent_loop::StartTurn>>,
         }
 
         impl HookingContext {
@@ -3042,9 +3052,11 @@ mod tests {
         }
 
         #[async_trait]
-        impl crate::ContextProvider for HookingContext {
-            async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
-                Ok(crate::Contexts {
+        impl crate::agent_loop::ContextProvider for HookingContext {
+            async fn provide(
+                &self,
+            ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+                Ok(crate::agent_loop::Contexts {
                     provider: self.llm.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
@@ -3057,10 +3069,11 @@ mod tests {
 
             async fn start_hooks(
                 &self,
-                turn: crate::StartTurn,
-            ) -> Result<crate::TurnPreparation, crate::ContextError> {
+                turn: crate::agent_loop::StartTurn,
+            ) -> Result<crate::agent_loop::TurnPreparation, crate::agent_loop::ContextError>
+            {
                 self.seen.lock().unwrap().push(turn);
-                Ok(crate::TurnPreparation {
+                Ok(crate::agent_loop::TurnPreparation {
                     records: self.records.clone(),
                     message: None,
                 })
@@ -3097,7 +3110,7 @@ mod tests {
         async fn prompt(agent: &ActorRef<AgentCommand>, text: &str, rx: &mut Outcomes) {
             agent
                 .tell(AgentCommand::Enqueue {
-                    item: crate::Incoming::User {
+                    item: crate::agent_loop::Incoming::User {
                         id: "m2".into(),
                         text: text.into(),
                     },
@@ -3234,7 +3247,7 @@ mod tests {
 
             agent
                 .tell(AgentCommand::Enqueue {
-                    item: crate::Incoming::User {
+                    item: crate::agent_loop::Incoming::User {
                         id: "m3".into(),
                         text: "my password is hunter2".into(),
                     },
@@ -3287,18 +3300,22 @@ mod tests {
         async fn a_terminal_preparation_failure_stays_terminal() {
             struct GoneContext;
             #[async_trait]
-            impl crate::ContextProvider for GoneContext {
-                async fn provide(&self) -> Result<crate::Contexts, crate::ContextError> {
-                    Err(crate::ContextError::terminal("runtime is gone"))
+            impl crate::agent_loop::ContextProvider for GoneContext {
+                async fn provide(
+                    &self,
+                ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError>
+                {
+                    Err(crate::agent_loop::ContextError::terminal("runtime is gone"))
                 }
                 fn has_start_hooks(&self) -> bool {
                     true
                 }
                 async fn start_hooks(
                     &self,
-                    _: crate::StartTurn,
-                ) -> Result<crate::TurnPreparation, crate::ContextError> {
-                    Err(crate::ContextError::terminal("runtime is gone"))
+                    _: crate::agent_loop::StartTurn,
+                ) -> Result<crate::agent_loop::TurnPreparation, crate::agent_loop::ContextError>
+                {
+                    Err(crate::agent_loop::ContextError::terminal("runtime is gone"))
                 }
             }
 
@@ -3317,7 +3334,7 @@ mod tests {
             );
             agent
                 .tell(AgentCommand::Enqueue {
-                    item: crate::Incoming::User {
+                    item: crate::agent_loop::Incoming::User {
                         id: "m4".into(),
                         text: "hi".into(),
                     },
@@ -3611,17 +3628,17 @@ mod tests {
         );
         assert_eq!(state.next_seq, 3);
 
-        let tail = crate::agent_log::page_before(&state.log, None, 2);
+        let tail = crate::agent_loop::agent_log::page_before(&state.log, None, 2);
         assert_eq!(
             tail.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![1, 2]
         );
 
         // The cursor resolves against a hook entry exactly like a message.
-        let forward = crate::agent_log::page_after(&state.log, 1);
+        let forward = crate::agent_loop::agent_log::page_after(&state.log, 1);
         assert_eq!(forward.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
 
-        let back = crate::agent_log::page_before(&state.log, Some(1), 10);
+        let back = crate::agent_loop::agent_log::page_before(&state.log, Some(1), 10);
         assert_eq!(
             back.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![0]
@@ -3712,7 +3729,7 @@ mod tests {
     fn a_reader_behind_the_tail_gets_entries_and_no_deltas() {
         let state = log_upto(5);
         let out = state.read_from(
-            Some(crate::agent_log::Cursor {
+            Some(crate::agent_loop::agent_log::Cursor {
                 entry_seq: 1,
                 delta_seq: 0,
             }),
@@ -3731,7 +3748,7 @@ mod tests {
     fn a_caught_up_reader_gets_the_deltas_after_its_own() {
         let state = log_upto(5);
         let out = state.read_from(
-            Some(crate::agent_log::Cursor {
+            Some(crate::agent_loop::agent_log::Cursor {
                 entry_seq: 4,
                 delta_seq: 1,
             }),
@@ -3754,7 +3771,7 @@ mod tests {
     fn a_restarted_run_is_detected_and_answered_with_a_reset() {
         let state = log_upto(5);
         let out = state.read_from(
-            Some(crate::agent_log::Cursor {
+            Some(crate::agent_loop::agent_log::Cursor {
                 entry_seq: 4,
                 delta_seq: 50,
             }),
@@ -3772,7 +3789,7 @@ mod tests {
     fn a_reader_exactly_at_the_position_gets_nothing() {
         let state = log_upto(5);
         let out = state.read_from(
-            Some(crate::agent_log::Cursor {
+            Some(crate::agent_loop::agent_log::Cursor {
                 entry_seq: 4,
                 delta_seq: 2,
             }),
@@ -4238,7 +4255,7 @@ mod tests {
 
     #[test]
     fn timer_events_fold_into_state() {
-        use crate::timers::{TimerKind, TimerRecord};
+        use crate::agent_loop::timers::{TimerKind, TimerRecord};
         use std::time::Duration;
 
         let rec = TimerRecord::arm(
@@ -4292,7 +4309,7 @@ mod tests {
 
         let mut snapshot = state.task_list.clone();
         snapshot
-            .apply(crate::task_list::TaskListAction::Create {
+            .apply(crate::agent_loop::task_list::TaskListAction::Create {
                 tasks: vec!["a".to_string(), "b".to_string()],
             })
             .unwrap();
@@ -4306,9 +4323,9 @@ mod tests {
         // assignment, not a merge.
         let mut snapshot = state.task_list.clone();
         snapshot
-            .apply(crate::task_list::TaskListAction::UpdateStatus {
+            .apply(crate::agent_loop::task_list::TaskListAction::UpdateStatus {
                 ids: vec![1],
-                status: crate::task_list::TaskStatus::Completed,
+                status: crate::agent_loop::task_list::TaskStatus::Completed,
             })
             .unwrap();
         state = AgentActor::apply_event(
@@ -4459,7 +4476,7 @@ mod tests {
 
     #[test]
     fn cancel_event_removes_selected_timers() {
-        use crate::timers::{TimerKind, TimerRecord};
+        use crate::agent_loop::timers::{TimerKind, TimerRecord};
         use std::time::Duration;
         let a = TimerRecord::arm(
             "a".into(),
@@ -4762,7 +4779,7 @@ mod retry_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod fence_tests {
     use super::*;
-    use crate::context::{ContextError, ContextProvider, Contexts};
+    use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
     use horsie_actor::{InMemoryJournal, spawn_root};
 
     struct HangingProvider;
@@ -4811,7 +4828,7 @@ mod fence_tests {
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
             .tell(AgentCommand::Enqueue {
-                item: crate::Incoming::User {
+                item: crate::agent_loop::Incoming::User {
                     id: "m5".into(),
                     text: "first".into(),
                 },
@@ -4837,7 +4854,7 @@ mod fence_tests {
         // start a second background loop against the same journal.
         agent
             .tell(AgentCommand::Enqueue {
-                item: crate::Incoming::User {
+                item: crate::agent_loop::Incoming::User {
                     id: "m6".into(),
                     text: "second".into(),
                 },
@@ -4894,10 +4911,10 @@ mod queue_tests {
     //! The queue as the agent actually runs it: what a not-ready agent does
     //! with a message, what a boundary drains, and what an answer resumes.
     //!
-    //! The *rule* is pure and tested in [`crate::inbox`]. These are about the
+    //! The *rule* is pure and tested in [`crate::agent_loop::inbox`]. These are about the
     //! actor around it — the gates it holds, and the events it journals.
     use super::*;
-    use crate::context::{ContextError, ContextProvider, Contexts};
+    use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
     use horsie_actor::{InMemoryJournal, Journal, spawn_root};
     use horsie_agentcore::testkit::MockProvider;
 
@@ -4979,7 +4996,7 @@ mod queue_tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         agent
             .tell(AgentCommand::Enqueue {
-                item: crate::Incoming::User {
+                item: crate::agent_loop::Incoming::User {
                     id: id.into(),
                     text: text.into(),
                 },
@@ -5130,7 +5147,7 @@ mod queue_tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         agent
             .tell(AgentCommand::Answer {
-                answers: vec![crate::AskAnswer {
+                answers: vec![crate::agent_loop::AskAnswer {
                     tool_call_id: "call-1".into(),
                     text: "main".into(),
                 }],
@@ -5138,7 +5155,10 @@ mod queue_tests {
             })
             .await
             .unwrap();
-        assert_eq!(rx.await.unwrap(), Err(crate::AnswerError::NothingPending));
+        assert_eq!(
+            rx.await.unwrap(),
+            Err(crate::agent_loop::AnswerError::NothingPending)
+        );
         assert!(lifecycle(&agent).await.is_empty());
     }
 }

@@ -1,6 +1,6 @@
 //! How one turn is assembled.
 //!
-//! A [`SessionContextProvider`] is what an [`AgentActor`](horsie_workflow::AgentActor)
+//! A [`SessionContextProvider`] is what an [`AgentActor`](crate::agent_loop::AgentActor)
 //! asks, on its own task, for everything a run needs: the runtime handle, the
 //! LLM provider, the toolbox and the system prompt. It resolves them per run
 //! rather than holding them, which is what lets an agent stay resident across a
@@ -14,6 +14,10 @@
 
 use super::CoreCommand;
 use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
+use crate::agent_loop::{
+    AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
+    StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
+};
 use crate::{
     runtime_manager::{RuntimeClientProvider, RuntimeError},
     sessions::{
@@ -32,10 +36,6 @@ use horsie_models::{
     },
 };
 use horsie_runtime_host::RuntimeClient;
-use horsie_workflow::{
-    AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
-    StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
-};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
@@ -324,7 +324,7 @@ impl SessionContextProvider {
         // noticed a layer later with the work already done. `start_blocked`,
         // not the halt: `{"decision":"block"}` and `continue: false` are two
         // different statements and only the second sets a halt.
-        if horsie_workflow::start_blocked(&records).is_some() {
+        if crate::agent_loop::start_blocked(&records).is_some() {
             return (None, records);
         }
 
@@ -417,7 +417,7 @@ impl ContextProvider for SessionContextProvider {
             // A refused expansion never becomes a turn — `start_blocked` reads
             // the refusal off these records one layer up — so there is nothing
             // left to submit.
-            if horsie_workflow::start_blocked(&records).is_some() {
+            if crate::agent_loop::start_blocked(&records).is_some() {
                 return Ok(TurnPreparation {
                     records,
                     message: Some(prompt),
@@ -611,7 +611,7 @@ impl ContextProvider for SessionContextProvider {
                         }
                     }
                     if !discovery.tools.is_empty() {
-                        mcp.push(Arc::new(horsie_workflow::PluginMcpToolbox::new(
+                        mcp.push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
                             runtime_client.clone(),
                             discovery.tools,
                         )));
@@ -737,8 +737,8 @@ mod tests {
     use super::super::*;
     use super::*;
 
+    use crate::agent_loop::{ContextProvider, Contexts, StartTurn};
     use horsie_models::hooks::HookAction;
-    use horsie_workflow::{ContextProvider, Contexts, StartTurn};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1091,7 +1091,7 @@ mod tests {
             "a refused expansion leaves the prompt as typed"
         );
         assert_eq!(
-            horsie_workflow::start_blocked(&prep.records).as_deref(),
+            crate::agent_loop::start_blocked(&prep.records).as_deref(),
             Some("not this one"),
             "and the refusal still abandons the turn"
         );

@@ -113,8 +113,8 @@ pub enum SessionSupervisorCommand {
     ReadLog {
         id: SessionId,
         agent_id: Option<String>,
-        after: Option<horsie_workflow::Cursor>,
-        reply: oneshot::Sender<Option<horsie_workflow::ReadOutcome>>,
+        after: Option<crate::agent_loop::Cursor>,
+        reply: oneshot::Sender<Option<crate::agent_loop::ReadOutcome>>,
     },
     /// Read a window backwards from a cursor — scroll-back.
     PageLog {
@@ -122,7 +122,7 @@ pub enum SessionSupervisorCommand {
         agent_id: Option<String>,
         before: Option<u64>,
         max: usize,
-        reply: oneshot::Sender<Option<horsie_workflow::LogPage>>,
+        reply: oneshot::Sender<Option<crate::agent_loop::LogPage>>,
     },
     /// Read a session's aggregated usage.
     UsageStats {
@@ -168,7 +168,7 @@ pub enum SessionSupervisorCommand {
     AgentState {
         id: SessionId,
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<horsie_workflow::AgentStateView>>,
+        reply: oneshot::Sender<Option<crate::agent_loop::AgentStateView>>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.

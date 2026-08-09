@@ -270,7 +270,7 @@ fn agent_roster(tree: &[(Uuid, SubAgentRecord)]) -> Vec<SubAgentView> {
     agents
 }
 
-fn to_wire_usage(u: horsie_workflow::UsageTotal) -> UsageView {
+fn to_wire_usage(u: crate::agent_loop::UsageTotal) -> UsageView {
     UsageView {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,

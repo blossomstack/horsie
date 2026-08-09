@@ -44,6 +44,9 @@ use run::WorkflowRun;
 use subagent::SubAgents;
 use turns::Turns;
 
+use crate::agent_loop::{
+    AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
+};
 use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
@@ -55,9 +58,6 @@ use async_trait::async_trait;
 use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
-use horsie_workflow::{
-    AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
-};
 use serde_json::Value;
 use std::{
     collections::HashMap,

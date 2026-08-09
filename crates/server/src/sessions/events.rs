@@ -6,10 +6,10 @@
 //! and deltas reach the agent through its mailbox, so there is no second copy
 //! of the transcript in flight to keep ordered against the first.
 
+use crate::agent_loop::TaskStatus as AgentTaskStatus;
 use horsie_models::agent::{TaskItem, TaskStatus as WireTaskStatus};
-use horsie_workflow::TaskStatus as AgentTaskStatus;
 
-pub(crate) fn wire_task(t: &horsie_workflow::TaskRecord) -> TaskItem {
+pub(crate) fn wire_task(t: &crate::agent_loop::TaskRecord) -> TaskItem {
     TaskItem {
         id: t.id,
         content: t.content.clone(),

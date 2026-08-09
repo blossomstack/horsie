@@ -10,6 +10,11 @@
 //! components, the fold lives in [`SessionActor::apply_event`](super::SessionActor::apply_event),
 //! and this file stays readable as a description of the domain.
 
+use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
+/// Answering belongs to the agent that asked, so its vocabulary lives with the
+/// agent. Re-exported because the session routes both and every caller reaches
+/// them through it.
+pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
     spec::SessionStatus,
@@ -17,11 +22,6 @@ use crate::sessions::{
     workflow::WorkflowRunState,
 };
 use horsie_models::hooks::HookRecord;
-use horsie_workflow::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
-/// Answering belongs to the agent that asked, so its vocabulary lives with the
-/// agent. Re-exported because the session routes both and every caller reaches
-/// them through it.
-pub use horsie_workflow::{AnswerError, AskAnswer};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -172,20 +172,20 @@ pub enum ReadCommand {
     /// `None` answers "no such agent".
     ReadLog {
         agent_id: Option<String>,
-        after: Option<horsie_workflow::Cursor>,
-        reply: oneshot::Sender<Option<horsie_workflow::ReadOutcome>>,
+        after: Option<crate::agent_loop::Cursor>,
+        reply: oneshot::Sender<Option<crate::agent_loop::ReadOutcome>>,
     },
     /// Read a window *backwards* from a cursor — scroll-back.
     PageLog {
         agent_id: Option<String>,
         before: Option<u64>,
         max: usize,
-        reply: oneshot::Sender<Option<horsie_workflow::LogPage>>,
+        reply: oneshot::Sender<Option<crate::agent_loop::LogPage>>,
     },
     /// Read one agent's current values (task list, usage) for its document.
     AgentState {
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<horsie_workflow::AgentStateView>>,
+        reply: oneshot::Sender<Option<crate::agent_loop::AgentStateView>>,
     },
     /// Read this session's recovered state: status, pending ask, inbox.
     Snapshot {
@@ -404,7 +404,7 @@ pub enum SessionDomainEvent {
 /// instead of each carrying an `unreachable!` for a variant it can never be
 /// handed.
 ///
-/// It is a second vocabulary for something `horsie_workflow` already names, and
+/// It is a second vocabulary for something `crate::agent_loop` already names, and
 /// that is the deliberate cost. `AgentOutcome` is the *protocol* between an
 /// agent and whatever owns it, and horsie has owners that are not sessions; a
 /// session's components want the smaller thing. [`TurnEnd::split`] is the only

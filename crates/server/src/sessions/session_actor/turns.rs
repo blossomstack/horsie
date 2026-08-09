@@ -21,12 +21,12 @@ use super::{
     AnswerError, AskAnswer, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
     SessionState, TurnCommand,
 };
+use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
-use horsie_workflow::{AgentCommand, Incoming};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -373,7 +373,7 @@ mod tests {
     //!
     //! The queue's own rules — what merges, what waits out a park, what an
     //! answer must cover — belong to the agent that holds the queue and are
-    //! tested in `horsie_workflow::inbox`. What is left here is what the
+    //! tested in `crate::agent_loop::inbox`. What is left here is what the
     //! *session* still owns.
     use super::super::testing::*;
     use super::super::*;
@@ -678,7 +678,7 @@ mod tests {
             .unwrap()
             .expect("a subagent takes messages like any other agent");
 
-        let queued_in = |page: &horsie_workflow::LogPage| {
+        let queued_in = |page: &crate::agent_loop::LogPage| {
             page.entries.iter().any(|e| {
                 matches!(
                     &e.body,

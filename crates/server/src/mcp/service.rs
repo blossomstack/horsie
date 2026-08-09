@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::agent_loop::McpToolbox;
 use async_trait::async_trait;
 use horsie_agentcore::Toolbox;
 use horsie_models::mcp::{
@@ -15,7 +16,6 @@ use horsie_models::mcp::{
     McpServerView,
 };
 use horsie_support::mcp::{BearerProvider, HttpTransport, McpClient, McpError};
-use horsie_workflow::McpToolbox;
 
 use super::oauth::{AsMetadata, McpOAuthClient, build_authorize_url, gen_pkce, gen_state};
 use super::store::{McpServerRow, McpStore, StoredAuth};
