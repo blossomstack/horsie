@@ -22,12 +22,14 @@ pub trait ConfigStore: Send + Sync {
     /// store can't be read.
     async fn view(&self) -> Result<SettingsView, String>;
 
-    /// Set the vendor new sessions default to, persisting and live-applying it.
-    async fn set_default_vendor(&self, vendor: &str) -> Result<SettingsView, String>;
+    /// Set the runtime vendor new sessions default to, persisting and
+    /// live-applying it.
+    async fn set_default_runtime_vendor(&self, vendor: &str) -> Result<SettingsView, String>;
 
-    /// Forget the default-vendor preference, falling back to the built-in
-    /// `local`. Distinct from setting it to an empty string, which is refused.
-    async fn clear_default_vendor(&self) -> Result<SettingsView, String>;
+    /// Forget the default-runtime-vendor preference, falling back to the
+    /// built-in `local`. Distinct from setting it to an empty string, which is
+    /// refused.
+    async fn clear_default_runtime_vendor(&self) -> Result<SettingsView, String>;
 
     /// Rebuild the live provider registry from what is stored.
     ///
@@ -56,5 +58,5 @@ pub trait ConfigStore: Send + Sync {
 
     /// The vendor a create request defaults to when it omits one. Read on the
     /// hot path, so it stays synchronous and cheap.
-    fn default_vendor(&self) -> String;
+    fn default_runtime_vendor(&self) -> String;
 }

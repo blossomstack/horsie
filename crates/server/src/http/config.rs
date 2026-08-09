@@ -7,7 +7,7 @@ use axum::Json;
 use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::settings::{
-    DefaultVendorInput, ModelInput, ModelView, ProviderInput, ProviderView, SettingsView,
+    DefaultRuntimeVendorInput, ModelInput, ModelView, ProviderInput, ProviderView, SettingsView,
 };
 
 /// `GET /api/config` — the current redacted settings view.
@@ -20,18 +20,19 @@ pub async fn get_config(Scope(state): Scope) -> Result<Json<SettingsView>, Api> 
         .map_err(Api::internal)
 }
 
-/// `PUT /api/config/default-vendor` — the vendor new sessions default to.
+/// `PUT /api/config/default-runtime-vendor` — the runtime vendor new sessions
+/// default to.
 ///
 /// Returns the whole settings view rather than the bare string: the caller is
 /// the Settings page, which renders `isDefault` per vendor and would otherwise
 /// have to refetch.
-pub async fn put_default_vendor(
+pub async fn put_default_runtime_vendor(
     Scope(state): Scope,
-    Json(input): Json<DefaultVendorInput>,
+    Json(input): Json<DefaultRuntimeVendorInput>,
 ) -> Result<Json<SettingsView>, Api> {
     state
         .config_store
-        .set_default_vendor(&input.vendor)
+        .set_default_runtime_vendor(&input.vendor)
         .await
         .map(Json)
         .map_err(Api::unprocessable)
@@ -134,15 +135,15 @@ pub async fn delete_provider(
     }
 }
 
-/// `DELETE /api/config/default-vendor` — forget the preference.
+/// `DELETE /api/config/default-runtime-vendor` — forget the preference.
 ///
 /// Distinct from setting it to `""`, which is refused: this removes the row and
 /// falls back to the built-in default, which is what the Settings page's
 /// "Clear the default" action means.
-pub async fn delete_default_vendor(Scope(state): Scope) -> Result<Json<SettingsView>, Api> {
+pub async fn delete_default_runtime_vendor(Scope(state): Scope) -> Result<Json<SettingsView>, Api> {
     state
         .config_store
-        .clear_default_vendor()
+        .clear_default_runtime_vendor()
         .await
         .map(Json)
         .map_err(Api::unprocessable)

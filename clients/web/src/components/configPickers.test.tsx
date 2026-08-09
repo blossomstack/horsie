@@ -27,7 +27,7 @@ const settings: SettingsView = {
     { name: "local", isDefault: true, capabilities: { supportsProvisioning: false } },
     { name: "velos", isDefault: false, capabilities: { supportsProvisioning: true } },
   ],
-  defaultVendor: "local",
+  defaultRuntimeVendor: "local",
   info: {
     configPath: "",
     database: "",

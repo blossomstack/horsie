@@ -126,7 +126,7 @@ export function reconcileModelEnvironment(
   draft: DraftPayload,
   modelAliases: readonly string[],
   activeVendorNames: readonly string[],
-  defaultVendor: string,
+  defaultRuntimeVendor: string,
   environmentNames: readonly string[] | undefined,
 ): DraftPayload {
   const model = modelAliases.includes(draft.model) ? draft.model : (modelAliases[0] ?? "");
@@ -137,13 +137,13 @@ export function reconcileModelEnvironment(
   let environment = draft.environment;
   if (environment.kind === "named") {
     if (environmentNames !== undefined && !environmentNames.includes(environment.name)) {
-      environment = { kind: "runtime", vendor: defaultVendor, repos: {} };
+      environment = { kind: "runtime", vendor: defaultRuntimeVendor, repos: {} };
     }
   } else if (
     !activeVendorNames.includes(environment.vendor) &&
-    environment.vendor !== defaultVendor
+    environment.vendor !== defaultRuntimeVendor
   ) {
-    environment = { ...environment, vendor: defaultVendor };
+    environment = { ...environment, vendor: defaultRuntimeVendor };
   }
   if (model === draft.model && environment === draft.environment) return draft;
   return { ...draft, model, environment };

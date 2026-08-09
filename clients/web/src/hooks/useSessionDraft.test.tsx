@@ -42,7 +42,7 @@ const settings: SettingsView = {
       capabilities: { supportsProvisioning: true },
     },
   ],
-  defaultVendor: "local",
+  defaultRuntimeVendor: "local",
   info: {
     configPath: "",
     database: "",
@@ -247,7 +247,7 @@ describe("useSessionDraft workflow channel", () => {
   // the server to have none connected.
   it("still requires an environment to start a run", async () => {
     const client = makeClient();
-    client.setQueryData(settingsKey, { ...settings, vendors: [], defaultVendor: "" });
+    client.setQueryData(settingsKey, { ...settings, vendors: [], defaultRuntimeVendor: "" });
     const { result } = render(client, "triage");
     await waitFor(() => expect(result.current.workflow).toBe("triage"));
     expect(result.current.blockedReason).toBe("Select an environment to start.");

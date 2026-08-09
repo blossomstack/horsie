@@ -99,9 +99,9 @@ export async function seedConfig(
 }
 
 /** Set the vendor new sessions default to; throws on non-2xx. */
-export async function setDefaultVendor(
+export async function setDefaultRuntimeVendor(
   baseURL: string,
   vendor: string,
 ): Promise<void> {
-  await putJson(`${baseURL}/api/config/default-vendor`, { vendor });
+  await putJson(`${baseURL}/api/config/default-runtime-vendor`, { vendor });
 }

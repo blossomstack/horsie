@@ -64,7 +64,7 @@ vi.mock("../../api/client", () => ({
         vendors: [
           { name: "local", isDefault: true, capabilities: { supportsProvisioning: false } },
         ],
-        defaultVendor: "local",
+        defaultRuntimeVendor: "local",
         info: {
           configPath: "",
           database: "",

@@ -22,7 +22,7 @@ const view = (providers: ProviderView[]): SettingsView => ({
   providers,
   models: [],
   vendors: [],
-  defaultVendor: "local",
+  defaultRuntimeVendor: "local",
   restartRequired: false,
   info: {
     configPath: "",

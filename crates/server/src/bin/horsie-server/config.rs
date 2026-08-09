@@ -3,8 +3,8 @@
 //! location. Providers, models, and vendor instances are NOT here — they live
 //! in the settings database (`horsie_server::config`), managed from the web
 //! UI. Ported from `cli/src/config.rs`, trimmed to only what this binary
-//! reads (no providers/models/hackamore/velos/default_vendor — those stay
-//! CLI/job-daemon-only).
+//! reads (no providers/models/hackamore/velos/default_runtime_vendor — those
+//! stay CLI/job-daemon-only).
 
 use horsie_server::auth::AuthMode;
 use serde::Deserialize;

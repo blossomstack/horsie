@@ -185,8 +185,8 @@ pub fn app(state: AppState) -> Router {
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))
         .route(
-            "/api/config/default-vendor",
-            put(config::put_default_vendor).delete(config::delete_default_vendor),
+            "/api/config/default-runtime-vendor",
+            put(config::put_default_runtime_vendor).delete(config::delete_default_runtime_vendor),
         )
         .route("/api/config/models", get(config::list_models))
         .route(
@@ -689,7 +689,7 @@ mod tests {
         let res = app.clone().oneshot(get("/api/config")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "local");
+        assert_eq!(view.default_runtime_vendor, "local");
         assert!(view.models.is_empty());
         assert_eq!(
             view.vendors.iter().map(|v| &v.name).collect::<Vec<_>>(),
@@ -726,23 +726,23 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 &serde_json::json!({"vendor": "mock"}),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "mock");
+        assert_eq!(view.default_runtime_vendor, "mock");
 
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/default-vendor"))
+            .oneshot(delete_req("/api/config/default-runtime-vendor"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
-        assert_eq!(view.default_vendor, "local");
+        assert_eq!(view.default_runtime_vendor, "local");
 
         // A model referencing a missing provider is a 422.
         let res = app
@@ -2162,7 +2162,7 @@ mod tests {
                 serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
             ),
             (
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 serde_json::json!({"vendor": "mock"}),
             ),
         ] {
@@ -2910,7 +2910,7 @@ mod tests {
             // A vendor no agent answers to: still accepted, because the agent
             // may dial in later.
             (
-                "/api/config/default-vendor",
+                "/api/config/default-runtime-vendor",
                 serde_json::json!({"vendor": "ghost-vendor"}),
             ),
         ] {

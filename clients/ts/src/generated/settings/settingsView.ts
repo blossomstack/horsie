@@ -10,7 +10,7 @@ export interface SettingsView {
   providers: ProviderView[];
   models: ModelView[];
   vendors: VendorView[];
-  defaultVendor: string;
+  defaultRuntimeVendor: string;
   info: ServerInfo;
   /**
    * Always false: every provider/model edit applies live. Retained for wire

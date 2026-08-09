@@ -1,7 +1,7 @@
 import { Star, X } from "lucide-react";
 import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
-import { useSettings, useSetDefaultVendor } from "../../hooks/useSettings";
+import { useSettings, useSetDefaultRuntimeVendor } from "../../hooks/useSettings";
 import { CloudVendors } from "./CloudVendors";
 import { ListRow, RowAction, Section, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
@@ -17,7 +17,7 @@ import { SettingsHeader } from "./SettingsHeader";
  */
 export function RuntimesSettings() {
   const { data: settings, isLoading, error } = useSettings();
-  const update = useSetDefaultVendor();
+  const update = useSetDefaultRuntimeVendor();
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Setting the default is one action on one row, so there is nothing to batch
@@ -57,9 +57,9 @@ export function RuntimesSettings() {
   // preference applies whenever it connects — so it gets a row of its own
   // rather than disappearing from a list of only-connected vendors.
   const absentDefault =
-    settings.defaultVendor &&
-    !vendors.some((v) => v.name === settings.defaultVendor)
-      ? settings.defaultVendor
+    settings.defaultRuntimeVendor &&
+    !vendors.some((v) => v.name === settings.defaultRuntimeVendor)
+      ? settings.defaultRuntimeVendor
       : null;
 
   return (

@@ -15,7 +15,7 @@ import {
   freePort,
   waitFor,
   seedConfig,
-  setDefaultVendor,
+  setDefaultRuntimeVendor,
   type RuntimeInfo,
 } from "./harness";
 
@@ -299,8 +299,8 @@ export default async function globalSetup(): Promise<void> {
       { timeoutMs: 20_000, label: "vendor 'e2e' connected" },
     );
 
-    log("setting defaultVendor=e2e");
-    await setDefaultVendor(baseURL, "e2e");
+    log("setting defaultRuntimeVendor=e2e");
+    await setDefaultRuntimeVendor(baseURL, "e2e");
 
     const info: RuntimeInfo = {
       baseURL,

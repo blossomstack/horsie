@@ -1,6 +1,12 @@
 //! Database-backed [`ConfigStore`]. Owns the settings database, builds the live
-//! provider registry from it, and applies edits: provider/model/default-vendor
-//! changes swap the live registry, so the next turn sees them.
+//! provider registry from it, and applies edits: provider, model and
+//! default-runtime-vendor changes swap the live registry, so the next turn sees
+//! them.
+//!
+//! The default runtime vendor is stored under the row key `default_vendor`,
+//! which the API rename deliberately left alone: it is storage no client can
+//! observe, and moving it would need a migration whose failure mode is silently
+//! resetting every deployment's default.
 //!
 //! It does **not** own runtime vendors. It holds the vendor map only to render
 //! the settings view; the two things that write it are
@@ -93,7 +99,7 @@ pub struct DbConfigStore {
     registry: SharedProviderRegistry,
     /// The name new sessions prefer. A preference, not a validated reference:
     /// the agent that answers to it may connect long after boot.
-    default_vendor: RwLock<String>,
+    default_runtime_vendor: RwLock<String>,
     /// The live vendor roster, written by connected agents rather than by this
     /// store. Read here only to render the settings view.
     vendors: RuntimeVendorMap,
@@ -148,7 +154,7 @@ impl DbConfigStore {
         // Kept as a preference even when no agent has connected yet — an agent
         // announcing this name later makes it take effect, so validating it
         // against the (empty) live map at boot would be wrong.
-        let default_vendor = read_setting(&db, db.pool(), &user, "default_vendor")
+        let default_runtime_vendor = read_setting(&db, db.pool(), &user, "default_vendor")
             .await
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| DEFAULT_VENDOR.into());
@@ -157,7 +163,7 @@ impl DbConfigStore {
             db: db.clone(),
             user,
             registry: registry.clone(),
-            default_vendor: RwLock::new(default_vendor),
+            default_runtime_vendor: RwLock::new(default_runtime_vendor),
             vendors: vendors.clone(),
             info: deps.info,
         });
@@ -183,15 +189,15 @@ impl DbConfigStore {
         let signed_in = read_provider_oauth(&self.db, self.db.pool(), &self.user)
             .await
             .map_err(|e| e.to_string())?;
-        let default_vendor = self.default_vendor();
+        let default_runtime_vendor = self.default_runtime_vendor();
         Ok(SettingsView {
             providers: provs
                 .iter()
                 .map(|r| provider_view(r, signed_in.contains_key(&r.name)))
                 .collect(),
             models: mods.iter().map(model_view).collect(),
-            vendors: self.vendors_view(&default_vendor),
-            default_vendor,
+            vendors: self.vendors_view(&default_runtime_vendor),
+            default_runtime_vendor,
             info: self.info.clone(),
             // Nothing the settings page can edit requires a restart any more.
             restart_required: false,
@@ -201,13 +207,13 @@ impl DbConfigStore {
     /// The live vendor roster: whichever agents are connected right now, with
     /// the capabilities they announced. There is no configured-but-inactive
     /// state to report, so every entry here is by definition usable.
-    fn vendors_view(&self, default_vendor: &str) -> Vec<VendorView> {
+    fn vendors_view(&self, default_runtime_vendor: &str) -> Vec<VendorView> {
         let live = self.vendors.read().unwrap_or_else(|e| e.into_inner());
         let mut out: Vec<VendorView> = live
             .iter()
             .map(|(name, vendor)| VendorView {
                 name: name.clone(),
-                is_default: default_vendor == name.as_str(),
+                is_default: default_runtime_vendor == name.as_str(),
                 capabilities: vendor_caps_view(vendor.capabilities()),
             })
             .collect();
@@ -255,7 +261,7 @@ impl ConfigStore for DbConfigStore {
         self.build_view().await
     }
 
-    async fn set_default_vendor(&self, vendor: &str) -> Result<SettingsView, String> {
+    async fn set_default_runtime_vendor(&self, vendor: &str) -> Result<SettingsView, String> {
         let vendor = vendor.trim();
         if vendor.is_empty() {
             return Err("default vendor cannot be empty".into());
@@ -274,13 +280,13 @@ impl ConfigStore for DbConfigStore {
         tx.commit().await.map_err(|e| e.to_string())?;
 
         *self
-            .default_vendor
+            .default_runtime_vendor
             .write()
             .unwrap_or_else(|e| e.into_inner()) = vendor.to_string();
         self.build_view().await
     }
 
-    async fn clear_default_vendor(&self) -> Result<SettingsView, String> {
+    async fn clear_default_runtime_vendor(&self) -> Result<SettingsView, String> {
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         sqlx::query(
             &self
@@ -296,7 +302,7 @@ impl ConfigStore for DbConfigStore {
         // Matches what `open` falls back to when the row is absent, so the
         // live value and a fresh boot agree.
         *self
-            .default_vendor
+            .default_runtime_vendor
             .write()
             .unwrap_or_else(|e| e.into_inner()) = DEFAULT_VENDOR.to_string();
         self.build_view().await
@@ -487,8 +493,8 @@ impl ConfigStore for DbConfigStore {
         self.validate_and_commit(tx).await
     }
 
-    fn default_vendor(&self) -> String {
-        self.default_vendor
+    fn default_runtime_vendor(&self) -> String {
+        self.default_runtime_vendor
             .read()
             .map(|g| g.clone())
             .unwrap_or_default()

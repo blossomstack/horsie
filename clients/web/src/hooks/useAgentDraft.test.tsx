@@ -31,7 +31,7 @@ const settings: SettingsView = {
       capabilities: { supportsProvisioning: true },
     },
   ],
-  defaultVendor: "local",
+  defaultRuntimeVendor: "local",
   info: {
     configPath: "",
     database: "",
