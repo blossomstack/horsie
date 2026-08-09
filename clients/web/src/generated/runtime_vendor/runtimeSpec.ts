@@ -13,8 +13,14 @@ export interface RuntimeSpec {
    */
   workspaces: string[];
   /**
-   * Resolved secrets and handles only the server can mint: the scoped
-   * GitHub token, the plugin bundle manifest, the plugins token.
+   * Resolved values only the server can mint: the runtime's dial token, the
+   * plugin bundle manifest, and the session's own environment variables.
+   *
+   * The dial token is the only credential here, and deliberately so. It does
+   * not expire, which matters because a vendor whose substrate cannot
+   * rewrite a running machine's environment freezes whatever this carried at
+   * create time. Anything with a lifetime — a GitHub token, bundle access —
+   * is fetched by the runtime against that token instead.
    */
   env: EnvVar[];
   /**

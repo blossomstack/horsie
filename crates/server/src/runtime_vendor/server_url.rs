@@ -30,7 +30,7 @@ pub fn http_base_of(callback_url: &str) -> String {
     };
     swapped
         .trim_end_matches('/')
-        .trim_end_matches("/api/runtime/connect")
+        .trim_end_matches(super::config::CONNECT_PATH)
         .trim_end_matches('/')
         .to_string()
 }
@@ -52,9 +52,9 @@ mod tests {
         );
     }
 
-    /// A bare origin is already the base. The settings layer appends the connect
-    /// path on save, but a stored row from before that, or one written by hand,
-    /// must not lose its host to an over-eager trim.
+    /// A bare origin is already the base. A save cannot produce one — the
+    /// settings layer refuses a callback url with no path — but a row stored
+    /// before that validation existed still must not lose its host here.
     #[test]
     fn a_bare_origin_survives_unchanged() {
         assert_eq!(http_base_of("ws://horsie:8080"), "http://horsie:8080");
