@@ -26,6 +26,7 @@ use crate::sessions::UserMessageError;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
+use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -38,7 +39,7 @@ impl Turns {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: TurnCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             TurnCommand::UserMessage {
@@ -116,8 +117,8 @@ impl SessionActor {
         state: &SessionState,
         agent_id: Option<String>,
         answers: Vec<AskAnswer>,
-        reply: oneshot::Sender<Result<(), AnswerError>>,
-        ctx: &ActorContext<Self>,
+        reply: ReplyTo<Result<(), AnswerError>>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let Some((_, agent)) = self.resolve_agent(state, ctx, agent_id.as_deref()) else {
             let _ = reply.send(Err(AnswerError::NothingPending));
@@ -147,7 +148,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         end: TurnEnd,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let events = match end {
             TurnEnd::Concluded { .. } => {
@@ -215,8 +216,8 @@ impl SessionActor {
         state: &SessionState,
         agent_id: Option<String>,
         text: String,
-        reply: oneshot::Sender<Result<String, UserMessageError>>,
-        ctx: &ActorContext<Self>,
+        reply: ReplyTo<Result<String, UserMessageError>>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         if let SessionStatus::Unrecoverable { reason } = &state.status {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
@@ -258,7 +259,7 @@ impl SessionActor {
         if agent
             .tell(AgentCommand::Enqueue {
                 item: Incoming::User { id, text },
-                ack: Some(tx),
+                ack: Some(ReplyTo::from_sender(tx)),
             })
             .await
             .is_err()
@@ -455,16 +456,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let session = horsie_actor::spawn_root(
-            SessionActor::new(
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps,
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
 
         let err = session
             .ask(|reply| {

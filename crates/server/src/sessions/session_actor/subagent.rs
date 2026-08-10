@@ -22,6 +22,7 @@ use crate::sessions::subagents::{
 };
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
+use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -34,7 +35,7 @@ impl SubAgents {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: SubAgentCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SubAgentCommand::Spawn {
@@ -99,7 +100,7 @@ impl SubAgents {
                         }))
                         .await;
                 });
-                CommandEffect::persist(vec![spawned]).and_ack(tx)
+                CommandEffect::persist(vec![spawned]).and_ack(ReplyTo::from_sender(tx))
             }
             SubAgentCommand::FinishSpawn {
                 id,
@@ -195,7 +196,7 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
         end: TurnEnd,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         if state.subagents.node(id).is_none() {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
@@ -239,7 +240,7 @@ impl SessionActor {
     /// prompt nobody can point at.
     pub(super) fn spawn_sub_agent_actor(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
         state: &SessionState,
         id: Uuid,
         agent_type: Option<String>,
@@ -619,16 +620,14 @@ mod tests {
 
         // Loading must start no runs: C stays owed until someone acts.
         let parent = spawn_deaf_supervisor();
-        let session2 = horsie_actor::spawn_root(
-            SessionActor::new(
+        let session2 =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 _f.deps.clone(),
                 parent,
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(!&state.subagents.node(c).unwrap().notified);
@@ -700,16 +699,14 @@ mod tests {
 
         // Second incarnation on the same journal.
         let parent = spawn_deaf_supervisor();
-        let session2 = horsie_actor::spawn_root(
-            SessionActor::new(
+        let session2 =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
                 parent,
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
         wait_for_tree(&journal, id, |t| {
             t.node(sub)
                 .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)

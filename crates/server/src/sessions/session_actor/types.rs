@@ -21,11 +21,11 @@ use crate::sessions::{
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
 };
+use horsie_actor::ReplyTo;
 use horsie_models::hooks::HookRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// Commands accepted by a [`SessionActor`].
@@ -70,9 +70,9 @@ pub enum LifecycleCommand {
     /// The supervisor wants to unload this session. Answers `false` if a run
     /// started in the meantime, in which case nothing has changed and the idle
     /// clock simply restarts.
-    PrepareOffload { reply: oneshot::Sender<bool> },
+    PrepareOffload { reply: ReplyTo<bool> },
     /// Delete: cancel, tell the vendor, and stop.
-    Delete { reply: oneshot::Sender<()> },
+    Delete { reply: ReplyTo<()> },
 }
 
 /// The conversation.
@@ -88,17 +88,17 @@ pub enum TurnCommand {
     UserMessage {
         agent_id: Option<String>,
         text: String,
-        reply: oneshot::Sender<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<String, UserMessageError>>,
     },
     /// Cancel the turn in flight. Queued messages are *not* discarded — stop
     /// means "not this turn", not "throw away what I asked for".
-    Stop { reply: oneshot::Sender<()> },
+    Stop { reply: ReplyTo<()> },
     /// Answer every question one agent is parked on, at once. Routed, not
     /// decided: the agent owns what it asked and validates the set.
     Answer {
         agent_id: Option<String>,
         answers: Vec<AskAnswer>,
-        reply: oneshot::Sender<Result<(), AnswerError>>,
+        reply: ReplyTo<Result<(), AnswerError>>,
     },
     /// Internal: post-recovery reconciliation of a turn the process died in.
     ReconcileInterrupted,
@@ -112,11 +112,11 @@ pub enum RunCommand {
     /// Re-run one execution from the run log.
     RetryStep {
         index: u32,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: ReplyTo<Result<(), String>>,
     },
     /// Read this session's workflow run, if it is one.
     State {
-        reply: oneshot::Sender<Option<crate::sessions::workflow::WorkflowRunState>>,
+        reply: ReplyTo<Option<crate::sessions::workflow::WorkflowRunState>>,
     },
     /// Recovery found a step the process died inside. Suspends the run, which is
     /// the state a retry can move.
@@ -136,7 +136,7 @@ pub enum SubAgentCommand {
         /// library as of the moment the subagent runs, not the moment it was
         /// asked for.
         agent_type: Option<String>,
-        reply: oneshot::Sender<Result<Uuid, String>>,
+        reply: ReplyTo<Result<Uuid, String>>,
     },
     /// Internal: the spawn's `SubAgentSpawned` write came back — only now
     /// does the child actor exist (persist-then-spawn). A failed write spawns
@@ -145,18 +145,18 @@ pub enum SubAgentCommand {
         id: Uuid,
         task: String,
         agent_type: Option<String>,
-        reply: oneshot::Sender<Result<Uuid, String>>,
+        reply: ReplyTo<Result<Uuid, String>>,
         persisted: Result<(), horsie_actor::JournalError>,
     },
     /// The `subagent_status` tool: one node, or the caller's whole subtree.
     Status {
         caller: SubAgentParent,
         id: Option<Uuid>,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: ReplyTo<Result<String, String>>,
     },
     /// Read every tree (backs `GET /api/sessions/:id/subagents`).
     Tree {
-        reply: oneshot::Sender<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>,
+        reply: ReplyTo<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>,
     },
     /// Internal: post-recovery reconciliation of subagents the process died
     /// under (tree nodes still `Running`). Their runs are over; the parents
@@ -173,28 +173,24 @@ pub enum ReadCommand {
     ReadLog {
         agent_id: Option<String>,
         after: Option<crate::agent_loop::Cursor>,
-        reply: oneshot::Sender<Option<crate::agent_loop::ReadOutcome>>,
+        reply: ReplyTo<Option<crate::agent_loop::ReadOutcome>>,
     },
     /// Read a window *backwards* from a cursor — scroll-back.
     PageLog {
         agent_id: Option<String>,
         before: Option<u64>,
         max: usize,
-        reply: oneshot::Sender<Option<crate::agent_loop::LogPage>>,
+        reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
     },
     /// Read one agent's current values (task list, usage) for its document.
     AgentState {
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<crate::agent_loop::AgentStateView>>,
+        reply: ReplyTo<Option<crate::agent_loop::AgentStateView>>,
     },
     /// Read this session's recovered state: status, pending ask, inbox.
-    Snapshot {
-        reply: oneshot::Sender<SessionSnapshot>,
-    },
+    Snapshot { reply: ReplyTo<SessionSnapshot> },
     /// Read this session's aggregated usage.
-    UsageStats {
-        reply: oneshot::Sender<SessionUsageStats>,
-    },
+    UsageStats { reply: ReplyTo<SessionUsageStats> },
 }
 
 /// What plugin hooks did. Pure routing: nothing here is persisted by the
@@ -227,7 +223,7 @@ pub enum CoreCommand {
     /// Set the session title from the built-in title tool.
     SetTitle {
         title: String,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: ReplyTo<Result<String, String>>,
     },
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.

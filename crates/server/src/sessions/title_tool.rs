@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     use crate::sessions::session_actor::SessionCommand;
     use horsie_actor::{
-        ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId, spawn_root,
+        ActorContext, ActorSystem, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
     };
     use horsie_agentcore::{EmptyToolbox, ToolCallError, Toolbox};
     use serde::{Deserialize, Serialize};
@@ -171,7 +171,8 @@ mod tests {
 
     #[tokio::test]
     async fn tool_spec_documents_rename_any_time_and_latest_wins() {
-        let session = spawn_root(TitleActor, Arc::new(InMemoryJournal::new()));
+        let session =
+            ActorSystem::new(Arc::new(InMemoryJournal::new())).spawn_persistent(TitleActor);
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let spec = toolbox
             .specs()
@@ -192,7 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_returns_the_normalized_title() {
-        let session = spawn_root(TitleActor, Arc::new(InMemoryJournal::new()));
+        let session =
+            ActorSystem::new(Arc::new(InMemoryJournal::new())).spawn_persistent(TitleActor);
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let result = toolbox
             .execute(
@@ -210,7 +212,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_delegates_other_tools() {
-        let session = spawn_root(TitleActor, Arc::new(InMemoryJournal::new()));
+        let session =
+            ActorSystem::new(Arc::new(InMemoryJournal::new())).spawn_persistent(TitleActor);
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let err = toolbox.execute("bash", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
@@ -243,7 +246,7 @@ mod tests {
             &mut self,
             _state: &Empty,
             cmd: SessionCommand,
-            _ctx: &mut ActorContext<Self>,
+            _ctx: &mut ActorContext<SessionCommand>,
         ) -> CommandEffect<()> {
             if let SessionCommand::Core(CoreCommand::SetTitle { title, reply }) = cmd {
                 let _ =

@@ -2,7 +2,9 @@ use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
 };
 use async_trait::async_trait;
-use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_actor::{
+    ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
+};
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
     AgentResult, AskLifecycle, ContentPart, EventSink, EventSinkError, HandoffCall, LifecycleEvent,
@@ -96,7 +98,7 @@ pub enum AgentCommand {
     /// immediately afterwards; see [`crate::agent_loop::queued_turn`].
     Enqueue {
         item: crate::agent_loop::Incoming,
-        ack: Option<tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>>,
+        ack: Option<ReplyTo<Result<(), horsie_actor::JournalError>>>,
     },
     /// Answer every question this agent is parked on, at once.
     ///
@@ -105,7 +107,7 @@ pub enum AgentCommand {
     /// next provider call would carry a `tool_use` with no result.
     Answer {
         answers: Vec<crate::agent_loop::AskAnswer>,
-        reply: tokio::sync::oneshot::Sender<Result<(), crate::agent_loop::AnswerError>>,
+        reply: ReplyTo<Result<(), crate::agent_loop::AnswerError>>,
     },
     /// Internal: reconsider whether the queue may start a turn now. Sent after
     /// anything that could have changed the answer.
@@ -115,9 +117,7 @@ pub enum AgentCommand {
     /// know this incarnation will write nothing more (e.g. a session about to
     /// spawn a replacement agent on the same journal) can wait for it rather
     /// than racing it.
-    Cancel {
-        ack: Option<tokio::sync::oneshot::Sender<()>>,
-    },
+    Cancel { ack: Option<ReplyTo<()>> },
     /// Internal: coarse events captured mid-run. `ack` lets the emitting loop await
     /// the durable write before continuing, so persistence applies backpressure on
     /// the agent loop, and reports the write outcome so a journal failure aborts the
@@ -125,7 +125,7 @@ pub enum AgentCommand {
     /// through this one mailbox.
     PersistProgress {
         events: Vec<AgentDomainEvent>,
-        ack: tokio::sync::oneshot::Sender<Result<(), horsie_actor::JournalError>>,
+        ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
     /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
     /// ack: nothing waits on an audit trail, and recording what a hook did must
@@ -144,16 +144,16 @@ pub enum AgentCommand {
         message: String,
         kind: crate::agent_loop::timers::TimerKind,
         after_secs: u64,
-        reply: tokio::sync::oneshot::Sender<crate::agent_loop::timers::TimerId>,
+        reply: ReplyTo<crate::agent_loop::timers::TimerId>,
     },
     /// List active timers.
     ListTimers {
-        reply: tokio::sync::oneshot::Sender<Vec<crate::agent_loop::timers::TimerView>>,
+        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerView>>,
     },
     /// Cancel one or all timers; replies with the ids actually removed.
     CancelTimer {
         selector: crate::agent_loop::timers::CancelSelector,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::agent_loop::timers::TimerId>>,
+        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerId>>,
     },
     /// Internal: a timer's sleep elapsed.
     TimerFired {
@@ -164,7 +164,7 @@ pub enum AgentCommand {
     /// action was rejected (unknown id, out-of-range position, ...).
     TaskListOp {
         action: crate::agent_loop::task_list::TaskListAction,
-        reply: tokio::sync::oneshot::Sender<Result<String, String>>,
+        reply: ReplyTo<Result<String, String>>,
     },
     /// Read forward from a cursor: durable entries plus, when the caller has
     /// caught up to the tail, the deltas of the message still being written.
@@ -174,7 +174,7 @@ pub enum AgentCommand {
     /// position at all asks for.
     ReadLog {
         after: Option<crate::agent_loop::agent_log::Cursor>,
-        reply: tokio::sync::oneshot::Sender<ReadOutcome>,
+        reply: ReplyTo<ReadOutcome>,
     },
     /// Read a window *backwards* from a cursor — scroll-back. Separate from
     /// [`Self::ReadLog`] because it answers a different question and never
@@ -182,7 +182,7 @@ pub enum AgentCommand {
     PageLog {
         before: Option<u64>,
         max: usize,
-        reply: tokio::sync::oneshot::Sender<crate::agent_loop::agent_log::LogPage>,
+        reply: ReplyTo<crate::agent_loop::agent_log::LogPage>,
     },
     /// Record something that happened to the session in this agent's log.
     ///
@@ -206,15 +206,11 @@ pub enum AgentCommand {
     /// Read this agent's own usage + context-size snapshot — no messages or
     /// tasks, cheaper than `GetHistory` when only the numbers are needed.
     /// Backs the session-level usage aggregation.
-    GetUsage {
-        reply: tokio::sync::oneshot::Sender<AgentUsageSnapshot>,
-    },
+    GetUsage { reply: ReplyTo<AgentUsageSnapshot> },
     /// Read this agent's current values — task list plus usage — for the agent
     /// document. Distinct from `GetHistory`, which returns transcript appends:
     /// these are values a client re-reads rather than accumulates.
-    GetState {
-        reply: tokio::sync::oneshot::Sender<AgentStateView>,
-    },
+    GetState { reply: ReplyTo<AgentStateView> },
 }
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
@@ -873,7 +869,7 @@ pub struct AgentActor {
     /// [`AgentCommand::Cancel`]). Drained the moment `RunFinished` is handled —
     /// the run task sends that as its very last act, so every journal write it
     /// could make has already happened by then.
-    cancel_acks: Vec<tokio::sync::oneshot::Sender<()>>,
+    cancel_acks: Vec<ReplyTo<()>>,
     /// Chunks of the message currently being written, since the newest log
     /// entry. Cleared whenever an entry lands, because the entry supersedes
     /// them.
@@ -1004,7 +1000,7 @@ impl AgentActor {
     async fn try_drain(
         &mut self,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
     ) -> Vec<AgentDomainEvent> {
         if self.busy() || !self.ready {
             return Vec::new();
@@ -1026,7 +1022,7 @@ impl AgentActor {
         &mut self,
         turn: crate::agent_loop::Turn,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
     ) -> Vec<AgentDomainEvent> {
         let mut events = vec![AgentDomainEvent::TurnBegan {
             consumed: turn.consumed.clone(),
@@ -1113,7 +1109,7 @@ impl AgentActor {
         &mut self,
         prepared: PreparedStart,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
     ) -> Vec<AgentDomainEvent> {
         let PreparedStart {
             turn,
@@ -1198,7 +1194,12 @@ impl AgentActor {
         events
     }
 
-    fn start_run(&mut self, input: AgentInput, ctx: &ActorContext<Self>, history: Vec<Message>) {
+    fn start_run(
+        &mut self,
+        input: AgentInput,
+        ctx: &ActorContext<AgentCommand>,
+        history: Vec<Message>,
+    ) {
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
         self.next_run_id += 1;
@@ -1339,7 +1340,7 @@ impl AgentActor {
         &mut self,
         report: RunReport,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         // A report from a run that has already been superseded says nothing
         // about the run that is in flight now: clearing the handle on its word
@@ -1535,7 +1536,7 @@ impl AgentActor {
     async fn park_or_resume(
         &mut self,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
         session_id: uuid::Uuid,
         parent: Arc<dyn AgentOutcomeSink>,
     ) -> CommandEffect<AgentDomainEvent> {
@@ -1577,7 +1578,7 @@ impl AgentActor {
         &mut self,
         id: crate::agent_loop::timers::TimerId,
         state: &AgentState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         let Some(record) = state.timers.iter().find(|t| t.id == id).cloned() else {
             // Cancelled or already removed — a stale sleep. Ignore.
@@ -1844,7 +1845,7 @@ impl EventSourcedActor for AgentActor {
         &mut self,
         state: &AgentState,
         cmd: AgentCommand,
-        ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
             AgentCommand::Enqueue { item, ack } => {
@@ -2074,7 +2075,11 @@ impl EventSourcedActor for AgentActor {
         }
     }
 
-    async fn on_recovery_complete(&mut self, state: &AgentState, ctx: &mut ActorContext<Self>) {
+    async fn on_recovery_complete(
+        &mut self,
+        state: &AgentState,
+        ctx: &mut ActorContext<AgentCommand>,
+    ) {
         // Announce where this incarnation starts. The channel outlives the
         // actor, so after an idle offload it still holds the position from
         // before — republishing costs nothing and keeps a reader that has been
@@ -2093,6 +2098,7 @@ impl EventSourcedActor for AgentActor {
         let repairs = missing_tool_results(&state.prompt_messages(), &self.params.handoff_tools());
         if !repairs.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
+            let ack = ReplyTo::from_sender(ack);
             let _ = ctx
                 .self_ref()
                 .tell(AgentCommand::PersistProgress {
@@ -2815,7 +2821,7 @@ mod tests {
     #[tokio::test]
     async fn an_observer_sees_durable_appends_with_folded_state() {
         use crate::agent_loop::{ContextError, ContextProvider, Contexts};
-        use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+        use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
 
         struct NoContext;
         #[async_trait]
@@ -2864,10 +2870,11 @@ mod tests {
             session_id,
             ready: true,
         };
-        let agent = spawn_root(
-            AgentActor::with_observer(ctx, AgentParams::from_def(&def_fixture()), recorder.clone()),
-            journal,
-        );
+        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::with_observer(
+            ctx,
+            AgentParams::from_def(&def_fixture()),
+            recorder.clone(),
+        ));
 
         let one = user_msg("one");
         let two = user_msg("two");
@@ -2882,7 +2889,7 @@ mod tests {
                         message: two.clone(),
                     },
                 ],
-                ack,
+                ack: ReplyTo::from_sender(ack),
             })
             .await
             .unwrap();
@@ -2906,7 +2913,7 @@ mod tests {
     /// only a colder prompt cache. Nothing fails, so nothing would catch it.
     #[tokio::test]
     async fn a_run_tells_the_provider_the_agent_s_own_id() {
-        use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+        use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
         use horsie_agentcore::EmptyToolbox;
         use horsie_agentcore::testkit::MockProvider;
 
@@ -2947,10 +2954,8 @@ mod tests {
             ready: true,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let agent = spawn_root(
-            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
-            journal,
-        );
+        let agent = ActorSystem::new(journal)
+            .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
 
         agent
             .tell(AgentCommand::Enqueue {
@@ -3004,7 +3009,7 @@ mod tests {
 
     mod start_hooks {
         use super::*;
-        use horsie_actor::{ActorRef, InMemoryJournal, Journal, spawn_root};
+        use horsie_actor::{ActorRef, ActorSystem, InMemoryJournal, Journal};
         use horsie_agentcore::EmptyToolbox;
         use horsie_agentcore::testkit::MockProvider;
         use horsie_models::hooks::{
@@ -3100,10 +3105,8 @@ mod tests {
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-            let agent = spawn_root(
-                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
-                journal,
-            );
+            let agent = ActorSystem::new(journal)
+                .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
             (agent, rx)
         }
 
@@ -3208,7 +3211,7 @@ mod tests {
                     events: vec![AgentDomainEvent::InputMessage {
                         message: user_msg("from a previous load"),
                     }],
-                    ack,
+                    ack: ReplyTo::from_sender(ack),
                 })
                 .await
                 .unwrap();
@@ -3328,10 +3331,8 @@ mod tests {
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-            let agent = spawn_root(
-                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
-                journal,
-            );
+            let agent = ActorSystem::new(journal)
+                .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
             agent
                 .tell(AgentCommand::Enqueue {
                     item: crate::agent_loop::Incoming::User {
@@ -4780,7 +4781,7 @@ mod retry_tests {
 mod fence_tests {
     use super::*;
     use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
-    use horsie_actor::{InMemoryJournal, spawn_root};
+    use horsie_actor::{ActorSystem, InMemoryJournal};
 
     struct HangingProvider;
     #[async_trait]
@@ -4823,7 +4824,7 @@ mod fence_tests {
         });
         params.interactive = true;
         let journal = Arc::new(InMemoryJournal::new());
-        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
 
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
@@ -4868,7 +4869,7 @@ mod fence_tests {
             .tell(AgentCommand::PageLog {
                 before: None,
                 max: 50,
-                reply,
+                reply: ReplyTo::from_sender(reply),
             })
             .await
             .unwrap();
@@ -4915,7 +4916,7 @@ mod queue_tests {
     //! actor around it — the gates it holds, and the events it journals.
     use super::*;
     use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
-    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
     use horsie_agentcore::testkit::MockProvider;
 
     struct OutcomeChannel(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
@@ -4965,7 +4966,7 @@ mod queue_tests {
         let mut params = AgentParams::from_def(&AgentRunDef::default());
         params.interactive = true;
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
         (agent, rx)
     }
 
@@ -5000,7 +5001,7 @@ mod queue_tests {
                     id: id.into(),
                     text: text.into(),
                 },
-                ack: Some(tx),
+                ack: Some(ReplyTo::from_sender(tx)),
             })
             .await
             .unwrap();
@@ -5151,7 +5152,7 @@ mod queue_tests {
                     tool_call_id: "call-1".into(),
                     text: "main".into(),
                 }],
-                reply: tx,
+                reply: ReplyTo::from_sender(tx),
             })
             .await
             .unwrap();

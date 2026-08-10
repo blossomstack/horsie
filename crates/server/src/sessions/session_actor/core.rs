@@ -9,6 +9,7 @@ use super::CoreCommand;
 use super::component::Component;
 use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
 use crate::agent_loop::AgentCommand;
+use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
@@ -38,7 +39,7 @@ impl SessionCore {
         actor: &mut SessionActor,
         _state: &SessionState,
         cmd: CoreCommand,
-        _ctx: &ActorContext<SessionActor>,
+        _ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             CoreCommand::SetTitle { title, reply } => {

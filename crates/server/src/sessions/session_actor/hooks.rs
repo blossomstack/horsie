@@ -22,6 +22,7 @@ use crate::sessions::spec::SessionStatus;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
+use horsie_actor::ReplyTo;
 use horsie_models::{
     hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome},
     runtime::{ServerHookEvent, StopInput, SubagentStopInput},
@@ -400,7 +401,7 @@ impl HookRouting {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: HookCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             HookCommand::Ran { key, records } => {
@@ -437,7 +438,9 @@ impl HookRouting {
                 let (tx, rx) = oneshot::channel();
                 let _ = agent
                     .actor
-                    .tell(AgentCommand::Cancel { ack: Some(tx) })
+                    .tell(AgentCommand::Cancel {
+                        ack: Some(ReplyTo::from_sender(tx)),
+                    })
                     .await;
                 if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
                     tracing::warn!(session = %actor.id, "halted agent did not finish in time");

@@ -22,6 +22,7 @@
 //! assembles a turn on the *agent's* task rather than on this mailbox, which is
 //! what keeps a thirty-second toolbox build from blocking a cancel.
 
+use horsie_actor::ReplyTo;
 mod component;
 mod context;
 mod core;
@@ -244,7 +245,7 @@ impl SessionActor {
     /// register under their own id, which is also the id they journal under.
     fn spawn_agent(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
         state: &SessionState,
         plan: AgentPlan,
     ) -> ResidentAgent {
@@ -317,7 +318,7 @@ impl SessionActor {
             ready: Self::runnable(state),
         };
         let resident = ResidentAgent {
-            actor: ctx.spawn(AgentActor::new(agent_ctx, params)),
+            actor: ctx.spawn_persistent(AgentActor::new(agent_ctx, params)),
             provider,
         };
         match plan.kind {
@@ -334,7 +335,7 @@ impl SessionActor {
     }
 
     /// The session's primary agent, spawned once at load.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<Self>, state: &SessionState) {
+    fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionCommand>, state: &SessionState) {
         self.spawn_agent(
             ctx,
             state,
@@ -363,7 +364,7 @@ impl SessionActor {
     fn resolve_agent(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
         agent_id: Option<&str>,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
@@ -406,7 +407,7 @@ impl SessionActor {
     fn resolve_step(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
         id: Uuid,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         let run = state.run.as_ref()?;
@@ -448,7 +449,9 @@ impl SessionActor {
         let (tx, rx) = oneshot::channel();
         let _ = agent
             .actor
-            .tell(AgentCommand::Cancel { ack: Some(tx) })
+            .tell(AgentCommand::Cancel {
+                ack: Some(ReplyTo::from_sender(tx)),
+            })
             .await;
         if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
             tracing::warn!(
@@ -482,7 +485,7 @@ impl SessionActor {
         &mut self,
         action: AgentAction,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> Vec<SessionDomainEvent> {
         match action {
             AgentAction::Deliver(delivery) => self.deliver(delivery, state, ctx).await,
@@ -507,7 +510,7 @@ impl SessionActor {
         &mut self,
         delivery: Delivery,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> Vec<SessionDomainEvent> {
         let Delivery { to, child, part } = delivery;
         let Some(agent) = self.reach(to, state, ctx) else {
@@ -538,7 +541,7 @@ impl SessionActor {
         &mut self,
         key: AgentKey,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> Option<ActorRef<AgentCommand>> {
         if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
             return Some(agent.actor.clone());
@@ -605,7 +608,7 @@ impl SessionActor {
     async fn flush_then_drain(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> Vec<SessionDomainEvent> {
         let mut events = Vec::new();
         let mut next = state.clone();
@@ -631,7 +634,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         mut events: Vec<SessionDomainEvent>,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let next = events
             .iter()
@@ -653,7 +656,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         outcome: AgentOutcome,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
@@ -791,7 +794,7 @@ impl EventSourcedActor for SessionActor {
         &mut self,
         state: &SessionState,
         cmd: SessionCommand,
-        ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
@@ -813,7 +816,11 @@ impl EventSourcedActor for SessionActor {
     /// in. It calls no vendor, starts no run, and drains nothing — an
     /// interrupted assistant turn is over, and queued user messages wait for
     /// the next turn the user starts.
-    async fn on_recovery_complete(&mut self, state: &SessionState, ctx: &mut ActorContext<Self>) {
+    async fn on_recovery_complete(
+        &mut self,
+        state: &SessionState,
+        ctx: &mut ActorContext<SessionCommand>,
+    ) {
         if self.spec.workflow.is_some() {
             // A run has no main agent. Step actors, like subagent actors, stay
             // cold: they spawn on demand for a history read, a retry, or the

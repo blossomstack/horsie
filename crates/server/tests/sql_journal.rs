@@ -266,7 +266,7 @@ async fn clear_removes_events_and_snapshot_together() {
 /// O(transcript) recovery into an O(events-since-snapshot) one.
 #[tokio::test]
 async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
-    use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, spawn_root};
+    use horsie_actor::{ActorContext, ActorSystem, CommandEffect, EventSourcedActor};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Default, Clone)]
@@ -302,7 +302,7 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
             &mut self,
             state: &SumState,
             cmd: Cmd,
-            _ctx: &mut ActorContext<Self>,
+            _ctx: &mut ActorContext<Cmd>,
         ) -> CommandEffect<Added> {
             match cmd {
                 Cmd::Add(n) => CommandEffect::persist(vec![Added(n)]),
@@ -319,7 +319,7 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
     let pid = PersistenceId::new("sum", "s1");
 
     // Four events, a snapshot (which compacts), then one more.
-    let a = spawn_root(Sum, j.clone() as std::sync::Arc<dyn Journal>);
+    let a = ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>).spawn_persistent(Sum);
     for n in [1, 2, 3, 4] {
         a.tell(Cmd::Add(n)).await.unwrap();
     }
@@ -346,7 +346,7 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
     );
 
     // A second incarnation recovers the same total from snapshot + tail.
-    let b = spawn_root(Sum, j.clone() as std::sync::Arc<dyn Journal>);
+    let b = ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>).spawn_persistent(Sum);
     let (tx, rx) = tokio::sync::oneshot::channel();
     b.tell(Cmd::Get(tx)).await.unwrap();
     assert_eq!(
