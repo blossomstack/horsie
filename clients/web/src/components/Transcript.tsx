@@ -63,7 +63,7 @@ function SegmentView({
             segment.streaming ? "assistant-streaming" : "assistant-text"
           }
         >
-          <Prose text={segment.text} />
+          <Prose text={segment.text} streaming={segment.streaming} />
         </div>
       );
     case "work":
