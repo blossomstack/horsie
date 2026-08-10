@@ -110,7 +110,7 @@ export function Sidebar() {
   );
   // Which sections are shut. Persisted for the same reason the order is: an
   // arrangement that half survives a reload is worse than one that does not,
-  // and collapsing a group is how a 41-session rail is made readable at all.
+  // and collapsing a group is how a long session rail is made readable at all.
   const [collapsed, setCollapsed] = usePersistentState<string[]>(
     "horsie.session-groups-collapsed",
     [],
