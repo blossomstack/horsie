@@ -5,6 +5,7 @@ import { ApiRequestError } from "../../api/client";
 import { useState } from "react";
 import { absoluteTime, relativeTime, sessionTitle } from "../../lib/format";
 import { RailToggle } from "../../components/rail";
+import { ReadError } from "../../components/ReadError";
 import { describeSchedule } from "../../lib/schedule";
 import {
   useRoutine,
@@ -15,7 +16,11 @@ import {
 export function RoutineDetailPage() {
   const { name } = useParams<{ name: string }>();
   const { data: routine, isLoading, isError } = useRoutine(name);
-  const { data: runs } = useRoutineSessions(name);
+  const {
+    data: runs,
+    isError: runsFailed,
+    error: runsError,
+  } = useRoutineSessions(name);
   const run = useRunRoutine();
   const [error, setError] = useState<string | null>(null);
 
@@ -140,6 +145,13 @@ export function RoutineDetailPage() {
             <div className="legend mb-2">
               Runs
             </div>
+            {runsFailed && (
+              <ReadError
+                what="this routine's runs"
+                error={runsError}
+                testId="routine-runs-error"
+              />
+            )}
             {runs && runs.length === 0 && (
               <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
                 No runs yet. Runs appear here rather than in the rail, and each

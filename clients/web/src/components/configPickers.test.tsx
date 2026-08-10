@@ -3,8 +3,11 @@ import { render, renderHook, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
+import { ApiRequestError } from "../api/client";
 import type { EnvironmentView, SettingsView } from "../api/types";
 import { environmentKeys } from "../hooks/useEnvironments";
+import { memorySpacesKey } from "../hooks/useMemory";
+import { pluginsKey } from "../hooks/usePlugins";
 import { settingsKey } from "../hooks/useSettings";
 import type {
   ConfigDraft,
@@ -12,7 +15,7 @@ import type {
   EnvironmentDraft,
   WorkflowChannel,
 } from "../hooks/useSessionDraft";
-import { useConfigPickers } from "./configPickers";
+import { useConfigPickers, type PickerSpec } from "./configPickers";
 
 // The default vendor cannot provision — the shape of a `horsie connect` setup,
 // which is the case that used to leave an agent preset with no Skills or MCP
@@ -100,27 +103,46 @@ function workflowDraft(
 }
 
 function keys(d: ConfigDraft): string[] {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
-  });
-  client.setQueryData(settingsKey, settings);
-  client.setQueryData(environmentKeys.all, environments);
-  const { result } = renderHook(() => useConfigPickers(d), {
-    wrapper: ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={client}>
-        <MemoryRouter>{children}</MemoryRouter>
-      </QueryClientProvider>
-    ),
-  });
-  return result.current.map((p) => p.key);
+  return pickers(d, seededClient()).map((p) => p.key);
 }
 
-function renderPickerBody(d: ConfigDraft, key: string) {
+function seededClient(): QueryClient {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        // An observer mounting on an errored query refetches by default, which
+        // would drop a `failRead` fixture back to "loading" before the first
+        // assertion.
+        refetchOnMount: false,
+        retryOnMount: false,
+      },
+    },
   });
   client.setQueryData(settingsKey, settings);
   client.setQueryData(environmentKeys.all, environments);
+  return client;
+}
+
+/** Leave a query in the state a failed read leaves behind. */
+function failRead(client: QueryClient, key: readonly unknown[]): QueryClient {
+  client
+    .getQueryCache()
+    .build(client, { queryKey: key })
+    .setState({
+      status: "error",
+      fetchStatus: "idle",
+      error: new ApiRequestError(
+        0,
+        "network",
+        "Could not reach the horsie server. Is `horsie serve` running?",
+      ),
+    });
+  return client;
+}
+
+function pickers(d: ConfigDraft, client: QueryClient): PickerSpec[] {
   const { result } = renderHook(() => useConfigPickers(d), {
     wrapper: ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>
@@ -128,7 +150,15 @@ function renderPickerBody(d: ConfigDraft, key: string) {
       </QueryClientProvider>
     ),
   });
-  const picker = result.current.find((p) => p.key === key);
+  return result.current;
+}
+
+function renderPickerBody(
+  d: ConfigDraft,
+  key: string,
+  client: QueryClient = seededClient(),
+) {
+  const picker = pickers(d, client).find((p) => p.key === key);
   if (!picker) throw new Error(`missing picker ${key}`);
   // Scoped to this render's own container: `render` defaults its queries to
   // document.body, so two bodies rendered in one test see each other's nodes.
@@ -253,6 +283,81 @@ describe("useConfigPickers", () => {
     expect(view.getByRole("button", { name: /^None/ }).getAttribute("data-selected")).not.toBe(
       "true",
     );
+  });
+
+  // A dead `/api/config` is not an account with nothing configured. The whole
+  // point of these three is the distinction: same empty list, different cause,
+  // and only one of them is something the reader can act on by adding a model.
+  it("says the model list failed to load rather than that there are none", () => {
+    const failed = renderPickerBody(
+      sessionDraft(),
+      "model",
+      failRead(seededClient(), settingsKey),
+    );
+    expect(failed.getByTestId("model-read-error").textContent).toContain(
+      "Couldn’t load models",
+    );
+    expect(failed.queryByText(/No models configured/)).toBeNull();
+
+    const empty = renderPickerBody(sessionDraft(), "model", (() => {
+      const c = seededClient();
+      c.setQueryData(settingsKey, { ...settings, models: [] });
+      return c;
+    })());
+    expect(empty.queryByTestId("model-read-error")).toBeNull();
+    expect(empty.queryByText(/No models configured/)).not.toBeNull();
+  });
+
+  it("says the runtime list failed to load rather than that none is connected", () => {
+    const failed = renderPickerBody(
+      sessionDraft(),
+      "environment",
+      failRead(seededClient(), settingsKey),
+    );
+    expect(failed.getByTestId("environment-read-error").textContent).toContain(
+      "Couldn’t load runtimes",
+    );
+    expect(failed.queryByText(/No runtime is connected/)).toBeNull();
+
+    const empty = renderPickerBody(sessionDraft(), "environment", (() => {
+      const c = seededClient();
+      c.setQueryData(settingsKey, { ...settings, vendors: [] });
+      return c;
+    })());
+    expect(empty.queryByTestId("environment-read-error")).toBeNull();
+    expect(empty.queryByText(/No runtime is connected/)).not.toBeNull();
+  });
+
+  it("says a failed toolbox read failed rather than inviting a fresh install", () => {
+    const skills = renderPickerBody(
+      sessionDraft(),
+      "skills",
+      failRead(seededClient(), pluginsKey),
+    );
+    expect(skills.getByTestId("skills-read-error").textContent).toContain(
+      "Couldn’t load skill bundles",
+    );
+    expect(skills.queryByText(/Install skill bundles in Settings/)).toBeNull();
+
+    const memory = renderPickerBody(
+      sessionDraft(),
+      "memory",
+      failRead(seededClient(), memorySpacesKey),
+    );
+    expect(memory.getByTestId("memory-read-error")).not.toBeNull();
+    expect(memory.queryByText(/Create a memory space first/)).toBeNull();
+  });
+
+  // The amber dot means "look at this", and a dead config read is exactly
+  // that — but a healthy server with a model chosen must not wear one.
+  it("marks the config-fed keys as needing attention only when the read failed", () => {
+    const failed = pickers(sessionDraft(), failRead(seededClient(), settingsKey));
+    expect(failed.find((p) => p.key === "model")?.warn).toBe(true);
+    expect(failed.find((p) => p.key === "environment")?.warn).toBe(true);
+
+    const healthy = pickers(sessionDraft(), seededClient());
+    expect(healthy.find((p) => p.key === "model")?.warn).toBe(false);
+    expect(healthy.find((p) => p.key === "environment")?.warn).toBe(false);
   });
 
   it("highlights the selected thinking effort without replacing its radio", () => {

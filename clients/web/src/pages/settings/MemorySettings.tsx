@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import { ApiRequestError } from "../../api/client";
 import type { MemorySpaceView, MemoryView } from "../../api/types";
 import { cn } from "../../lib/cn";
+import { ReadError } from "../../components/ReadError";
 import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 import { askConfirm } from "../../lib/confirm";
@@ -101,9 +102,11 @@ export function MemorySettings() {
                 <p className="py-8 text-center text-sm text-faint">Loading…</p>
               )}
               {spaces.isError && (
-                <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-                  Couldn’t load memory spaces. Is the server running?
-                </div>
+                <ReadError
+                  what="memory spaces"
+                  error={spaces.error}
+                  testId="memory-spaces-error"
+                />
               )}
               {spaces.data?.length === 0 && (
                 <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
@@ -158,6 +161,13 @@ export function MemorySettings() {
                     <p className="py-8 text-center text-sm text-faint">
                       Loading…
                     </p>
+                  )}
+                  {memories.isError && (
+                    <ReadError
+                      what="memories"
+                      error={memories.error}
+                      testId="memories-error"
+                    />
                   )}
                   {memories.data?.length === 0 && (
                     <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
