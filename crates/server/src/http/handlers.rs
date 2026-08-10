@@ -8,7 +8,7 @@ use crate::sessions::builder::build_session_spec;
 use crate::sessions::session_actor::AskAnswer;
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
-use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
+use crate::sessions::supervisor::{RenameSessionError, SessionRecord, SessionSupervisorCommand};
 use crate::sessions::workflow::StepStatus;
 use axum::Json;
 use axum::extract::{Path, Query};
@@ -20,7 +20,7 @@ use horsie_models::session::{
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
-    GetSessionResponse, ListSessionsResponse, SendMessageRequest, SessionAck,
+    GetSessionResponse, ListSessionsResponse, RenameSessionRequest, SendMessageRequest, SessionAck,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -452,6 +452,29 @@ pub async fn send_message(
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
         Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
     }
+}
+
+/// `PUT /api/sessions/:id/name` — rename a session.
+///
+/// The agent's title tool was the only writer of a session name, so a session
+/// the model never titled kept its first message as its name for good. This is
+/// the other writer.
+pub async fn rename_session(
+    Scope(state): Scope,
+    Path(id): Path<String>,
+    Json(req): Json<RenameSessionRequest>,
+) -> Result<impl IntoResponse, Api> {
+    ask(&state, |reply| SessionSupervisorCommand::SetSessionTitle {
+        id,
+        name: req.name,
+        reply,
+    })
+    .await?
+    .map_err(|e| match e {
+        RenameSessionError::NotFound(m) => Api::not_found(m),
+        RenameSessionError::Invalid(m) => Api::unprocessable(m),
+    })?;
+    Ok(Json(Ack {}))
 }
 
 pub async fn stop_session(

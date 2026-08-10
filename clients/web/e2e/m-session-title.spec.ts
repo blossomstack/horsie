@@ -35,3 +35,32 @@ test("M1: set_session_title renames the session live", async ({
   );
   await expectStatus(page, "Idle");
 });
+
+test("M2: a session can be renamed by hand when the model never titles it", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // The model answers literally and never calls the title tool — the case that
+  // left a session wearing its raw first message as a name for good, with the
+  // tool as the only writer there was.
+  await mock.queueText("The answer is 4.");
+  await createSession(page, appBase);
+  const id = await sendMessage(page, "what is 2 + 2");
+  await expect(page.getByTestId("assistant-text")).toContainText("The answer is 4.");
+  await expect(page.getByTestId("session-title")).toHaveText("what is 2 + 2");
+
+  await page.getByTestId("session-title").click();
+  const input = page.getByTestId("session-title-input");
+  await input.fill("Arithmetic");
+  await input.press("Enter");
+
+  await expect(page.getByTestId("session-title")).toHaveText("Arithmetic");
+  await expect(
+    page.locator(`[data-testid="session-row"][data-session-id="${id}"]`),
+  ).toContainText("Arithmetic");
+
+  // Durable, not just on screen.
+  await page.reload();
+  await expect(page.getByTestId("session-title")).toHaveText("Arithmetic");
+});
