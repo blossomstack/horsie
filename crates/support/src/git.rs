@@ -12,6 +12,11 @@ use std::process::Command;
 /// the case that matters most — it is the only `git_ref` that makes an install
 /// reproducible — so it cannot be the one that does not work.
 pub fn clone(url: &str, git_ref: Option<&str>, dest: &Path) -> Result<(), String> {
+    // Here rather than at each caller: the URL becomes one of `git`'s
+    // arguments, so a value beginning with `-` is an option and `ext::` is
+    // arbitrary command execution. Any caller that forgot would be a hole, and
+    // this is the one place all of them funnel through.
+    crate::remote_url::check_git_url(url)?;
     let Some(git_ref) = git_ref else {
         return clone_at_name(url, None, dest);
     };

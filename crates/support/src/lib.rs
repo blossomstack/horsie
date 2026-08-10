@@ -11,3 +11,4 @@ pub mod frontmatter;
 pub mod git;
 pub mod mcp;
 pub mod plugin;
+pub mod remote_url;

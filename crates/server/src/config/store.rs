@@ -890,6 +890,14 @@ fn validate_provider(input: &ProviderInput) -> Result<String, String> {
             input.kind
         ));
     }
+    // An absent or empty base URL means "use this kind's default", which is the
+    // common case; only a value someone actually typed is checked. Until now
+    // nothing parsed it at all, so the server would dial whatever it was given.
+    if let Some(base) = input.base_url.as_deref().map(str::trim)
+        && !base.is_empty()
+    {
+        horsie_support::remote_url::check_fetch_url(base)?;
+    }
     Ok(name.to_string())
 }
 

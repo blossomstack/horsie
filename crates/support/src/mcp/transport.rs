@@ -165,7 +165,22 @@ impl McpTransport for HttpTransport {
             return Err(McpError::Unauthorized { www_authenticate });
         }
         if !status.is_success() {
-            return Err(McpError::Transport(format!("http {status}: {text}")));
+            // The body is logged, never returned. horsie dereferences whatever
+            // URL an operator types, and this error reaches the API, the UI and
+            // the `last_error` column — so echoing the body turned horsie into
+            // a read primitive for anything it can reach and the caller cannot.
+            // Demonstrated live in testing, pulling
+            // `INTERNAL-ONLY-SECRET: db_password=…` out of a LAN service the
+            // browser had no route to.
+            tracing::warn!(
+                endpoint = %self.endpoint,
+                %status,
+                body = %text,
+                "an MCP request failed"
+            );
+            return Err(McpError::Transport(format!(
+                "http {status} from the MCP server (see the server log for its response)"
+            )));
         }
         let msg = if ctype.contains("text/event-stream") {
             parse_sse_response(&text)?
@@ -343,6 +358,48 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{addr}/")
+    }
+
+    /// A server that answers with a secret in its body, exactly as the LAN
+    /// service did during testing.
+    async fn mock_leaks_its_body() -> String {
+        use axum::response::{IntoResponse, Response};
+        use axum::{Router, http::StatusCode, routing::post};
+        async fn handle() -> Response {
+            (
+                StatusCode::FORBIDDEN,
+                "INTERNAL-ONLY-SECRET: db_password=hunter2",
+            )
+                .into_response()
+        }
+        let app = Router::new().route("/", post(handle));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/")
+    }
+
+    /// horsie dereferences whatever URL an operator types, and this error
+    /// reaches the API, the UI and the `last_error` column. Echoing the body
+    /// made horsie a read primitive for anything it can reach and the caller
+    /// cannot — testing pulled a database password out of a LAN service the
+    /// browser had no route to.
+    #[tokio::test]
+    async fn a_failed_request_never_carries_the_targets_body() {
+        let url = mock_leaks_its_body().await;
+        let t = HttpTransport::new(url, Arc::new(StaticProvider));
+        let err = t.request("tools/call", json!({})).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            !message.contains("INTERNAL-ONLY-SECRET"),
+            "the target's body was reflected: {message}"
+        );
+        assert!(
+            !message.contains("hunter2"),
+            "the target's body was reflected: {message}"
+        );
+        // Still says what happened, or an operator has nothing to act on.
+        assert!(message.contains("403"), "unhelpful message: {message}");
     }
 
     #[tokio::test]

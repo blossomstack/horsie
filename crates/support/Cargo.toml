@@ -25,6 +25,8 @@ hex         = { workspace = true }
 regex       = "1"
 reqwest     = { workspace = true }
 tokio       = { workspace = true, features = ["process", "io-util"] }
+tracing     = { workspace = true }
+url         = { workspace = true }
 
 [dev-dependencies]
 axum     = { workspace = true }
