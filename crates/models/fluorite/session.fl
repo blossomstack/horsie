@@ -114,9 +114,6 @@ struct SessionDetail {
     /// Every agent this session hosts: the main agent first, then its subagent
     /// tree. Each is addressable at `/sessions/:id/agents/:agent_id`.
     agents: Vec<SubAgentView>,
-    /// The resource-preparation stage a turn is currently at, when one is
-    /// spinning up. Live-only history: past stages are not replayable.
-    progression: Option<ProgressionEvent>,
     /// The workflow this session is a run of, if it is one. Decides which view
     /// the page renders: a run has a graph rather than a conversation.
     workflow: Option<String>,
@@ -192,11 +189,10 @@ struct MessageDelta {
     reset: bool,
 }
 
-/// A resource-preparation progression — shown live while a turn spins up and
-/// kept for audit. `stage` is a stable key (`acquiring_runtime`,
-/// `scanning_workspace`, `connecting_tools`, `ready`); `detail` is optional
-/// human text; `at_ms` is the unix-epoch millisecond it occurred.
-struct ProgressionEvent { stage: String, detail: Option<String>, at_ms: u64 }
+// No `ProgressionEvent` here any more. Preparation progress is a `Preparing`
+// entry in the agent's own log — journaled, ordered against everything else
+// that happened, and replayable — so a session document carrying a snapshot of
+// the current stage had no source to fill it from and was always `null`.
 
 /// Cumulative token usage across a session's completed turns. `u64` (not the
 /// per-turn `Usage`'s `u32`) because it sums re-sent context over many turns.

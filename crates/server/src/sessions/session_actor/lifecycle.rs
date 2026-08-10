@@ -76,17 +76,28 @@ impl RuntimeLifecycle {
                 // throughout. The status it just journaled is what holds the
                 // turn back meanwhile.
                 tokio::spawn(async move {
-                    let (error, terminal) = match runtimes.create(&session, &vendor, &spec).await {
-                        Ok(()) => (None, false),
-                        // Exactly the split `get` makes: only a live vendor
-                        // refusing to produce the runtime is terminal. An
-                        // offline vendor or a failed token mint is a bad
-                        // moment, not a dead session.
-                        Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true),
-                        Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
-                            (Some(e.to_string()), false)
-                        }
-                    };
+                    let (error, terminal, detail) =
+                        match runtimes.create(&session, &vendor, &spec).await {
+                            Ok(detail) => (None, false, detail),
+                            // Exactly the split `get` makes: only a live vendor
+                            // refusing to produce the runtime is terminal. An
+                            // offline vendor or a failed token mint is a bad
+                            // moment, not a dead session.
+                            Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                            Err(
+                                e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)),
+                            ) => (Some(e.to_string()), false, None),
+                        };
+                    // Before the outcome, and separately from it: the vendor
+                    // described the runtime it accepted, and that sentence
+                    // belongs to the wait rather than to how the wait ended.
+                    if let Some(detail) = detail {
+                        let _ = me
+                            .tell(SessionCommand::Lifecycle(
+                                LifecycleCommand::NarrateProvisioning { detail },
+                            ))
+                            .await;
+                    }
                     let _ = me
                         .tell(SessionCommand::Lifecycle(
                             LifecycleCommand::FinishProvisioning { error, terminal },
@@ -96,6 +107,18 @@ impl RuntimeLifecycle {
                 actor.report(SessionStatus::Provisioning).await;
                 CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted {
                     at_ms: now_ms(),
+                }])
+            }
+            LifecycleCommand::NarrateProvisioning { detail } => {
+                // Only while a create is actually outstanding. A vendor's word
+                // that lands after the outcome would say a session is still
+                // coming up when it is already running.
+                if !matches!(state.status, SessionStatus::Provisioning) {
+                    return CommandEffect::none();
+                }
+                CommandEffect::persist(vec![SessionDomainEvent::ProvisioningProgress {
+                    at_ms: now_ms(),
+                    detail,
                 }])
             }
             LifecycleCommand::FinishProvisioning { error, terminal } => {
@@ -185,6 +208,11 @@ impl Component for RuntimeLifecycle {
             SessionDomainEvent::ProvisioningStarted { .. } => {
                 state.status = SessionStatus::Provisioning;
             }
+            // Narration: it changes nothing, and the status it is describing
+            // was set by the `ProvisioningStarted` before it. Journaled all the
+            // same, so a client that arrives mid-create reads the same account
+            // of the wait as one that watched it live.
+            SessionDomainEvent::ProvisioningProgress { .. } => {}
             SessionDomainEvent::ProvisioningSucceeded { .. } => {
                 state.status = SessionStatus::Idle;
                 state.last_error = None;
@@ -560,6 +588,124 @@ mod tests {
                 .any(|s| s == &format!("create:{id}")),
             "the runtime has to actually get built: {:?}",
             f.agent.signals()
+        );
+    }
+
+    /// The whole of what a person has to go on while a session is provisioning.
+    /// The vendor said "the machine is booting"; the create used to answer `()`,
+    /// so the session journaled that it was provisioning and then that it was
+    /// done, and every word in between was dropped at the manager.
+    #[tokio::test]
+    async fn what_the_vendor_says_about_a_create_is_journaled() {
+        let f = actor_fixture().await;
+        f.deps.vendors.write().unwrap().insert(
+            "mock".to_string(),
+            Arc::new(BootingVendor) as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
+        let id = Uuid::new_v4();
+        let (session, journal) = spawn_unprovisioned(&f, id);
+        session
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .await
+            .unwrap();
+
+        let events = wait_for_events(&journal, id, "the create finishing", |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::ProvisioningSucceeded { .. }))
+        })
+        .await;
+        let said: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionDomainEvent::ProvisioningProgress { detail, .. } => Some(detail.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            said,
+            vec![BOOTING_CREATE.to_string()],
+            "the vendor's account of the create has to reach the journal: {events:?}"
+        );
+
+        // And it belongs to the wait rather than to how the wait ended: a line
+        // recorded after `ProvisioningSucceeded` would say a session is still
+        // coming up when it is already running.
+        let position = |pred: fn(&SessionDomainEvent) -> bool| events.iter().position(pred);
+        assert!(
+            position(|e| matches!(e, SessionDomainEvent::ProvisioningProgress { .. }))
+                < position(|e| matches!(e, SessionDomainEvent::ProvisioningSucceeded { .. })),
+            "narration comes before the outcome: {events:?}"
+        );
+    }
+
+    /// A vendor whose runtime is already up narrates nothing, and the session
+    /// records nothing. There is no wait to describe, and a line invented for
+    /// one would put a stage on screen that never happened.
+    #[tokio::test]
+    async fn a_create_with_nothing_to_say_records_nothing() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let (session, journal) = spawn_unprovisioned(&f, id);
+        session
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .await
+            .unwrap();
+        let events = wait_for_events(&journal, id, "the create finishing", |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::ProvisioningSucceeded { .. }))
+        })
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::ProvisioningProgress { .. })),
+            "{events:?}"
+        );
+    }
+
+    /// A vendor's word that arrives after the create has settled is dropped.
+    /// Recording it would put a session that is already running back into
+    /// "still coming up", which is the sort of thing a reader believes.
+    #[tokio::test]
+    async fn narration_that_outlives_the_create_is_ignored() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let (session, journal) = spawn_unprovisioned(&f, id);
+        session
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .await
+            .unwrap();
+        // Asserted on the event, not the folded status: a session that has not
+        // journaled its `ProvisioningStarted` yet folds to the default `Idle`,
+        // so waiting for "not provisioning" answers before the create began.
+        wait_for_events(&journal, id, "the create finishing", |events| {
+            events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::ProvisioningSucceeded { .. }))
+        })
+        .await;
+
+        session
+            .tell(SessionCommand::Lifecycle(
+                LifecycleCommand::NarrateProvisioning {
+                    detail: BOOTING_CREATE.into(),
+                },
+            ))
+            .await
+            .unwrap();
+        // Round-tripped through the mailbox so the assertion is not racing the
+        // command it is about.
+        let _ = session
+            .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
+            .await;
+        let events = crate::sessions::events::session_events(&journal, id).await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::ProvisioningProgress { .. })),
+            "{events:?}"
         );
     }
 

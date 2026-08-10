@@ -28,28 +28,7 @@ import {
 } from "../hooks/useSessions";
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
-import { statusMeta } from "../lib/status";
-
-/** Friendly label for a resource-preparation progression stage. Unknown stages
- * fall back to a de-slugged form so a new backend stage still reads sensibly.
- *
- * `ready` is deliberately absent. The preparation stages earn a line because
- * they explain a wait the operator is sitting through; "Ready" is the end of
- * that wait and reports nothing — it sat above the composer as a lamp and a
- * word saying only that nothing was happening. */
-function progressionLabel(stage: string): string {
-  const known: Record<string, string> = {
-    provisioning_runtime: "Starting runtime…",
-    scanning_workspace: "Scanning workspace…",
-    connecting_tools: "Connecting tools…",
-  };
-  return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
-}
-
-/** Stages worth showing. Anything terminal is the absence of news. */
-function showsProgression(stage: string | undefined): boolean {
-  return stage !== undefined && stage !== "ready";
-}
+import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
 export function SessionView() {
   const { id, agentId } = useParams<{ id: string; agentId?: string }>();

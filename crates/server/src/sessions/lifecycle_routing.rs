@@ -57,10 +57,23 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
                 detail: None,
             }),
         ),
+        // Still acquiring, now with the vendor's own account of why it is
+        // taking as long as it is. The status is unchanged on purpose: this is
+        // the same fact as the entry above, said with more of what is known.
+        E::ProvisioningProgress { detail, .. } => on_session(
+            state,
+            LifecycleEvent::Runtime(RuntimeLifecycle {
+                status: RuntimeStatus::Acquiring(EmptyOutcome {}),
+                detail: Some(detail.clone()),
+            }),
+        ),
         E::ProvisioningSucceeded { .. } => on_session(
             state,
             LifecycleEvent::Runtime(RuntimeLifecycle {
                 status: RuntimeStatus::Ready(EmptyOutcome {}),
+                // Nothing to add: the runtime is up, which is the whole
+                // message. A detail here would be narration of a wait that is
+                // over.
                 detail: None,
             }),
         ),
@@ -264,6 +277,10 @@ mod tests {
         use SessionDomainEvent as E;
         vec![
             E::ProvisioningStarted { at_ms: 1 },
+            E::ProvisioningProgress {
+                at_ms: 1,
+                detail: "the machine is booting".into(),
+            },
             E::ProvisioningSucceeded { at_ms: 1 },
             E::ProvisioningFailed {
                 at_ms: 1,
@@ -399,6 +416,67 @@ mod tests {
                 false => assert!(!entries.is_empty(), "{event:?} has no destination"),
             }
         }
+    }
+
+    /// The vendor's own sentence reaches the log, which is the whole point of
+    /// carrying one: "provisioning" for four minutes says nothing, while "the
+    /// machine is resuming" is the answer to what a person is waiting for.
+    ///
+    /// Still `Acquiring`, and still no status change: narration describes the
+    /// wait, it does not end it.
+    #[test]
+    fn a_vendors_words_reach_the_log_while_the_runtime_comes_up() {
+        let state = SessionState::default();
+        let entries = route(
+            &SessionDomainEvent::ProvisioningProgress {
+                at_ms: 1,
+                detail: "the machine is booting".into(),
+            },
+            &state,
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, AgentKey::Main);
+        let LifecycleEvent::Runtime(payload) = &entries[0].1 else {
+            panic!("expected a Runtime entry, got {:?}", entries[0].1);
+        };
+        assert!(matches!(payload.status, RuntimeStatus::Acquiring(_)));
+        assert_eq!(payload.detail.as_deref(), Some("the machine is booting"));
+    }
+
+    /// The two ends of a provisioning wait carry no detail, and that is not an
+    /// oversight: "acquiring" is the start of a wait nothing is known about yet,
+    /// and "ready" is the end of one, where the only news is that it is over.
+    #[test]
+    fn the_ends_of_a_provisioning_wait_have_nothing_to_say() {
+        let state = SessionState::default();
+        for event in [
+            SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
+            SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
+        ] {
+            let entries = route(&event, &state);
+            let Some((_, LifecycleEvent::Runtime(payload))) = entries.first() else {
+                panic!("expected a Runtime entry for {event:?}");
+            };
+            assert_eq!(payload.detail, None, "{event:?}");
+        }
+    }
+
+    /// A failure carries the vendor's reason, which is the one detail that was
+    /// never dropped — and the one this variant must keep.
+    #[test]
+    fn a_failed_provision_reports_why() {
+        let entries = route(
+            &SessionDomainEvent::ProvisioningFailed {
+                at_ms: 1,
+                error: "no capacity in region".into(),
+                terminal: false,
+            },
+            &SessionState::default(),
+        );
+        let Some((_, LifecycleEvent::Runtime(payload))) = entries.first() else {
+            panic!("expected a Runtime entry");
+        };
+        assert_eq!(payload.detail.as_deref(), Some("no capacity in region"));
     }
 
     /// A run that has not started its first step has no log at all yet, so a

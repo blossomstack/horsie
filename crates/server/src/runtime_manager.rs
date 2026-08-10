@@ -78,6 +78,25 @@ const PROGRESS_BUFFER: usize = 32;
 /// vendor would park a turn forever.
 const ACQUIRE_WINDOW: std::time::Duration = std::time::Duration::from_secs(960);
 
+/// Where an acquisition's running commentary goes, in the vendor's own words.
+///
+/// A plain channel for the same reason [`RuntimeProgressSink`] is one, and
+/// `try_send` for the same reason too: narration is advisory, so a consumer
+/// falling behind must drop words rather than stall the acquisition it is
+/// describing.
+///
+/// Only the words, not the [`RuntimeProgress`] they came from: the caller is a
+/// log, not a state machine — the outcome is the return value, and a second
+/// party interpreting progress states is how two readings of one runtime start
+/// to disagree.
+///
+/// [`RuntimeProgressSink`]: horsie_runtime_host::RuntimeProgressSink
+/// [`RuntimeProgress`]: horsie_runtime_host::RuntimeProgress
+pub type NarrationSink = tokio::sync::mpsc::Sender<String>;
+
+/// How many unread lines of narration may queue before the newest are dropped.
+pub const NARRATION_BUFFER: usize = 8;
+
 pub struct RuntimeManager {
     deps: RuntimeDeps,
 }
@@ -211,12 +230,18 @@ impl RuntimeManager {
     }
 
     /// Provision this session's runtime. One caller, once per session.
+    ///
+    /// Answers with what the vendor said about the runtime it just accepted —
+    /// "the machine is booting", "the container is being scheduled" — for the
+    /// session to journal. Returned rather than pushed anywhere, because a
+    /// create's first observation is the last one this call has: the substrate
+    /// finishes on a sink nothing here waits on.
     pub async fn create(
         &self,
         session: &str,
         vendor: &str,
         spec: &SessionSpec,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Option<String>, RuntimeError> {
         let link = self.vendor(vendor)?;
         let rt_spec = self.runtime_spec(session, spec).await?;
         // Not awaited to `Ready`, unlike an acquisition. A create's job is to
@@ -224,10 +249,28 @@ impl RuntimeManager {
         // happened and the first `get` is what waits for it to come up — a wait
         // that survives this process dying, which one held here would not.
         let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
-        link.create(session, &rt_spec.to_wire(), progress)
+        let first = link
+            .create(session, &rt_spec.to_wire(), progress)
             .await
             .map_err(Self::vendor_error)?;
-        Ok(())
+        Ok(Self::narration(&first))
+    }
+
+    /// What a progress report says, when it says anything a person would read.
+    ///
+    /// The vendor's own words, verbatim: it is the only party that knows
+    /// whether a machine is booting, resuming or merely still coming up, and a
+    /// vocabulary invented up here would have to guess at all three.
+    fn narration(progress: &horsie_runtime_host::RuntimeProgress) -> Option<String> {
+        use horsie_runtime_host::RuntimeProgress as P;
+        match progress {
+            P::Starting { detail } | P::Provisioning { detail } => Some(detail.clone()),
+            // Nothing to narrate. A runtime that is already up, or one the
+            // substrate has merely acknowledged, has no news in it; and the
+            // ways a runtime ends are an outcome, which travels as this call's
+            // return value rather than as a line in a log.
+            P::Requested | P::Ready(_) | P::Stopping | P::Stopped | P::Gone { .. } => None,
+        }
     }
 
     /// Hand back a client for this session's runtime, resuming it if the
@@ -239,11 +282,17 @@ impl RuntimeManager {
     /// reconnects mid-run comes back on a different link. Binding to the name
     /// means the next tool call finds it; binding to the link meant every tool
     /// call for the rest of that turn failed on a dead socket.
+    ///
+    /// `narrate` is where the wait describes itself. An acquisition is the long
+    /// one — a machine that has to resume takes minutes — and the vendor is
+    /// saying why the whole time, so a caller with somewhere to put those words
+    /// passes a sink and a caller without one passes `None`.
     pub async fn get(
         &self,
         session: &str,
         vendor: &str,
         spec: &SessionSpec,
+        narrate: Option<NarrationSink>,
     ) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
         // The receiver is held for the whole acquisition, not dropped on the
@@ -258,7 +307,7 @@ impl RuntimeManager {
             .get(session, &rt_spec.to_wire(), progress)
             .await
             .map_err(Self::vendor_error)?;
-        let handle = Self::await_ready(session, first, &mut rx).await?;
+        let handle = Self::await_ready(session, first, &mut rx, narrate.as_ref()).await?;
         Ok(Self::client(session, handle))
     }
 
@@ -279,15 +328,29 @@ impl RuntimeManager {
     ///
     /// Events for another runtime are ignored rather than trusted: one account
     /// has one sink, and a vendor is free to report on anything it owns.
+    ///
+    /// Every non-terminal state the fold walks through is narrated on the way
+    /// past. That is the whole of what a person waiting has to go on: this loop
+    /// can sit here for minutes, and the vendor is describing the wait — first
+    /// in the value it returned, then on the sink — the entire time.
     async fn await_ready(
         session: &str,
         first: horsie_runtime_host::RuntimeProgress,
         rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_host::RuntimeEvent>,
+        narrate: Option<&NarrationSink>,
     ) -> Result<Arc<dyn crate::runtime_vendor::RuntimeHandle>, RuntimeError> {
         use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
         let mut progress = first;
         loop {
+            if let Some(sink) = narrate
+                && let Some(line) = Self::narration(&progress)
+            {
+                // Dropped rather than awaited when the consumer is behind:
+                // nothing about this acquisition may wait on somebody reading
+                // about it.
+                let _ = sink.try_send(line);
+            }
             match progress {
                 P::Ready(handle) => return Ok(handle),
                 // Terminal, and the reason travels: a session whose runtime is
@@ -393,9 +456,12 @@ pub struct RuntimeClientProvider {
 
 impl RuntimeClientProvider {
     /// A working client for this session's runtime, resumed if need be.
-    pub async fn get(&self) -> Result<RuntimeClient, RuntimeError> {
+    ///
+    /// `narrate` carries the vendor's account of the wait to whoever asked, and
+    /// is `None` for a caller with nowhere to show it.
+    pub async fn get(&self, narrate: Option<NarrationSink>) -> Result<RuntimeClient, RuntimeError> {
         self.manager
-            .get(&self.session, &self.vendor, &self.spec)
+            .get(&self.session, &self.vendor, &self.spec, narrate)
             .await
     }
 }
@@ -533,7 +599,10 @@ mod tests {
     #[tokio::test]
     async fn unavailable_when_the_vendor_name_is_not_registered() {
         let m = manager(Arc::new(RwLock::new(HashMap::new())));
-        let Err(err) = m.get("s1", "nope", &SessionSpec::for_vendor("v")).await else {
+        let Err(err) = m
+            .get("s1", "nope", &SessionSpec::for_vendor("v"), None)
+            .await
+        else {
             panic!("an unregistered vendor must not yield a client")
         };
         assert!(
@@ -553,7 +622,7 @@ mod tests {
         // The link notices asynchronously; poll briefly rather than sleep-and-hope.
         let mut err = None;
         for _ in 0..50 {
-            match m.get("s1", "v", &SessionSpec::for_vendor("v")).await {
+            match m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await {
                 Err(RuntimeError::Unavailable(e)) => {
                     err = Some(e);
                     break;
@@ -571,7 +640,7 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
             panic!("a get must never provision")
         };
         assert!(
@@ -590,7 +659,7 @@ mod tests {
         m.create("s1", "v", &session_spec("v"))
             .await
             .expect("create");
-        m.get("s1", "v", &SessionSpec::for_vendor("v"))
+        m.get("s1", "v", &SessionSpec::for_vendor("v"), None)
             .await
             .expect("get after create");
         assert_eq!(
@@ -788,22 +857,28 @@ mod tests {
     /// websocket-backed double can stand in for one — a `horsie connect` link
     /// only ever answers once its runtime is already up.
     struct BootingVendor {
-        outcome: std::sync::Mutex<Option<horsie_runtime_host::RuntimeProgress>>,
+        /// What an acquisition reports on the sink, in order, after the
+        /// `Starting` it returned. A list rather than one outcome so a test can
+        /// put an intermediate state in front of the terminal one, which is
+        /// what a substrate that provisions after booting actually does.
+        outcome: std::sync::Mutex<Vec<horsie_runtime_host::RuntimeProgress>>,
     }
 
     impl BootingVendor {
         fn with(outcome: horsie_runtime_host::RuntimeProgress) -> Arc<Self> {
+            Self::reporting(vec![outcome])
+        }
+
+        fn reporting(outcomes: Vec<horsie_runtime_host::RuntimeProgress>) -> Arc<Self> {
             Arc::new(Self {
-                outcome: std::sync::Mutex::new(Some(outcome)),
+                outcome: std::sync::Mutex::new(outcomes),
             })
         }
 
         /// Never reports an outcome at all, the way a vendor whose background
         /// task died does.
         fn silent() -> Arc<Self> {
-            Arc::new(Self {
-                outcome: std::sync::Mutex::new(None),
-            })
+            Self::reporting(Vec::new())
         }
 
         fn ready() -> Arc<Self> {
@@ -867,15 +942,15 @@ mod tests {
             _spec: &horsie_models::runtime_vendor::RuntimeSpec,
             progress: horsie_runtime_host::RuntimeProgressSink,
         ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
-            let outcome = self.outcome.lock().unwrap().take();
+            let outcome = std::mem::take(&mut *self.outcome.lock().unwrap());
             let id = runtime_id.to_string();
             // After the return value is built, per the ordering rule.
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                if let Some(progress_step) = outcome {
+                for progress_step in outcome {
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
                     let _ = progress
                         .send(horsie_runtime_host::RuntimeEvent {
-                            runtime_id: id,
+                            runtime_id: id.clone(),
                             progress: progress_step,
                         })
                         .await;
@@ -918,7 +993,7 @@ mod tests {
     async fn an_acquisition_follows_a_booting_runtime_to_ready() {
         let vendor = BootingVendor::ready();
         let m = manager(published_vendor(vendor));
-        m.get("s1", "v", &SessionSpec::for_vendor("v"))
+        m.get("s1", "v", &SessionSpec::for_vendor("v"), None)
             .await
             .expect("a runtime that comes up on the sink must be handed back");
     }
@@ -932,7 +1007,7 @@ mod tests {
             reason: "the machine never dialed back".into(),
         });
         let m = manager(published_vendor(vendor));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
             panic!("a runtime reported gone must not yield a client")
         };
         assert!(
@@ -946,10 +1021,104 @@ mod tests {
     #[tokio::test]
     async fn a_vendor_that_stops_reporting_leaves_the_session_recoverable() {
         let m = manager(published_vendor(BootingVendor::silent()));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v")).await else {
+        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
             panic!("a silent vendor must not yield a client")
         };
         assert!(matches!(err, RuntimeError::Unavailable(_)), "{err:?}");
+    }
+
+    /// What a create knows and used to throw away. The substrate has just
+    /// accepted the runtime and said something about it — "the machine is
+    /// booting" — and that sentence is the only account of the wait anyone
+    /// gets, because a create deliberately does not stay to watch.
+    #[tokio::test]
+    async fn a_create_hands_back_what_the_vendor_said_about_the_runtime() {
+        let m = manager(published_vendor(BootingVendor::ready()));
+        let said = m
+            .create("s1", "v", &session_spec("v"))
+            .await
+            .expect("create");
+        assert_eq!(
+            said.as_deref(),
+            Some("booting"),
+            "the vendor's own words have to survive the create"
+        );
+    }
+
+    /// A vendor with nothing to narrate says nothing. `horsie connect` answers
+    /// `Ready` because its runtime is already up, and inventing a line for that
+    /// would put a wait on screen that never happened.
+    #[tokio::test]
+    async fn a_create_with_nothing_to_report_stays_quiet() {
+        let agent = FakeRuntimeVendor::builder("v")
+            .serve_in_process()
+            .await
+            .unwrap();
+        let m = manager(published(&agent, "v"));
+        let said = m
+            .create("s1", "v", &session_spec("v"))
+            .await
+            .expect("create");
+        assert_eq!(said, None);
+    }
+
+    /// The long wait, narrated. An acquisition can sit here for minutes while a
+    /// machine resumes, and the vendor describes it the whole way — first in
+    /// what it returned, then on its sink. Every one of those states used to be
+    /// matched and discarded, so the panel showed nothing at all between the
+    /// message going out and the reply coming back.
+    #[tokio::test]
+    async fn an_acquisition_narrates_every_state_it_waits_through() {
+        let vendor = BootingVendor::reporting(vec![
+            horsie_runtime_host::RuntimeProgress::Provisioning {
+                detail: "running the provision steps".into(),
+            },
+            horsie_runtime_host::RuntimeProgress::Ready(Arc::new(StubHandle)),
+        ]);
+        let m = manager(published_vendor(vendor));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
+        m.get("s1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+            .await
+            .expect("get");
+
+        let mut said = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            said.push(line);
+        }
+        assert_eq!(
+            said,
+            vec![
+                // What `get` returned: the first observation is an observation
+                // like any other.
+                "the machine is up; waiting for it to dial back".to_string(),
+                "running the provision steps".to_string(),
+            ],
+            "every non-terminal state the fold walked through has to be said"
+        );
+    }
+
+    /// Being ready is not news, and neither is being gone: one is the end of
+    /// the wait and the other is the error the caller is about to be handed.
+    #[tokio::test]
+    async fn an_outcome_is_not_narration() {
+        let m = manager(published_vendor(BootingVendor::with(
+            horsie_runtime_host::RuntimeProgress::Gone {
+                reason: "the machine never dialed back".into(),
+            },
+        )));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
+        let _ = m
+            .get("s1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+            .await;
+        let mut said = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            said.push(line);
+        }
+        assert_eq!(
+            said,
+            vec!["the machine is up; waiting for it to dial back".to_string()],
+            "the reason a runtime is gone travels as the error, not as progress"
+        );
     }
 
     #[tokio::test]
@@ -967,7 +1136,7 @@ mod tests {
             "v".to_string(),
             SessionSpec::for_vendor("v"),
         );
-        provider.get().await.expect("provider get");
+        provider.get(None).await.expect("provider get");
         assert_eq!(
             agent.signals(),
             vec!["create:s1".to_string(), "get:s1".to_string()]
