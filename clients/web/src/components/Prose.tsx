@@ -13,10 +13,18 @@ const Markdown = lazy(() => chunk);
  * (which for streaming output is usually indistinguishable), so there is no
  * visible flash.
  */
-export function Prose({ text }: { text: string }) {
+export function Prose({
+  text,
+  streaming = false,
+}: {
+  text: string;
+  /** Suppresses syntax highlighting until the text stops changing — see
+   *  `Markdown` for why that mattered enough to thread a flag down here. */
+  streaming?: boolean;
+}) {
   return (
     <Suspense fallback={<div className="prose whitespace-pre-wrap">{text}</div>}>
-      <Markdown text={text} />
+      <Markdown text={text} highlight={!streaming} />
     </Suspense>
   );
 }
