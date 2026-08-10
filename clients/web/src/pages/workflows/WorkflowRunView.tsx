@@ -8,6 +8,7 @@ import {
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { StepRunView, WorkflowRunGraph } from "../../api/types";
+import { RunStatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph, type NodeState } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
 import { useRetryStep, useWorkflowRun } from "../../hooks/useWorkflows";
@@ -94,24 +95,6 @@ function nodeState(runs: StepRunView[]): NodeState {
   }
 }
 
-const STATUS_TEXT: Record<string, string> = {
-  Pending: "Pending",
-  Running: "Running",
-  Suspended: "Suspended",
-  AwaitingInput: "Awaiting input",
-  Finished: "Finished",
-  Failed: "Failed",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  Pending: "text-faint",
-  Running: "text-amber-ink",
-  Suspended: "text-orange-ink",
-  AwaitingInput: "text-orange-ink",
-  Finished: "text-lamp-ok",
-  Failed: "text-red-ink",
-};
-
 interface Props {
   sessionId: string;
   onStop: () => void;
@@ -151,13 +134,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
       <header className="flex items-center gap-4 border-b px-6 py-3">
         <div className="min-w-0">
           <h1 className="page-title truncate">{graph.workflow}</h1>
-          <span
-            className={`text-xs ${STATUS_TONE[graph.status.type] ?? "text-faint"}`}
-            data-testid="run-status"
-            data-status={graph.status.type}
-          >
-            {STATUS_TEXT[graph.status.type] ?? graph.status.type}
-          </span>
+          <RunStatusBadge status={graph.status} />
         </div>
         <span className="ml-auto text-xs text-faint" data-testid="run-usage">
           {(graph.inputTokens + graph.outputTokens).toLocaleString()} tokens

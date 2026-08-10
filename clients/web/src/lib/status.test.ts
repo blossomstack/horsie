@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { SessionStatusKind } from "../api/types";
 import {
   progressionLabel,
+  runStatusMeta,
   showsProgression,
   statusMeta,
   TONE_TEXT,
@@ -56,5 +57,52 @@ describe("progression presentation", () => {
     expect(showsProgression("runtime_acquiring")).toBe(true);
     expect(showsProgression("scanning_workspace")).toBe(true);
     expect(showsProgression(undefined)).toBe(false);
+  });
+});
+
+describe("run presentation metadata", () => {
+  /** The whole point of the vocabulary: the three outcomes a person scanning a
+   * list of past runs is actually asking about have to be three different
+   * lamps, not one. */
+  it("gives success, failure and parked-on-a-question distinct lamps", () => {
+    const finished = runStatusMeta({ type: "Finished", value: {} });
+    const failed = runStatusMeta({ type: "Failed", value: {} });
+    const parked = runStatusMeta({ type: "AwaitingInput", value: {} });
+
+    expect(finished.tone).toBe("ready");
+    expect(failed.tone).toBe("fault");
+    expect(parked.tone).toBe("attention");
+    expect(
+      new Set([finished.label, failed.label, parked.label]).size,
+    ).toBe(3);
+    expect(
+      new Set([
+        TONE_TEXT[finished.tone],
+        TONE_TEXT[failed.tone],
+        TONE_TEXT[parked.tone],
+      ]).size,
+    ).toBe(3);
+  });
+
+  /** A run's lifecycle state is durable, so unlike a session's there is nothing
+   * to be unknown about: no run may read as the em dash a session shows when it
+   * is merely not loaded. */
+  it("labels every run state rather than falling back to an em dash", () => {
+    for (const type of [
+      "Pending",
+      "Running",
+      "Suspended",
+      "AwaitingInput",
+      "Finished",
+      "Failed",
+    ] as const) {
+      expect(runStatusMeta({ type, value: {} }).label).not.toBe("—");
+    }
+  });
+
+  it("animates only a run with a step actually working", () => {
+    expect(runStatusMeta({ type: "Running", value: {} }).busy).toBe(true);
+    expect(runStatusMeta({ type: "AwaitingInput", value: {} }).busy).toBe(false);
+    expect(runStatusMeta({ type: "Finished", value: {} }).busy).toBe(false);
   });
 });

@@ -18,6 +18,7 @@ use super::{
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::orchestrator::StepStart;
 use crate::sessions::spec::SessionStatus;
+use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
@@ -141,6 +142,33 @@ impl SessionActor {
             error,
         }]
     }
+
+    /// Tell the registry what lifecycle state this run has reached, so a
+    /// workflow's list of past runs can show it without loading them.
+    ///
+    /// Read off the folded state rather than announced at each transition, and
+    /// called only where the state has settled — after a persisted batch, and
+    /// once at load. So what the registry records is by construction what the
+    /// session journaled, and the two cannot drift apart by a missed call site.
+    ///
+    /// Gated on the *spec*, like `on_load`: a run whose first step has not
+    /// started yet has no `run` state, and `Pending` is precisely what it is.
+    /// The supervisor drops a report that changes nothing, so a session that
+    /// merely loads writes nothing.
+    pub(super) async fn report_run_status(&self, state: &SessionState) {
+        if self.spec.workflow.is_none() {
+            return;
+        }
+        let status = state.run.as_ref().map(|r| r.status).unwrap_or_default();
+        let _ = self
+            .parent
+            .tell(SessionSupervisorCommand::RunStatusChanged {
+                id: self.id.to_string(),
+                status,
+            })
+            .await;
+    }
+
     /// Re-run one execution from the log.
     ///
     /// Appends rather than truncating: earlier attempts stay readable, and the

@@ -789,8 +789,14 @@ impl EventSourcedActor for SessionActor {
     /// Write what just became durable into the agents' own transcripts, so a
     /// reader sees a lifecycle entry where it happened rather than having to
     /// infer it from the session's status.
+    ///
+    /// A run also reports the lifecycle state the batch left it in, which is
+    /// what lets the registry answer for it once it is cold. Here rather than at
+    /// each transition because here the write is already durable: the registry's
+    /// copy can lag the journal, never lead it.
     async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
         self.record_lifecycle(events, state).await;
+        self.report_run_status(state).await;
     }
 
     async fn handle_command(
@@ -863,6 +869,12 @@ impl EventSourcedActor for SessionActor {
         if !repairing {
             self.report(state.status.clone()).await;
         }
+        // A run reports its lifecycle state unconditionally, repairs or not: a
+        // repair need not persist anything, so waiting for one would leave a run
+        // that predates the registry keeping this recorded with nothing at all.
+        // The report is idempotent, and a repair that does persist reports again
+        // with the state it landed on.
+        self.report_run_status(state).await;
     }
 }
 

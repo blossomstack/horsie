@@ -124,6 +124,7 @@ pub async fn create_session(
         spec,
         created_at,
         annotations: BTreeMap::new(),
+        run_status: None,
     };
     Ok((
         StatusCode::CREATED,

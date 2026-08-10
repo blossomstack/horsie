@@ -1,4 +1,5 @@
 import { SessionStatusKind } from "../api/types";
+import type { WorkflowStatus } from "../api/types";
 
 /** Panel lamp colours. `live` is a value in motion, `attention` is a control
  * waiting on the operator, `fault` is a stopped machine, `idle` is a subdued
@@ -123,6 +124,72 @@ const SETTLED = new Set(["ready", "runtime_ready"]);
 /** Whether a stage is worth a line on screen. */
 export function showsProgression(stage: string | undefined): boolean {
   return stage !== undefined && !SETTLED.has(stage);
+}
+
+/** How a run reads on the panel.
+ *
+ * A run's lifecycle is not a session's: a session is idle between turns and a
+ * run is not, and a run is the only thing that can be finished. So it gets its
+ * own vocabulary over the same lamps — one place, because the run page and the
+ * workflow's list of past runs have to agree about what "Suspended" looks
+ * like. */
+const RUN_META: Record<WorkflowStatus["type"], RunStatusMeta> = {
+  Pending: {
+    label: "Pending",
+    tone: "off",
+    busy: false,
+    hint: "Created; no step has started yet.",
+  },
+  Running: {
+    label: "Running",
+    tone: "live",
+    busy: true,
+    hint: "A step is working.",
+  },
+  Suspended: {
+    label: "Suspended",
+    tone: "attention",
+    busy: false,
+    hint: "A step was interrupted — nothing runs until you retry it.",
+  },
+  AwaitingInput: {
+    label: "Awaiting input",
+    tone: "attention",
+    busy: false,
+    hint: "A step is parked on a question.",
+  },
+  Finished: {
+    label: "Finished",
+    tone: "ready",
+    busy: false,
+    hint: "The run reached a terminal step and carried its output out.",
+  },
+  Failed: {
+    label: "Failed",
+    tone: "fault",
+    busy: false,
+    hint: "The run ended on an error no retry clears by itself.",
+  },
+};
+
+export interface RunStatusMeta {
+  label: string;
+  tone: StatusTone;
+  busy: boolean;
+  hint: string;
+}
+
+/** A run always has one: unlike a session's, its lifecycle state is durable, so
+ * there is no unknown to fall back to. */
+export function runStatusMeta(status: WorkflowStatus): RunStatusMeta {
+  return (
+    RUN_META[status.type] ?? {
+      label: status.type,
+      tone: "off",
+      busy: false,
+      hint: "",
+    }
+  );
 }
 
 export const TONE_TEXT: Record<StatusTone, string> = {

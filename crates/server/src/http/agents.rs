@@ -175,6 +175,7 @@ pub async fn invoke_agent(
         spec,
         created_at,
         annotations: BTreeMap::new(),
+        run_status: None,
     };
     Ok((
         StatusCode::CREATED,

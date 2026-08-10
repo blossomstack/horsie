@@ -24,7 +24,8 @@ use horsie_models::workflow::{
     AwaitingInputStatus, FailedStatus, FinishedStatus, PendingStatus, RunEdge, RunNode,
     RunningStatus, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
     StepRunning, SuspendedStatus, WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph,
-    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunsResponse, WorkflowStatus, WorkflowView,
+    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunSummary, WorkflowRunsResponse,
+    WorkflowStatus, WorkflowView,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -242,11 +243,12 @@ pub async fn start_run(
         reply,
     })
     .await?;
-    // Just created, so it carries no annotations yet.
+    // Just created, so it carries no annotations yet, and no step has started.
     let rec = SessionRecord {
         spec,
         created_at,
         annotations: Default::default(),
+        run_status: Some(WorkflowRunStatus::Pending),
     };
     Ok((
         StatusCode::CREATED,
@@ -257,6 +259,14 @@ pub async fn start_run(
 }
 
 /// GET /api/workflows/:name/runs — this workflow's runs, newest first.
+///
+/// Each row carries the *run's* lifecycle state, not the session's. The session
+/// status is a cache of loaded sessions, and past runs are exactly the ones that
+/// are not loaded, so every row read `—`. The registry records a run's state
+/// durably as the run reports it, which is what lets this answer for a cold
+/// session — and asking each run's actor instead is not an option: loading a
+/// session re-attempts an interrupted provision, so rendering a list would wake
+/// and re-provision every run in it.
 pub async fn list_runs(
     Scope(state): Scope,
     Path(name): Path<String>,
@@ -265,13 +275,19 @@ pub async fn list_runs(
     // empty list that reads like "no runs yet".
     state.workflows.get(&name).await.map_err(api_err)?;
     let all = handlers::ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let mut sessions: Vec<_> = all
+    let mut runs: Vec<_> = all
         .iter()
         .filter(|(_, rec, _)| rec.spec.workflow_name() == Some(name.as_str()))
-        .map(|(id, rec, status)| handlers::summary(id, rec, status.as_ref()))
+        .map(|(id, rec, status)| WorkflowRunSummary {
+            session: handlers::summary(id, rec, status.as_ref()),
+            // A run whose first step has not started has nothing recorded yet,
+            // and `Pending` is what it is — the same default `get_run_graph`
+            // projects for a run with no state.
+            status: wire_status(rec.run_status.unwrap_or_default()),
+        })
         .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(WorkflowRunsResponse { sessions }))
+    runs.sort_by_key(|r| std::cmp::Reverse(r.session.created_at));
+    Ok(Json(WorkflowRunsResponse { runs }))
 }
 
 /// GET /api/sessions/:id/workflow — the run, projected onto its graph.

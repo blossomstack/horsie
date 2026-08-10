@@ -34,7 +34,7 @@ export function useWorkflowRuns(name: string | undefined) {
     queryFn: () => api.workflows.runs(name as string),
     enabled: !!name,
     refetchInterval: 5_000,
-    select: (r) => r.sessions,
+    select: (r) => r.runs,
   });
 }
 

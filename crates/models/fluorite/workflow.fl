@@ -92,8 +92,20 @@ struct WorkflowRunRequest {
 /// The session a run created. It is running by the time this is returned.
 struct WorkflowRunResponse { session: SessionSummary }
 
+/// One past run in a workflow's list.
+///
+/// The run's own `status` rather than the session's: a session reports a live
+/// status only while it is loaded, and nothing is loaded at boot — so a list of
+/// past runs read the session's and showed every one of them as unknown.
+/// A run's lifecycle state is durable, and telling success from failure from
+/// parked-on-a-question is the whole reason to look at this list.
+struct WorkflowRunSummary {
+    session: SessionSummary,
+    status: WorkflowStatus,
+}
+
 /// A workflow's runs, newest first.
-struct WorkflowRunsResponse { sessions: Vec<SessionSummary> }
+struct WorkflowRunsResponse { runs: Vec<WorkflowRunSummary> }
 
 /// Lifecycle of one run. `Suspended` means stopped part-way and resumable by
 /// retrying a step — cancelled, or a step interrupted by a restart. `Finished`

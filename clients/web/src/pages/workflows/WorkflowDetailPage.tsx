@@ -1,6 +1,6 @@
 import { Pencil, Play } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { StatusBadge } from "../../components/StatusBadge";
+import { RunStatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
 import { RailToggle } from "../../components/rail";
@@ -91,19 +91,23 @@ export function WorkflowDetailPage() {
             <p className="mt-2 text-sm text-faint">No runs yet.</p>
           ) : (
             <div className="mt-3 space-y-2">
-              {(runs ?? []).map((s) => (
+              {(runs ?? []).map((r) => (
                 <Link
-                  key={s.id}
-                  to={`/sessions/${s.id}`}
+                  key={r.session.id}
+                  to={`/sessions/${r.session.id}`}
                   className="flex items-center gap-3 rounded-[var(--radius-control)] border px-3 py-2"
                   data-testid="workflow-run-row"
                 >
                   <span className="min-w-0 flex-1 truncate text-sm text-legend">
-                    {s.name ?? s.id}
+                    {r.session.name ?? r.session.id}
                   </span>
-                  <StatusBadge status={s.status} />
+                  {/* The run's own lifecycle, not the session's. A session
+                      reports a status only while it is loaded, and a past run
+                      is precisely one that is not — so this column used to be
+                      an em dash on every row. */}
+                  <RunStatusBadge status={r.status} />
                   <span className="shrink-0 text-xs text-faint">
-                    {relativeTime(s.createdAt)}
+                    {relativeTime(r.session.createdAt)}
                   </span>
                 </Link>
               ))}

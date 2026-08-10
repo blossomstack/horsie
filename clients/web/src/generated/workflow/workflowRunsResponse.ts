@@ -1,8 +1,8 @@
 
-import { SessionSummary } from '../session';
+import { WorkflowRunSummary } from './workflowRunSummary';
 /**
  * A workflow's runs, newest first.
  */
 export interface WorkflowRunsResponse {
-  sessions: SessionSummary[];
+  runs: WorkflowRunSummary[];
 }

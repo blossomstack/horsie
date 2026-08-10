@@ -1,11 +1,18 @@
 //! The session registry: which sessions exist, which are loaded, and when a
 //! loaded one goes cold.
 //!
-//! What is persisted here is **existence only** — created, named, deleted.
-//! Status is not: the session's own journal is the truth for that, and this
-//! actor keeps a cache filled in when a session loads and reports in. So after
-//! a restart the list renders with every status unknown until someone opens a
-//! session, which is the honest thing to show.
+//! What is persisted here is a session's **existence and its settled facts** —
+//! created, named, deleted, and the outcome of a run. Live status is not: the
+//! session's own journal is the truth for that, and this actor keeps a cache
+//! filled in when a session loads and reports in. So after a restart the list
+//! renders with every status unknown until someone opens a session, which is
+//! the honest thing to show.
+//!
+//! A run's lifecycle state is the exception, and for the same reason a title is
+//! persisted: it is what a list of past runs is *for*, and the list must render
+//! without loading anything. It is still owned by the session — the session
+//! journals the transition and then reports it here — so this copy is a
+//! projection, never a source.
 //!
 //! Nothing is loaded at boot. A session actor is spawned the first time a
 //! command is addressed to it, and dropped again once it has been idle for
@@ -183,6 +190,14 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         status: SessionStatus,
     },
+    /// Internal: a run reports the lifecycle state it has reached, so the
+    /// registry can answer for it once it is cold. Fire-and-forget: the session
+    /// journals the transition itself, this is only the copy a list reads, and
+    /// a session that loads re-reports whatever it recovered.
+    RunStatusChanged {
+        id: SessionId,
+        status: crate::sessions::workflow::WorkflowRunStatus,
+    },
     /// Internal: a session actor requests a durable rename.
     RenameSession {
         id: SessionId,
@@ -272,6 +287,13 @@ pub enum SessionSupervisorEvent {
         set: BTreeMap<String, String>,
         remove: Vec<String>,
     },
+    /// A run reached a new lifecycle state. Journaled only when it differs from
+    /// what is already recorded, so a session that loads and reports the status
+    /// it recovered writes nothing.
+    RunStatusChanged {
+        id: SessionId,
+        status: crate::sessions::workflow::WorkflowRunStatus,
+    },
 }
 
 /// Why a rename was refused.
@@ -346,6 +368,22 @@ pub struct SessionRecord {
     /// default so pre-annotations journal rows load with an empty map.
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+    /// What became of this session's workflow run, for a session that is one.
+    ///
+    /// A durable copy of a fact the session's own journal owns, kept here for
+    /// exactly the reason the title is: a list has to render it without loading
+    /// the session. Loading is not free — it re-attempts an interrupted
+    /// provision — so a page showing thirty past runs must not be thirty
+    /// wake-ups.
+    ///
+    /// Unlike live status, an outcome is worth persisting: `Finished` and
+    /// `Failed` do not change on their own, and the states that can go stale
+    /// under a crash (`Running`) go stale identically in the session's own
+    /// journal, which also only learns better when it loads and repairs.
+    ///
+    /// `None` for a conversation, and for a run that predates this field.
+    #[serde(default)]
+    pub run_status: Option<crate::sessions::workflow::WorkflowRunStatus>,
 }
 
 /// One registered group. Registration is optional metadata: a group can exist
@@ -593,6 +631,7 @@ impl EventSourcedActor for SessionSupervisor {
                         spec,
                         created_at,
                         annotations: BTreeMap::new(),
+                        run_status: None,
                     },
                 );
             }
@@ -631,6 +670,11 @@ impl EventSourcedActor for SessionSupervisor {
                         rec.annotations.remove(key);
                     }
                     rec.annotations.extend(set);
+                }
+            }
+            SessionSupervisorEvent::RunStatusChanged { id, status } => {
+                if let Some(rec) = state.sessions.get_mut(&id) {
+                    rec.run_status = Some(status);
                 }
             }
         }
@@ -982,6 +1026,19 @@ impl EventSourcedActor for SessionSupervisor {
                 self.status.insert(id, status);
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::RunStatusChanged { id, status } => {
+                // Idempotent on purpose: every load of a run reports what it
+                // recovered, and only a real transition is worth a write.
+                match state.sessions.get(&id) {
+                    Some(rec) if rec.run_status != Some(status) => {
+                        CommandEffect::persist(vec![SessionSupervisorEvent::RunStatusChanged {
+                            id,
+                            status,
+                        }])
+                    }
+                    _ => CommandEffect::none(),
+                }
+            }
             SessionSupervisorCommand::RenameSession { id, name, reply } => {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
                     .and_ack(reply)
@@ -1139,6 +1196,7 @@ mod tests {
     use crate::sessions::clock::TestClock;
     use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
+    use crate::sessions::workflow::WorkflowRunStatus;
     use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
     use std::collections::HashMap;
 
@@ -1385,6 +1443,140 @@ mod tests {
             SessionSupervisorEvent::SessionDeleted { id: "s1".into() },
         );
         assert!(s.sessions.is_empty());
+    }
+
+    /// A run's outcome outlives the process that produced it.
+    ///
+    /// Live status deliberately does not — it is a cache of loaded sessions —
+    /// but a workflow's list of past runs is a list of sessions that are by
+    /// definition cold, so reading the cache showed every run as unknown. The
+    /// registry records the outcome the run reports, and answers from that.
+    #[tokio::test]
+    async fn a_runs_outcome_survives_a_restart() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+
+        let sup =
+            ActorSystem::new(journal.clone()).spawn_persistent(SessionSupervisor::with_config(
+                crate::auth::UserId::bootstrap(),
+                f.deps.clone(),
+                gtx.clone(),
+                manual_config(&clock),
+            ));
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        for status in [WorkflowRunStatus::Running, WorkflowRunStatus::Failed] {
+            let _ = sup
+                .tell(SessionSupervisorCommand::RunStatusChanged {
+                    id: id.clone(),
+                    status,
+                })
+                .await;
+        }
+        sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
+            .await
+            .unwrap();
+        let before = f.agent.signals();
+
+        let sup2 = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
+        let rows = sup2
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let (_, rec, status) = rows
+            .into_iter()
+            .find(|(row_id, _, _)| row_id == &id)
+            .expect("the session still exists");
+        assert_eq!(
+            rec.run_status,
+            Some(WorkflowRunStatus::Failed),
+            "the last outcome the run reported is the one the registry keeps"
+        );
+        assert!(
+            status.is_none(),
+            "the outcome must come from the registry, not from loading the session"
+        );
+        assert_eq!(
+            f.agent.signals(),
+            before,
+            "listing runs must not wake one, which would re-attempt its provision"
+        );
+    }
+
+    /// Reporting is idempotent, because every load of a run reports what it
+    /// recovered. Without this a page-open storm would journal a write per open.
+    #[tokio::test]
+    async fn re_reporting_the_same_outcome_journals_nothing() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let sup = spawn_supervisor_on(&f, journal.clone()).await;
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        let _ = sup
+            .tell(SessionSupervisorCommand::RunStatusChanged {
+                id: id.clone(),
+                status: WorkflowRunStatus::Finished,
+            })
+            .await;
+        // Round-trip so the write above is folded before the count is taken.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let pid = PersistenceId::new(
+            "session-supervisor",
+            crate::auth::UserId::bootstrap().as_str(),
+        );
+        let before = journal_len(&journal, &pid).await;
+
+        for _ in 0..3 {
+            let _ = sup
+                .tell(SessionSupervisorCommand::RunStatusChanged {
+                    id: id.clone(),
+                    status: WorkflowRunStatus::Finished,
+                })
+                .await;
+        }
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal_len(&journal, &pid).await,
+            before,
+            "an outcome that has not changed is not news"
+        );
+    }
+
+    async fn spawn_supervisor_on(
+        f: &Fixture,
+        journal: Arc<dyn Journal>,
+    ) -> ActorRef<SessionSupervisorCommand> {
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ))
+    }
+
+    async fn journal_len(journal: &Arc<dyn Journal>, pid: &PersistenceId) -> usize {
+        use futures_util::StreamExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only inspection of a journal whose actor is running"
+        )]
+        let stream = journal.replay(pid, 0).await;
+        stream.count().await
     }
 
     #[tokio::test]

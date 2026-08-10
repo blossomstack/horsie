@@ -2596,57 +2596,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     let client = reqwest::Client::new();
     let base = format!("http://{}", server.addr);
 
-    // A run resolves each step's preset and checks its model is still
-    // configured, so both have to exist over the wire rather than be injected.
-    // Pointing the provider at the mock is what `provider_at` already does, so
-    // swapping the live registry changes nothing but the route.
-    let res = client
-        .put(format!("{base}/api/config/model-providers/p"))
-        .json(&serde_json::json!({
-            "name": "p", "kind": "anthropic",
-            "baseUrl": mock.url(), "apiKey": "test-key"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 200, "configure the provider");
-    let res = client
-        .put(format!("{base}/api/config/models/mock"))
-        .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "configure the model a step runs"
-    );
-
-    let res = client
-        .post(format!("{base}/api/agents"))
-        .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
-
-    let res = client
-        .post(format!("{base}/api/workflows"))
-        .json(&serde_json::json!({
-            "name": "e2e-flow",
-            "start": "triage",
-            "steps": [
-                {
-                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
-                    "transitions": [{"to": "fix"}]
-                },
-                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
-            ]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 201, "create the definition");
+    define_e2e_workflow(&client, &base, &mock.url()).await;
 
     // Creating the run is what starts it: there is no message to send.
     let res = client
@@ -2743,6 +2693,156 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         "the retry appends, so the earlier attempt stays readable: {fix}"
     );
     assert_eq!(fix["runs"][1]["attempt"], serde_json::json!(2));
+
+    server.shutdown().await;
+}
+
+/// Everything a workflow run needs to exist before it can be started: the
+/// provider and model a step's preset names, the preset itself, and a two-step
+/// `e2e-flow` definition.
+///
+/// A run resolves each step's preset and checks its model is still configured,
+/// so all of it has to exist over the wire rather than be injected. Pointing the
+/// provider at the mock is what `provider_at` already does, so swapping the live
+/// registry changes nothing but the route.
+async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &str) {
+    let res = client
+        .put(format!("{base}/api/config/model-providers/p"))
+        .json(&serde_json::json!({
+            "name": "p", "kind": "anthropic",
+            "baseUrl": mock_url, "apiKey": "test-key"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200, "configure the provider");
+    let res = client
+        .put(format!("{base}/api/config/models/mock"))
+        .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "configure the model a step runs"
+    );
+
+    let res = client
+        .post(format!("{base}/api/agents"))
+        .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
+
+    let res = client
+        .post(format!("{base}/api/workflows"))
+        .json(&serde_json::json!({
+            "name": "e2e-flow",
+            "start": "triage",
+            "steps": [
+                {
+                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
+                    "transitions": [{"to": "fix"}]
+                },
+                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "create the definition");
+}
+
+/// A workflow's list of past runs says what became of each, for runs that are
+/// cold — which every past run is.
+///
+/// The list used to carry the *session's* status, a cache of loaded sessions
+/// that is empty at boot and cleared by the idle sweep. So every row rendered an
+/// em dash and a finished run, a failed one and one parked on a question were
+/// indistinguishable. Reading it per row through the session actor is not the
+/// fix either: loading a session re-attempts an interrupted provision, so the
+/// vendor must hear nothing at all from a list request.
+#[tokio::test]
+async fn a_workflows_run_list_reports_the_outcome_of_a_cold_run() {
+    let mock = MockLlmServer::builder().build().await;
+    for _ in 0..4 {
+        mock.queue_response("step done");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let clock = Arc::new(TestClock::new());
+    let server = start_server_with(
+        tmp.path(),
+        Some(agent.link()),
+        &mock.url(),
+        Some(clock.clone()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", server.addr);
+    define_e2e_workflow(&client, &base, &mock.url()).await;
+
+    let res = client
+        .post(format!("{base}/api/workflows/e2e-flow/runs"))
+        .json(&serde_json::json!({
+            "input": "the build is red",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "start a run");
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    let graph_url = format!("{base}/api/sessions/{id}/workflow");
+    wait_for_run_status(&client, &graph_url, "Finished").await;
+
+    // Let it go cold. This is the state every run on the page is in: nothing is
+    // loaded at boot either, and the idle sweep gets whatever is.
+    clock.advance(Duration::from_secs(600));
+    let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
+    wait_until("the finished run to be unloaded", async || {
+        agent
+            .signals()
+            .contains(&format!("hibernate:{id}"))
+            .then_some(())
+    })
+    .await;
+    let before = agent.signals();
+
+    let res = client
+        .get(format!("{base}/api/workflows/e2e-flow/runs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200, "list the workflow's runs");
+    let body: serde_json::Value = res.json().await.unwrap();
+    let row = body["runs"]
+        .as_array()
+        .expect("the list is keyed by run")
+        .iter()
+        .find(|r| r["session"]["id"] == serde_json::json!(id))
+        .unwrap_or_else(|| panic!("the run is missing from its workflow's list: {body}"));
+    assert_eq!(
+        row["status"]["type"],
+        serde_json::json!("Finished"),
+        "a cold run still knows how it ended: {body}"
+    );
+    assert_eq!(
+        row["session"]["status"],
+        serde_json::Value::Null,
+        "the outcome has to be the run's own, not a loaded session's: {body}"
+    );
+    assert_eq!(
+        agent.signals(),
+        before,
+        "listing runs woke one, which re-attempts its provision"
+    );
 
     server.shutdown().await;
 }
