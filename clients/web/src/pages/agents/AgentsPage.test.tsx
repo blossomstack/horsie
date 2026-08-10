@@ -3,11 +3,13 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentView } from "../../api/types";
+import { answerConfirm, confirmSnapshot, resetConfirm } from "../../lib/confirm";
 import { AgentsPage } from "./AgentsPage";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
+afterEach(resetConfirm);
 
 const remove = vi.fn(async (_name: string) => {});
 const list = vi.fn(async (): Promise<AgentView[]> => agents);
@@ -64,12 +66,10 @@ describe("AgentsPage", () => {
   });
 
   it("deletes the named agent once the confirm is accepted", async () => {
-    const confirm = vi
-      .spyOn(window, "confirm")
-      .mockImplementation(() => true);
     const { findByTestId } = renderPage();
     fireEvent.click(await findByTestId("delete-agent-fixer"));
+    expect(confirmSnapshot()?.message).toContain("fixer");
+    answerConfirm(true);
     await waitFor(() => expect(remove).toHaveBeenCalledWith("fixer"));
-    confirm.mockRestore();
   });
 });

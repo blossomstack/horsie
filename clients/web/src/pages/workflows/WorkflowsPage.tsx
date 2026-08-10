@@ -1,6 +1,8 @@
 import { Plus, Trash2 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { relativeTime } from "../../lib/format";
+import { askConfirm } from "../../lib/confirm";
+import { RailToggle } from "../../components/rail";
 import { useDeleteWorkflow, useWorkflows } from "../../hooks/useWorkflows";
 
 export function WorkflowsPage() {
@@ -11,6 +13,7 @@ export function WorkflowsPage() {
   return (
     <div className="flex h-full flex-col" data-testid="workflows-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">Workflows</h1>
         <button
           className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
@@ -63,11 +66,11 @@ export function WorkflowsPage() {
                 title={`Delete ${w.name}`}
                 aria-label={`Delete ${w.name}`}
                 data-testid="delete-workflow"
-                onClick={() => {
+                onClick={async () => {
                   // Runs are sessions in their own right and survive this, each
                   // carrying the graph it started with.
                   if (
-                    window.confirm(
+                    await askConfirm(
                       `Delete workflow "${w.name}"? Its runs stay in the session rail.`,
                     )
                   ) {

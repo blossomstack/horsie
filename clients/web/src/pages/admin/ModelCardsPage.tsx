@@ -11,6 +11,7 @@ import {
 import { compactNumber } from "../../lib/format";
 import { ListRow, RowAction, RowLabel, Section, SettingsPane } from "../settings/fields";
 import { SettingsHeader } from "../settings/SettingsHeader";
+import { askConfirm } from "../../lib/confirm";
 
 export function ModelCardsPage() {
   return (
@@ -160,11 +161,11 @@ function DeleteCardAction({ card }: { card: ModelCard }) {
       label={`Delete ${card.name}`}
       danger
       disabled={remove.isPending}
-      onClick={() => {
+      onClick={async () => {
         if (
-          !confirm(
+          !(await askConfirm(
             `Delete model card "${card.modelId}"? Models already configured keep their current values.`,
-          )
+          ))
         )
           return;
         remove.mutate(card.modelId);

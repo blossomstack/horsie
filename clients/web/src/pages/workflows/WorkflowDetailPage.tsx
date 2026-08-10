@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
+import { RailToggle } from "../../components/rail";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
 
 /**
@@ -35,6 +36,7 @@ export function WorkflowDetailPage() {
   return (
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">{workflow.name}</h1>
         <Link
           to={`/workflows/${encodeURIComponent(workflow.name)}/edit`}

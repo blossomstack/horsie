@@ -35,8 +35,8 @@ test("D2: delete a session removes it and navigates away", async ({ page, appBas
   await createSession(page, appBase);
   const id = await sendMessage(page, "to delete");
 
-  page.on("dialog", (d) => d.accept()); // auto-accept the native confirm()
   await page.getByTestId("session-delete").click();
+  await page.getByTestId("confirm-accept").click();
 
   await page.waitForURL((url) => url.pathname === "/");
   await expect(

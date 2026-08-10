@@ -112,8 +112,8 @@ test("Q3: deleting a routine takes its runs with it", async ({
   const { session } = (await run.json()) as { session: { id: string } };
 
   await page.goto(`${appBase}/routines`);
-  page.on("dialog", (d) => void d.accept());
   await page.getByTestId("delete-routine-e2e-doomed").click();
+  await page.getByTestId("confirm-accept").click();
   await expect(
     page.locator('[data-testid="routine-row"][data-routine-name="e2e-doomed"]'),
   ).toHaveCount(0);

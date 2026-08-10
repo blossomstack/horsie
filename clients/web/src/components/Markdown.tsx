@@ -33,6 +33,30 @@ const HIGHLIGHT_MAX_CHARS = 40_000;
  * highlighted above [`HIGHLIGHT_MAX_CHARS`]. The finished message highlights
  * once, which is the only render anyone actually reads.
  */
+/**
+ * Blocks that carry the reply's own text, and therefore its own direction.
+ *
+ * react-markdown emits a bare `<p>`, which inherits the app's `ltr`, so an
+ * Arabic or Hebrew reply rendered flush left: the browser's bidi algorithm got
+ * the word order right and the paragraph still read as visibly wrong to anyone
+ * who reads that way. `dir="auto"` puts each block in the direction of its own
+ * first strong character, which is per block rather than per message — a reply
+ * that quotes English inside Hebrew gets both right.
+ */
+const directionalComponents = {
+  p: (props: object) => <p dir="auto" {...props} />,
+  li: (props: object) => <li dir="auto" {...props} />,
+  h1: (props: object) => <h1 dir="auto" {...props} />,
+  h2: (props: object) => <h2 dir="auto" {...props} />,
+  h3: (props: object) => <h3 dir="auto" {...props} />,
+  h4: (props: object) => <h4 dir="auto" {...props} />,
+  h5: (props: object) => <h5 dir="auto" {...props} />,
+  h6: (props: object) => <h6 dir="auto" {...props} />,
+  blockquote: (props: object) => <blockquote dir="auto" {...props} />,
+  td: (props: object) => <td dir="auto" {...props} />,
+  th: (props: object) => <th dir="auto" {...props} />,
+};
+
 const Markdown = memo(function Markdown({
   text,
   highlight = true,
@@ -50,8 +74,17 @@ const Markdown = memo(function Markdown({
           highlighting ? [[rehypeHighlight, { ignoreMissing: true }]] : []
         }
         components={{
+          ...directionalComponents,
           a: (props) => (
             <a {...props} target="_blank" rel="noreferrer noopener" />
+          ),
+          // A wide table used to push the whole transcript column sideways, so
+          // recovering one cell meant dragging every other message with it.
+          // The scroll belongs to the table, not to the conversation.
+          table: (props) => (
+            <div className="prose-scroll">
+              <table {...props} />
+            </div>
           ),
         }}
       >

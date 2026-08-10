@@ -22,6 +22,7 @@ import {
 import { useCreateGroup, useGroupList } from "../hooks/useGroups";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionList } from "../hooks/useSessions";
+import { sessionTitle } from "../lib/format";
 import { SessionGroupSection } from "./SessionGroupSection";
 import { ThemeToggle } from "./ThemeToggle";
 
@@ -107,6 +108,20 @@ export function Sidebar() {
           : undefined,
     },
   );
+  // Which sections are shut. Persisted for the same reason the order is: an
+  // arrangement that half survives a reload is worse than one that does not,
+  // and collapsing a group is how a 41-session rail is made readable at all.
+  const [collapsed, setCollapsed] = usePersistentState<string[]>(
+    "horsie.session-groups-collapsed",
+    [],
+    {
+      deserialize: (raw) =>
+        Array.isArray(raw) && raw.every((x) => typeof x === "string")
+          ? (raw as string[])
+          : undefined,
+    },
+  );
+  const [filter, setFilter] = useState("");
   const groups = useMemo(
     () => unionGroups(registeredGroups ?? [], sessions ?? []),
     [registeredGroups, sessions],
@@ -115,9 +130,21 @@ export function Sidebar() {
     () => reconcileOrder(savedOrder, groups),
     [savedOrder, groups],
   );
+  // Filtering happens before partitioning, so a group whose every session is
+  // filtered out disappears with them rather than sitting there empty.
+  const needle = filter.trim().toLowerCase();
+  const shown = useMemo(() => {
+    if (!needle) return sessions ?? [];
+    return (sessions ?? []).filter((s) =>
+      [sessionTitle(s.name), s.workflow ?? ""]
+        .join(" ")
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [sessions, needle]);
   const parts = useMemo(
-    () => partitionSessions(sessions ?? [], groups),
-    [sessions, groups],
+    () => partitionSessions(shown, groups),
+    [shown, groups],
   );
   const navigate = useNavigate();
 
@@ -217,6 +244,24 @@ export function Sidebar() {
         </div>
       </div>
 
+      {/* Only once there is enough to search. Below that the box is a control
+          with nothing to do, taking rail height from the list itself. */}
+      {(sessions?.length ?? 0) > 8 && (
+        <div className="px-2 pb-1.5">
+          <input
+            className="w-full rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none placeholder:text-faint focus:border-[var(--rule-strong)]"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setFilter("");
+            }}
+            placeholder="Filter sessions…"
+            aria-label="Filter sessions"
+            data-testid="session-filter"
+          />
+        </div>
+      )}
+
       <nav
         className="flex-1 space-y-px overflow-y-auto px-2 pb-2"
         aria-label="Sessions"
@@ -277,15 +322,35 @@ export function Sidebar() {
             </button>
           </div>
         )}
+        {/* A filter that matches nothing has to say so, or it reads as an
+            account whose sessions have gone. */}
+        {!isLoading && !isError && needle !== "" && shown.length === 0 && (
+          <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
+            No session matches “{filter.trim()}”.
+          </p>
+        )}
         {!isLoading &&
           !isError &&
-          ordered.map((g) => (
+          ordered
+            // While filtering, a section with no surviving rows is noise.
+            .filter((g) => needle === "" || (parts.get(g)?.length ?? 0) > 0)
+            .map((g) => (
             <SessionGroupSection
               key={g}
               name={g}
               sessions={parts.get(g) ?? []}
               groups={groups}
               ungrouped={g === UNGROUPED}
+              // A filter that hides its matches inside a collapsed group has
+              // found nothing as far as the user is concerned.
+              collapsed={needle === "" && collapsed.includes(g)}
+              onToggleCollapsed={() =>
+                setCollapsed(
+                  collapsed.includes(g)
+                    ? collapsed.filter((x) => x !== g)
+                    : [...collapsed, g],
+                )
+              }
               // Until a group exists there is nothing to be un-grouped from,
               // so the Ungrouped header would be a label with no job — and
               // grouping chrome nobody asked for. The rows render bare, and

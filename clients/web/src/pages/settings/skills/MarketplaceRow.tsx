@@ -7,6 +7,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useState } from "react";
+import { askConfirm } from "../../../lib/confirm";
 import type { MarketplaceView } from "../../../api/types";
 import {
   useInstallPlugin,
@@ -92,10 +93,11 @@ export function MarketplaceRow({
           </button>
           <button
             className="key-icon shrink-0 text-faint hover:text-red-ink"
-            onClick={() => {
+            onClick={async () => {
               if (
-                confirm(
+                await askConfirm(
                   `Remove marketplace "${marketplace.name}"? Bundles installed from it stay installed.`,
+                  "Remove",
                 )
               )
                 remove.mutate(marketplace.name);

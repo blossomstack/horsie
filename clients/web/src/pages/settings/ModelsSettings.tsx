@@ -27,6 +27,7 @@ import {
   TextField,
 } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { askConfirm } from "../../lib/confirm";
 
 type ProviderKind = "anthropic" | "openai" | "openai-responses" | "chatgpt";
 
@@ -280,7 +281,7 @@ export function ModelsSettings() {
           .join(", ")}. Delete or move ${many ? "them" : "it"} first.`,
       );
     }
-    if (!confirm(`Delete provider “${name}”?`)) return;
+    if (!(await askConfirm(`Delete provider “${name}”?`))) return;
     try {
       await removeProvider.mutateAsync(name);
     } catch (e) {
@@ -317,7 +318,7 @@ export function ModelsSettings() {
 
   const deleteModel = async (alias: string) => {
     setLocalError(null);
-    if (!confirm(`Delete model “${alias}”?`)) return;
+    if (!(await askConfirm(`Delete model “${alias}”?`))) return;
     try {
       await removeModel.mutateAsync(alias);
     } catch (e) {

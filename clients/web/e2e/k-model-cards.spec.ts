@@ -48,9 +48,9 @@ test.describe("model cards", () => {
     await page.reload();
     await expect(page.getByTestId("model-card-row-e2e-model-1")).toBeVisible();
 
-    // Delete (accept the confirm dialog).
-    page.on("dialog", (d) => d.accept());
+    // Delete (accept the in-app confirm).
     await page.getByTestId("model-card-delete-e2e-model-1").click();
+    await page.getByTestId("confirm-accept").click();
     await expect(page.getByTestId("model-card-row-e2e-model-1")).toHaveCount(0);
   });
 

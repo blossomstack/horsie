@@ -2,6 +2,8 @@ import { Plus, Trash2 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import type { RoutineView } from "../../api/types";
 import { relativeTime } from "../../lib/format";
+import { askConfirm } from "../../lib/confirm";
+import { RailToggle } from "../../components/rail";
 import { describeSchedule } from "../../lib/schedule";
 import { useDeleteRoutine, useRoutines } from "../../hooks/useRoutines";
 
@@ -21,6 +23,7 @@ export function RoutinesPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button
           className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
@@ -85,9 +88,9 @@ export function RoutinesPage() {
                 className="rounded-[var(--radius-chip)] p-1.5 text-faint hover:bg-raised hover:text-red-ink"
                 title={`Delete ${r.name}`}
                 data-testid={`delete-routine-${r.name}`}
-                onClick={() => {
+                onClick={async () => {
                   if (
-                    window.confirm(
+                    await askConfirm(
                       `Delete routine '${r.name}' and every session it created?`,
                     )
                   )

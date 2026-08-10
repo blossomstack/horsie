@@ -290,4 +290,35 @@ describe("RoutineEditPage", () => {
       ).toBe("false");
     }
   });
+  // Save used to stay enabled directly beneath the client's own "the shortest
+  // interval is 1 minute": the validity chain fell through to the *calendar*
+  // rule, which an `Every` schedule does not use and which was trivially true.
+  it("blocks saving an interval shorter than the minimum", async () => {
+    const utils = renderNew();
+    const { findByTestId, getByTestId } = utils;
+    fireEvent.change(await findByTestId("routine-name-input"), {
+      target: { value: "too-fast" },
+    });
+    fireEvent.change(getByTestId("routine-agent-select"), {
+      target: { value: "reviewer" },
+    });
+    fireEvent.change(getByTestId("routine-prompt-input"), {
+      target: { value: "poll" },
+    });
+    fireEvent.change(getByTestId("routine-schedule-kind"), {
+      target: { value: "Every" },
+    });
+    await chooseEnvironment(utils);
+
+    const save = getByTestId("save-routine-button") as HTMLButtonElement;
+    fireEvent.change(getByTestId("routine-interval-minutes"), {
+      target: { value: "0" },
+    });
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(getByTestId("routine-interval-minutes"), {
+      target: { value: "5" },
+    });
+    expect(save.disabled).toBe(false);
+  });
 });

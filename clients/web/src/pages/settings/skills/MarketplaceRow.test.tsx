@@ -1,11 +1,13 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MarketplaceView } from "../../../api/types";
+import { answerConfirm, confirmSnapshot, resetConfirm } from "../../../lib/confirm";
 import { MarketplaceRow } from "./MarketplaceRow";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
+afterEach(resetConfirm);
 
 const install = vi.fn();
 const refresh = vi.fn();
@@ -115,12 +117,11 @@ describe("MarketplaceRow", () => {
 
   // Removing a source is not removing the software, and the confirm has to say
   // so — otherwise it reads like an uninstall.
-  it("says installed bundles survive before removing a source", () => {
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("says installed bundles survive before removing a source", async () => {
     render(<MarketplaceRow marketplace={market()} expanded onToggle={() => {}} />);
     fireEvent.click(screen.getByLabelText("Remove marketplace"));
-    expect(confirmSpy.mock.calls[0]?.[0]).toContain("stay installed");
-    expect(remove).toHaveBeenCalledWith("official");
-    confirmSpy.mockRestore();
+    expect(confirmSnapshot()?.message).toContain("stay installed");
+    answerConfirm(true);
+    await waitFor(() => expect(remove).toHaveBeenCalledWith("official"));
   });
 });

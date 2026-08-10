@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { RailToggle } from "../../components/rail";
 import { ApiRequestError } from "../../api/client";
 import type { RoutineInput, RoutineSchedule, RoutineView } from "../../api/types";
 import { Weekday } from "../../api/types";
@@ -142,11 +143,19 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
     (kind !== "Weekly" || weekdays.size > 0) &&
     (kind !== "Monthly" || dayValid) &&
     (kind !== "Yearly" || (month >= 1 && month <= 12 && dayValid));
+  // One arm per kind, not a chain of ORs. As a chain, an `Every` schedule with
+  // a too-short interval failed its own arm and then fell through to
+  // `calendarValid` — which is about a time-of-day and a timezone `Every` does
+  // not use, so it was true and Save stayed enabled directly beneath the
+  // client's own "the shortest interval is 1 minute".
   const scheduleValid =
-    kind === "Manual" ||
-    (kind === "Every" && intervalSecs >= MIN_INTERVAL_SECS) ||
-    (kind === "Once" && !Number.isNaN(fromLocalInputValue(atLocal))) ||
-    calendarValid;
+    kind === "Manual"
+      ? true
+      : kind === "Every"
+        ? intervalSecs >= MIN_INTERVAL_SECS
+        : kind === "Once"
+          ? !Number.isNaN(fromLocalInputValue(atLocal))
+          : calendarValid;
   const canSave =
     !busy &&
     routineName.trim() !== "" &&
@@ -226,7 +235,8 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="routine-edit-page">
-      <div className="border-b px-6 py-4">
+      <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">
           {editing ? `Edit ${initial.name}` : "New routine"}
         </h1>
