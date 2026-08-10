@@ -368,6 +368,20 @@ pub fn app(state: AppState) -> Router {
         Some(dir) => api
             .nest_service("/assets", ServeDir::new(dir.join("assets")))
             .route_service("/favicon.svg", ServeFile::new(dir.join("favicon.svg")))
+            // An unmatched `/api/*` path answers `404` in JSON rather than
+            // falling through to the shell below. It used to serve
+            // `200 text/html`, so a consumer checking status codes parsed an
+            // HTML document as success — a typo in a path looked like an empty
+            // result. A catch-all is matchit's lowest priority, so every real
+            // route above still wins.
+            .route(
+                "/api/{*rest}",
+                axum::routing::any(|| async {
+                    axum::response::IntoResponse::into_response(error::Api::not_found(
+                        "no such API route",
+                    ))
+                }),
+            )
             .fallback_service(ServeFile::new(dir.join("index.html"))),
         None => api,
     }
@@ -2424,6 +2438,42 @@ mod tests {
         let app = app(state);
 
         let res = app.oneshot(get("/settings")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_api_path_is_a_json_404_not_the_spa_shell() {
+        // The SPA fallback used to swallow `/api/*` too, so a mistyped path
+        // answered `200 text/html` and a consumer checking status codes parsed
+        // an HTML document as success.
+        let tmp = tempfile::tempdir().unwrap();
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(web.join("assets")).unwrap();
+        std::fs::write(web.join("index.html"), "<html>app</html>").unwrap();
+        std::fs::write(web.join("favicon.svg"), "<svg/>").unwrap();
+
+        let (mut state, _pw) = auth_state(&tmp).await;
+        state.web_dir = Some(web);
+        let app = app(state);
+
+        let res = app.clone().oneshot(get("/api/nope")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            res.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+        );
+
+        // A real route still wins over the catch-all: matchit ranks a literal
+        // segment above a wildcard, but that is worth pinning rather than
+        // trusting.
+        let res = app.clone().oneshot(get("/api/health")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // And a client-side route still gets the shell, or a hard refresh on
+        // `/sessions/:id` would 404.
+        let res = app.oneshot(get("/sessions/abc")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
