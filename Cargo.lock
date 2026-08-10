@@ -1574,14 +1574,14 @@ dependencies = [
 [[package]]
 name = "horsie-actor"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c9368b5b1676b76d9aef3ffd7f8c5c4cb109e66f027c109a3711eba6f05060"
 dependencies = [
  "async-trait",
  "futures-util",
- "horsie-actor",
  "parking_lot",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
