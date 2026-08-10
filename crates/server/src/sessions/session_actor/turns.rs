@@ -453,6 +453,7 @@ mod tests {
                     reason: "runtime gone".into(),
                 })
                 .unwrap()],
+                None,
             )
             .await
             .unwrap();

@@ -123,7 +123,7 @@ async fn seed(journal: &Arc<InMemoryJournal>, session_id: uuid::Uuid, events: &[
         .map(|e| serde_json::to_vec(e).unwrap())
         .collect();
     journal
-        .persist(&AgentActor::persistence_id_for(session_id), &encoded)
+        .persist(&AgentActor::persistence_id_for(session_id), &encoded, None)
         .await
         .unwrap();
 }

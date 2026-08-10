@@ -1465,6 +1465,7 @@ mod tests {
             .persist(
                 &pid,
                 &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                None,
             )
             .await
             .unwrap();

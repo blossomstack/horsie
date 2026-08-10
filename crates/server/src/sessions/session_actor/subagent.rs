@@ -616,7 +616,7 @@ mod tests {
         .iter()
         .map(|e| serde_json::to_vec(e).unwrap())
         .collect();
-        journal.persist(&pid, &events).await.unwrap();
+        journal.persist(&pid, &events, None).await.unwrap();
 
         // Loading must start no runs: C stays owed until someone acts.
         let parent = spawn_deaf_supervisor();

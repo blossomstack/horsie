@@ -31,7 +31,7 @@ argon2            = "0.5"
 # third-party crate. Declared here rather than per-crate so both consumers move
 # in lockstep — two members on different versions would be two incompatible
 # `Journal` traits.
-horsie-actor      = "0.3"
+horsie-actor      = "0.7"
 # Protocol modules are opt-in per crate: `anthropic`, `openai`, `responses`,
 # `mock`. TLS is picked here so every member links the same reqwest backend.
 async-llm         = { version = "0.10.0", default-features = false, features = ["rustls"] }

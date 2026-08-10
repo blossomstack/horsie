@@ -417,8 +417,11 @@ async fn journals_are_isolated() {
     let theirs = SqlJournal::new(db, b);
     let pid = PersistenceId::new("session", "same-id");
 
-    mine.persist(&pid, &[b"mine".to_vec()]).await.unwrap();
-    theirs.persist(&pid, &[b"theirs".to_vec()]).await.unwrap();
+    mine.persist(&pid, &[b"mine".to_vec()], None).await.unwrap();
+    theirs
+        .persist(&pid, &[b"theirs".to_vec()], None)
+        .await
+        .unwrap();
 
     async fn read(j: &SqlJournal, pid: &PersistenceId) -> Vec<Vec<u8>> {
         let mut out = Vec::new();

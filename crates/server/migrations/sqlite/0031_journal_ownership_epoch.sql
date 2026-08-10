@@ -1,0 +1,17 @@
+-- Ownership generation per log, for hosting an actor on more than one machine.
+--
+-- A host claims a log before serving it, which bumps this number and returns it.
+-- Every subsequent write carries the number it claimed at, and a write carrying
+-- a lower one is rejected *in the same transaction as the append* — so a host
+-- that lost the log without being told cannot merge its writes into the history
+-- somebody else is now building.
+--
+-- It lives here rather than in whatever decides placement because this table is
+-- already durable. A generation minted by an in-memory election would reset to
+-- zero after a total restart while this log still remembered a higher one, and
+-- then every write would be fenced out forever: safe, and permanently wedged.
+--
+-- 0 means "never claimed", which is also what every existing log gets. That is
+-- correct: a single-process deployment passes no fence at all, and those writes
+-- are admitted unconditionally.
+ALTER TABLE journal_logs ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0;

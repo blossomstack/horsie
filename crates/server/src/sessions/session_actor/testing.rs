@@ -564,8 +564,9 @@ impl horsie_actor::Journal for CountingJournal {
         &self,
         pid: &horsie_actor::PersistenceId,
         events: &[Vec<u8>],
+        fence: Option<horsie_actor::Epoch>,
     ) -> horsie_actor::JournalResult<()> {
-        self.inner.persist(pid, events).await
+        self.inner.persist(pid, events, fence).await
     }
 
     #[expect(
@@ -587,8 +588,9 @@ impl horsie_actor::Journal for CountingJournal {
         pid: &horsie_actor::PersistenceId,
         state: Vec<u8>,
         seq_nr: u64,
+        fence: Option<horsie_actor::Epoch>,
     ) -> horsie_actor::JournalResult<()> {
-        self.inner.save_snapshot(pid, state, seq_nr).await
+        self.inner.save_snapshot(pid, state, seq_nr, fence).await
     }
 
     async fn latest_snapshot(
@@ -612,6 +614,20 @@ impl horsie_actor::Journal for CountingJournal {
         to: &horsie_actor::PersistenceId,
     ) -> horsie_actor::JournalResult<()> {
         self.inner.copy_snapshot(from, to).await
+    }
+
+    async fn claim_ownership(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<horsie_actor::Epoch> {
+        self.inner.claim_ownership(pid).await
+    }
+
+    async fn current_epoch(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<Option<horsie_actor::Epoch>> {
+        self.inner.current_epoch(pid).await
     }
 
     async fn clear(&self, pid: &horsie_actor::PersistenceId) -> horsie_actor::JournalResult<()> {
