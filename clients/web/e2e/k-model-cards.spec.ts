@@ -114,4 +114,37 @@ test.describe("model cards", () => {
     ).toHaveValue("1048576");
     expect(await providerRow.textContent()).toBe(before);
   });
+  // Editing a card used to wipe `thinkingEfforts`, `defaultThinkingEffort` and
+  // `thinkingDialect`: a full-replacement PUT plus a form that could not
+  // display those three fields. `seed_if_missing` never repairs an existing
+  // row, so one operator bumping a max-token count destroyed a model's
+  // thinking config permanently, with no way to restore it in the product.
+  test("editing an unrelated field keeps the card's thinking config", async ({
+    page,
+    appBase,
+  }) => {
+    await page.goto(`${appBase}/admin/model-cards`);
+
+    const row = page.getByTestId("model-card-row-claude-sonnet-4-6");
+    await row.getByTestId("model-card-info-claude-sonnet-4-6").click();
+    await expect(row).toContainText("anthropic_effort");
+
+    // Change one thing that has nothing to do with thinking — the exact
+    // sequence that used to destroy it.
+    await row.getByTestId("model-card-edit-claude-sonnet-4-6").click();
+    const editor = page.getByTestId("model-card-editor-claude-sonnet-4-6");
+    // The editor can now see them at all, which is the other half of the fix.
+    await expect(editor.getByTestId("model-card-dialect")).toHaveValue(
+      "anthropic_effort",
+    );
+    await editor.getByLabel("Max tokens (optional)").fill("32768");
+    await editor.getByTestId("model-card-save").click();
+
+    await page.reload();
+    const after = page.getByTestId("model-card-row-claude-sonnet-4-6");
+    await after.getByTestId("model-card-info-claude-sonnet-4-6").click();
+    await expect(after).toContainText("anthropic_effort");
+    // And the efforts survived too, not just the dialect.
+    await expect(after).not.toContainText("Thinking efforts —");
+  });
 });

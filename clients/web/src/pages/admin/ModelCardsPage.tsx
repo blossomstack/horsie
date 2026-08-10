@@ -174,6 +174,33 @@ function DeleteCardAction({ card }: { card: ModelCard }) {
   );
 }
 
+/**
+ * The canonical thinking values, mirrored from `crates/agentcore/src/thinking.rs`
+ * (`ThinkingEffort::parse` and `ThinkingDialect::parse`). A card carrying
+ * anything else is data the server should never have accepted, so the editor
+ * shows it rather than silently dropping it — losing it on save is the bug this
+ * whole change exists to stop.
+ */
+const THINKING_EFFORTS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+
+const THINKING_DIALECTS = [
+  "anthropic_effort",
+  "anthropic_always_on",
+  "anthropic_budget",
+  "openai_effort",
+  "zai_thinking",
+  "kimi_thinking",
+  "none",
+] as const;
+
 /** The editor, for both a new (unsaved) and an existing card. Save creates or
  * updates immediately. The model id is the id of record, so it is fixed once
  * saved. */
@@ -200,9 +227,47 @@ function ModelCardEditor({
   const [forcedToolsDisableThinking, setForcedToolsDisableThinking] = useState(
     card?.forcedToolsDisableThinking ?? false,
   );
+  const [thinkingEfforts, setThinkingEfforts] = useState<string[]>(
+    card?.thinkingEfforts ?? [],
+  );
+  const [defaultThinkingEffort, setDefaultThinkingEffort] = useState(
+    card?.defaultThinkingEffort ?? "",
+  );
+  const [thinkingDialect, setThinkingDialect] = useState(
+    card?.thinkingDialect ?? "",
+  );
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const touch = () => setDirty(true);
+
+  // A stored value the canonical list does not contain still gets an option,
+  // so opening and saving a card cannot quietly discard it.
+  const effortOptions = [
+    ...THINKING_EFFORTS,
+    ...thinkingEfforts.filter(
+      (e) => !THINKING_EFFORTS.includes(e as (typeof THINKING_EFFORTS)[number]),
+    ),
+  ];
+  const dialectOptions = [
+    ...THINKING_DIALECTS,
+    ...(thinkingDialect &&
+    !THINKING_DIALECTS.includes(
+      thinkingDialect as (typeof THINKING_DIALECTS)[number],
+    )
+      ? [thinkingDialect]
+      : []),
+  ];
+
+  const toggleEffort = (effort: string) => {
+    setThinkingEfforts((current) =>
+      current.includes(effort)
+        ? current.filter((e) => e !== effort)
+        : // Kept in canonical order, which the wire type documents as
+          // ascending — a card is read as a range, not a set.
+          effortOptions.filter((e) => e === effort || current.includes(e)),
+    );
+    touch();
+  };
 
   const parseNum = (s: string): number | undefined =>
     s.trim() === "" ? undefined : Number(s);
@@ -226,6 +291,9 @@ function ModelCardEditor({
           contextWindow: parseNum(contextWindow),
           maxTokens: parseNum(maxTokens),
           baseUrl: baseUrl.trim() || undefined,
+          thinkingEfforts: thinkingEfforts.length ? thinkingEfforts : undefined,
+          defaultThinkingEffort: defaultThinkingEffort || undefined,
+          thinkingDialect: thinkingDialect || undefined,
           forcedToolsDisableThinking,
         });
         onDone?.();
@@ -237,6 +305,9 @@ function ModelCardEditor({
             contextWindow: parseNum(contextWindow),
             maxTokens: parseNum(maxTokens),
             baseUrl: baseUrl.trim() || undefined,
+            thinkingEfforts: thinkingEfforts.length ? thinkingEfforts : undefined,
+            defaultThinkingEffort: defaultThinkingEffort || undefined,
+            thinkingDialect: thinkingDialect || undefined,
             forcedToolsDisableThinking,
           },
         });
@@ -340,6 +411,73 @@ function ModelCardEditor({
               support this tool_choice”.
             </span>
           </span>
+        </label>
+
+        {/* The three fields the editor could not show. A full-replacement PUT
+          plus a partial form meant every save stripped them, and
+          `seed_if_missing` never repairs an existing row — so one operator
+          bumping a max-token count permanently destroyed a model's thinking
+          config with no way to put it back in the product. */}
+        <fieldset className="col-span-1 sm:col-span-2">
+          <RowLabel>Thinking efforts (optional)</RowLabel>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-2">
+            {effortOptions.map((effort) => (
+              <label
+                key={effort}
+                className="flex items-center gap-1.5 text-sm text-dim"
+              >
+                <input
+                  type="checkbox"
+                  checked={thinkingEfforts.includes(effort)}
+                  onChange={() => toggleEffort(effort)}
+                  data-testid={`model-card-effort-${effort}`}
+                />
+                <span className="font-mono text-xs">{effort}</span>
+              </label>
+            ))}
+          </div>
+          <span className="mt-1 block text-xs text-dim">
+            What this model accepts, ascending. Leave empty for a model with no
+            thinking control.
+          </span>
+        </fieldset>
+        <label className="block">
+          <RowLabel>Default thinking effort (optional)</RowLabel>
+          <select
+            className="field font-mono"
+            value={defaultThinkingEffort}
+            onChange={(e) => {
+              setDefaultThinkingEffort(e.target.value);
+              touch();
+            }}
+            data-testid="model-card-default-effort"
+          >
+            <option value="">—</option>
+            {effortOptions.map((effort) => (
+              <option key={effort} value={effort}>
+                {effort}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <RowLabel>Thinking dialect (optional)</RowLabel>
+          <select
+            className="field font-mono"
+            value={thinkingDialect}
+            onChange={(e) => {
+              setThinkingDialect(e.target.value);
+              touch();
+            }}
+            data-testid="model-card-dialect"
+          >
+            <option value="">—</option>
+            {dialectOptions.map((dialect) => (
+              <option key={dialect} value={dialect}>
+                {dialect}
+              </option>
+            ))}
+          </select>
         </label>
       </div>
 
