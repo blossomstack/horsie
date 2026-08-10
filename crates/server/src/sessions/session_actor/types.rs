@@ -104,8 +104,6 @@ pub enum TurnCommand {
         answers: Vec<AskAnswer>,
         reply: ReplyTo<Result<(), AnswerError>>,
     },
-    /// Internal: post-recovery reconciliation of a turn the process died in.
-    ReconcileInterrupted,
 }
 
 /// The workflow graph.
@@ -416,7 +414,7 @@ pub enum SessionDomainEvent {
 /// all: `UsageRecorded`, banked identically for every agent a session hosts,
 /// and `Started`, which reports a turn *beginning*. `on_agent_outcome` answers
 /// both once before routing. Narrowing them away here is what lets the three
-/// components that handle an outcome match exhaustively on the four real cases,
+/// components that handle an outcome match exhaustively on the five real cases,
 /// instead of each carrying an `unreachable!` for a variant it can never be
 /// handed.
 ///
@@ -441,6 +439,14 @@ pub(super) enum TurnEnd {
     Failed { error: String, terminal: bool },
     /// The agent parked awaiting its timers, which sessions do not support.
     Parked,
+    /// The process died inside the turn, and the agent said so at recovery.
+    ///
+    /// The one end that produces nothing — no output, no questions, no error to
+    /// show. Only the main agent's is acted on: a subagent's node and a step's
+    /// log entry are repaired from state the *session* owns, at session load,
+    /// and those agents stay cold long enough that their own report would
+    /// arrive after the repair rather than instead of it.
+    Interrupted,
 }
 
 impl TurnEnd {
@@ -452,22 +458,20 @@ impl TurnEnd {
     /// and nothing below it needs a case for a variant that never arrives.
     pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
         match outcome {
-            AgentOutcome::Concluded { session_id, output } => {
-                Ok((session_id, Self::Concluded { output }))
-            }
-            AgentOutcome::Asked { session_id, .. } => Ok((session_id, Self::Asked)),
-            AgentOutcome::Parked { session_id } => Ok((session_id, Self::Parked)),
+            AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
+            AgentOutcome::Asked { agent, .. } => Ok((agent, Self::Asked)),
+            AgentOutcome::Parked { agent } => Ok((agent, Self::Parked)),
+            AgentOutcome::Interrupted { agent } => Ok((agent, Self::Interrupted)),
             AgentOutcome::Failed {
-                session_id,
+                agent,
                 error,
                 terminal,
                 ..
-            } => Ok((session_id, Self::Failed { error, terminal })),
-            AgentOutcome::UsageRecorded {
-                session_id,
-                usage_total,
-            } => Err((session_id, NotAnEnd::Usage(usage_total))),
-            AgentOutcome::Started { session_id } => Err((session_id, NotAnEnd::Started)),
+            } => Ok((agent, Self::Failed { error, terminal })),
+            AgentOutcome::UsageRecorded { agent, usage_total } => {
+                Err((agent, NotAnEnd::Usage(usage_total)))
+            }
+            AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
         }
     }
 }

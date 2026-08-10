@@ -87,16 +87,6 @@ impl Turns {
                 answers,
                 reply,
             } => actor.on_answer(state, agent_id, answers, reply, ctx).await,
-            TurnCommand::ReconcileInterrupted => {
-                if state.status == SessionStatus::Running {
-                    actor.report(SessionStatus::Idle).await;
-                    CommandEffect::persist(vec![SessionDomainEvent::TurnInterrupted {
-                        at_ms: now_ms(),
-                    }])
-                } else {
-                    CommandEffect::none()
-                }
-            }
         }
     }
 }
@@ -159,6 +149,19 @@ impl SessionActor {
                 self.report(SessionStatus::AwaitingInput).await;
                 vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }]
             }
+            // Only from a session that still believes the turn is running. The
+            // agent reports what its *own* journal left open, and a turn that
+            // failed before the loop began — abandoned by a start hook, or a
+            // context that would not build — never banked a boundary there, so
+            // the agent still calls it open while the session, which was told
+            // directly, has already recorded `TurnFailed`. The session owns the
+            // merged status, so the session decides; a report about anything but
+            // a live turn is history that is already written.
+            TurnEnd::Interrupted if state.status == SessionStatus::Running => {
+                self.report(SessionStatus::Idle).await;
+                vec![SessionDomainEvent::TurnInterrupted { at_ms: now_ms() }]
+            }
+            TurnEnd::Interrupted => return CommandEffect::none(),
             // A runtime that a live vendor cannot produce is the one terminal
             // failure: re-provisioning would silently rebuild a workspace the
             // user believes they still have. Everything else — provider errors,
@@ -294,15 +297,20 @@ impl Component for Turns {
         Vec::new()
     }
 
-    /// A turn the process died inside is over; recovery records that.
+    /// Nothing. A turn the process died inside is reported by the agent whose
+    /// turn it was, from its own recovery, and arrives here as an ordinary
+    /// `AgentOutcome::Interrupted`.
     ///
-    /// Not for a run: `TurnInterrupted` says only that the *session* stopped
-    /// running, and a run needs its step marked too. `WorkflowRun` repairs that
-    /// one, so leaving this to fire as well would record a turn boundary the run
-    /// never had and report `Idle` over the `Suspended` the repair lands on.
-    fn on_load(cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        (cx.spec.workflow.is_none() && state.status == SessionStatus::Running)
-            .then_some(SessionCommand::Turn(TurnCommand::ReconcileInterrupted))
+    /// This used to self-send a reconcile command that asked "is the session
+    /// `Running`?" — a question the session cannot answer about a *turn*, since
+    /// a self-send queues behind everything the supervisor sent while the actor
+    /// was loading. A message, an answer or a flushed subagent result handled
+    /// first could start a real turn, and the reconcile then recorded *that* one
+    /// as interrupted: the client dropped the text it was streaming, the run
+    /// carried on generating with nothing able to stop it, and the session
+    /// called itself idle while it did. Asking the agent removes the question.
+    fn on_load(_cx: &ActionCx<'_>, _state: &SessionState) -> Option<SessionCommand> {
+        None
     }
 
     /// A turn in flight. `WorkflowRun` answers for a step, so this is only ever
@@ -482,6 +490,119 @@ mod tests {
             session_journal_len(&journal, id).await,
             1,
             "a refused message journals nothing, here or on the agent"
+        );
+    }
+
+    /// Seed a session journal and load it, so the actor recovers from exactly
+    /// what a killed process would have left.
+    async fn load_from(
+        deps: crate::sessions::spec::ServerDeps,
+        id: Uuid,
+        events: &[SessionDomainEvent],
+    ) -> (
+        horsie_actor::ActorRef<SessionCommand>,
+        Arc<dyn horsie_actor::Journal>,
+    ) {
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let encoded: Vec<Vec<u8>> = events
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap())
+            .collect();
+        journal
+            .persist(&SessionActor::persistence_id_for(id), &encoded, None)
+            .await
+            .unwrap();
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                deps,
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ));
+        (session, journal)
+    }
+
+    /// The main agent says the turn its process died inside is over, and the
+    /// session records it — the genuine case the repair exists for.
+    #[tokio::test]
+    async fn a_reported_interruption_ends_the_turn() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        // A journal that ends mid-turn: exactly what a process killed during a
+        // run leaves behind.
+        let (session, journal) =
+            load_from(f.deps, id, &[SessionDomainEvent::TurnBegan { at_ms: 0 }]).await;
+
+        session
+            .tell(SessionCommand::AgentOutcome(
+                crate::agent_loop::AgentOutcome::Interrupted { agent: id },
+            ))
+            .await
+            .unwrap();
+
+        wait_for_state(&journal, id, "the interrupted turn to be recorded", |s| {
+            s.status == SessionStatus::Idle
+        })
+        .await;
+    }
+
+    /// A turn that failed before its loop began banks no boundary in the agent's
+    /// journal, so the agent still calls it open and reports it at the next
+    /// load. The session was told directly and has already recorded
+    /// `TurnFailed`, so it owns the answer: a report about anything but a live
+    /// turn is history that is already written.
+    ///
+    /// Without the check the session would report `Idle` over a failure the
+    /// user is still looking at, and journal a turn boundary that never
+    /// happened.
+    #[tokio::test]
+    async fn a_reported_interruption_leaves_a_failed_turn_alone() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let (session, journal) = load_from(
+            f.deps,
+            id,
+            &[
+                SessionDomainEvent::TurnBegan { at_ms: 0 },
+                SessionDomainEvent::TurnFailed {
+                    at_ms: 1,
+                    error: "provider said no".into(),
+                },
+            ],
+        )
+        .await;
+
+        session
+            .tell(SessionCommand::AgentOutcome(
+                crate::agent_loop::AgentOutcome::Interrupted { agent: id },
+            ))
+            .await
+            .unwrap();
+
+        // Nothing to wait *for*, so wait on something the same mailbox answers
+        // after it: a read replies only once the outcome ahead of it is done.
+        let (reply, rx) = oneshot::channel();
+        session
+            .tell(SessionCommand::Read(ReadCommand::Snapshot {
+                reply: ReplyTo::from_sender(reply),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.await.unwrap().status,
+            SessionStatus::Failed {
+                reason: "provider said no".into()
+            },
+            "an interruption reported over a turn that already failed changed the status"
+        );
+        let events = crate::sessions::events::session_events(&journal, id).await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::TurnInterrupted { .. })),
+            "a turn that already failed was journaled as interrupted too: {events:?}"
         );
     }
 

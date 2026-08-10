@@ -277,6 +277,12 @@ impl SessionActor {
                     false,
                 )
             }
+            // A step the process died inside is suspended by
+            // `WorkflowRun::on_load`, which is the state a retry can move.
+            // Recording it a second time from the step agent's own recovery
+            // would append a second log entry for one execution — and a step
+            // agent stays cold, so its report arrives long after the repair.
+            TurnEnd::Interrupted => return CommandEffect::none(),
         };
         match advance {
             true => self.persist_and_advance(state, events, ctx).await,

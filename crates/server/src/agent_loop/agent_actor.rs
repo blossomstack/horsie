@@ -474,6 +474,23 @@ pub struct AgentState {
     /// True while the agent has parked itself awaiting a timer (no run in flight).
     #[serde(default)]
     pub parked: bool,
+    /// True between a turn beginning and that turn reaching a boundary.
+    ///
+    /// Durable because only a crash can leave one open: every boundary an agent
+    /// reaches under its own power journals something, so a fold that still
+    /// reads `true` at recovery describes a turn no process is running any
+    /// more. That is the whole of how an interruption is detected, and it is
+    /// detected *here* because this is the only place the fact exists — an
+    /// owner sees a status, which cannot say whose turn produced it.
+    ///
+    /// "Under its own power" is not quite all of them. A turn that fails
+    /// *before* the loop is entered — start hooks that abandon it, a context or
+    /// toolbox that will not build — never reaches `Agent::run`, so no
+    /// `RunAborted` banks it and this stays set through a failure the owner was
+    /// told about directly. The owner reconciles that against the status it
+    /// already recorded; see `TurnEnd::Interrupted`.
+    #[serde(default)]
+    pub turn_in_flight: bool,
     /// The agent's task list — durable so it survives an actor restart exactly
     /// like timers do; see `crate::agent_loop::task_list`.
     #[serde(default)]
@@ -984,10 +1001,11 @@ impl AgentActor {
         }
     }
 
-    /// The journal identity of an agent session: kind `"agent"`, id = the session
-    /// UUID. Centralizes the kind so the workflow (e.g. fork) and the actor agree.
-    pub fn persistence_id_for(session_id: uuid::Uuid) -> PersistenceId {
-        PersistenceId::new("agent", session_id.to_string())
+    /// The journal identity of an agent: kind `"agent"`, id = the agent's own
+    /// [`AgentRuntimeContext::journal_id`]. Centralizes the kind so the workflow
+    /// (e.g. fork) and the actor agree.
+    pub fn persistence_id_for(journal_id: uuid::Uuid) -> PersistenceId {
+        PersistenceId::new("agent", journal_id.to_string())
     }
 
     /// Refuse to begin a turn while one is already in flight — running, or still
@@ -1056,7 +1074,7 @@ impl AgentActor {
         self.ctx
             .parent
             .deliver(AgentOutcome::Started {
-                session_id: self.ctx.session_id,
+                agent: self.ctx.journal_id,
             })
             .await;
 
@@ -1166,7 +1184,7 @@ impl AgentActor {
             self.ctx
                 .parent
                 .deliver(AgentOutcome::Failed {
-                    session_id: self.ctx.session_id,
+                    agent: self.ctx.journal_id,
                     error,
                     recoverable,
                     terminal,
@@ -1244,13 +1262,13 @@ impl AgentActor {
         let thinking_effort = self.params.thinking_effort;
         let max_retries = self.params.max_retries;
         let parent = self.ctx.parent.clone();
-        let session_id = self.ctx.session_id;
-        // The same value, named for the other job it does. `session_id` is this
+        let agent = self.ctx.journal_id;
+        // The same value, named for the other job it does. `journal_id` is this
         // agent's own identity, and only a *main* agent's identity is a session
         // id — a subagent or a workflow step carries its own uuid. Each has its
         // own history, and so its own cacheable prefix, which is exactly the
         // granularity a provider grouping requests by conversation wants.
-        let conversation_id = session_id.to_string();
+        let conversation_id = agent.to_string();
 
         tokio::spawn(async move {
             // Provide this run's contexts on the spawned task (never the mailbox):
@@ -1282,7 +1300,7 @@ impl AgentActor {
                 Err(error) => {
                     parent
                         .deliver(AgentOutcome::Failed {
-                            session_id,
+                            agent,
                             error: error.message,
                             recoverable: true,
                             terminal: error.terminal,
@@ -1396,7 +1414,7 @@ impl AgentActor {
         for ack in self.cancel_acks.drain(..) {
             let _ = ack.send(());
         }
-        let session_id = self.ctx.session_id;
+        let agent = self.ctx.journal_id;
         let parent = self.ctx.parent.clone();
 
         match report.outcome {
@@ -1404,13 +1422,13 @@ impl AgentActor {
                 // No conclude tool: treat the final text as the output.
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
-                        session_id,
+                        agent,
                         usage_total: state.usage_total,
                     })
                     .await;
                 parent
                     .deliver(AgentOutcome::Concluded {
-                        session_id,
+                        agent,
                         output: Value::String(text),
                     })
                     .await;
@@ -1428,12 +1446,12 @@ impl AgentActor {
                     Conclusion::Output(output) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
-                                session_id,
+                                agent,
                                 usage_total: state.usage_total,
                             })
                             .await;
                         parent
-                            .deliver(AgentOutcome::Concluded { session_id, output })
+                            .deliver(AgentOutcome::Concluded { agent, output })
                             .await;
                         let drained = self.try_drain(state, ctx).await;
                         self.persist_maybe_snapshot(drained)
@@ -1441,13 +1459,13 @@ impl AgentActor {
                     Conclusion::Ask(asks) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
-                                session_id,
+                                agent,
                                 usage_total: state.usage_total,
                             })
                             .await;
                         parent
                             .deliver(AgentOutcome::Asked {
-                                session_id,
+                                agent,
                                 asks: asks.clone(),
                             })
                             .await;
@@ -1469,7 +1487,7 @@ impl AgentActor {
                         self.events_since_snapshot = 0;
                         CommandEffect::persist(events).and_snapshot()
                     }
-                    Conclusion::Park => self.park_or_resume(state, ctx, session_id, parent).await,
+                    Conclusion::Park => self.park_or_resume(state, ctx, agent, parent).await,
                 }
             }
             RunOutcome::Cancelled => {
@@ -1479,7 +1497,7 @@ impl AgentActor {
                 // read here is the one that includes them.
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
-                        session_id,
+                        agent,
                         usage_total: state.usage_total,
                     })
                     .await;
@@ -1521,13 +1539,13 @@ impl AgentActor {
             RunOutcome::Failed { error, recoverable } => {
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
-                        session_id,
+                        agent,
                         usage_total: state.usage_total,
                     })
                     .await;
                 parent
                     .deliver(AgentOutcome::Failed {
-                        session_id,
+                        agent,
                         error,
                         recoverable,
                         // A run that failed inside the loop says nothing about
@@ -1598,13 +1616,13 @@ impl AgentActor {
         &mut self,
         state: &AgentState,
         ctx: &ActorContext<AgentCommand>,
-        session_id: uuid::Uuid,
+        agent: uuid::Uuid,
         parent: Arc<dyn AgentOutcomeSink>,
     ) -> CommandEffect<AgentDomainEvent> {
         if state.timers.is_empty() {
             parent
                 .deliver(AgentOutcome::Failed {
-                    session_id,
+                    agent,
                     error: "agent parked with no active timers — nothing would ever wake it"
                         .to_string(),
                     recoverable: false,
@@ -1624,7 +1642,7 @@ impl AgentActor {
             events.extend(drained);
             return CommandEffect::persist(events);
         }
-        parent.deliver(AgentOutcome::Parked { session_id }).await;
+        parent.deliver(AgentOutcome::Parked { agent }).await;
         self.events_since_snapshot = 0;
         CommandEffect::persist(events).and_snapshot()
     }
@@ -1776,7 +1794,7 @@ impl EventSourcedActor for AgentActor {
     type State = AgentState;
 
     fn persistence_id(&self) -> PersistenceId {
-        Self::persistence_id_for(self.ctx.session_id)
+        Self::persistence_id_for(self.ctx.journal_id)
     }
 
     fn initial_state() -> AgentState {
@@ -1857,6 +1875,7 @@ impl EventSourcedActor for AgentActor {
                 // answered, or the user moved on and they were abandoned. Both
                 // record a result for every call before the turn starts.
                 state.asks.clear();
+                state.turn_in_flight = true;
             }
             AgentDomainEvent::AskRecorded { asks, at_ms } => {
                 for ask in &asks {
@@ -1869,6 +1888,9 @@ impl EventSourcedActor for AgentActor {
                     );
                 }
                 state.asks = asks;
+                // Parking on a question is a turn boundary: the run is over and
+                // the answer starts the next one.
+                state.turn_in_flight = false;
             }
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
@@ -1887,7 +1909,10 @@ impl EventSourcedActor for AgentActor {
                 }
                 None => state.timers.retain(|t| t.id != id),
             },
-            AgentDomainEvent::Parked { .. } => state.parked = true,
+            AgentDomainEvent::Parked { .. } => {
+                state.parked = true;
+                state.turn_in_flight = false;
+            }
             AgentDomainEvent::TaskListChanged { snapshot, .. } => state.task_list = snapshot,
             AgentDomainEvent::RunComplete {
                 usage,
@@ -1897,6 +1922,7 @@ impl EventSourcedActor for AgentActor {
                 state.usage_total.add(&usage);
                 state.context_tokens = context_tokens;
                 state.last_turn_usage = Some(usage);
+                state.turn_in_flight = false;
             }
             AgentDomainEvent::RunAborted {
                 usage,
@@ -1905,8 +1931,9 @@ impl EventSourcedActor for AgentActor {
             } => {
                 state.usage_total.add(&usage);
                 state.context_tokens = context_tokens;
+                state.turn_in_flight = false;
             }
-            AgentDomainEvent::RunCancelled { .. } => {}
+            AgentDomainEvent::RunCancelled { .. } => state.turn_in_flight = false,
         }
         state
     }
@@ -2177,6 +2204,28 @@ impl EventSourcedActor for AgentActor {
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect(),
                     ack,
+                })
+                .await;
+        }
+        // A turn still open in the fold is one no process is running any more.
+        // Tell the owner, from here rather than from a command: this hook runs
+        // before the first live command, so the report is ordered ahead of
+        // anything queued while the actor was loading — including a message
+        // that starts a real turn. An owner therefore never has to work out
+        // which turn the report is about, which is exactly the question its own
+        // status could not answer.
+        //
+        // Nothing is journaled to clear the flag. It would have to be self-sent
+        // and would land *behind* that queued message, clearing the flag over a
+        // turn that had since begun — so the next crash would go undetected. It
+        // stays set until a turn reaches a boundary under its own power, and a
+        // second load before then simply reports again, which the owner reads
+        // against a status that has already moved on.
+        if state.turn_in_flight {
+            self.ctx
+                .parent
+                .deliver(AgentOutcome::Interrupted {
+                    agent: self.ctx.journal_id,
                 })
                 .await;
         }
@@ -2840,7 +2889,7 @@ mod tests {
         }
     }
 
-    fn def_fixture() -> AgentRunDef {
+    pub(super) fn def_fixture() -> AgentRunDef {
         AgentRunDef {
             system_prompt: None,
             output_schema: None,
@@ -2867,7 +2916,7 @@ mod tests {
             context_provider: Arc::new(StubContext),
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(StubParent),
-            session_id,
+            journal_id: session_id,
             ready: true,
         };
         let mut agent = AgentActor::new(ctx, AgentParams::from_def(&def_fixture()));
@@ -2949,7 +2998,7 @@ mod tests {
             context_provider: Arc::new(NoContext),
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(DeafParent),
-            session_id,
+            journal_id: session_id,
             ready: true,
         };
         let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::with_observer(
@@ -3032,7 +3081,7 @@ mod tests {
             context_provider: Arc::new(MockContext(provider.clone())),
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(ReportingParent(tx)),
-            session_id,
+            journal_id: session_id,
             ready: true,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
@@ -3183,7 +3232,7 @@ mod tests {
                 context_provider: provider,
                 position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
-                session_id: uuid::Uuid::new_v4(),
+                journal_id: uuid::Uuid::new_v4(),
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
@@ -3409,7 +3458,7 @@ mod tests {
                 context_provider: Arc::new(GoneContext),
                 position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
                 parent: Arc::new(ReportingParent(tx)),
-                session_id: uuid::Uuid::new_v4(),
+                journal_id: uuid::Uuid::new_v4(),
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
@@ -4942,7 +4991,7 @@ mod fence_tests {
             context_provider: Arc::new(HangingProvider),
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(OutcomeChannel(tx)),
-            session_id: uuid::Uuid::new_v4(),
+            journal_id: uuid::Uuid::new_v4(),
             ready: true,
         };
         let mut params = AgentParams::from_def(&AgentRunDef {
@@ -5051,7 +5100,7 @@ mod fence_tests {
             context_provider: Arc::new(HangingProvider),
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(OutcomeChannel(tx)),
-            session_id: uuid::Uuid::new_v4(),
+            journal_id: uuid::Uuid::new_v4(),
             ready: true,
         };
         let mut params = AgentParams::from_def(&AgentRunDef {
@@ -5195,7 +5244,7 @@ mod queue_tests {
             context_provider: provider,
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             parent: Arc::new(OutcomeChannel(tx)),
-            session_id: uuid::Uuid::new_v4(),
+            journal_id: uuid::Uuid::new_v4(),
             ready,
         };
         let mut params = AgentParams::from_def(&AgentRunDef::default());
@@ -5396,5 +5445,135 @@ mod queue_tests {
             Err(crate::agent_loop::AnswerError::NothingPending)
         );
         assert!(lifecycle(&agent).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod interruption_tests {
+    //! What an agent says about the turn its process died inside.
+    //!
+    //! The fact lives here and nowhere else. An owner holds a *status*, which
+    //! cannot say which turn produced it — so recovery used to ask "is the
+    //! session running?" and got yes about a turn that had begun since. These
+    //! are about the agent answering for itself instead.
+    use super::*;
+    use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+
+    struct OutcomeChannel(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+    #[async_trait]
+    impl AgentOutcomeSink for OutcomeChannel {
+        async fn deliver(&self, outcome: AgentOutcome) {
+            let _ = self.0.send(outcome);
+        }
+    }
+
+    /// Never asked: these agents recover and report, they do not run.
+    struct HangingContext;
+    #[async_trait]
+    impl ContextProvider for HangingContext {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            std::future::pending().await
+        }
+    }
+
+    /// Spawn an agent over a journal that already holds `events`, and hand back
+    /// whatever it reports while recovering.
+    async fn recover_with(
+        events: &[AgentDomainEvent],
+    ) -> tokio::sync::mpsc::UnboundedReceiver<AgentOutcome> {
+        let id = uuid::Uuid::new_v4();
+        let journal = Arc::new(InMemoryJournal::new());
+        let encoded: Vec<Vec<u8>> = events
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap())
+            .collect();
+        journal
+            .persist(&AgentActor::persistence_id_for(id), &encoded, None)
+            .await
+            .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingContext),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            parent: Arc::new(OutcomeChannel(tx)),
+            journal_id: id,
+            ready: true,
+        };
+        let mut params =
+            AgentParams::from_def(&crate::agent_loop::agent_actor::tests::def_fixture());
+        // Every agent a session spawns is interactive, so this is the only
+        // configuration that matters — and it is the one that returns from
+        // `on_recovery_complete` early, so the report has to precede that.
+        params.interactive = true;
+        let _agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        // Recovery runs before the first command, so anything reported is
+        // already on its way by the time the spawn returns.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        rx
+    }
+
+    fn began() -> AgentDomainEvent {
+        AgentDomainEvent::TurnBegan {
+            consumed: Vec::new(),
+            answered: Vec::new(),
+            at_ms: 0,
+        }
+    }
+
+    /// A journal ending at `TurnBegan` is what a process killed mid-run leaves
+    /// behind, and the agent is the only thing that can say so: its owner sees
+    /// a status, and a status cannot name a turn.
+    #[tokio::test]
+    async fn a_turn_the_process_died_in_is_reported_at_recovery() {
+        let mut outcomes = recover_with(&[began()]).await;
+        assert!(
+            matches!(outcomes.try_recv(), Ok(AgentOutcome::Interrupted { .. })),
+            "an agent recovering mid-turn must tell its owner the turn is over"
+        );
+    }
+
+    /// The other half. A turn that reached a boundary under its own power is
+    /// not an interruption, and reporting one would end a turn that had already
+    /// ended properly.
+    #[tokio::test]
+    async fn a_turn_that_reached_a_boundary_is_not_reported() {
+        let mut outcomes = recover_with(&[
+            began(),
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(1, 1),
+                iterations: 1,
+                context_tokens: 0,
+                at_ms: 1,
+            },
+        ])
+        .await;
+        assert!(
+            outcomes.try_recv().is_err(),
+            "a completed turn is not an interruption"
+        );
+    }
+
+    /// A park is a boundary too: the agent is waiting for an answer, not
+    /// stranded mid-run. Reporting it would move the session off
+    /// `AwaitingInput` and lose the question.
+    #[tokio::test]
+    async fn a_parked_turn_is_not_reported() {
+        let mut outcomes = recover_with(&[
+            began(),
+            AgentDomainEvent::AskRecorded {
+                asks: vec![crate::agent_loop::AskedQuestion {
+                    tool_call_id: Some("call-1".into()),
+                    question: "which one?".into(),
+                }],
+                at_ms: 1,
+            },
+        ])
+        .await;
+        assert!(
+            outcomes.try_recv().is_err(),
+            "an agent parked on a question has no interrupted turn to report"
+        );
     }
 }

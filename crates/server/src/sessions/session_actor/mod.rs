@@ -310,7 +310,7 @@ impl SessionActor {
             context_provider: provider.clone(),
             position,
             parent: StopHookParent::wrap(ctx.self_ref(), key, provider.clone()),
-            session_id: journal_id,
+            journal_id,
             // Computed from the state this spawn was decided against, never
             // remembered: an agent built after the runtime landed starts ready,
             // and one built before it starts waiting. Changes reach it as the
@@ -664,10 +664,10 @@ impl SessionActor {
             // were spent whatever became of the turn that spent them. The main
             // agent banks under a fixed name because its journal is keyed by
             // the session id; every other agent banks under its own.
-            Err((session_id, NotAnEnd::Usage(usage_total))) => {
-                let agent_id = match session_id == self.id {
+            Err((agent, NotAnEnd::Usage(usage_total))) => {
+                let agent_id = match agent == self.id {
                     true => MAIN_AGENT_ID.to_string(),
-                    false => session_id.to_string(),
+                    false => agent.to_string(),
                 };
                 return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
                     at_ms: now_ms(),
@@ -675,8 +675,8 @@ impl SessionActor {
                     usage_total,
                 }]);
             }
-            Err((session_id, NotAnEnd::Started)) => {
-                return self.on_agent_started(state, session_id).await;
+            Err((agent, NotAnEnd::Started)) => {
+                return self.on_agent_started(state, agent).await;
             }
         };
         // In a run, an outcome is a step's or one of a step's subagents'.
