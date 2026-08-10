@@ -32,6 +32,12 @@ use std::time::Duration;
 /// timeout: a create with `git_checkout` steps legitimately runs for minutes.
 const READY_WINDOW: Duration = Duration::from_secs(900);
 
+/// How long the settings check waits for Fly before calling it unreachable.
+///
+/// Short on purpose: it runs inside a settings save, and a save that hangs on a
+/// slow cloud API is a form the operator cannot tell from a broken button.
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The machine name for a runtime. Deterministic on purpose — see the module
 /// docs.
 #[must_use]
@@ -360,6 +366,31 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         }
     }
 
+    /// Lists the app's machines. The cheapest call Fly has that needs both
+    /// halves of a configuration to be right: the token authenticates it and
+    /// the app is in the path, so a bad token is a 401 and an app that does not
+    /// exist is a 404 — the two mistakes that otherwise wait for the first
+    /// session to make them.
+    ///
+    /// Bounded by its own deadline. Every other call this vendor makes is
+    /// inside a session that already has one; this one is inside a settings
+    /// save, where a hung request is a form that never comes back.
+    async fn preflight(&self) -> Result<(), RuntimeVendorError> {
+        match tokio::time::timeout(PREFLIGHT_TIMEOUT, self.api.machines()).await {
+            Ok(Ok(_)) => Ok(()),
+            // Named for what an operator can act on. Fly's own message says
+            // which of the two it is, and says it in fly's words.
+            Ok(Err(FlyError::Rejected(m))) => Err(RuntimeVendorError::Provision(format!(
+                "fly refused to list the app's machines ({m}) — check the API token, and that the app already exists"
+            ))),
+            Ok(Err(e @ FlyError::Unreachable(_))) => Err(e.into()),
+            Err(_elapsed) => Err(RuntimeVendorError::Unavailable(format!(
+                "fly did not answer within {}s",
+                PREFLIGHT_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
     async fn create(
         &self,
         runtime_id: &str,
@@ -547,6 +578,9 @@ mod tests {
         calls: Mutex<Vec<String>>,
         volumes: Mutex<Vec<String>>,
         reject_create: bool,
+        /// The app or the token is wrong, so listing machines is a 401/404 —
+        /// what a settings check is there to catch.
+        reject_list: bool,
         unreachable: bool,
         /// Machine ids whose destroy fails, so a test can hold one object stuck
         /// and watch what the sweep does with the rest.
@@ -613,6 +647,12 @@ mod tests {
                 .map(|(_, m)| m.clone()))
         }
         async fn machines(&self) -> Result<Vec<(String, Machine)>, FlyError> {
+            if self.unreachable {
+                return Err(FlyError::Unreachable("no route".to_string()));
+            }
+            if self.reject_list {
+                return Err(FlyError::Rejected("401: unauthorized".to_string()));
+            }
             Ok(self.machines.lock().unwrap().clone())
         }
         async fn start(&self, id: &str) -> Result<(), FlyError> {
@@ -1075,5 +1115,56 @@ mod tests {
     #[test]
     fn a_machine_is_named_for_its_runtime_so_nothing_has_to_be_written_down() {
         assert_eq!(machine_name("abc-123"), "horsie-abc-123");
+    }
+
+    #[tokio::test]
+    async fn a_preflight_lists_the_apps_machines_and_creates_nothing() {
+        let (v, _reg) = vendor(FakeFly::default(), true);
+        assert!(v.preflight().await.is_ok());
+        assert!(
+            v.api.calls().is_empty(),
+            "a check must not build anything, got {:?}",
+            v.api.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_listing_is_the_configurations_own_fault() {
+        // The whole point: a bad token and an app that does not exist both come
+        // back from this one call, and both are terminal — no retry fixes them.
+        let (v, _reg) = vendor(
+            FakeFly {
+                reject_list: true,
+                ..FakeFly::default()
+            },
+            true,
+        );
+        let err = v.preflight().await.unwrap_err();
+        assert!(
+            matches!(&err, RuntimeVendorError::Provision(m) if m.contains("401")),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("app already exists"),
+            "the message has to name what to go and check: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fly_being_down_is_never_a_verdict_on_the_configuration() {
+        // The distinction the caller acts on: refusing to store a vendor
+        // because Fly is having an outage would be worse than storing one that
+        // may be wrong.
+        let (v, _reg) = vendor(
+            FakeFly {
+                unreachable: true,
+                ..FakeFly::default()
+            },
+            true,
+        );
+        assert!(matches!(
+            v.preflight().await.unwrap_err(),
+            RuntimeVendorError::Unavailable(_)
+        ));
     }
 }

@@ -26,4 +26,5 @@ export * from './flyVendorSettings';
 export * from './velosVendorSettings';
 export * from './runtimeVendorSettings';
 export * from './runtimeVendorConfigView';
+export * from './runtimeVendorTestResult';
 export * from './runtimeVendorConfigInput';

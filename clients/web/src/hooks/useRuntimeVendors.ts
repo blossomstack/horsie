@@ -35,6 +35,19 @@ export function useSaveRuntimeVendor() {
   });
 }
 
+/**
+ * Ask a saved vendor's substrate whether it still answers.
+ *
+ * No cache to invalidate: the outcome is not stored anywhere, because a claim
+ * about a remote credential stops being true the moment someone revokes it —
+ * so the only honest place for it is the row that asked, until the page is left.
+ */
+export function useTestRuntimeVendor() {
+  return useMutation({
+    mutationFn: (name: string) => api.runtimeVendors.test(name),
+  });
+}
+
 export function useDeleteRuntimeVendor() {
   const qc = useQueryClient();
   return useMutation({

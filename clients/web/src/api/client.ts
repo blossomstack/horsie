@@ -40,6 +40,7 @@ import type {
   ModelCard,
   RuntimeVendorConfigInput,
   RuntimeVendorConfigView,
+  RuntimeVendorTestResult,
   ModelCardInput,
   ModelCardUpdate,
   PluginDefaultInput,
@@ -338,6 +339,16 @@ export const api = {
     remove: (name: string): Promise<void> =>
       request(`/runtime-vendors/${encodeURIComponent(name)}`, {
         method: "DELETE",
+      }),
+
+    /** Ask the substrate whether this vendor is usable right now. Nothing is
+     * created, and nothing is recorded — a save already proves a configuration
+     * before storing it, so this answers the question a stored row cannot: has
+     * the token been revoked since. */
+    test: (name: string): Promise<RuntimeVendorTestResult> =>
+      request(`/runtime-vendors/${encodeURIComponent(name)}/test`, {
+        method: "POST",
+        body: "{}",
       }),
   },
 
