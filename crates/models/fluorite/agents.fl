@@ -16,7 +16,13 @@ use session.SessionSummary;
 struct AgentView {
     /// Slug; the id of record, used in API paths and CLI invocations.
     name: String,
+    /// What this preset is for, as shown in the roster. Never sent to the
+    /// model — `instructions` is what the model reads.
     description: String,
+    /// Standing instructions this preset's agent runs under, added to the
+    /// system prompt as its own section. Absent → the agent behaves exactly
+    /// like an unpresetted one.
+    instructions: Option<String>,
     /// Configured model alias.
     model: String,
     /// Selected plugin-bundle (skill) names.
@@ -41,6 +47,7 @@ struct AgentView {
 struct AgentPresetInput {
     name: String,
     description: Option<String>,
+    instructions: Option<String>,
     model: String,
     plugins: Option<Vec<String>>,
     mcp_servers: Option<Vec<String>>,

@@ -10,6 +10,7 @@
 export interface AgentPresetInput {
   name: string;
   description?: string;
+  instructions?: string;
   model: string;
   plugins?: string[];
   mcpServers?: string[];

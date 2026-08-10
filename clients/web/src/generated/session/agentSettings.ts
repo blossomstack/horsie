@@ -28,4 +28,10 @@ export interface AgentSettings {
    * server's built-in default (8).
    */
   maxConcurrentSubagents?: number;
+  /**
+   * Standing instructions this session's agent runs under, added to the
+   * system prompt as its own section. Set from an agent preset, or directly
+   * here; absent → none.
+   */
+  instructions?: string;
 }

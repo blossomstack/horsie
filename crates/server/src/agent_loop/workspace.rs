@@ -343,13 +343,15 @@ fn parse_skill(file: &ScannedFile) -> Option<Skill> {
 }
 
 /// Compose the agent's effective system prompt: the agent's own prompt (role),
-/// the workspace instructions/skills, and finally the shared-skills listing.
+/// the workspace instructions/skills, the shared-skills listing, and the
+/// standing instructions its preset was configured with.
 /// Sections are omitted when empty; returns `None` if nothing at all would be
 /// emitted.
 pub fn compose_system_prompt(
     agent_prompt: Option<&str>,
     ws: &WorkspaceContext,
     shared: Option<&SharedContext>,
+    instructions: Option<&str>,
 ) -> Option<String> {
     let mut sections: Vec<String> = Vec::new();
     if let Some(p) = agent_prompt
@@ -412,6 +414,15 @@ pub fn compose_system_prompt(
             SHARED_WORKSPACE,
             skills_listing(&s.skills, s.root.as_deref())
         ));
+    }
+    // Last of the standing sections, and after the workspace's own instruction
+    // files on purpose: the prompt's precedence rule puts the user first, then
+    // the workspace, then skills. A preset speaks for the operator who
+    // configured the agent, not for the repository it happens to be working in.
+    if let Some(i) = instructions
+        && !i.trim().is_empty()
+    {
+        sections.push(format!("# Agent instructions\n{}", i.trim()));
     }
     if sections.is_empty() {
         None
@@ -678,7 +689,7 @@ mod tests {
             ),
             ws_scan("beta", None, vec![]),
         ]);
-        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None).unwrap();
+        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None, None).unwrap();
         let role = prompt.find("You are a coder.").unwrap();
         let header = prompt.find("# Workspaces").unwrap();
         let alpha = prompt.find("## alpha").unwrap();
@@ -713,9 +724,9 @@ mod tests {
     #[test]
     fn compose_empty_context_is_none() {
         let ctx = WorkspaceContext::default();
-        assert!(compose_system_prompt(None, &ctx, None).is_none());
+        assert!(compose_system_prompt(None, &ctx, None, None).is_none());
         assert_eq!(
-            compose_system_prompt(Some("just role"), &ctx, None).as_deref(),
+            compose_system_prompt(Some("just role"), &ctx, None, None).as_deref(),
             Some("just role")
         );
     }
@@ -727,7 +738,7 @@ mod tests {
     #[test]
     fn compose_states_tool_session_state_ahead_of_the_workspace_list() {
         let ctx = interpret(vec![ws_scan("alpha", None, vec![])]);
-        let prompt = compose_system_prompt(None, &ctx, None).unwrap();
+        let prompt = compose_system_prompt(None, &ctx, None, None).unwrap();
         let state = prompt.find("# Tool session state").unwrap();
         assert!(state < prompt.find("# Workspaces").unwrap(), "{prompt}");
         // Both halves, and the negative instruction that is the whole point:
@@ -744,7 +755,7 @@ mod tests {
     #[test]
     fn compose_omits_tool_session_state_without_a_runtime_scan() {
         let ctx = WorkspaceContext::default();
-        let prompt = compose_system_prompt(Some("just role"), &ctx, None).unwrap();
+        let prompt = compose_system_prompt(Some("just role"), &ctx, None, None).unwrap();
         assert!(!prompt.contains("# Tool session state"), "{prompt}");
     }
 
@@ -754,7 +765,7 @@ mod tests {
             workspaces: vec![],
             platform: Some("macos-aarch64".to_string()),
         };
-        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None).unwrap();
+        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, None, None).unwrap();
         assert!(prompt.contains("# Environment"), "{prompt}");
         assert!(prompt.contains("BSD userland"), "{prompt}");
     }
@@ -892,7 +903,8 @@ mod tests {
             agents: Arc::default(),
             root: scan.root,
         };
-        let prompt = compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared)).unwrap();
+        let prompt =
+            compose_system_prompt(Some("You are a coder."), &ctx, Some(&shared), None).unwrap();
         let role = prompt.find("You are a coder.").unwrap();
         let shared_hdr = prompt.find("# Shared skills").unwrap();
         assert!(role < shared_hdr);
@@ -910,6 +922,48 @@ mod tests {
             prompt.contains("- tdd — sp/skills/tdd/: write tests first"),
             "{prompt}"
         );
+    }
+
+    /// A preset could say what it was *for* and not how its agent should
+    /// behave: `description` is roster copy the model never sees, so two
+    /// presets on one model were behaviourally identical. This is the section
+    /// that changes that.
+    #[test]
+    fn preset_instructions_become_their_own_section() {
+        let ctx = WorkspaceContext {
+            workspaces: vec![WorkspaceInfo {
+                name: "horsie".into(),
+                path: "/w/horsie".into(),
+                is_git_repo: true,
+                instructions: Some("Repo rule: run make check.".into()),
+                skills: Arc::new(SkillSet::default()),
+            }],
+            platform: None,
+        };
+        let prompt = compose_system_prompt(
+            Some("You are a coder."),
+            &ctx,
+            None,
+            Some("  Always end with the word PELICAN.  "),
+        )
+        .unwrap();
+        assert!(prompt.contains("# Agent instructions"), "{prompt}");
+        assert!(
+            prompt.contains("Always end with the word PELICAN."),
+            "{prompt}"
+        );
+        // After the workspace's own instruction file: the precedence rule puts
+        // the repository ahead of the operator who configured the preset.
+        let repo = prompt.find("Repo rule: run make check.").unwrap();
+        let preset = prompt.find("# Agent instructions").unwrap();
+        assert!(repo < preset, "{prompt}");
+
+        // Absent, and whitespace-only, add nothing at all.
+        for none_of_it in [None, Some("   \n  ".to_string())] {
+            let bare =
+                compose_system_prompt(Some("role"), &ctx, None, none_of_it.as_deref()).unwrap();
+            assert!(!bare.contains("# Agent instructions"), "{bare}");
+        }
     }
 
     #[test]

@@ -45,6 +45,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         memory_spaces: w.memory_spaces.unwrap_or_default(),
         thinking_effort: w.thinking_effort,
         max_concurrent_subagents: w.max_concurrent_subagents,
+        instructions: w.instructions,
     }
 }
 
@@ -236,6 +237,7 @@ mod tests {
     fn wire_settings() -> WireAgentSettings {
         WireAgentSettings {
             model: "m".into(),
+            instructions: None,
             allowed_tools: None,
             use_plugins: None,
             max_iterations: None,

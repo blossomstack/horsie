@@ -31,9 +31,21 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await expect(page.getByTestId("agent-name-input")).toBeDisabled();
   await page.getByTestId("agent-description-input").fill("edited");
+  // The field that actually reaches the model. A preset used to gate what an
+  // agent *could do* and say nothing about how it should behave, so two presets
+  // on one model were the same agent.
+  await page
+    .getByTestId("agent-instructions-input")
+    .fill("Always end every reply with the word PELICAN.");
   await page.getByTestId("save-agent-button").click();
   await page.waitForURL((url) => url.pathname === "/agents");
   await expect(page.getByTestId("agent-row")).toContainText("edited");
+
+  await page.getByTestId("agent-row").getByRole("link").click();
+  await expect(page.getByTestId("agent-instructions-input")).toHaveValue(
+    "Always end every reply with the word PELICAN.",
+  );
+  await page.goto(`${appBase}/agents`);
 
   // Delete, accepting the confirm.
   await page.getByTestId("delete-agent-e2e-agent").click();

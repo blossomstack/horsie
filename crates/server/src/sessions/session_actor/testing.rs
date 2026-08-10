@@ -43,6 +43,7 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
         name: Some("test".into()),
         agent: AgentSettings {
             model: "mock".into(),
+            instructions: None,
             allowed_tools: None,
             use_plugins: None,
             max_iterations: None,
@@ -265,6 +266,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
     use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
     let settings = |()| AgentSettings {
         model: "mock".into(),
+        instructions: None,
         allowed_tools: None,
         use_plugins: None,
         max_iterations: None,

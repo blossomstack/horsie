@@ -7,7 +7,17 @@ export interface AgentView {
    * Slug; the id of record, used in API paths and CLI invocations.
    */
   name: string;
+  /**
+   * What this preset is for, as shown in the roster. Never sent to the
+   * model — `instructions` is what the model reads.
+   */
   description: string;
+  /**
+   * Standing instructions this preset's agent runs under, added to the
+   * system prompt as its own section. Absent → the agent behaves exactly
+   * like an unpresetted one.
+   */
+  instructions?: string;
   /**
    * Configured model alias.
    */

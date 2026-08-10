@@ -192,6 +192,7 @@ mod tests {
 
     fn settings() -> AgentSettings {
         AgentSettings {
+            instructions: None,
             model: "sonnet".into(),
             allowed_tools: None,
             use_plugins: None,

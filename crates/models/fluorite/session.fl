@@ -51,6 +51,10 @@ struct AgentSettings {
     /// Cap on concurrently-active subagents in this session; absent → the
     /// server's built-in default (8).
     max_concurrent_subagents: Option<u32>,
+    /// Standing instructions this session's agent runs under, added to the
+    /// system prompt as its own section. Set from an agent preset, or directly
+    /// here; absent → none.
+    instructions: Option<String>,
 }
 
 struct SessionSummary {

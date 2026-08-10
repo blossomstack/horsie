@@ -1164,6 +1164,7 @@ mod tests {
         SessionSpec {
             name: Some("test".into()),
             agent: AgentSettings {
+                instructions: None,
                 model: "mock".into(),
                 allowed_tools: None,
                 use_plugins: None,

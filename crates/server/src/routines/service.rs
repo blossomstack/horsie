@@ -446,6 +446,7 @@ pub(crate) mod tests {
             .create(AgentPresetInput {
                 name: "reviewer".into(),
                 description: None,
+                instructions: None,
                 model: "sonnet".into(),
                 plugins: None,
                 mcp_servers: None,

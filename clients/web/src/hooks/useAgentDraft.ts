@@ -6,7 +6,11 @@ import type { ConfigDraft } from "./useSessionDraft";
 export interface AgentDraft extends ConfigDraft {
   /** Assemble the save payload. `name`/`description` come from the form's
    * text inputs, not the picker state. */
-  buildAgentInput: (name: string, description: string) => AgentPresetInput;
+  buildAgentInput: (
+    name: string,
+    description: string,
+    instructions: string,
+  ) => AgentPresetInput;
 }
 
 /** Draft state for the agent-preset form. Unlike `useSessionDraft` nothing
@@ -42,10 +46,15 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
 
   const buildAgentInput = useMemo(
     () =>
-      (name: string, description: string): AgentPresetInput => ({
+      (
+        name: string,
+        description: string,
+        instructions: string,
+      ): AgentPresetInput => ({
         // `PUT` is a full replace, so anything omitted here is deleted.
         name: name.trim(),
         description: description.trim() || undefined,
+        instructions: instructions.trim() || undefined,
         model: model.trim(),
         plugins: skills.size ? [...skills] : undefined,
         mcpServers: mcp.size ? [...mcp] : undefined,

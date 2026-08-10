@@ -139,6 +139,7 @@ async fn agents_are_isolated() {
     let agent = |model: &str| AgentRow {
         name: "reviewer".into(),
         description: String::new(),
+        instructions: None,
         model: model.into(),
         plugins: vec![],
         mcp_servers: vec![],
