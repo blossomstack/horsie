@@ -51,6 +51,12 @@ pub struct AskedQuestion {
 
 /// A terminal outcome an [`AgentActor`](crate::agent_loop::AgentActor) reports to whoever
 /// spawned it — the workflow that orchestrates it, or an interactive session.
+///
+/// Every variant names the agent that reported it, because one owner hosts
+/// many: a session's sink receives from its main agent, from every subagent
+/// and from every workflow step, and routing is the first thing it does. The
+/// id is the agent's *journal* id — the session's own for a main agent, since
+/// its transcript is the session's, and the agent's own for anything else.
 #[derive(Debug, Clone)]
 pub enum AgentOutcome {
     /// The agent started a turn off its own queue.
@@ -59,24 +65,33 @@ pub enum AgentOutcome {
     /// rather than after it. It exists because the agent, not its owner, decides
     /// when its queue becomes a turn — so the owner can no longer learn that a
     /// turn began by being the thing that began it.
-    Started { session_id: Uuid },
+    Started { agent: Uuid },
+    /// A turn the process died inside, found at recovery and reported by the
+    /// only thing that can tell: the agent whose turn it was.
+    ///
+    /// Delivered from `on_recovery_complete`, which the runtime runs before the
+    /// first live command — so an agent physically cannot begin a new turn
+    /// before this has been sent, and an owner reading it never has to work out
+    /// *which* turn it means. That ordering is the whole mechanism; there is no
+    /// fence and no turn number anywhere.
+    Interrupted { agent: Uuid },
     /// The agent produced its output (structured, or its final text).
-    Concluded { session_id: Uuid, output: Value },
+    Concluded { agent: Uuid, output: Value },
     /// The agent paused to ask the user. A turn may ask more than once — each
     /// question is its own tool call, and they are answered together, since the
     /// run cannot resume while any of them is still missing a result.
     Asked {
-        session_id: Uuid,
+        agent: Uuid,
         asks: Vec<AskedQuestion>,
     },
     /// The agent parked itself awaiting its timers.
-    Parked { session_id: Uuid },
+    Parked { agent: Uuid },
     /// The agent run failed. `recoverable` is about the *run* — whether trying
     /// it again could work — while `terminal` is about the agent's owner: its
     /// sandbox is gone and no later message can bring it back. A provider `401`
     /// is neither recoverable nor terminal; fix the key and the next turn runs.
     Failed {
-        session_id: Uuid,
+        agent: Uuid,
         error: String,
         recoverable: bool,
         terminal: bool,
@@ -87,7 +102,7 @@ pub enum AgentOutcome {
     /// a parent hosting multiple agents can maintain its own durable
     /// session-level usage total without waking an idle agent to ask for it.
     UsageRecorded {
-        session_id: Uuid,
+        agent: Uuid,
         usage_total: UsageTotal,
     },
 }
@@ -266,7 +281,14 @@ pub struct AgentRuntimeContext {
     pub position: Arc<tokio::sync::watch::Sender<(u64, usize)>>,
     /// Whoever spawned this agent; receives its terminal outcome.
     pub parent: Arc<dyn AgentOutcomeSink>,
-    pub session_id: Uuid,
+    /// This agent's identity: the id it journals under, and the id it names
+    /// itself by in every [`AgentOutcome`] it reports.
+    ///
+    /// The session's own id for a main agent — its transcript *is* the
+    /// session's — and the agent's own id for a subagent or a workflow step.
+    /// One id space, which is what lets an owner hosting all three route by
+    /// comparison alone.
+    pub journal_id: Uuid,
     /// Whether the session this agent belongs to has a runtime to run on, as of
     /// this spawn.
     ///

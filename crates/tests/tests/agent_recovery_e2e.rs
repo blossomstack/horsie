@@ -221,7 +221,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
             toolbox: Arc::new(ReadFileToolbox),
         }),
         parent: Arc::new(OutcomeChannel(tx)),
-        session_id,
+        journal_id: session_id,
         ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
@@ -340,7 +340,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             toolbox: Arc::new(AskUserToolbox),
         }),
         parent: Arc::new(OutcomeChannel(tx)),
-        session_id,
+        journal_id: session_id,
         ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
@@ -443,7 +443,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
             context_provider: Arc::new(HangingContextProvider),
             parent: Arc::new(OutcomeChannel(tx)),
-            session_id,
+            journal_id: session_id,
             ready: true,
         };
         let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
@@ -522,7 +522,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             toolbox: Arc::new(ReadFileToolbox),
         }),
         parent: Arc::new(OutcomeChannel(tx)),
-        session_id,
+        journal_id: session_id,
         ready: true,
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
@@ -579,7 +579,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             toolbox: Arc::new(ReadFileToolbox),
         }),
         parent: Arc::new(OutcomeChannel(tx2)),
-        session_id,
+        journal_id: session_id,
         ready: true,
     };
     let mut params2 = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {

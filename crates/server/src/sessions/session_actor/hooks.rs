@@ -453,7 +453,7 @@ impl HookRouting {
                     .on_agent_outcome(
                         state,
                         AgentOutcome::Failed {
-                            session_id: match key {
+                            agent: match key {
                                 AgentKey::Main => actor.id,
                                 AgentKey::Sub(id) | AgentKey::Step(id) => id,
                             },
