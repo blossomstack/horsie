@@ -13,6 +13,14 @@ function Shell() {
 
   return (
     <div className="flex h-full overflow-hidden">
+      {/* First in the document, and the first thing Tab reaches. The rail is a
+          long control: four destinations, two session actions, a filter, a
+          header and a menu per group, and a link and a menu per session — so
+          without this the composer is roughly the hundredth stop on a busy
+          account. */}
+      <a href="#main" className="skip-link" data-testid="skip-to-main">
+        Skip to content
+      </a>
       {/* Scrim: only ever present while the drawer is open on a narrow screen. */}
       {open && (
         <button
@@ -22,15 +30,25 @@ function Shell() {
           tabIndex={-1}
         />
       )}
+      {/* `invisible` as well as translated: a drawer parked off-canvas is still
+          in the tab order, so on a phone the whole rail sat between the page
+          and the keyboard while being nowhere on screen. `visibility` is
+          animatable and flips only at the end of a transition, so the slide out
+          still plays in full before the rail goes away. */}
       <div
         className={cn(
-          "z-40 h-full shrink-0 transition-transform duration-200 ease-out max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:shadow-[var(--panel-lift)]",
-          open ? "max-md:translate-x-0" : "max-md:-translate-x-full",
+          "z-40 h-full shrink-0 transition-[transform,visibility] duration-200 ease-out max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:shadow-[var(--panel-lift)]",
+          open ? "max-md:translate-x-0" : "max-md:invisible max-md:-translate-x-full",
         )}
       >
         <Sidebar />
       </div>
-      <main className="min-w-0 flex-1">
+      {/* `tabIndex={-1}` is what makes the skip link land: an anchor to a
+          container the browser cannot focus moves the scroll and leaves the
+          keyboard where it was. No ring on it — a 2px outline round the whole
+          column is a lot of chrome for a stop you leave on the next Tab, and
+          that Tab lands on a real control that draws its own. */}
+      <main id="main" tabIndex={-1} className="min-w-0 flex-1 outline-none">
         <Outlet />
       </main>
     </div>

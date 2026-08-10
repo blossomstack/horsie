@@ -50,7 +50,10 @@ export interface PickerSpec {
   body: (close: () => void) => ReactNode;
 }
 
-/** Keep selected picker choices legible without changing the compact menu layout. */
+/** Keep selected picker choices legible without changing the compact menu
+ * layout. Every button that wears this also carries `data-popover-option`, which
+ * is what tells `PopoverMenu` to give the list arrow keys and one tab stop —
+ * the checklists and the radio group get that from their native controls. */
 function optionClass(selected: boolean): string {
   return cn(
     "flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm",
@@ -185,6 +188,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                   key={e.name}
                   type="button"
                   className={optionClass(selected)}
+                  data-popover-option
                   data-testid="environment-option"
                   data-value={e.name}
                   data-kind="named"
@@ -225,6 +229,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                 key={v.name}
                 type="button"
                 className={optionClass(selected)}
+                data-popover-option
                 data-testid="environment-option"
                 data-value={v.name}
                 data-kind="runtime"
@@ -355,6 +360,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           <button
             type="button"
             className={optionClass(d.workflow === "")}
+            data-popover-option
             data-testid="workflow-option"
             data-value=""
             data-selected={d.workflow === ""}
@@ -376,6 +382,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
                 key={w}
                 type="button"
                 className={optionClass(d.workflow === w)}
+                data-popover-option
                 data-testid="workflow-option"
                 data-value={w}
                 data-selected={d.workflow === w}
@@ -505,6 +512,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
             key={m.alias}
             type="button"
             className={optionClass(draft.model === m.alias)}
+            data-popover-option
             data-testid="model-option"
             data-value={m.alias}
             data-selected={draft.model === m.alias}
