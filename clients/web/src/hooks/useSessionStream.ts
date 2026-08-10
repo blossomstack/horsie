@@ -343,12 +343,28 @@ export function fold(entries: AgentLogEntry[]): Folded {
           detail: `"${ev.value.label}" (${ev.value.id})`,
         };
         break;
-      case "Step":
-        out.progression = {
-          stage: `step_${ev.value.status}`,
-          detail: ev.value.name,
-        };
+      // A step's own turn boundary. A step never gets a `TurnEnded` — its
+      // outcome is journaled as `StepConcluded`/`StepFailed`/`StepCancelled`,
+      // which route here — so folding this only into a progress line left a
+      // finished step's page reading `RUNNING` for ever, through reloads and
+      // cold tabs, while the session itself said `Idle`.
+      case "Step": {
+        const step = ev.value.status;
+        if (step === "started") {
+          out.status = SessionStatusKind.Running;
+          out.statusSeq += 1;
+          out.progression = { stage: `step_${step}`, detail: ev.value.name };
+          break;
+        }
+        out.status =
+          step === "failed" || step === "run_failed"
+            ? SessionStatusKind.Failed
+            : SessionStatusKind.Idle;
+        out.statusSeq += 1;
+        // Terminal is the absence of news, as everywhere else.
+        out.progression = null;
         break;
+      }
       case "SessionFailed":
         out.status = SessionStatusKind.Unrecoverable;
         out.reason = ev.value.reason;

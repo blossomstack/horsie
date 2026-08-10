@@ -460,13 +460,19 @@ export function SessionView() {
                 This is a workflow step. It works from its definition, not from
                 messages.
               </span>
-              <button
-                className="key key-stop ml-auto !px-2 !py-1 text-xs"
-                onClick={handleStop}
-                data-testid="step-stop"
-              >
-                Interrupt
-              </button>
+              {/* Only while there is something to interrupt. The step's own
+                  document says what became of it; offering the control on a
+                  step that concluded hours ago was the same lie the badge told
+                  beside it. */}
+              {mainAgent?.status === "running" && (
+                <button
+                  className="key key-stop ml-auto !px-2 !py-1 text-xs"
+                  onClick={handleStop}
+                  data-testid="step-stop"
+                >
+                  Interrupt
+                </button>
+              )}
             </div>
           ) : (
             <Composer
