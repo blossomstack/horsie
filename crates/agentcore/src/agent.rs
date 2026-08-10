@@ -10,7 +10,7 @@ use horsie_models::agent::{
 };
 use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
-    RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
+    RunAbortedEvent, RunCompleteEvent, ToolCompleteEvent, ToolExecutingEvent,
 };
 use horsie_models::now_ms;
 use serde_json::Value;
@@ -235,6 +235,32 @@ fn sum_optional(a: Option<u32>, b: Option<u32>) -> Option<u32> {
     }
 }
 
+/// What a run has spent so far.
+///
+/// Owned by [`Agent::run`] rather than by the loop it drives, so that every one
+/// of the loop's exits — including the error returns, which carry nothing —
+/// leaves the figures somewhere the caller can still read them. Before this,
+/// a cancelled or failed run's tokens existed only in a local the `?` walked
+/// past, and the turn reported having cost nothing.
+///
+/// `context_tokens` is the *last* call's prompt size alone, overwritten rather
+/// than summed: it is what is loaded in the model's context, not what the run
+/// cost. Both stay zero for a run cancelled before its first call answered.
+#[derive(Debug, Clone)]
+struct RunAccounting {
+    usage: Usage,
+    context_tokens: u32,
+}
+
+impl RunAccounting {
+    fn new() -> Self {
+        Self {
+            usage: Usage::without_cache(0, 0),
+            context_tokens: 0,
+        }
+    }
+}
+
 impl Agent {
     /// `conversation_id` names the conversation these turns belong to. It is a
     /// constructor argument rather than an optional setter on purpose: an
@@ -291,6 +317,16 @@ impl Agent {
         None
     }
 
+    /// Drive one turn to a conclusion, emitting the run's events as it goes.
+    ///
+    /// A thin shell around [`Agent::run_inner`], which owns the whole loop. Its
+    /// only job is the accounting: every one of the loop's error returns
+    /// abandons a run that already spent tokens, and an `AgentError` carries
+    /// none of them, so what the run spent is accumulated into a struct this
+    /// level owns and reported here as `RunAborted`. Doing it here rather than
+    /// before each of the loop's ten-odd `return Err` sites is what makes "every
+    /// error path banks its usage" a fact of the code instead of a convention
+    /// the next error path has to remember.
     pub async fn run(
         &mut self,
         input: AgentInput,
@@ -298,7 +334,34 @@ impl Agent {
         cancel: CancellationToken,
     ) -> Result<AgentOutput, AgentError> {
         let run_id = Uuid::new_v4().to_string();
+        let mut spent = RunAccounting::new();
+        let result = self
+            .run_inner(&run_id, input, events, cancel, &mut spent)
+            .await;
+        if result.is_err() {
+            // The sink's own failure cannot change the outcome — the run has
+            // already failed — and propagating it would replace the error that
+            // explains the failure with one about bookkeeping.
+            let _ = events
+                .emit(AgentEvent::RunAborted(RunAbortedEvent {
+                    message_id: run_id,
+                    usage: spent.usage.clone(),
+                    context_tokens: spent.context_tokens,
+                    at_ms: now_ms(),
+                }))
+                .await;
+        }
+        result
+    }
 
+    async fn run_inner(
+        &mut self,
+        run_id: &str,
+        input: AgentInput,
+        events: &dyn EventSink,
+        cancel: CancellationToken,
+        spent: &mut RunAccounting,
+    ) -> Result<AgentOutput, AgentError> {
         let input_msg = input.to_message(now_ms());
         events
             .emit(AgentEvent::InputMessage(InputMessageEvent {
@@ -308,12 +371,6 @@ impl Agent {
             .await?;
         self.history.push(input_msg);
 
-        let mut total_usage = Usage::without_cache(0, 0);
-        // The *last* call's prompt size alone — overwritten (not summed) each
-        // iteration, unlike `total_usage`. Represents what's actually loaded in
-        // the model's context once the run ends. Every path that reads this runs
-        // after at least one loop iteration has set it.
-        let mut context_tokens: u32;
         let mut iteration: u32 = 0;
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
         let mut handoff_retries: u32 = 0;
@@ -390,17 +447,20 @@ impl Agent {
                 }))
                 .await?;
 
-            total_usage.input_tokens += response.usage.input_tokens;
-            total_usage.output_tokens += response.usage.output_tokens;
-            total_usage.cache_creation_tokens = sum_optional(
-                total_usage.cache_creation_tokens,
+            // Banked the moment the call answers, before anything downstream can
+            // fail: from here on every exit — the two `Ok` returns and every
+            // `return Err` below — reports this call's cost.
+            spent.usage.input_tokens += response.usage.input_tokens;
+            spent.usage.output_tokens += response.usage.output_tokens;
+            spent.usage.cache_creation_tokens = sum_optional(
+                spent.usage.cache_creation_tokens,
                 response.usage.cache_creation_tokens,
             );
-            total_usage.cache_read_tokens = sum_optional(
-                total_usage.cache_read_tokens,
+            spent.usage.cache_read_tokens = sum_optional(
+                spent.usage.cache_read_tokens,
                 response.usage.cache_read_tokens,
             );
-            context_tokens = response.usage.input_tokens;
+            spent.context_tokens = response.usage.input_tokens;
 
             let assistant_msg = Message {
                 id: msg_id.clone(),
@@ -464,10 +524,10 @@ impl Agent {
 
                 events
                     .emit(AgentEvent::RunComplete(RunCompleteEvent {
-                        message_id: run_id.clone(),
-                        usage: total_usage.clone(),
+                        message_id: run_id.to_string(),
+                        usage: spent.usage.clone(),
                         iterations: iteration,
-                        context_tokens,
+                        context_tokens: spent.context_tokens,
                         at_ms: now_ms(),
                     }))
                     .await?;
@@ -475,7 +535,7 @@ impl Agent {
                     result: AgentResult::Completed(CompletedOutput {
                         text: extract_text(&response.parts),
                     }),
-                    usage: total_usage,
+                    usage: spent.usage.clone(),
                 });
             }
 
@@ -516,10 +576,10 @@ impl Agent {
                         }
                         events
                             .emit(AgentEvent::RunComplete(RunCompleteEvent {
-                                message_id: run_id.clone(),
-                                usage: total_usage.clone(),
+                                message_id: run_id.to_string(),
+                                usage: spent.usage.clone(),
                                 iterations: iteration,
-                                context_tokens,
+                                context_tokens: spent.context_tokens,
                                 at_ms: now_ms(),
                             }))
                             .await?;
@@ -528,7 +588,7 @@ impl Agent {
                                 tool_name: handoff_name,
                                 calls: handoffs,
                             }),
-                            usage: total_usage,
+                            usage: spent.usage.clone(),
                         });
                     }
                     Some(reason) => {
@@ -1623,6 +1683,95 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AgentError::StuckInLoop { .. }));
+    }
+
+    /// A run that ends in an error still reports what it spent. It used to
+    /// report nothing at all: the totals lived in a local the error return
+    /// walked past, `AgentError` carries no usage, and the only event that
+    /// reported any was the one a failing run never emits.
+    #[tokio::test]
+    async fn a_failed_run_reports_the_tokens_it_spent() {
+        let provider = MockProvider::always(CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: "t1".into(),
+                name: "loop_tool".into(),
+                input: json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(5, 2),
+        });
+        let toolbox = MockToolbox::echo("loop_tool");
+        let config = AgentConfig {
+            max_iterations: 3,
+            stuck_threshold: 10,
+            nudge_threshold: 8,
+            max_tokens: None,
+            ..AgentConfig::default()
+        };
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .with_config(config)
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+
+        agent
+            .run(
+                AgentInput::user_message("msg-1", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+        let aborted: Vec<RunAbortedEvent> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::RunAborted(ev) => Some(ev),
+                _other => None,
+            })
+            .collect();
+        assert_eq!(aborted.len(), 1, "one accounting event ends a run, exactly");
+        assert_eq!(aborted[0].usage.input_tokens, 15, "three calls at 5");
+        assert_eq!(aborted[0].usage.output_tokens, 6);
+        assert_eq!(aborted[0].context_tokens, 5, "the last call's prompt alone");
+        assert!(
+            !sink
+                .events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::RunComplete(_))),
+            "a run ends with one of the two, never both"
+        );
+    }
+
+    /// Cancelled before the first call answered: nothing was spent, and the
+    /// accounting says so rather than being absent.
+    #[tokio::test]
+    async fn a_run_cancelled_before_it_spent_anything_reports_zero() {
+        let provider = MockProvider::text("never reached");
+        let toolbox = MockToolbox::echo("some_tool");
+        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
+            .build()
+            .unwrap();
+        let sink = CollectingEventSink::new();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        agent
+            .run(AgentInput::user_message("msg-1", "go"), &sink, token)
+            .await
+            .unwrap_err();
+
+        let aborted = sink
+            .events()
+            .into_iter()
+            .find_map(|e| match e {
+                AgentEvent::RunAborted(ev) => Some(ev),
+                _other => None,
+            })
+            .expect("a cancelled run still accounts for itself");
+        assert_eq!(aborted.usage.input_tokens, 0);
+        assert_eq!(aborted.context_tokens, 0);
     }
 
     #[tokio::test]

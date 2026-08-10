@@ -73,6 +73,7 @@ fn event_kinds(events: &[AgentEvent]) -> Vec<&'static str> {
             AgentEvent::ToolExecuting(_) => "ToolExecuting",
             AgentEvent::ToolComplete(_) => "ToolComplete",
             AgentEvent::RunComplete(_) => "RunComplete",
+            AgentEvent::RunAborted(_) => "RunAborted",
         })
         .collect()
 }
