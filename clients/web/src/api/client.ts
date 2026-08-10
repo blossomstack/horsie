@@ -121,15 +121,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     let code = `http_${res.status}`;
-    let message = `${res.status} ${res.statusText}`;
+    // `statusText` is empty over HTTP/2, so the old fallback of
+    // `${status} ${statusText}` rendered as a bare `422 ` with a trailing
+    // space. The status alone at least says something.
+    let message = res.statusText ? `${res.status} ${res.statusText}` : `${res.status}`;
+    // Read once, as text, then try to parse it. The old code called
+    // `res.json()`, which *throws* on a non-JSON body — and axum's own body
+    // rejections are `text/plain`. So the server's real message
+    // ("provision[0]: missing field `name` at line 1 column 63") was discarded
+    // and the user saw the bare status instead.
+    const raw = await res.text().catch(() => "");
+    let parsed: Partial<ApiError> | undefined;
     try {
-      const body = (await res.json()) as Partial<ApiError>;
-      if (body && typeof body.message === "string") {
-        message = body.message;
-        if (typeof body.code === "string") code = body.code;
-      }
+      parsed = JSON.parse(raw) as Partial<ApiError>;
     } catch {
-      /* non-JSON error body — keep the status line */
+      /* not JSON — the text itself is the message */
+    }
+    if (parsed && typeof parsed.message === "string") {
+      message = parsed.message;
+      if (typeof parsed.code === "string") code = parsed.code;
+    } else if (raw.trim()) {
+      message = raw.trim();
     }
     // A session that expired mid-use should land on the login page, not on a
     // wall of failed queries. The gate listens for this.

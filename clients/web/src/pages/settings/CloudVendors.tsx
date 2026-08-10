@@ -153,18 +153,16 @@ export function CloudVendors() {
     }
   };
 
-  const drop = async (name: string) => {
-    setError(null);
-    try {
-      await remove.mutateAsync(name);
-      if (draft?.name === name) setDraft(null);
-    } catch (e) {
-      setError(
-        e instanceof ApiRequestError
-          ? e.message
-          : "Failed to delete the vendor.",
-      );
-    }
+  // A delete is triggered from a row in the list, so there is no one field it
+  // belongs under: it reports through the global failure notice instead. The
+  // save below keeps its inline error, because that one *does* have a home —
+  // directly above the button that caused it.
+  const drop = (name: string) => {
+    remove.mutate(name, {
+      onSuccess: () => {
+        if (draft?.name === name) setDraft(null);
+      },
+    });
   };
 
   const add = (kind: RuntimeVendorSettings["kind"]) =>
@@ -188,15 +186,6 @@ export function CloudVendors() {
           : null
       }
     >
-      {error && (
-        <p
-          className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
-          data-testid="cloud-vendor-error"
-        >
-          {error}
-        </p>
-      )}
-
       {vendors?.map((v) => (
         <ListRow
           key={v.name}
@@ -339,6 +328,17 @@ export function CloudVendors() {
             <p className="mt-3 text-xs leading-relaxed text-faint">
               velos has no volumes: stopping a session deletes its container, and
               the next message schedules a fresh one that re-runs provisioning.
+            </p>
+          )}
+          {/* Beside the button that caused it. This sat at the top of the
+            pane, which put it 389px above the viewport while SAVE was 542px
+            below — so a rejected save looked like a button that did nothing. */}
+          {error && (
+            <p
+              className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+              data-testid="cloud-vendor-error"
+            >
+              {error}
             </p>
           )}
           <div className="mt-3 flex gap-2">

@@ -61,6 +61,8 @@ export function useCreateWorkflow() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: WorkflowInput) => api.workflows.create(body),
+    // The editor renders the failure beside its Save button.
+    meta: { inlineError: true },
     onSuccess: () => qc.invalidateQueries({ queryKey: workflowKeys.all }),
   });
 }
@@ -70,6 +72,8 @@ export function useUpdateWorkflow() {
   return useMutation({
     mutationFn: ({ name, body }: { name: string; body: WorkflowInput }) =>
       api.workflows.update(name, body),
+    // As above: reported inline by the editor.
+    meta: { inlineError: true },
     onSuccess: (_r, { name }) => {
       qc.invalidateQueries({ queryKey: workflowKeys.all });
       qc.invalidateQueries({ queryKey: workflowKeys.one(name) });

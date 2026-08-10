@@ -14,6 +14,8 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const login = useMutation({
     mutationFn: () => api.auth.login(password),
+    // A wrong password belongs under the password field, not in a corner.
+    meta: { inlineError: true },
     onSuccess: (status) => {
       qc.setQueryData(AUTH_STATUS_KEY, status);
       void qc.invalidateQueries();
