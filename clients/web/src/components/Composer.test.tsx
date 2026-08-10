@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionStatusKind, type CatalogEntryView } from "../api/types";
 import { Composer } from "./Composer";
@@ -113,6 +119,35 @@ describe("Composer typeahead", () => {
     fireEvent.keyDown(input, { key: "Escape" });
     expect(screen.queryByTestId("entry-menu")).toBeNull();
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  // Sending while offline used to clear the box and lose the message: the
+  // request failed, the optimistic bubble vanished on the next refetch, and
+  // what had been typed existed nowhere.
+  it("puts the message back when the send never left", async () => {
+    const onSend = vi.fn(() => Promise.reject(new Error("offline")));
+    const { input } = composer(onSend);
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("hello");
+    await waitFor(() =>
+      expect((input as HTMLTextAreaElement).value).toBe("hello"),
+    );
+  });
+
+  // But not over something typed while the request was in flight.
+  it("does not clobber a new message typed while the send was in flight", async () => {
+    let reject: (e: Error) => void = () => {};
+    const onSend = vi.fn(
+      () => new Promise((_, r) => { reject = r as (e: Error) => void; }),
+    );
+    const { input } = composer(onSend);
+    fireEvent.change(input, { target: { value: "first" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.change(input, { target: { value: "second" } });
+    reject(new Error("offline"));
+    await waitFor(() => expect(onSend).toHaveBeenCalled());
+    expect((input as HTMLTextAreaElement).value).toBe("second");
   });
 
   it("stays out of the way when nothing matches", () => {

@@ -424,7 +424,15 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
             <button
               className="key key-go"
               onClick={save}
-              disabled={!dirty || update.isPending}
+              // The create form has always refused an empty body; the edit
+              // form used to accept one, so a memory could be emptied after
+              // the fact into something the agent loads to learn nothing.
+              disabled={
+                !dirty ||
+                update.isPending ||
+                !description.trim() ||
+                !content.trim()
+              }
             >
               {update.isPending && (
                 <Loader2 size={15} className="animate-spin" />

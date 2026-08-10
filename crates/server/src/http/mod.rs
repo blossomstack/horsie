@@ -8,7 +8,7 @@ mod chatgpt;
 mod config;
 mod environments;
 pub mod error;
-mod github;
+pub(crate) mod github;
 mod groups;
 mod handlers;
 mod marketplaces;
@@ -1199,9 +1199,11 @@ mod tests {
         assert!(!s.connected);
         assert!(!s.app_configured);
 
-        // Save app config; secrets come back redacted.
+        // Save app config; secrets come back redacted. A real key, because the
+        // save now parses it — see `validate_app_config`.
+        let pem = include_str!("../github/testdata/test_rsa.pem");
         let body = serde_json::json!({
-            "clientId": "cid", "clientSecret": "sec", "appId": 7, "privateKey": "PEM"
+            "clientId": "cid", "clientSecret": "sec", "appId": 7, "privateKey": pem
         });
         let res = app
             .clone()
@@ -1228,6 +1230,49 @@ mod tests {
         assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
         let loc = res.headers().get("location").unwrap().to_str().unwrap();
         assert!(loc.contains("client_id=cid"), "{loc}");
+    }
+
+    // The form performed no save-time validation at all: an empty save wiped a
+    // working registration and reported a green SAVED, and a private key that
+    // was not a key stored with `hasPrivateKey: true` and failed hours later at
+    // the first clone.
+    #[tokio::test]
+    async fn app_config_refuses_what_it_cannot_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = app(test_state(&tmp).await);
+
+        for body in [
+            serde_json::json!({ "clientId": "" }),
+            serde_json::json!({ "clientId": "cid", "privateKey": "not-a-pem" }),
+            // A value that is PEM-*shaped* but is not a key. This is the case
+            // the old "does it start with -----BEGIN" check waved through, and
+            // it stored with `hasPrivateKey: true`.
+            serde_json::json!({
+                "clientId": "cid",
+                "privateKey": "-----BEGIN RSA PRIVATE KEY-----\nnope\n-----END RSA PRIVATE KEY-----\n",
+            }),
+            serde_json::json!({ "clientId": "cid", "callbackBase": "horsie.example.com" }),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(put_json("/api/github/app-config", &body))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{body} should be refused"
+            );
+        }
+
+        // And nothing was stored on the way through.
+        let res = app
+            .clone()
+            .oneshot(get("/api/github/status"))
+            .await
+            .unwrap();
+        let s: horsie_models::github::GitHubStatus = read_json(res).await;
+        assert!(!s.app_configured);
     }
 
     #[tokio::test]
@@ -1810,7 +1855,12 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
         let loc = res.headers().get("location").unwrap().to_str().unwrap();
-        assert!(loc.starts_with("/settings?mcp_error="), "{loc}");
+        // The page that actually reads `mcp_error`. `/settings` redirects to
+        // `/settings/models` and drops the query on the way.
+        assert!(
+            loc.starts_with("/settings/integrations?mcp_error="),
+            "{loc}"
+        );
     }
 
     #[tokio::test]
@@ -3594,11 +3644,39 @@ mod tests {
         );
 
         let res = app
+            .clone()
             .oneshot(get_with_cookie("/api/device/tokens", &cookie))
             .await
             .unwrap();
         let listed: Vec<AgentTokenView> = read_json(res).await;
         assert!(listed.is_empty());
+
+        // Revoking it again is still success — that is the state the caller
+        // asked for. Revoking an id that never existed is not: it used to be a
+        // 204, which reported a revocation that never happened.
+        let revoke = |id: String| {
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/device/tokens/{id}"))
+                .header("cookie", format!("horsie_session={cookie}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(revoke(created.view.id.clone()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            app.oneshot(revoke("no-such-token".into()))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

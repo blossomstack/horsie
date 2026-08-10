@@ -448,17 +448,23 @@ pub async fn create_agent_token(
     ))
 }
 
-/// `DELETE /api/device/tokens/:id` — revoke. Idempotent: revoking an already-dead
-/// token is the state the caller asked for.
+/// `DELETE /api/device/tokens/:id` — revoke.
+///
+/// Idempotent for a token that exists: revoking an already-dead one is the
+/// state the caller asked for. An id that never existed is a 404 — it used to
+/// be a 204, which told a caller that a token it had mistyped was now revoked.
 pub async fn delete_agent_token(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<StatusCode, Api> {
-    state
+    let existed = state
         .auth
         .revoke_agent_token(&id)
         .await
         .map_err(Api::internal)?;
+    if !existed {
+        return Err(Api::not_found(format!("no token with id '{id}'")));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

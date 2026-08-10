@@ -2,7 +2,9 @@
 //! agent-facing reads (`memories_in`, `get_by_ref`) the toolbox and the prompt
 //! index use, so the session layer never touches the store directly.
 
-use crate::memory::{MAX_DESCRIPTION_CHARS, MemoryRow, MemorySpaceRow, MemoryStore, validate_slug};
+use crate::memory::{
+    MAX_CONTENT_CHARS, MAX_DESCRIPTION_CHARS, MemoryRow, MemorySpaceRow, MemoryStore, validate_slug,
+};
 use horsie_models::memory::{
     MemoryCreateInput, MemorySpaceCreateInput, MemorySpaceUpdateInput, MemorySpaceView,
     MemoryUpdateInput, MemoryView,
@@ -36,6 +38,15 @@ impl MemoryService {
         input: MemorySpaceCreateInput,
     ) -> Result<MemorySpaceView, String> {
         validate_slug(&input.name)?;
+        // Asked here rather than left to the UNIQUE index, which surfaced as a
+        // raw SQLite constraint message naming the internal table and columns —
+        // the one validation on this page that did not return a sentence.
+        if self.store.get_space(&input.name).await?.is_some() {
+            return Err(format!(
+                "a memory space named '{}' already exists",
+                input.name
+            ));
+        }
         let now = now_secs();
         self.store
             .create_space(&MemorySpaceRow {
@@ -118,6 +129,7 @@ impl MemoryService {
         validate_slug(&input.space)?;
         validate_slug(&input.name)?;
         check_description(&input.description)?;
+        check_content(&input.content)?;
         let now = now_secs();
         let id = self
             .store
@@ -141,6 +153,13 @@ impl MemoryService {
     ) -> Result<MemoryView, String> {
         if let Some(d) = input.description.as_deref() {
             check_description(d)?;
+        }
+        // Checked on update as well as create. It was only checked on create,
+        // so the edit form happily saved an empty body the create form had
+        // refused — and a memory with no body is one the agent loads to learn
+        // nothing.
+        if let Some(c) = input.content.as_deref() {
+            check_content(c)?;
         }
         let changed = self
             .store
@@ -177,6 +196,22 @@ impl MemoryService {
     pub async fn get_by_ref(&self, space: &str, name: &str) -> Result<Option<MemoryRow>, String> {
         self.store.get_memory_by_ref(space, name).await
     }
+}
+
+/// A memory's body. Capped because a body is loaded verbatim into a turn on
+/// request, and nothing else bounded it — 100 KB was accepted, which is a
+/// context window's worth of one memory.
+fn check_content(c: &str) -> Result<(), String> {
+    if c.trim().is_empty() {
+        return Err("content must not be empty".to_string());
+    }
+    if c.chars().count() > MAX_CONTENT_CHARS {
+        return Err(format!(
+            "content must be at most {MAX_CONTENT_CHARS} characters (got {})",
+            c.chars().count()
+        ));
+    }
+    Ok(())
 }
 
 fn check_description(d: &str) -> Result<(), String> {
@@ -363,5 +398,68 @@ mod tests {
     async fn deleting_a_missing_space_errors() {
         let (s, _t) = service().await;
         assert!(s.delete_space("nope").await.is_err());
+    }
+    // The one validation on that page that leaked its implementation: a
+    // duplicate name came back as a raw SQLite constraint error naming the
+    // internal table and columns.
+    #[tokio::test]
+    async fn a_duplicate_space_name_is_a_sentence_not_a_constraint() {
+        let (s, _t) = service().await;
+        s.create_space(MemorySpaceCreateInput {
+            name: "ops".into(),
+            description: None,
+        })
+        .await
+        .unwrap();
+        let err = s
+            .create_space(MemorySpaceCreateInput {
+                name: "ops".into(),
+                description: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert!(!err.to_lowercase().contains("unique"), "{err}");
+        assert!(!err.contains("memory_spaces"), "{err}");
+    }
+
+    // The create form refused an empty body and the edit form did not, so a
+    // memory could be emptied after the fact. Nothing capped a body either.
+    #[tokio::test]
+    async fn a_body_must_be_present_and_bounded_on_create_and_update() {
+        let (s, _t) = service().await;
+        let mut empty = create("default", "alpha");
+        empty.content = "  ".into();
+        assert!(s.create_memory(empty).await.is_err());
+
+        let mut huge = create("default", "alpha");
+        huge.content = "x".repeat(crate::memory::MAX_CONTENT_CHARS + 1);
+        let err = s.create_memory(huge).await.unwrap_err();
+        assert!(err.contains("content"), "{err}");
+
+        let v = s.create_memory(create("default", "alpha")).await.unwrap();
+        let id = i64::try_from(v.id).unwrap();
+        assert!(
+            s.update_memory(
+                id,
+                MemoryUpdateInput {
+                    description: None,
+                    content: Some(String::new()),
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            s.update_memory(
+                id,
+                MemoryUpdateInput {
+                    description: None,
+                    content: Some("x".repeat(crate::memory::MAX_CONTENT_CHARS + 1)),
+                }
+            )
+            .await
+            .is_err()
+        );
     }
 }

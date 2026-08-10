@@ -494,7 +494,8 @@ impl AuthService {
         self.store.list_tokens_of_kind(TokenKind::Agent).await
     }
 
-    pub async fn revoke_agent_token(&self, id: &str) -> Result<(), String> {
+    /// Returns false when no token has this id.
+    pub async fn revoke_agent_token(&self, id: &str) -> Result<bool, String> {
         self.store.revoke_token(id, now_secs()).await
     }
 

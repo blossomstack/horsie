@@ -47,10 +47,13 @@ fn clone_at_name(url: &str, name: Option<&str>, dest: &Path) -> Result<(), Strin
         .output()
         .map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
+        // Redacted, because git names the remote it failed on and the remote
+        // may carry a credential: `https://user:token@host/repo`. Every caller
+        // puts this string somewhere a person can read it.
+        return Err(crate::remote_url::redact_url_credentials(&format!(
             "git clone failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
     }
     Ok(())
 }
@@ -81,10 +84,10 @@ fn run_git(what: &str, args: &[&str]) -> Result<(), String> {
         .output()
         .map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(crate::remote_url::redact_url_credentials(&format!(
             "git {what} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
     }
     Ok(())
 }
@@ -102,10 +105,10 @@ pub fn pull_ff_only(dir: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
+        return Err(crate::remote_url::redact_url_credentials(&format!(
             "git pull failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        )));
     }
     Ok(())
 }
@@ -133,6 +136,26 @@ pub fn head_sha(dir: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A clone URL can legitimately carry a credential, and git names the
+    /// remote it failed on. Every caller of `clone` puts the returned string
+    /// somewhere a person reads it — an API body, the UI, a log.
+    ///
+    /// git strips userinfo from *some* of its own messages, which is exactly
+    /// why this cannot be left to git: which ones it strips depends on the
+    /// version and on which error path fired.
+    #[test]
+    fn a_failed_clone_does_not_echo_the_credential() {
+        let dest = TempDir::new().unwrap();
+        let err = clone(
+            "https://someone:s3cret@127.0.0.1:1/nope.git",
+            None,
+            &dest.path().join("out"),
+        )
+        .unwrap_err();
+        assert!(!err.contains("s3cret"), "{err}");
+        assert!(!err.contains("someone"), "{err}");
+    }
 
     /// A real local repo with one commit, usable as a `file://` clone source so
     /// tests never touch the network.

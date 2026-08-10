@@ -101,10 +101,89 @@ pub fn check_git_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Replace the userinfo in every URL inside `text` with `***`.
+///
+/// A git remote can legitimately carry a credential — `https://user:token@host/repo`
+/// is how a private marketplace is cloned without an SSH identity — and horsie
+/// stores it because it needs it again on every refresh. What it must not do is
+/// hand it back: the URL was returned verbatim by `GET /api/plugins` and
+/// `/api/marketplaces`, rendered in the marketplace rows, and echoed inside
+/// `git clone failed: …` bodies, so a token typed once into a form ended up on
+/// screen, in the API and in an error message.
+///
+/// Text rather than a URL, because the worst offender is `git`'s stderr, which
+/// is prose with a URL somewhere in it. The scan is deliberately narrow: from a
+/// `://` to the next `@`, stopping at any character that cannot appear in
+/// userinfo, so an `@` later in a path or query is not mistaken for one.
+pub fn redact_url_credentials(text: &str) -> String {
+    const MARK: &str = "://";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(MARK) {
+        let (head, tail) = rest.split_at(at + MARK.len());
+        out.push_str(head);
+        // Userinfo runs to the first `@`, and cannot contain any of these.
+        let end = tail
+            .find(['@', '/', '?', '#', ' ', '\t', '\n', '"', '\'']);
+        match end {
+            Some(i) if tail.as_bytes().get(i) == Some(&b'@') => {
+                out.push_str("***@");
+                rest = &tail[i + 1..];
+            }
+            _ => rest = tail,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credentials_are_stripped_from_a_url() {
+        assert_eq!(
+            redact_url_credentials("https://user:token@github.com/o/r.git"),
+            "https://***@github.com/o/r.git"
+        );
+        assert_eq!(
+            redact_url_credentials("https://token@github.com/o/r.git"),
+            "https://***@github.com/o/r.git"
+        );
+    }
+
+    #[test]
+    fn a_url_with_no_credential_is_untouched() {
+        for url in [
+            "https://github.com/o/r.git",
+            "http://localhost:11434/v1",
+            "file:///srv/repo",
+            // An `@` in the path is not userinfo.
+            "https://example.com/o/r@v2.git",
+            "https://example.com/search?q=a@b",
+        ] {
+            assert_eq!(redact_url_credentials(url), url, "{url}");
+        }
+    }
+
+    #[test]
+    fn every_url_in_a_line_of_prose_is_covered() {
+        let stderr = "fatal: could not read from https://u:p@a.example/x.git; \
+                      tried https://u2:p2@b.example/y.git too";
+        let out = redact_url_credentials(stderr);
+        assert!(!out.contains("u:p@"), "{out}");
+        assert!(!out.contains("u2:p2@"), "{out}");
+        assert_eq!(out.matches("***@").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn text_with_no_url_survives_intact() {
+        for s in ["", "no urls here", "a@b.example is an address", "://"] {
+            assert_eq!(redact_url_credentials(s), s, "{s:?}");
+        }
+    }
 
     #[test]
     fn ordinary_http_urls_are_accepted() {

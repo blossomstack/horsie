@@ -28,6 +28,16 @@ pub async fn auth(Scope(state): Scope, headers: HeaderMap) -> Result<Redirect, A
     Ok(Redirect::temporary(&url))
 }
 
+/// Where a callback sends the browser back to.
+///
+/// `/settings/integrations`, not `/settings`: the index route redirects to
+/// `/settings/models` and drops the query string on the way, so the server's
+/// perfectly good error message was thrown away by the client's own router and
+/// the user saw an unremarkable settings page. `IntegrationsSettings` is the
+/// only page that reads these params, so it is the only page worth sending
+/// them to.
+pub(crate) const SETTINGS_PAGE: &str = "/settings/integrations";
+
 pub async fn callback(
     Scope(state): Scope,
     Query(q): Query<CallbackQuery>,
@@ -36,11 +46,11 @@ pub async fn callback(
     let base = crate::http::request_base(&headers);
     let dest = match q.code {
         Some(code) => match state.github.handle_callback(&code, &base).await {
-            Ok(()) => "/settings?github_connected=1".to_string(),
-            Err(e) => format!("/settings?github_error={}", urlencode(&e)),
+            Ok(()) => format!("{SETTINGS_PAGE}?github_connected=1"),
+            Err(e) => format!("{SETTINGS_PAGE}?github_error={}", urlencode(&e)),
         },
         None => format!(
-            "/settings?github_error={}",
+            "{SETTINGS_PAGE}?github_error={}",
             urlencode(
                 &q.error_description
                     .or(q.error)

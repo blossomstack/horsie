@@ -212,8 +212,14 @@ impl AuthStore {
         row.as_ref().map(row_to_token).transpose()
     }
 
-    pub async fn revoke_token(&self, id: &str, now: i64) -> Result<(), String> {
-        sqlx::query(
+    /// Returns whether a token with this id exists at all.
+    ///
+    /// Revoking an already-revoked token is still success — it is the state the
+    /// caller asked for — but revoking an id that never existed used to be
+    /// success too, so a typo in a token id reported a revocation that never
+    /// happened.
+    pub async fn revoke_token(&self, id: &str, now: i64) -> Result<bool, String> {
+        let res = sqlx::query(
             &self
                 .db
                 .q("UPDATE auth_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"),
@@ -223,7 +229,15 @@ impl AuthStore {
         .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
-        Ok(())
+        if res.rows_affected() > 0 {
+            return Ok(true);
+        }
+        let existing = sqlx::query(&self.db.q("SELECT id FROM auth_tokens WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(existing.is_some())
     }
 
     /// Revoke every live token of one kind for a principal, optionally sparing

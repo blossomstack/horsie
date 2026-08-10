@@ -95,6 +95,9 @@ export function SessionView() {
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send message.",
       );
+      // Rethrown so the composer can restore what was typed. Swallowing it
+      // here is what let an offline send clear the box and lose the message.
+      throw e;
     }
   };
 

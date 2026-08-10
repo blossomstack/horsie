@@ -159,12 +159,14 @@ export function GithubAppPage() {
               testId="github-app-id"
             />
             {/* A textarea, not an <input type="password">. Chrome collapses
-                newlines to spaces when pasting into a single-line input, so the
-                documented primary format — a PEM, which is newline-delimited by
-                definition — was silently mangled into a key openssl refuses to
-                read, and only the base64 form ever worked. A key is not a
-                password field anyway: it is pasted once, and being able to see
-                that it pasted whole is worth more than the dots. */}
+                newlines to spaces when pasting into a single-line input, and
+                the documented primary format — a PEM — is newline-delimited by
+                definition, so what was stored was never what was copied. (The
+                key horsie parses survives that mangling; `openssl rsa -check`
+                does not, so the value on screen and the value in the field
+                disagreed about being valid.) A key is not a password anyway:
+                it is pasted once, and seeing that it pasted whole is worth
+                more than the dots — and the save now parses it either way. */}
             <TextAreaField
               label="Private key (PEM or base64)"
               value={privateKey}

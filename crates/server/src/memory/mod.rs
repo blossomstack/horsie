@@ -20,6 +20,11 @@ pub use toolbox::MemoryToolbox;
 /// in the system prompt on every turn, so this bounds the fixed per-turn cost.
 pub const MAX_DESCRIPTION_CHARS: usize = 200;
 
+/// Cap on a memory's body. The index only ships descriptions, but a body is
+/// loaded verbatim into a turn on request, and nothing bounded it at all — a
+/// 100 KB memory was accepted, then read whole into the prompt.
+pub const MAX_CONTENT_CHARS: usize = 32_000;
+
 /// Cap on how many memories the rendered index lists before truncating.
 pub const MAX_INDEX_ENTRIES: usize = 200;
 

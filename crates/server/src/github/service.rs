@@ -15,6 +15,37 @@ use super::api::{GithubApi, now_secs};
 use super::decode_private_key;
 use super::store::{AppConfigRow, CredentialsRow, GithubStore};
 
+/// What this endpoint will not store.
+///
+/// It used to store anything: an empty submission replaced a working
+/// registration and reported success; a private key that was not a key stored
+/// with `hasPrivateKey: true` and failed hours later at the first clone; a
+/// `callback_base` that was not a URL produced a `redirect_uri` GitHub refuses.
+/// Every one of those is knowable here, at the moment it is typed.
+fn validate_app_config(input: &GitHubAppConfigInput) -> Result<(), String> {
+    if input.client_id.trim().is_empty() {
+        return Err("a client id is required — it is what identifies the app".to_string());
+    }
+    // Not merely "is it PEM-shaped": a PEM pasted into a single-line input has
+    // its newlines collapsed to spaces, which still starts with `-----BEGIN`
+    // and is still unparseable. Parsing it here is the only check that
+    // notices.
+    if let Some(key) = input.private_key.as_deref().map(str::trim)
+        && !key.is_empty()
+    {
+        let pem = decode_private_key(key)?;
+        jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes())
+            .map_err(|e| format!("private key is not a usable RSA key: {e}"))?;
+    }
+    if let Some(base) = input.callback_base.as_deref().map(str::trim)
+        && !base.is_empty()
+    {
+        horsie_support::remote_url::check_fetch_url(base)
+            .map_err(|e| format!("callback base URL: {e}"))?;
+    }
+    Ok(())
+}
+
 /// How long a fetched repo list is served from memory before a refetch.
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
@@ -65,6 +96,7 @@ impl GithubService {
         &self,
         input: GitHubAppConfigInput,
     ) -> Result<GitHubAppConfigView, String> {
+        validate_app_config(&input)?;
         let row = self.store.save_app_config(&input).await?;
         Ok(app_view(&row))
     }

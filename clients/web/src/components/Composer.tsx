@@ -43,7 +43,9 @@ export function Composer({
   /** What the selected bundles offer, for the `/` and `@` typeahead. Empty
    * where there is nothing to complete against. */
   entries?: CatalogEntryView[];
-  onSend: (text: string) => void;
+  /** May be async; a rejection means the message never left, and the
+   * composer puts it back. */
+  onSend: (text: string) => void | Promise<unknown>;
   onStop: () => void;
 }) {
   const [text, setText] = useState("");
@@ -93,9 +95,14 @@ export function Composer({
   const submit = () => {
     const trimmed = text.trim();
     if (!trimmed || !meta.canSend || busy || blocked) return;
-    onSend(trimmed);
     setText("");
     setActive(0);
+    // Put it back if it never left. Sending while offline cleared the box and
+    // dropped the message: the request failed, the optimistic bubble vanished
+    // on the next refetch, and what had been typed existed nowhere.
+    void Promise.resolve(onSend(trimmed)).catch(() =>
+      setText((current) => (current === "" ? trimmed : current)),
+    );
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
