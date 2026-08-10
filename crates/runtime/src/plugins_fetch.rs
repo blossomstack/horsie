@@ -97,6 +97,17 @@ async fn provision_into(
             return None;
         }
     };
+    // Whether the runtime even has a credential, said once and up front. The
+    // server checks that this account installed the bundle being asked for, so
+    // an absent token is a 403 on every bundle — a completely different fault
+    // from a transport failure, and one that otherwise looks identical from
+    // out here. Never the value: this is the runtime's only credential.
+    if token.is_none() {
+        eprintln!(
+            "plugins: no {} in the environment; every bundle fetch will be refused",
+            ENV_CONNECT_TOKEN
+        );
+    }
     let mut complete = true;
     for r in &refs {
         if let Err(e) = materialize(&client, r, base, dir, token).await {
@@ -152,16 +163,40 @@ async fn materialize(
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let resp = req.send().await.map_err(|e| chain(&e))?;
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let bytes = resp.bytes().await.map_err(|e| chain(&e))?;
     let got = sha256_hex(&bytes);
     if got != r.hash {
         return Err(format!("hash mismatch (want {}, got {got})", r.hash));
     }
     unpack_zip(&bytes, &dir.join(&r.name))
+}
+
+/// An error plus every `source()` behind it, joined.
+///
+/// `reqwest::Error`'s own `Display` is `error sending request for url (…)` and
+/// says nothing about *why* — the cause is one or more layers down, in hyper,
+/// in the connector, in the TLS stack. Reporting only the top line is how a
+/// bundle fetch came to fail with no recoverable diagnosis at all: the message
+/// could not distinguish a DNS failure from a refused connection from an
+/// untrusted certificate, which are three completely different bugs. Anything
+/// that reports a transport failure to a human needs the chain, not the head.
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        // Some layers restate their child verbatim; repeating it adds nothing.
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -198,6 +233,66 @@ fn unpack_zip(bytes: &[u8], into: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::{Read as _, Write as _};
+
+    /// A transport failure has to name its cause.
+    ///
+    /// `reqwest::Error` displays as `error sending request for url (…)` and
+    /// stops there, which is exactly what a bundle fetch reported when it
+    /// failed — a message that cannot tell a DNS failure from a refused
+    /// connection from an untrusted certificate. Nothing could be diagnosed
+    /// from the logs because the cause was never printed.
+    #[tokio::test]
+    async fn a_transport_failure_reports_its_whole_cause_chain() {
+        // Port 1 on loopback: nothing listens, so this fails in the connector
+        // rather than at any layer that would produce a status.
+        let client = reqwest::Client::builder().build().unwrap();
+        let r = ArtifactRef {
+            name: "b".to_string(),
+            hash: "00".to_string(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let err = materialize(&client, &r, "http://127.0.0.1:1", dir.path(), None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.len() > "error sending request".len(),
+            "the bare reqwest Display is not a diagnosis: {err}"
+        );
+        // The connector's own words, whatever the platform calls them.
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("connect") || lower.contains("refused") || lower.contains("os error"),
+            "no underlying cause in: {err}"
+        );
+    }
+
+    #[test]
+    fn the_chain_does_not_repeat_a_layer_that_restates_its_child() {
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection refused")
+            }
+        }
+        impl std::error::Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrapper(Leaf);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "dial failed: connection refused")
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(chain(&Wrapper(Leaf)), "dial failed: connection refused");
+    }
 
     /// Build a small deterministic zip with one file.
     fn make_zip() -> Vec<u8> {
