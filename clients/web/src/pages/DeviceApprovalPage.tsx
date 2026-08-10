@@ -8,10 +8,15 @@ export function DeviceApprovalPage() {
   const [params] = useSearchParams();
   const [code, setCode] = useState(params.get("code") ?? "");
 
+  // Both render their failure on the page itself.
   const approve = useMutation({
     mutationFn: () => api.auth.approveDevice(code),
+    meta: { inlineError: true },
   });
-  const deny = useMutation({ mutationFn: () => api.auth.denyDevice(code) });
+  const deny = useMutation({
+    mutationFn: () => api.auth.denyDevice(code),
+    meta: { inlineError: true },
+  });
 
   const error = [approve.error, deny.error].find(
     (e): e is ApiRequestError => e instanceof ApiRequestError,

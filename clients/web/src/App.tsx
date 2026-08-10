@@ -1,4 +1,10 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  MutationCache,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
+import { pushMutationError } from "./api/mutationErrors";
+import { MutationErrors } from "./components/MutationErrors";
 import { useEffect } from "react";
 import type { ReactNode } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
@@ -32,6 +38,20 @@ import { GithubAppPage } from "./pages/admin/GithubAppPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 
 const client = new QueryClient({
+  // Every failed write reports itself. Handled here rather than at each call
+  // site because a call-site list is a denylist: it silently re-opens the
+  // moment someone adds a mutation and forgets an `onError`, which is exactly
+  // how ~8 of them came to swallow the server's message.
+  mutationCache: new MutationCache({
+    onError: (error, _variables, _context, mutation) => {
+      // A site that already renders the failure inline says so, so the same
+      // error is not reported twice in two places.
+      if (mutation.options.meta?.inlineError) return;
+      pushMutationError(
+        error instanceof Error ? error.message : "The write failed.",
+      );
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 5_000,
@@ -130,6 +150,7 @@ export default function App() {
             </Route>
           </Routes>
         </AuthGate>
+        <MutationErrors />
       </BrowserRouter>
     </QueryClientProvider>
   );

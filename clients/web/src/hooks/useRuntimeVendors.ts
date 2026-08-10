@@ -17,6 +17,8 @@ export function useRuntimeVendors() {
 export function useSaveRuntimeVendor() {
   const qc = useQueryClient();
   return useMutation({
+    // The form renders this one directly above its Save button.
+    meta: { inlineError: true },
     mutationFn: ({
       name,
       body,

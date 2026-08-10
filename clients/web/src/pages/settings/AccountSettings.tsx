@@ -18,6 +18,8 @@ function MachineTokens() {
   });
   const create = useMutation({
     mutationFn: () => api.auth.createToken(label),
+    // Reported under the label field.
+    meta: { inlineError: true },
     onSuccess: (created) => {
       setLabel("");
       // Shown once: only the hash is stored, so there is nothing to show later.
@@ -131,6 +133,8 @@ export function AccountSettings() {
   const change = useMutation({
     mutationFn: () =>
       api.auth.changePassword({ currentPassword: current, newPassword: next }),
+    // Reported beside the password fields.
+    meta: { inlineError: true },
     onSuccess: (s) => {
       setCurrent("");
       setNext("");
