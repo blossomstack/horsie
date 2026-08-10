@@ -1,7 +1,9 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionDetail } from "../api/types";
+import { settingsKey } from "../hooks/useSettings";
 import { SessionConfigBar } from "./SessionConfigBar";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
@@ -27,11 +29,27 @@ function detail(overrides: Partial<SessionDetail> = {}): SessionDetail {
   };
 }
 
-function renderLocked(d: SessionDetail) {
+/**
+ * The locked row reads the configured models, so it needs a query client — it
+ * has to know whether the session's alias still exists. With no settings
+ * loaded it says nothing, which is why every test below is unaffected: an
+ * unknown answer must not be reported as "missing".
+ */
+function renderLocked(d: SessionDetail, models?: string[]) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  if (models) {
+    client.setQueryData(settingsKey, {
+      models: models.map((alias) => ({ alias })),
+    });
+  }
   return render(
-    <MemoryRouter>
-      <SessionConfigBar mode="locked" detail={d} />
-    </MemoryRouter>,
+    <QueryClientProvider client={client}>
+      <MemoryRouter>
+        <SessionConfigBar mode="locked" detail={d} />
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
 }
 
@@ -73,6 +91,28 @@ describe("SessionConfigBar locked mode", () => {
     const { getByTestId, getAllByText } = renderLocked(detail());
     fireEvent.click(getByTestId("config-model"));
     expect(getAllByText("Model")).toHaveLength(1);
+  });
+
+  /**
+   * A model alias can be renamed or deleted out from under a live session, and
+   * the next turn then fails `no provider registered for model '…'`. The row
+   * showed the dead alias exactly as it shows a live one, so the only symptom
+   * was a session that had quietly stopped working.
+   */
+  it("says so when the session's model no longer exists", () => {
+    const { getByTestId, getByText } = renderLocked(detail(), ["opus", "haiku"]);
+    expect(getByTestId("config-model").getAttribute("aria-label")).toContain(
+      "missing",
+    );
+    fireEvent.click(getByTestId("config-model"));
+    expect(getByText(/no longer configured/i)).toBeDefined();
+  });
+
+  it("stays quiet when the model is still configured", () => {
+    const { getByTestId } = renderLocked(detail(), ["sonnet", "opus"]);
+    expect(
+      getByTestId("config-model").getAttribute("aria-label"),
+    ).not.toContain("missing");
   });
 
   it("omits a workspace channel the session does not have", () => {

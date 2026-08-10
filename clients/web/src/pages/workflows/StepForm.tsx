@@ -20,6 +20,8 @@ export function StepForm({
   stepNames: string[];
   onChange: (patch: Partial<StepDraft>) => void;
 }) {
+  const missingAgent =
+    step.agent !== "" && !agents.some((a) => a.name === step.agent);
   return (
     <div className="space-y-4" data-testid="step-form" data-step-name={step.name}>
       <section className="panel space-y-3 p-4">
@@ -48,7 +50,22 @@ export function StepForm({
                 {a.name}
               </option>
             ))}
+            {/* A step keeps naming an agent that has been deleted — nothing
+              checks workflows on delete, so this is reachable and only fails
+              at run time. Without an option for it the select falls back to
+              rendering the first one, so the form showed "Choose an agent…"
+              while still holding the dead name, and a save carried it. */}
+            {missingAgent && (
+              <option value={step.agent}>{step.agent} — missing</option>
+            )}
           </select>
+          {missingAgent && (
+            <span className="mt-1 block text-xs leading-relaxed text-red-ink">
+              No agent named <span className="font-mono">{step.agent}</span>{" "}
+              exists any more, so this step fails when the workflow runs. Pick
+              another, or recreate it.
+            </span>
+          )}
         </label>
 
         <label className="block">

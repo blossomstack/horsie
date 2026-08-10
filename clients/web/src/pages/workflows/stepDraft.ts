@@ -108,3 +108,43 @@ export const emptyStep = (n: number): StepDraft => ({
   maxIterations: undefined,
   maxRetries: undefined,
 });
+
+/**
+ * Rename a step and carry every reference to it.
+ *
+ * Renaming used to change only the step's own `name`, leaving other steps'
+ * `transitions[].to` — and the workflow's `start` — pointing at a name that no
+ * longer existed. Save then failed naming a step that appeared nowhere in the
+ * form, and since the seeded first step is called `start`, renaming it is the
+ * first thing anyone does.
+ *
+ * A rewrite, not a refusal: the references are inside the object being edited,
+ * so there is nothing to ask the user about. Returns the new list and the new
+ * `start`.
+ *
+ * An empty or unchanged new name rewrites nothing — a half-typed name must not
+ * repoint transitions on every keystroke.
+ */
+export function renameStep(
+  steps: StepDraft[],
+  id: string,
+  nextName: string,
+  start: string,
+): { steps: StepDraft[]; start: string } {
+  const target = steps.find((s) => s.id === id);
+  const from = target?.name.trim() ?? "";
+  const to = nextName.trim();
+  const renaming = from !== "" && to !== "" && from !== to;
+
+  const next = steps.map((s) => {
+    const named = s.id === id ? { ...s, name: nextName } : s;
+    if (!renaming) return named;
+    return {
+      ...named,
+      transitions: named.transitions.map((t) =>
+        t.to.trim() === from ? { ...t, to } : t,
+      ),
+    };
+  });
+  return { steps: next, start: renaming && start === from ? to : start };
+}

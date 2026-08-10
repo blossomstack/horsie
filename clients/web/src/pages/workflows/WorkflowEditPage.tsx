@@ -10,7 +10,13 @@ import {
 } from "../../hooks/useWorkflows";
 import { cn } from "../../lib/cn";
 import { StepForm } from "./StepForm";
-import { emptyStep, fromDraft, toDraft, type StepDraft } from "./stepDraft";
+import {
+  emptyStep,
+  fromDraft,
+  renameStep,
+  toDraft,
+  type StepDraft,
+} from "./stepDraft";
 import {
   afterRemoval,
   DEFINITION,
@@ -77,8 +83,20 @@ export function WorkflowEditPage() {
     return { nodes, edges };
   }, [steps]);
 
-  const setStep = (id: string, patch: Partial<StepDraft>) =>
+  const setStep = (id: string, patch: Partial<StepDraft>) => {
+    // A rename has to carry its references — other steps' transition targets
+    // and the workflow's own start — or the save fails naming a step that
+    // appears nowhere in the form. See `renameStep`.
+    if (patch.name !== undefined) {
+      // Computed from the current render's state rather than inside an updater:
+      // an updater must stay pure, and this one would have to call `setStart`.
+      const moved = renameStep(steps, id, patch.name, start);
+      setSteps(moved.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      setStart(moved.start);
+      return;
+    }
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
 
   const openStep = (id: string) => {
     setSelected({ kind: "step", id });

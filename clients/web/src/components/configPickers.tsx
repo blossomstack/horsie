@@ -587,6 +587,16 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
  * editable; `marked` means "this session has one", not "you chose one".
  */
 export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
+  const { data: settings } = useSettings();
+  // A model alias can be renamed or deleted out from under a live session, and
+  // the next turn then fails `no provider registered for model '…'`. The row
+  // used to show the dead alias exactly as it shows a live one, so the only
+  // symptom was a turn that stopped working. It cannot be repaired here —
+  // there is no API to repoint an existing session — but it can at least stop
+  // being a surprise.
+  const modelGone =
+    !!settings && !settings.models.some((m) => m.alias === detail.model);
+
   const value = (items: string[]) =>
     items.length ? items.join(", ") : "None";
 
@@ -659,11 +669,25 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
       key: "model",
       legend: "Model",
       icon: <Cpu size={15} />,
-      label: detail.model,
+      label: modelGone ? `${detail.model} — missing` : detail.model,
       marked: true,
+      warn: modelGone,
       width: "w-72",
       testId: "config-model",
-      body: readout([detail.model]),
+      body: modelGone
+        ? () => (
+            <div className="space-y-1.5 px-1 py-0.5">
+              <p className="font-mono text-[0.8125rem] break-words text-legend">
+                {detail.model}
+              </p>
+              <p className="text-sm leading-relaxed text-red-ink">
+                This model is no longer configured, so the next turn in this
+                session will fail. Restore the alias in Settings → Models, or
+                start a new session.
+              </p>
+            </div>
+          )
+        : readout([detail.model]),
     },
   ];
 
