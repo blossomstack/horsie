@@ -89,11 +89,15 @@ impl Fixture {
 /// that collision is the bug this whole change exists to make impossible.
 async fn account(users: &UserRegistry, store: &horsie_server::auth::AuthStore) -> Account {
     let user = UserId::generate();
-    let token = horsie_server::auth::generate(TokenKind::Agent);
+    // `Access`, not `Agent`: what these tests need is a *login* scoped to an
+    // account, and a machine token is not one — it reaches
+    // `/api/vendor/connect` and nothing else. The vendor below is served in
+    // process and never presents this credential anyway.
+    let token = horsie_server::auth::generate(TokenKind::Access);
     store
         .insert_token(
             &format!("tok-{}", user.as_str()),
-            TokenKind::Agent,
+            TokenKind::Access,
             &Principal::User(user.clone()),
             &token.hash,
             Some("test"),

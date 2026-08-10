@@ -3449,7 +3449,10 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, created.view.id);
 
-        // The secret works as a bearer.
+        // The secret is live, and restricted: `403` rather than `401` is what
+        // says the token verified and was then refused this route. A machine
+        // token used to answer `200` here — full session transcripts to a
+        // credential minted for connecting a runtime.
         let req = Request::builder()
             .uri("/api/sessions")
             .header("authorization", format!("Bearer {}", created.token))
@@ -3457,7 +3460,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::OK
+            StatusCode::FORBIDDEN
         );
 
         // Revoke, and it stops working.
@@ -3487,6 +3490,63 @@ mod tests {
             .unwrap();
         let listed: Vec<AgentTokenView> = read_json(res).await;
         assert!(listed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_machine_token_reaches_nothing_but_vendor_connect() {
+        // A machine token is described in the UI as being for runtime vendor
+        // processes that run unattended, and `vendor_connect.rs` is explicit
+        // that `/api/vendor/connect` is the one endpoint those dial. It used to
+        // authenticate every route instead: reads, writes, `POST
+        // /api/auth/password`, and — worst — minting further machine tokens, so
+        // revoking a leaked one did not lock the holder out.
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, _pw) = auth_state(&tmp).await;
+        let (secret, _view) = state
+            .auth
+            .mint_agent_token(
+                "vendor",
+                &crate::auth::Principal::User(crate::auth::UserId::new("1")),
+            )
+            .await
+            .unwrap();
+        let app = app(state);
+
+        let bearer = |method: &str, uri: &str| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {secret}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap()
+        };
+
+        for (method, uri) in [
+            // A read, and the one that leaks most: whole transcripts.
+            ("GET", "/api/sessions"),
+            ("GET", "/api/config"),
+            ("GET", "/api/agents"),
+            // A write.
+            ("POST", "/api/agents"),
+            // Taking over the account outright.
+            ("POST", "/api/auth/password"),
+            // Minting a successor, which is what made revocation useless.
+            ("POST", "/api/device/tokens"),
+            ("GET", "/api/device/tokens"),
+        ] {
+            let status = app
+                .clone()
+                .oneshot(bearer(method, uri))
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "{method} {uri} must be forbidden to a machine token, got {status}"
+            );
+        }
     }
 
     fn delete_req(uri: &str) -> Request<Body> {
