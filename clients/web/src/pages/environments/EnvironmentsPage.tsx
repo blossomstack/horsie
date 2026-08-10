@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { RailToggle } from "../../components/rail";
+import { askConfirm } from "../../lib/confirm";
 import { Link, useNavigate } from "react-router-dom";
 import { useEnvironments, useDeleteEnvironment } from "../../hooks/useEnvironments";
 
@@ -91,8 +92,8 @@ export function EnvironmentsPage() {
                   className="key-icon shrink-0 !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
                   title={`Delete ${e.name}`}
                   data-testid={`delete-environment-${e.name}`}
-                  onClick={() => {
-                    if (window.confirm(`Delete environment '${e.name}'?`))
+                  onClick={async () => {
+                    if (await askConfirm(`Delete environment '${e.name}'?`))
                       del.mutate(e.name);
                   }}
                 >

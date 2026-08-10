@@ -188,7 +188,10 @@ pub fn read_marketplace(url: &str, git_ref: Option<&str>) -> Result<ParsedMarket
     let dest = tmp.path().join("repo");
     horsie_support::git::clone(url, git_ref, &dest)?;
     let m = Marketplace::read(&dest)?.ok_or_else(|| {
-        format!("'{url}' is not a marketplace: it has no .claude-plugin/marketplace.json")
+        format!(
+            "'{}' is not a marketplace: it has no .claude-plugin/marketplace.json",
+            horsie_support::remote_url::redact_url_credentials(url)
+        )
     })?;
     Ok(ParsedMarketplace {
         name: m.name.clone().unwrap_or_else(|| repo_basename(url)),

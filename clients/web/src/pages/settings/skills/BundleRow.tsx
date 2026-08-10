@@ -1,5 +1,6 @@
 import { ChevronRight, Loader2, RotateCcw, Trash2, Webhook } from "lucide-react";
 import { useState } from "react";
+import { askConfirm } from "../../../lib/confirm";
 import type { CatalogEntryView, PluginView } from "../../../api/types";
 import { cn } from "../../../lib/cn";
 import {
@@ -132,8 +133,8 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
           </button>
           <button
             className="key-icon shrink-0 text-faint hover:text-red-ink"
-            onClick={() => {
-              if (confirm(`Delete skill bundle "${bundle.name}"?`))
+            onClick={async () => {
+              if (await askConfirm(`Delete skill bundle "${bundle.name}"?`))
                 remove.mutate(bundle.name);
             }}
             disabled={remove.isPending}

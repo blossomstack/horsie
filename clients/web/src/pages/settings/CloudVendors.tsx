@@ -130,6 +130,18 @@ export function CloudVendors() {
   const submit = async () => {
     if (!draft) return;
     setError(null);
+    // The route is an upsert, which is right for an edit and wrong for an add:
+    // adding a vendor under a name already taken silently replaced it,
+    // destroying its stored credential and repointing every session that names
+    // it, with a green Saved. Upsert stays; *add* refuses.
+    if (
+      !draft.existing &&
+      (vendors ?? []).some((v) => v.name === draft.name.trim())
+    ) {
+      return setError(
+        `A cloud vendor named “${draft.name.trim()}” already exists. Edit it from the list, or pick another name.`,
+      );
+    }
     try {
       await save.mutateAsync({
         name: draft.name,
@@ -237,6 +249,10 @@ export function CloudVendors() {
                 value={draft.settings.value.app}
                 onChange={(app) => patch({ app })}
                 placeholder="horsie-runtimes"
+                // horsie never creates the app, and nothing said so: a typo
+                // here saved cleanly and failed hours later at the first
+                // session, as a machine-create rejection.
+                hint="Must already exist — create it with `fly apps create`. horsie only makes machines in it."
               />
             ) : (
               <TextField

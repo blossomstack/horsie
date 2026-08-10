@@ -13,6 +13,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
 import { WorkflowRunView } from "./workflows/WorkflowRunView";
+import { askConfirm } from "../lib/confirm";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionStream } from "../hooks/useSessionStream";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
@@ -94,6 +95,9 @@ export function SessionView() {
       setSendError(
         e instanceof ApiRequestError ? e.message : "Failed to send message.",
       );
+      // Rethrown so the composer can restore what was typed. Swallowing it
+      // here is what let an offline send clear the box and lose the message.
+      throw e;
     }
   };
 
@@ -194,7 +198,8 @@ export function SessionView() {
   };
 
   const handleDelete = async () => {
-    if (!confirm("Delete this session? This cannot be undone.")) return;
+    if (!(await askConfirm("Delete this session? This cannot be undone.")))
+      return;
     try {
       await del.mutateAsync(id);
       navigate("/");

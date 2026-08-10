@@ -4,6 +4,7 @@ import {
   QueryClientProvider,
 } from "@tanstack/react-query";
 import { pushMutationError } from "./api/mutationErrors";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { MutationErrors } from "./components/MutationErrors";
 import { useEffect } from "react";
 import type { ReactNode } from "react";
@@ -151,6 +152,7 @@ export default function App() {
           </Routes>
         </AuthGate>
         <MutationErrors />
+        <ConfirmDialog />
       </BrowserRouter>
     </QueryClientProvider>
   );

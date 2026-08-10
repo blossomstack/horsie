@@ -22,6 +22,8 @@ export function SessionGroupSection({
   bare = false,
   order,
   onReorder,
+  collapsed,
+  onToggleCollapsed,
 }: {
   name: string;
   sessions: SessionSummary[];
@@ -32,8 +34,12 @@ export function SessionGroupSection({
   bare?: boolean;
   order: string[];
   onReorder: (next: string[]) => void;
+  /** Held by the rail, not here, because it is persisted: group *order*
+   * already survived a reload and collapse did not, so half of an arrangement
+   * came back and half of it did not. */
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(name);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -158,7 +164,7 @@ export function SessionGroupSection({
             <button
               type="button"
               className="flex min-w-0 flex-1 cursor-pointer items-center gap-1 text-left"
-              onClick={() => setCollapsed((v) => !v)}
+              onClick={onToggleCollapsed}
               aria-expanded={!collapsed}
               aria-controls={bodyId}
               data-testid={`group-toggle-${name}`}

@@ -13,6 +13,7 @@ use horsie_models::plugins::{
     PluginInstallInput, PluginView,
 };
 use horsie_support::plugin::source_location;
+use horsie_support::remote_url::redact_url_credentials;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -288,7 +289,8 @@ impl PluginService {
         if let Some(prev) = existing.as_ref().filter(|p| p.source_url != parsed.url) {
             return Err(format!(
                 "a marketplace named '{}' is already registered from {}",
-                parsed.name, prev.source_url
+                parsed.name,
+                redact_url_credentials(&prev.source_url)
             ));
         }
         let now = now_string();
@@ -321,7 +323,9 @@ impl PluginService {
                 })
                 .collect(),
             name: row.name,
-            source_url: row.source_url,
+            // A clone URL may carry a credential and this view is read by the
+            // browser. The row keeps the real one — refresh needs it.
+            source_url: redact_url_credentials(&row.source_url),
             source_ref: row.source_ref,
             updated_at: row.updated_at,
             skipped: row.skipped,
@@ -501,7 +505,9 @@ fn row_to_view(row: PluginRow) -> PluginView {
         name: row.name,
         description: row.description,
         version: row.version,
-        source_url: row.source_url,
+        // See `marketplace_view`: the stored URL can hold a credential, and
+        // this is the shape `GET /api/plugins` returns to a browser.
+        source_url: redact_url_credentials(&row.source_url),
         source_ref: row.source_ref,
         catalog: row.catalog.into_iter().map(entry_to_view).collect(),
         has_hooks: row.has_hooks,

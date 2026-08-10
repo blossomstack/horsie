@@ -36,8 +36,8 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(page.getByTestId("agent-row")).toContainText("edited");
 
   // Delete, accepting the confirm.
-  page.on("dialog", (d) => void d.accept());
   await page.getByTestId("delete-agent-e2e-agent").click();
+  await page.getByTestId("confirm-accept").click();
   await expect(page.getByTestId("agent-row")).toHaveCount(0);
 });
 

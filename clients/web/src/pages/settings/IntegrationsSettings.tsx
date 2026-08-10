@@ -344,6 +344,7 @@ function McpServerRow({
   const del = useDeleteMcpServer();
   const test = useTestMcpServer();
   const connect = useConnectMcpServer();
+  const { data: allServers } = useMcpServers();
   const isNew = !server;
 
   const [name, setName] = useState(server?.name ?? "");
@@ -374,7 +375,24 @@ function McpServerRow({
   const save = async () => {
     setError(null);
     if (!name.trim()) return setError("Name is required.");
+    // The name is spliced into every tool id this server contributes
+    // (`mcp__<name>__<tool>`), and providers reject an id outside
+    // `^[a-zA-Z0-9_-]+$` — so a space or a slash here kills *every* turn in
+    // any session using it, with a 400 naming a tool index nobody can map back
+    // to a server. The server enforces this too; saying it here means the
+    // typing stops before the save.
+    if (!/^[a-zA-Z0-9_-]+$/.test(name.trim()))
+      return setError(
+        "A name may only use letters, digits, '-' and '_' — it becomes part of every tool id this server contributes.",
+      );
     if (!url.trim()) return setError("URL is required.");
+    // Upsert is right for an edit and wrong for an add: adding under a name
+    // already taken silently replaced that server and destroyed its stored
+    // credential.
+    if (isNew && (allServers ?? []).some((s) => s.name === name.trim()))
+      return setError(
+        `An MCP server named “${name.trim()}” already exists. Edit it from the list, or pick another name.`,
+      );
     const auth: McpServerInput["auth"] =
       authKind === "Bearer"
         ? {
@@ -432,6 +450,7 @@ function McpServerRow({
                 touch();
               }}
               placeholder="linear"
+              hint="Letters, digits, '-' and '_'. It becomes part of every tool id: mcp__<name>__<tool>."
             />
           ) : (
             <div>

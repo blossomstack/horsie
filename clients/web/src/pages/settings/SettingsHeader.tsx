@@ -16,6 +16,7 @@ export function SettingsHeader({
   dirty = false,
   saved = false,
   saving = false,
+  saveBlocked = false,
   onSave,
   onDiscard,
 }: {
@@ -24,6 +25,9 @@ export function SettingsHeader({
   dirty?: boolean;
   saved?: boolean;
   saving?: boolean;
+  /** The form is holding a value it will refuse to send. Save goes dead rather
+   * than staying lit above the page's own validation message. */
+  saveBlocked?: boolean;
   onSave?: () => void;
   onDiscard?: () => void;
 }) {
@@ -87,7 +91,7 @@ export function SettingsHeader({
                 <button
                   className="key key-go"
                   onClick={onSave}
-                  disabled={!dirty || saving}
+                  disabled={!dirty || saving || saveBlocked}
                   data-testid="settings-save"
                 >
                   <Save size={13} aria-hidden />

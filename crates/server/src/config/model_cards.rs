@@ -37,6 +37,9 @@ fn validate(
     name: &str,
     context_window: Option<u32>,
     max_tokens: Option<u32>,
+    thinking_efforts: Option<&Vec<String>>,
+    default_thinking_effort: Option<&str>,
+    thinking_dialect: Option<&str>,
 ) -> Result<(), ModelCardError> {
     if model_id.trim().is_empty() {
         return Err(ModelCardError::Invalid("model_id cannot be empty".into()));
@@ -53,6 +56,56 @@ fn validate(
         return Err(ModelCardError::Invalid(
             "context_window and max_tokens must be positive".into(),
         ));
+    }
+    validate_thinking(thinking_efforts, default_thinking_effort, thinking_dialect)
+}
+
+/// Whole-card validation, for the paths that hold a `ModelCardInput` already.
+fn validate_card(c: &ModelCardInput) -> Result<(), ModelCardError> {
+    validate(
+        &c.model_id,
+        &c.name,
+        c.context_window,
+        c.max_tokens,
+        c.thinking_efforts.as_ref(),
+        c.default_thinking_effort.as_deref(),
+        c.thinking_dialect.as_deref(),
+    )
+}
+
+/// The same rules `validate_model` applies to a configured model, applied to
+/// the card that prefills one.
+///
+/// A card took arbitrary strings: `["banana","high"]` was a 201, and `banana`
+/// was then injected into the Settings → Models dropdown as a *selected*
+/// option with no checkbox able to unselect it — a value the model form could
+/// not have produced and cannot repair.
+fn validate_thinking(
+    efforts: Option<&Vec<String>>,
+    default_effort: Option<&str>,
+    dialect: Option<&str>,
+) -> Result<(), ModelCardError> {
+    let offered: &[String] = efforts.map_or(&[][..], |v| v.as_slice());
+    for e in offered {
+        if horsie_agentcore::ThinkingEffort::parse(e).is_none() {
+            return Err(ModelCardError::Invalid(format!(
+                "unknown thinking effort '{e}'"
+            )));
+        }
+    }
+    if let Some(d) = dialect
+        && horsie_agentcore::ThinkingDialect::parse(d).is_none()
+    {
+        return Err(ModelCardError::Invalid(format!(
+            "unknown thinking dialect '{d}'"
+        )));
+    }
+    if let Some(def) = default_effort
+        && !offered.iter().any(|e| e == def)
+    {
+        return Err(ModelCardError::Invalid(format!(
+            "default thinking effort '{def}' is not among the offered efforts"
+        )));
     }
     Ok(())
 }
@@ -147,6 +200,9 @@ impl ModelCardStore {
             &input.name,
             input.context_window,
             input.max_tokens,
+            input.thinking_efforts.as_ref(),
+            input.default_thinking_effort.as_deref(),
+            input.thinking_dialect.as_deref(),
         )?;
         if self.get(&input.model_id).await?.is_some() {
             return Err(ModelCardError::Duplicate(format!(
@@ -187,6 +243,9 @@ impl ModelCardStore {
             &update.name,
             update.context_window,
             update.max_tokens,
+            update.thinking_efforts.as_ref(),
+            update.default_thinking_effort.as_deref(),
+            update.thinking_dialect.as_deref(),
         )?;
         let statement = format!(
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
@@ -248,7 +307,7 @@ impl ModelCardStore {
     pub async fn seed_if_missing(&self, cards: &[ModelCardInput]) -> Result<usize, ModelCardError> {
         let mut inserted = 0usize;
         for c in cards {
-            validate(&c.model_id, &c.name, c.context_window, c.max_tokens)?;
+            validate_card(c)?;
             // `ON CONFLICT DO NOTHING` rather than SQLite's `INSERT OR IGNORE`:
             // same semantics, and the standard spelling works on both backends.
             let res = sqlx::query(&self.db.q(
@@ -357,7 +416,7 @@ pub fn load_seed_file(path: &std::path::Path) -> Result<Vec<ModelCardInput>, Str
 fn parse_seed(json: &str) -> Result<Vec<ModelCardInput>, String> {
     let cards: Vec<ModelCardInput> = serde_json::from_str(json).map_err(|e| e.to_string())?;
     for c in &cards {
-        validate(&c.model_id, &c.name, c.context_window, c.max_tokens).map_err(|e| match e {
+        validate_card(c).map_err(|e| match e {
             ModelCardError::Invalid(m) => m,
             other @ (ModelCardError::Duplicate(_)
             | ModelCardError::NotFound(_)
@@ -551,6 +610,52 @@ mod tests {
                 .unwrap_err(),
             ModelCardError::Duplicate("model card 'a' already exists".into()),
         );
+    }
+
+    // `["banana","high"]` used to be a 201, and `banana` was then injected as a
+    // *selected* option into the Settings → Models dropdown, with no checkbox
+    // in the effort list able to unselect it.
+    #[tokio::test]
+    async fn thinking_values_outside_the_canonical_sets_are_rejected() {
+        let store = test_store().await;
+
+        let mut bad = input("m1", "M1", None, None);
+        bad.thinking_efforts = Some(vec!["banana".into(), "high".into()]);
+        let err = store.insert(&bad).await.unwrap_err();
+        assert_eq!(
+            err,
+            ModelCardError::Invalid("unknown thinking effort 'banana'".into())
+        );
+
+        let mut bad = input("m1", "M1", None, None);
+        bad.thinking_dialect = Some("banana_thinking".into());
+        assert!(matches!(
+            store.insert(&bad).await.unwrap_err(),
+            ModelCardError::Invalid(_)
+        ));
+
+        // A default nothing offers is the same class of unusable data.
+        let mut bad = input("m1", "M1", None, None);
+        bad.thinking_efforts = Some(vec!["low".into()]);
+        bad.default_thinking_effort = Some("high".into());
+        assert!(matches!(
+            store.insert(&bad).await.unwrap_err(),
+            ModelCardError::Invalid(_)
+        ));
+
+        // And an update cannot smuggle in what an insert refuses.
+        let mut good = input("m1", "M1", None, None);
+        good.thinking_efforts = Some(vec!["low".into(), "high".into()]);
+        good.default_thinking_effort = Some("high".into());
+        good.thinking_dialect = Some("openai_effort".into());
+        store.insert(&good).await.unwrap();
+
+        let mut up = update_of("M1", None, None);
+        up.thinking_efforts = Some(vec!["banana".into()]);
+        assert!(matches!(
+            store.update("m1", &up).await.unwrap_err(),
+            ModelCardError::Invalid(_)
+        ));
     }
 
     #[tokio::test]

@@ -1,14 +1,25 @@
-/** Compact relative time, e.g. "just now", "3m ago", "2h ago", "Apr 4". */
+/**
+ * Compact relative time, e.g. "just now", "3m ago", "in 2h", "Apr 4".
+ *
+ * Both directions, because this formats future timestamps too. It used to
+ * subtract and never look at the sign, so a routine's `nextRunAtMs` produced a
+ * negative diff that fell straight into the `< 45s` branch: every armed
+ * routine, on every schedule, on both list and detail, read **"next just
+ * now"**. The one number that says a routine is going to fire was
+ * unconditionally wrong, in the most reassuring direction.
+ */
 export function relativeTime(epochMillis: number): string {
   const diff = Date.now() - epochMillis;
-  const s = Math.round(diff / 1000);
-  if (s < 45) return "just now";
+  const future = diff < 0;
+  const say = (v: string) => (future ? `in ${v}` : `${v} ago`);
+  const s = Math.round(Math.abs(diff) / 1000);
+  if (s < 45) return future ? "in a moment" : "just now";
   const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
+  if (m < 60) return say(`${m}m`);
   const h = Math.round(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return say(`${h}h`);
   const d = Math.round(h / 24);
-  if (d < 7) return `${d}d ago`;
+  if (d < 7) return say(`${d}d`);
   return new Date(epochMillis).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",

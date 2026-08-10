@@ -40,13 +40,21 @@ pub async fn delete(Scope(state): Scope, Path(name): Path<String>) -> Result<(),
 }
 
 /// `POST /api/mcp/servers/:name/test` — connect (`initialize` + `tools/list`),
-/// persist the outcome, and return it. Always `200` with the result envelope;
-/// a failed connect is `ok: false` with `error`, not an HTTP error.
+/// persist the outcome, and return it. `200` with the result envelope for a
+/// configured server; a failed *connect* is `ok: false` with `error`, not an
+/// HTTP error. A server that is not configured at all is a 404, which is a
+/// different thing and used to be a 500.
 pub async fn test(
     Scope(state): Scope,
     Path(name): Path<String>,
 ) -> Result<Json<McpConnectResult>, Api> {
-    state.mcp.test(&name).await.map(Json).map_err(Api::internal)
+    state
+        .mcp
+        .test(&name)
+        .await
+        .map_err(Api::internal)?
+        .map(Json)
+        .ok_or_else(|| Api::not_found(format!("no MCP server '{name}'")))
 }
 
 /// `POST /api/mcp/servers/:name/connect` — begin OAuth for an `oauth` server:
@@ -82,12 +90,21 @@ pub async fn oauth_callback(
                 .handle_oauth_callback(&name, &code, &st, &base)
                 .await
             {
-                Ok(()) => format!("/settings?mcp_connected={}", urlencode(&name)),
-                Err(e) => format!("/settings?mcp_error={}", urlencode(&e)),
+                Ok(()) => format!(
+                    "{}?mcp_connected={}",
+                    crate::http::github::SETTINGS_PAGE,
+                    urlencode(&name)
+                ),
+                Err(e) => format!(
+                    "{}?mcp_error={}",
+                    crate::http::github::SETTINGS_PAGE,
+                    urlencode(&e)
+                ),
             }
         }
         _ => format!(
-            "/settings?mcp_error={}",
+            "{}?mcp_error={}",
+            crate::http::github::SETTINGS_PAGE,
             urlencode(
                 &q.error_description
                     .or(q.error)

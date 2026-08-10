@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { RailToggle } from "../../components/rail";
+import { askConfirm } from "../../lib/confirm";
 import { Link, useNavigate } from "react-router-dom";
 import { useAgents, useDeleteAgent } from "../../hooks/useAgents";
 
@@ -103,8 +104,8 @@ export function AgentsPage() {
                   className="key-icon shrink-0 !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
                   title={`Delete ${a.name}`}
                   data-testid={`delete-agent-${a.name}`}
-                  onClick={() => {
-                    if (window.confirm(`Delete agent '${a.name}'?`))
+                  onClick={async () => {
+                    if (await askConfirm(`Delete agent '${a.name}'?`))
                       del.mutate(a.name);
                   }}
                 >

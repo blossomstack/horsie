@@ -790,6 +790,11 @@
   font-size: 0.9375rem;
   line-height: 1.65;
   color: var(--legend);
+  /* A single unbroken token — a 200-character URL, a base64 blob, a stack
+   * frame pasted without spaces — used to widen the whole transcript column
+   * and push every other message sideways with it. Nothing was lost, but
+   * reading the message after it meant dragging the conversation back. */
+  overflow-wrap: break-word;
 }
 
 /* Measure. The transcript column is 54rem because tables, code blocks and
@@ -897,6 +902,33 @@
   overflow-x: auto;
   font-size: 0.8125em;
   line-height: 1.6;
+}
+
+/* A table's own scroller, so a 12-column table scrolls instead of widening
+ * the transcript. `max-width` rather than `width`, so a narrow table stays
+ * its own width instead of stretching to the column. */
+.prose-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* macOS overlay scrollbars are invisible until you already scroll, so a code
+ * block or table with content past its right edge looked like it had none.
+ * These are the two surfaces in a reply that scroll, and they say so. */
+.prose pre,
+.prose-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+.prose pre::-webkit-scrollbar,
+.prose-scroll::-webkit-scrollbar {
+  -webkit-appearance: none;
+  height: 8px;
+}
+.prose pre::-webkit-scrollbar-thumb,
+.prose-scroll::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: var(--rule-strong);
 }
 .prose pre code {
   padding: 0;

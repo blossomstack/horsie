@@ -494,6 +494,21 @@ impl RuntimeVendorConfigService {
             .get(name)
             .await
             .map_err(VendorConfigError::Internal)?;
+        let settings = StoredVendorSettings::from_wire(input.settings);
+        // The UI has always treated the kind as fixed once saved — changing it
+        // in place leaves every session pointing at a name whose substrate
+        // silently moved. The API did not, so a PUT with a different kind came
+        // back 200 and did exactly that; the Terraform provider is the caller
+        // most likely to send one.
+        if let Some(row) = existing.as_ref()
+            && row.settings.kind() != settings.kind()
+        {
+            return Err(VendorConfigError::Invalid(format!(
+                "runtime vendor '{name}' is a {} vendor and cannot become a {} one —                  delete it and create the new one under its own name, so sessions                  naming it are not silently repointed",
+                row.settings.kind(),
+                settings.kind()
+            )));
+        }
         let credential = match (input.credential, existing.as_ref()) {
             (Some(c), _) => c,
             (None, Some(row)) => row.credential.clone(),
@@ -506,7 +521,7 @@ impl RuntimeVendorConfigService {
         let now = unix_seconds();
         let row = RuntimeVendorRow {
             name: input.name,
-            settings: StoredVendorSettings::from_wire(input.settings),
+            settings,
             credential,
             created_at: existing.map_or_else(|| now.clone(), |r| r.created_at),
             updated_at: now,
@@ -853,6 +868,59 @@ mod tests {
             .await
             .unwrap();
         assert!(vendors.read().unwrap().contains_key("velos"));
+    }
+
+    // The UI has always treated the kind as fixed once saved; the API did not,
+    // so a PUT with a different kind returned 200 and silently moved every
+    // session naming that vendor onto a different substrate.
+    #[tokio::test]
+    async fn a_saved_vendors_kind_cannot_be_changed_through_the_api() {
+        use horsie_models::runtime_vendor::{
+            FlyVendorSettings, RuntimeVendorConfigInput, RuntimeVendorSettings, VelosVendorSettings,
+        };
+        let db = crate::db::testing::db().await;
+        let service = service(empty_map(), db);
+        let callback = "wss://horsie.example.com/api/runtime/connect".to_string();
+
+        let fly = RuntimeVendorConfigInput {
+            name: "vendor".to_string(),
+            settings: RuntimeVendorSettings::Fly(FlyVendorSettings {
+                app: "horsie-runtimes".to_string(),
+                image: "ghcr.io/x/runtime:1".to_string(),
+                region: "iad".to_string(),
+                workspace_root: "/workspaces".to_string(),
+                callback_url: callback.clone(),
+                volumes: false,
+                volume_size_gb: 1,
+                cpu_kind: "shared".to_string(),
+                cpus: 1,
+                memory_mb: 512,
+            }),
+            credential: Some("fly-token".to_string()),
+        };
+        service.save_input("vendor", fly.clone()).await.unwrap();
+
+        let velos = RuntimeVendorConfigInput {
+            name: "vendor".to_string(),
+            settings: RuntimeVendorSettings::Velos(VelosVendorSettings {
+                server_url: "http://velos.example:8080".to_string(),
+                image: "ghcr.io/x/runtime:1".to_string(),
+                runtime_bin: "/usr/local/bin/horsie-runtime".to_string(),
+                workspace_root: "/workspaces".to_string(),
+                callback_url: callback,
+                cpu: 1,
+                memory_mb: 512,
+            }),
+            credential: Some(String::new()),
+        };
+        let err = service.save_input("vendor", velos).await.unwrap_err();
+        assert!(
+            matches!(&err, VendorConfigError::Invalid(m) if m.contains("cannot become")),
+            "{err:?}"
+        );
+
+        // Re-saving the same kind is still how a rotated token is applied.
+        assert!(service.save_input("vendor", fly).await.is_ok());
     }
 
     #[tokio::test]

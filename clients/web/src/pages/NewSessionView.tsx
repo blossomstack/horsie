@@ -59,6 +59,8 @@ export function NewSessionView() {
             ? "Failed to start run."
             : "Failed to start session.",
       );
+      // See `Composer.submit`: rethrowing is what puts the message back.
+      throw e;
     }
   };
 

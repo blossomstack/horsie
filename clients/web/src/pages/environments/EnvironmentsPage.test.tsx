@@ -3,11 +3,13 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EnvironmentView } from "../../api/types";
+import { answerConfirm, confirmSnapshot, resetConfirm } from "../../lib/confirm";
 import { EnvironmentsPage } from "./EnvironmentsPage";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
+afterEach(resetConfirm);
 
 const remove = vi.fn(async (_name: string) => {});
 const list = vi.fn(async (): Promise<EnvironmentView[]> => environments);
@@ -67,12 +69,10 @@ describe("EnvironmentsPage", () => {
   });
 
   it("deletes the named environment once the confirm is accepted", async () => {
-    const confirm = vi
-      .spyOn(window, "confirm")
-      .mockImplementation(() => true);
     const { findByTestId } = renderPage();
     fireEvent.click(await findByTestId("delete-environment-prod"));
+    expect(confirmSnapshot()?.message).toContain("prod");
+    answerConfirm(true);
     await waitFor(() => expect(remove).toHaveBeenCalledWith("prod"));
-    confirm.mockRestore();
   });
 });

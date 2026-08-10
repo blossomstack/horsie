@@ -68,29 +68,32 @@ impl McpService {
 
     /// Smoke test: connect (`initialize` + `tools/list`) with the row's auth,
     /// persist the outcome (enabling on success), and return it.
-    pub async fn test(&self, name: &str) -> Result<McpConnectResult, String> {
-        let row = self
-            .store
-            .get(name)
-            .await?
-            .ok_or_else(|| format!("unknown MCP server '{name}'"))?;
+    ///
+    /// `Ok(None)` for a server that is not configured — the caller's mistake,
+    /// which the handler turns into a 404. Returning an `Err` for it made
+    /// "there is no such server" indistinguishable from "the database is
+    /// broken", and the route answered 500.
+    pub async fn test(&self, name: &str) -> Result<Option<McpConnectResult>, String> {
+        let Some(row) = self.store.get(name).await? else {
+            return Ok(None);
+        };
         match self.build_toolbox(&row).await {
             Ok(tb) => {
                 let count = u32::try_from(tb.specs().len()).unwrap_or(u32::MAX);
                 self.store.set_status(name, true, Some(count), None).await?;
-                Ok(McpConnectResult {
+                Ok(Some(McpConnectResult {
                     ok: true,
                     tool_count: Some(count),
                     error: None,
-                })
+                }))
             }
             Err(e) => {
                 self.store.set_status(name, false, None, Some(&e)).await?;
-                Ok(McpConnectResult {
+                Ok(Some(McpConnectResult {
                     ok: false,
                     tool_count: None,
                     error: Some(e),
-                })
+                }))
             }
         }
     }
@@ -656,7 +659,7 @@ mod tests {
         let url = mock_mcp_server().await;
         svc.upsert(none_input("mock", &url)).await.unwrap();
 
-        let result = svc.test("mock").await.unwrap();
+        let result = svc.test("mock").await.unwrap().expect("configured");
         assert!(result.ok, "connect should succeed: {result:?}");
         assert_eq!(result.tool_count, Some(2));
 
@@ -666,6 +669,14 @@ mod tests {
         assert!(view[0].enabled);
         assert_eq!(view[0].tool_count, Some(2));
         assert!(view[0].last_error.is_none());
+    }
+
+    // "Not configured" and "configured but unreachable" are different answers.
+    // The first used to be an Err, which the route turned into a 500.
+    #[tokio::test]
+    async fn testing_a_server_that_is_not_configured_is_not_an_error() {
+        let (svc, _t) = service().await;
+        assert!(svc.test("never-existed").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -688,7 +699,7 @@ mod tests {
         svc.upsert(none_input("dead", "http://127.0.0.1:0/"))
             .await
             .unwrap();
-        let result = svc.test("dead").await.unwrap();
+        let result = svc.test("dead").await.unwrap().expect("configured");
         assert!(!result.ok);
         assert!(result.error.is_some());
         let view = svc.list().await.unwrap();

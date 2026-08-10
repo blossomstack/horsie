@@ -4,6 +4,7 @@ import { StatusDot } from "../../components/StatusBadge";
 import { ApiRequestError } from "../../api/client";
 import { useState } from "react";
 import { absoluteTime, relativeTime, sessionTitle } from "../../lib/format";
+import { RailToggle } from "../../components/rail";
 import { describeSchedule } from "../../lib/schedule";
 import {
   useRoutine,
@@ -39,6 +40,7 @@ export function RoutineDetailPage() {
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">
           {routine.name}
         </h1>

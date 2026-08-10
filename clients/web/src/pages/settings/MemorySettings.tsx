@@ -5,6 +5,7 @@ import type { MemorySpaceView, MemoryView } from "../../api/types";
 import { cn } from "../../lib/cn";
 import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { askConfirm } from "../../lib/confirm";
 import {
   useCreateMemory,
   useCreateSpace,
@@ -186,14 +187,14 @@ function SpaceRow({
 }) {
   const remove = useDeleteSpace();
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     const tail =
       space.memoryCount === 0
         ? "It holds no memories."
         : `This also deletes its ${space.memoryCount} ${
             space.memoryCount === 1 ? "memory" : "memories"
           }.`;
-    if (confirm(`Delete memory space "${space.name}"? ${tail}`))
+    if (await askConfirm(`Delete memory space "${space.name}"? ${tail}`))
       remove.mutate(space.name);
   };
 
@@ -383,8 +384,8 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
         </button>
         <button
           className="key-icon shrink-0 text-faint hover:text-red-ink"
-          onClick={() => {
-            if (confirm(`Delete memory "${memory.space}/${memory.name}"?`))
+          onClick={async () => {
+            if (await askConfirm(`Delete memory "${memory.space}/${memory.name}"?`))
               remove.mutate(memory.id);
           }}
           disabled={remove.isPending}
@@ -423,7 +424,15 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
             <button
               className="key key-go"
               onClick={save}
-              disabled={!dirty || update.isPending}
+              // The create form has always refused an empty body; the edit
+              // form used to accept one, so a memory could be emptied after
+              // the fact into something the agent loads to learn nothing.
+              disabled={
+                !dirty ||
+                update.isPending ||
+                !description.trim() ||
+                !content.trim()
+              }
             >
               {update.isPending && (
                 <Loader2 size={15} className="animate-spin" />

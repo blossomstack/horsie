@@ -227,4 +227,51 @@ describe("Sidebar groups", () => {
     expect(screen.getByTestId("group-toggle-web")).toBeDefined();
     expect(api.sessionGroups.remove).not.toHaveBeenCalled();
   });
+  // Group *order* already survived a reload and collapse did not, so half of
+  // an arrangement came back and half of it did not.
+  it("remembers which groups are collapsed across a remount", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({
+      groups: [{ name: "web" }],
+    });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", "web")],
+    });
+    renderSidebar();
+    expect(
+      (await screen.findByTestId("group-section-web")).textContent,
+    ).toContain("session 1");
+    fireEvent.click(screen.getByTestId("group-toggle-web"));
+    expect(screen.getByTestId("group-section-web").textContent).not.toContain(
+      "session 1",
+    );
+
+    cleanup();
+    renderSidebar();
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("group-section-web").textContent,
+      ).not.toContain("session 1"),
+    );
+  });
+
+  it("filters the rail by session title once there is enough to search", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: Array.from({ length: 9 }, (_, i) => session(String(i))),
+    });
+    renderSidebar();
+    const box = await screen.findByTestId("session-filter");
+
+    fireEvent.change(box, { target: { value: "session 3" } });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+
+    // A filter matching nothing says so rather than reading as an empty account.
+    fireEvent.change(box, { target: { value: "nothing here" } });
+    await waitFor(() =>
+      expect(screen.queryAllByTestId("session-row")).toHaveLength(0),
+    );
+    expect(screen.getByText(/No session matches/)).toBeDefined();
+  });
 });

@@ -27,6 +27,7 @@ import {
   TextField,
 } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { askConfirm } from "../../lib/confirm";
 
 type ProviderKind = "anthropic" | "openai" | "openai-responses" | "chatgpt";
 
@@ -97,6 +98,10 @@ type ProviderDraft = {
   kind: ProviderKind;
   baseUrl: string;
   apiKeyInput: string; // "" = leave the stored key unchanged
+  /** Send an empty key, which is how the server is told to drop the stored
+   * one. Without this there was no way to un-set a key from the UI at all —
+   * blank means "keep", so the only exit was deleting the provider. */
+  clearApiKey: boolean;
   hasCredential: boolean;
   keepThinkingSignature: boolean;
 };
@@ -120,6 +125,7 @@ const providerToDraft = (p: ProviderView): ProviderDraft => ({
     : "anthropic",
   baseUrl: p.baseUrl ?? "",
   apiKeyInput: "",
+  clearApiKey: false,
   hasCredential: p.hasCredential,
   keepThinkingSignature: p.keepThinkingSignature,
 });
@@ -141,6 +147,7 @@ const newProvider = (): ProviderDraft => ({
   kind: "anthropic",
   baseUrl: "",
   apiKeyInput: "",
+  clearApiKey: false,
   hasCredential: false,
   keepThinkingSignature: false,
 });
@@ -161,7 +168,9 @@ const toProviderInput = (p: ProviderDraft): ProviderInput => ({
   name: p.name.trim(),
   kind: p.kind,
   baseUrl: p.baseUrl.trim() || undefined,
-  apiKey: p.apiKeyInput === "" ? undefined : p.apiKeyInput,
+  // Three states, not two: undefined keeps the stored key, "" drops it, and
+  // anything else replaces it.
+  apiKey: p.clearApiKey ? "" : p.apiKeyInput === "" ? undefined : p.apiKeyInput,
   keepThinkingSignature: p.keepThinkingSignature,
 });
 
@@ -280,7 +289,7 @@ export function ModelsSettings() {
           .join(", ")}. Delete or move ${many ? "them" : "it"} first.`,
       );
     }
-    if (!confirm(`Delete provider “${name}”?`)) return;
+    if (!(await askConfirm(`Delete provider “${name}”?`))) return;
     try {
       await removeProvider.mutateAsync(name);
     } catch (e) {
@@ -317,7 +326,7 @@ export function ModelsSettings() {
 
   const deleteModel = async (alias: string) => {
     setLocalError(null);
-    if (!confirm(`Delete model “${alias}”?`)) return;
+    if (!(await askConfirm(`Delete model “${alias}”?`))) return;
     try {
       await removeModel.mutateAsync(alias);
     } catch (e) {
@@ -336,7 +345,7 @@ export function ModelsSettings() {
     <div className="flex h-full flex-col overflow-hidden">
       <SettingsHeader
         title="Models & providers"
-        desc="API endpoints and the model aliases sessions pick from. Changes save as you make them."
+        desc="API endpoints and the model aliases sessions pick from. Each provider and each model saves on its own — open one, edit it, press its Save."
         saving={busy}
         saved={wroteOk}
       />
@@ -401,11 +410,13 @@ export function ModelsSettings() {
                     active={selected === p.name}
                     onActivate={() => setSelected(p.name)}
                     meta={
+                      // Three badges do not fit beside a name and two actions
+                      // at 390px. The lamp survives everywhere because it is
+                      // the one that decides whether the provider works at
+                      // all; its word, the kind and the model count drop out
+                      // in that order as the pane narrows, and each keeps its
+                      // meaning in the title attribute.
                       <span className="flex shrink-0 items-center gap-2">
-                        {/* Whether this provider can authenticate is the one
-                            thing here that decides if it works at all, so it is
-                            a lamp and a word rather than a detail in the
-                            editor. */}
                         <span
                           className={
                             p.hasCredential
@@ -418,14 +429,17 @@ export function ModelsSettings() {
                             className={p.hasCredential ? "lamp" : "lamp lamp-off"}
                             aria-hidden
                           />
-                          <span className="legend text-current">
+                          <span className="legend hidden text-current sm:inline">
                             {credentialWords(p.kind, p.hasCredential)}
                           </span>
                         </span>
-                        <span className="chip">
+                        <span
+                          className="chip hidden lg:inline-flex"
+                          title={KIND_LABELS[p.kind as ProviderKind] ?? p.kind}
+                        >
                           {KIND_LABELS[p.kind as ProviderKind] ?? p.kind}
                         </span>
-                        <span className="legend">
+                        <span className="legend hidden sm:inline">
                           {count} {count === 1 ? "model" : "models"}
                         </span>
                       </span>
@@ -667,15 +681,41 @@ function ProviderEditor({
           value={draft.baseUrl}
           onChange={(v) => set({ baseUrl: v })}
           placeholder={KIND_PLACEHOLDERS[draft.kind]}
+          // The rule nobody knew: horsie appends the protocol's own path, so
+          // pasting the value a vendor's docs give you — which usually ends in
+          // /v1 — produces /v1/v1/chat/completions. It surfaced only as a
+          // conversation that would not start, with nothing pointing back here.
+          hint={`Host only — horsie appends the API path. ${KIND_PLACEHOLDERS[draft.kind]}, not ${KIND_PLACEHOLDERS[draft.kind]}/v1.`}
         />
         {usesApiKey(draft.kind) && (
-          <TextField
-            label="Inline key"
-            type="password"
-            value={draft.apiKeyInput}
-            onChange={(v) => set({ apiKeyInput: v })}
-            placeholder={draft.hasCredential ? "•••• stored — blank keeps it" : "not set"}
-          />
+          <div>
+            <TextField
+              label="Inline key"
+              type="password"
+              value={draft.apiKeyInput}
+              onChange={(v) => set({ apiKeyInput: v, clearApiKey: false })}
+              placeholder={
+                draft.clearApiKey
+                  ? "will be cleared on save"
+                  : draft.hasCredential
+                    ? "•••• stored — blank keeps it"
+                    : "not set"
+              }
+            />
+            {draft.hasCredential && (
+              <label className="mt-1.5 flex items-center gap-2 text-xs text-dim">
+                <input
+                  type="checkbox"
+                  checked={draft.clearApiKey}
+                  onChange={(e) =>
+                    set({ clearApiKey: e.target.checked, apiKeyInput: "" })
+                  }
+                  data-testid="provider-clear-key"
+                />
+                Clear the stored key on save
+              </label>
+            )}
+          </div>
         )}
         {draft.kind === "chatgpt" && (
           <p className="col-span-1 text-xs text-dim sm:col-span-2">

@@ -71,6 +71,30 @@ pub struct McpServerRow {
     pub last_error: Option<String>,
 }
 
+/// What an MCP server may be called.
+///
+/// Unconstrained, this is a live break rather than a cosmetic one: the name is
+/// spliced into every tool id the server contributes (`mcp__<name>__<tool>`),
+/// and providers reject a tool name outside `^[a-zA-Z0-9_-]+$`. So a single
+/// space here killed *every* turn in any session using that server, with a raw
+/// provider 400 naming a tool index nobody can map back to a server.
+pub fn validate_server_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("MCP server name cannot be empty".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+    {
+        return Err(format!(
+            "MCP server name '{name}' may only contain letters, digits, '_' and '-': \
+             it becomes part of every tool id this server contributes \
+             (mcp__<name>__<tool>), and providers reject anything else"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct McpStore {
     db: Db,
@@ -99,7 +123,12 @@ impl McpStore {
     }
 
     /// One server by name.
+    ///
+    /// The name is trimmed, because `upsert` trims before storing: looking up
+    /// the untrimmed spelling found nothing, so `" linear"` and `"linear"`
+    /// disagreed about whether a server existed.
     pub async fn get(&self, name: &str) -> Result<Option<McpServerRow>, String> {
+        let name = name.trim();
         let row = sqlx::query(&self.db.q(
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
@@ -119,9 +148,7 @@ impl McpStore {
     /// The bearer secret honors keep/clear/set against the existing row.
     pub async fn upsert(&self, input: &McpServerInput) -> Result<McpServerRow, String> {
         let name = input.name.trim();
-        if name.is_empty() {
-            return Err("MCP server name cannot be empty".into());
-        }
+        validate_server_name(name)?;
         let url = input.url.trim();
         if url.is_empty() {
             return Err("MCP server url cannot be empty".into());
@@ -171,6 +198,7 @@ impl McpStore {
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), String> {
+        let name = name.trim();
         sqlx::query(
             &self
                 .db
@@ -615,6 +643,47 @@ mod tests {
             "tokens survive re-upsert"
         );
         assert!(st.meta.is_some(), "endpoint meta survives re-upsert");
+    }
+
+    // A space or a slash here killed every turn in every session using the
+    // server: the name is spliced into `mcp__<name>__<tool>` and providers
+    // reject a tool name outside `^[a-zA-Z0-9_-]+$`.
+    #[tokio::test]
+    async fn a_name_that_cannot_be_a_tool_id_is_refused() {
+        let (s, _t) = store().await;
+        let named = |n: &str| McpServerInput {
+            name: n.into(),
+            url: "https://mcp.example/".into(),
+            auth: McpAuthInput::None(McpNoAuth {}),
+        };
+        for bad in ["my server", "a/b", "café", "x.y", "a:b"] {
+            let err = s.upsert(&named(bad)).await.unwrap_err();
+            assert!(err.contains("may only contain"), "{bad}: {err}");
+        }
+        for ok in ["linear", "my-server", "my_server", "srv2"] {
+            assert!(
+                s.upsert(&named(ok)).await.is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+    }
+
+    // `upsert` trims before storing, so a lookup that did not trim disagreed
+    // with it about whether a server existed.
+    #[tokio::test]
+    async fn a_name_is_found_however_it_is_padded() {
+        let (s, _t) = store().await;
+        s.upsert(&McpServerInput {
+            name: "  linear  ".into(),
+            url: "https://mcp.example/".into(),
+            auth: McpAuthInput::None(McpNoAuth {}),
+        })
+        .await
+        .unwrap();
+        assert!(s.get("linear").await.unwrap().is_some());
+        assert!(s.get(" linear ").await.unwrap().is_some());
+        s.delete(" linear ").await.unwrap();
+        assert!(s.get("linear").await.unwrap().is_none());
     }
 
     #[tokio::test]

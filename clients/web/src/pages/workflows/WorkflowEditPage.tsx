@@ -2,6 +2,7 @@ import { GitBranch, GripVertical, Plus, Sliders, Trash2 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
+import { RailToggle } from "../../components/rail";
 import { useAgents } from "../../hooks/useAgents";
 import {
   useCreateWorkflow,
@@ -25,6 +26,23 @@ import {
   type Selection,
 } from "./stepList";
 
+/** Editing a workflow that does not exist used to render the editor anyway —
+ * a form with Name and Save permanently disabled, which is a dead end rather
+ * than a not-found. Same shape as `AgentEditPage`, which got this right. */
+export function WorkflowEditPage() {
+  const { name } = useParams<{ name: string }>();
+  const { isLoading, isError } = useWorkflow(name);
+  if (name && isLoading) {
+    return <p className="px-6 py-4 text-sm text-faint">Loading…</p>;
+  }
+  if (name && isError) {
+    return (
+      <p className="px-6 py-4 text-sm text-red-ink">No such workflow: {name}.</p>
+    );
+  }
+  return <WorkflowEditor key={name ?? "new"} />;
+}
+
 /**
  * The workflow editor: a sidebar of what the definition holds, and one panel
  * showing whichever piece is selected.
@@ -35,7 +53,7 @@ import {
  * grows, and the graph takes the whole panel when asked for — where clicking a
  * node can select that step, which a preview pinned in a gutter could not do.
  */
-export function WorkflowEditPage() {
+function WorkflowEditor() {
   const { name } = useParams<{ name: string }>();
   const editing = !!name;
   const navigate = useNavigate();
@@ -141,6 +159,7 @@ export function WorkflowEditPage() {
   return (
     <div className="flex h-full flex-col" data-testid="workflow-edit-page">
       <div className="flex items-center gap-3 border-b px-6 py-4">
+        <RailToggle />
         <h1 className="page-title">{editing ? `Edit ${name}` : "New workflow"}</h1>
         <button
           className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
@@ -363,6 +382,15 @@ export function WorkflowEditPage() {
                   onChange={(e) => setStart(e.target.value)}
                   data-testid="workflow-start"
                 >
+                  {/* Without a placeholder, a `start` that matches no option
+                      makes the browser fall back to option 0 and *display* a
+                      step the state is not holding — so the form showed one
+                      answer while the save sent another. */}
+                  {!stepNames.includes(start) && (
+                    <option value={start}>
+                      {start.trim() === "" ? "— choose a step —" : `${start} (no such step)`}
+                    </option>
+                  )}
                   {stepNames.map((n) => (
                     <option key={n} value={n}>
                       {n}

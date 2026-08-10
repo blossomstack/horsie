@@ -3,11 +3,13 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RoutineView } from "../../api/types";
+import { answerConfirm, confirmSnapshot, resetConfirm } from "../../lib/confirm";
 import { RoutinesPage } from "./RoutinesPage";
 
 // vitest runs without `globals`, so testing-library's auto-cleanup never
 // fires; without this the second render's queries see the first test's DOM.
 afterEach(cleanup);
+afterEach(resetConfirm);
 
 const remove = vi.fn(async (_name: string) => {});
 const list = vi.fn(async (): Promise<RoutineView[]> => routines);
@@ -66,7 +68,9 @@ describe("RoutinesPage", () => {
     expect(rows[0].textContent).toContain("nightly");
     expect(rows[0].textContent).toContain("reviewer");
     expect(rows[0].textContent).toContain("every 1h");
-    expect(rows[0].textContent).toContain("next");
+    // Not "next just now": a future timestamp used to fall into the
+    // "less than 45 seconds ago" branch of a past-only formatter.
+    expect(rows[0].textContent).toContain("next in 1m");
     expect(rows[0].textContent).toContain("nightly description");
   });
 
@@ -78,13 +82,10 @@ describe("RoutinesPage", () => {
   });
 
   it("warns that the runs go too before deleting", async () => {
-    const confirm = vi
-      .spyOn(window, "confirm")
-      .mockImplementation(() => true);
     const { findByTestId } = renderPage();
     fireEvent.click(await findByTestId("delete-routine-paused"));
+    expect(confirmSnapshot()?.message).toContain("every session it created");
+    answerConfirm(true);
     await waitFor(() => expect(remove).toHaveBeenCalledWith("paused"));
-    expect(confirm.mock.calls[0]?.[0]).toContain("every session it created");
-    confirm.mockRestore();
   });
 });

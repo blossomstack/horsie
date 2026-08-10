@@ -1,5 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -47,7 +47,9 @@ export function Section({
 }) {
   return (
     <section className="panel p-4">
-      <div className="mb-4 flex items-start justify-between gap-4">
+      {/* Wraps rather than overlapping: at 768px the Add key drew on top of
+          the heading it was meant to sit beside. */}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <h2 className="section-title">{title}</h2>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
@@ -196,30 +198,121 @@ export function RowLabel({ children }: { children: ReactNode }) {
   return <span className="legend mb-1 block">{children}</span>;
 }
 
+/**
+ * The note under a field: what it wants, or why it cannot be saved.
+ *
+ * Deliberately a sibling of the `<label>` rather than inside it. A wrapping
+ * label contributes *all* its text to the control's accessible name, so a hint
+ * placed inside would rename the field to "App ID The number on the app's page
+ * on GitHub" for anyone listening. `aria-describedby` is the relationship this
+ * actually is.
+ */
+function FieldNote({
+  id,
+  hint,
+  invalid,
+}: {
+  id: string;
+  hint?: ReactNode;
+  invalid?: string | null;
+}) {
+  if (!invalid && !hint) return null;
+  return (
+    <span
+      id={id}
+      className={cn(
+        "mt-1 block text-xs leading-relaxed",
+        invalid ? "text-red-ink" : "text-dim",
+      )}
+    >
+      {invalid ?? hint}
+    </span>
+  );
+}
+
 export function TextField({
   label,
   value,
   onChange,
   placeholder,
   type,
+  hint,
+  invalid,
+  testId,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  /** What the field wants, under it. A rule discovered only as a broken
+   * conversation half an hour later is a rule the field should have stated. */
+  hint?: ReactNode;
+  /** Why this value cannot be saved. Replaces the hint while it holds. */
+  invalid?: string | null;
+  testId?: string;
 }) {
+  const noteId = useId();
+  const described = invalid || hint ? noteId : undefined;
   return (
-    <label className="block">
-      <RowLabel>{label}</RowLabel>
-      <input
-        className="field field-mono"
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
-    </label>
+    <div className="block">
+      <label className="block">
+        <RowLabel>{label}</RowLabel>
+        <input
+          className={cn("field field-mono", invalid && "border-red")}
+          type={type}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={described}
+          data-testid={testId}
+        />
+      </label>
+      <FieldNote id={noteId} hint={hint} invalid={invalid} />
+    </div>
+  );
+}
+
+/** A multi-line field, for values that legitimately carry newlines. */
+export function TextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  rows = 5,
+  hint,
+  invalid,
+  testId,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  rows?: number;
+  hint?: ReactNode;
+  invalid?: string | null;
+  testId?: string;
+}) {
+  const noteId = useId();
+  const described = invalid || hint ? noteId : undefined;
+  return (
+    <div className="block">
+      <label className="block">
+        <RowLabel>{label}</RowLabel>
+        <textarea
+          className={cn("field field-mono", invalid && "border-red")}
+          rows={rows}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={described}
+          data-testid={testId}
+        />
+      </label>
+      <FieldNote id={noteId} hint={hint} invalid={invalid} />
+    </div>
   );
 }
 
