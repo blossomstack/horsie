@@ -232,6 +232,13 @@ export const api = {
     remove: (id: string): Promise<Ack> =>
       request(`/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
+    /** Rename a session. Single line, non-empty, at most 60 characters. */
+    rename: (id: string, name: string): Promise<Ack> =>
+      request(`/sessions/${encodeURIComponent(id)}/name`, {
+        method: "PUT",
+        body: JSON.stringify({ name }),
+      }),
+
     send: (id: string, text: string): Promise<SessionAck> =>
       request(`/sessions/${encodeURIComponent(id)}/messages`, {
         method: "POST",

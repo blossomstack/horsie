@@ -50,6 +50,10 @@ impl SessionCore {
                 let _ = reply.send(result);
                 CommandEffect::none()
             }
+            CoreCommand::TitleSet { name } => {
+                actor.spec.name = Some(name);
+                CommandEffect::none()
+            }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
                     .record_on(

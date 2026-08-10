@@ -112,6 +112,9 @@ struct CreateGroupRequest { name: String }
 struct CreateGroupResponse { group: SessionGroupView }
 /// Rename a group; sessions annotated with the old name follow.
 struct RenameGroupRequest { name: String }
+/// Rename a session. Single line, non-empty, at most 60 characters — the same
+/// rule the agent's own title tool is held to.
+struct RenameSessionRequest { name: String }
 struct ListGroupsResponse { groups: Vec<SessionGroupView> }
 
 /// Merge-update a session's annotations: every `set` entry upserts a key,

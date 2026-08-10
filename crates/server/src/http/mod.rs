@@ -195,6 +195,7 @@ pub fn app(state: AppState) -> Router {
             "/api/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
+        .route("/api/sessions/{id}/name", put(handlers::rename_session))
         .route("/api/sessions/{id}/stop", post(handlers::stop_session))
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))

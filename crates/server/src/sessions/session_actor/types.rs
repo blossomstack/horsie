@@ -225,6 +225,11 @@ pub enum CoreCommand {
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },
+    /// A rename that happened elsewhere. The supervisor owns the durable write,
+    /// so this only keeps the actor's own copy of the spec true — which one
+    /// thing reads: the fallback that titles an as-yet-unnamed session from its
+    /// first message, and which would otherwise overwrite the chosen name.
+    TitleSet { name: String },
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.
     Progress {

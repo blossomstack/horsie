@@ -17,7 +17,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    LifecycleCommand, ReadCommand, RunCommand, SubAgentCommand, TurnCommand,
+    CoreCommand, LifecycleCommand, ReadCommand, RunCommand, SubAgentCommand, TurnCommand,
 };
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
@@ -190,6 +190,18 @@ pub enum SessionSupervisorCommand {
     },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
+    /// Rename a session on someone's behalf rather than the agent's.
+    ///
+    /// Handled here rather than by asking the session actor, because renaming
+    /// must not wake a session: loading one re-attempts an interrupted
+    /// provision, and nobody expects typing a name to start a machine. A
+    /// session that happens to be resident is told afterwards, so its own copy
+    /// of the spec stays true.
+    SetSessionTitle {
+        id: SessionId,
+        name: String,
+        reply: ReplyTo<Result<String, RenameSessionError>>,
+    },
     /// Register a group. `created_at` is unix epoch millis (caller-supplied for
     /// deterministic tests, like `Create`).
     CreateGroup {
@@ -259,6 +271,23 @@ pub enum SessionSupervisorEvent {
         set: BTreeMap<String, String>,
         remove: Vec<String>,
     },
+}
+
+/// Why a rename was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameSessionError {
+    NotFound(String),
+    /// Empty, multi-line, or over-long — the same rule the title tool applies.
+    Invalid(String),
+}
+
+impl std::fmt::Display for RenameSessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenameSessionError::NotFound(id) => write!(f, "no such session: {id}"),
+            RenameSessionError::Invalid(reason) => write!(f, "{reason}"),
+        }
+    }
 }
 
 /// Why a group command was refused.
@@ -974,6 +1003,35 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorCommand::RenameSession { id, name, reply } => {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
                     .and_ack(reply)
+            }
+            SessionSupervisorCommand::SetSessionTitle { id, name, reply } => {
+                let title = match crate::sessions::title_tool::normalize_session_title(&name) {
+                    Ok(title) => title,
+                    Err(e) => {
+                        let _ = reply.send(Err(RenameSessionError::Invalid(e.to_string())));
+                        return CommandEffect::none();
+                    }
+                };
+                if !state.sessions.contains_key(&id) {
+                    let _ = reply.send(Err(RenameSessionError::NotFound(id)));
+                    return CommandEffect::none();
+                }
+                // The resident actor's own copy of the spec is what decides
+                // whether a first message still gets to title the session, so a
+                // rename it never heard about would be overwritten by one.
+                if let Some(child) = self.children.get(&id) {
+                    let _ = child
+                        .tell(SessionCommand::Core(CoreCommand::TitleSet {
+                            name: title.clone(),
+                        }))
+                        .await;
+                }
+                self.publish_title(&id, &title);
+                let _ = reply.send(Ok(title.clone()));
+                CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed {
+                    id,
+                    name: title,
+                }])
             }
             SessionSupervisorCommand::PublishSessionTitle { id, name } => {
                 // A rename superseded while its publish was queued must not
@@ -1715,6 +1773,99 @@ mod tests {
                 break;
             }
         }
+    }
+
+    /// A person renaming a session, as opposed to the agent titling one.
+    ///
+    /// The two used to be the same writer, so a session the model never titled
+    /// kept its first message as its name for good. This one holds the title
+    /// tool's rule, refuses an id it does not know, and — crucially — does not
+    /// load the session: waking one re-attempts an interrupted provision, and
+    /// nobody expects typing a name to start a machine.
+    #[tokio::test]
+    async fn a_person_can_rename_a_session_without_waking_it() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, mut grx) = broadcast::channel(16);
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
+        let id = sup
+            .ask(|reply| SessionSupervisorCommand::Create {
+                spec: SessionSpec {
+                    name: None,
+                    ..spec_fixture()
+                },
+                created_at: 1,
+                reply,
+            })
+            .await
+            .unwrap();
+
+        let named = sup
+            .ask(|reply| SessionSupervisorCommand::SetSessionTitle {
+                id: id.clone(),
+                name: "  Investigate login failure  ".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            named, "Investigate login failure",
+            "trimmed like the tool's"
+        );
+
+        let listed = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|(sid, ..)| *sid == id)
+                .and_then(|(_, rec, _)| rec.spec.name.as_deref()),
+            Some("Investigate login failure"),
+            "the rename is durable, not just broadcast"
+        );
+
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let GlobalSessionEvent::TitleChanged(event) = frame {
+                assert_eq!(event.name, "Investigate login failure");
+                break;
+            }
+        }
+
+        assert_eq!(
+            sup.ask(|reply| SessionSupervisorCommand::SetSessionTitle {
+                id: id.clone(),
+                name: "one\ntwo".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap_err(),
+            RenameSessionError::Invalid("session title must be a single line".into()),
+        );
+        assert_eq!(
+            sup.ask(|reply| SessionSupervisorCommand::SetSessionTitle {
+                id: "missing".into(),
+                name: "anything".into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap_err(),
+            RenameSessionError::NotFound("missing".into()),
+        );
     }
 
     #[tokio::test]
