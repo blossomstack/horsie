@@ -7,6 +7,7 @@
 // T4 is the exception: asking needs `conclude`, so that workflow declares one.
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { expectStatus } from "./helpers";
 
 const WORKFLOW = "e2e-workflow";
 const ASK_WORKFLOW = "e2e-workflow-ask";
@@ -152,7 +153,14 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   await page.getByTestId("workflow-node-start").click();
   await page.getByTestId("open-step").first().click();
   await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
-  await expect(page.getByTestId("step-stop")).toBeVisible();
+  // A step that is over says so. It used to read `RUNNING` for ever — through
+  // reloads and cold tabs — with INTERRUPT still offered, because a step's
+  // outcome is journaled as `StepConcluded` rather than as a turn ending, and
+  // the client only cleared `Running` on the latter.
+  await expectStatus(page, "Idle");
+  await expect(page.getByTestId("step-stop")).toHaveCount(0);
+  await page.reload();
+  await expectStatus(page, "Idle");
 
   // It landed under the workflow it was started from.
   await page.goto(`${appBase}/workflows/${WORKFLOW}`);

@@ -228,6 +228,38 @@ describe("fold", () => {
     expect(f.progression).toEqual({ stage: "step_started", detail: "review" });
   });
 
+  // A step never gets a `TurnEnded`: its outcome is journaled as
+  // `StepConcluded`/`StepFailed`/`StepCancelled` and routed to its own log as
+  // these. Folding them only into a progress line left a finished step's page
+  // reading `RUNNING` for ever, surviving reloads and cold tabs, while the
+  // session itself said `Idle`.
+  it("ends a step's turn on the entry that says the step is over", () => {
+    for (const [status, expected] of [
+      ["concluded", SessionStatusKind.Idle],
+      ["cancelled", SessionStatusKind.Idle],
+      ["run_finished", SessionStatusKind.Idle],
+      ["failed", SessionStatusKind.Failed],
+      ["run_failed", SessionStatusKind.Failed],
+    ] as const) {
+      reset();
+      const f = fold([
+        lifecycle("Step", { index: 0, name: "review", status: "started" }),
+        lifecycle("Step", { index: 0, name: "review", status }),
+      ]);
+      expect(f.status, status).toBe(expected);
+      expect(f.progression, status).toBeNull();
+    }
+  });
+
+  it("keeps a started step running", () => {
+    reset();
+    const f = fold([
+      lifecycle("Step", { index: 0, name: "review", status: "started" }),
+    ]);
+    expect(f.status).toBe(SessionStatusKind.Running);
+    expect(f.progression).toEqual({ stage: "step_started", detail: "review" });
+  });
+
   it("drops a subagent's progress once the turn ends", () => {
     reset();
     const f = fold([

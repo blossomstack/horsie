@@ -152,18 +152,6 @@ impl SubAgents {
                 let _ = reply.send(rendered);
                 CommandEffect::none()
             }
-            SubAgentCommand::Tree { reply } => {
-                // Every tree, not one: the API reports a run's step subagents
-                // alongside a conversation's.
-                let tree = state
-                    .subagents
-                    .ids()
-                    .into_iter()
-                    .filter_map(|id| state.subagents.node(id).map(|rec| (id, rec.clone())))
-                    .collect();
-                let _ = reply.send(tree);
-                CommandEffect::none()
-            }
             SubAgentCommand::Reconcile => {
                 let interrupted = state.subagents.interrupted();
                 if interrupted.is_empty() {
@@ -793,13 +781,17 @@ mod tests {
         assert_eq!(state.subagents.active_count(), 1);
         assert_eq!(state.subagents.interrupted(), vec![sub]);
 
-        // And the API reports it: `SubAgentTree` spans every tree.
-        let tree = session
-            .ask(|reply| SessionCommand::SubAgent(SubAgentCommand::Tree { reply }))
+        // And the API reports it: the roster spans every tree, so a run's step
+        // agents and the subagents beneath them arrive in one list.
+        let snapshot = session
+            .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
             .await
             .unwrap();
-        assert_eq!(tree.len(), 1, "a run's subagents must reach the API");
-        assert_eq!(tree[0].0, sub);
+        let ids: Vec<&str> = snapshot.agents.iter().map(|a| a.id.as_str()).collect();
+        assert!(
+            ids.contains(&sub.to_string().as_str()),
+            "a run's subagents must reach the API: {ids:?}"
+        );
     }
 
     /// A nested subagent's result reaches its parent inside a run. Delivery used to
