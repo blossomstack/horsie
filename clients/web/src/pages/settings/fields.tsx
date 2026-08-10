@@ -47,7 +47,9 @@ export function Section({
 }) {
   return (
     <section className="panel p-4">
-      <div className="mb-4 flex items-start justify-between gap-4">
+      {/* Wraps rather than overlapping: at 768px the Add key drew on top of
+          the heading it was meant to sit beside. */}
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
         <div className="min-w-0">
           <h2 className="section-title">{title}</h2>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
@@ -159,7 +161,10 @@ export function ListRow({
           </span>
         )}
       </span>
-      {meta}
+      {/* `min-w-0` so a row's badges shrink before its name does. Without it
+          the badge cluster held its full width at 390px and the provider name
+          was squeezed to nothing while the badges drew over the actions. */}
+      {meta && <span className="flex min-w-0 items-center">{meta}</span>}
     </>
   );
 
@@ -202,23 +207,90 @@ export function TextField({
   onChange,
   placeholder,
   type,
+  hint,
+  invalid,
+  testId,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  /** What the field wants, under it. A rule discovered only as a broken
+   * conversation half an hour later is a rule the field should have stated. */
+  hint?: ReactNode;
+  /** Why this value cannot be saved. Replaces the hint while it holds. */
+  invalid?: string | null;
+  testId?: string;
 }) {
   return (
     <label className="block">
       <RowLabel>{label}</RowLabel>
       <input
-        className="field field-mono"
+        className={cn("field field-mono", invalid && "border-red")}
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        aria-invalid={invalid ? true : undefined}
+        data-testid={testId}
       />
+      {(invalid || hint) && (
+        <span
+          className={cn(
+            "mt-1 block text-xs leading-relaxed",
+            invalid ? "text-red-ink" : "text-dim",
+          )}
+        >
+          {invalid ?? hint}
+        </span>
+      )}
+    </label>
+  );
+}
+
+/** A multi-line field, for values that legitimately carry newlines. */
+export function TextAreaField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  rows = 5,
+  hint,
+  invalid,
+  testId,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  rows?: number;
+  hint?: ReactNode;
+  invalid?: string | null;
+  testId?: string;
+}) {
+  return (
+    <label className="block">
+      <RowLabel>{label}</RowLabel>
+      <textarea
+        className={cn("field field-mono", invalid && "border-red")}
+        rows={rows}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        aria-invalid={invalid ? true : undefined}
+        data-testid={testId}
+      />
+      {(invalid || hint) && (
+        <span
+          className={cn(
+            "mt-1 block text-xs leading-relaxed",
+            invalid ? "text-red-ink" : "text-dim",
+          )}
+        >
+          {invalid ?? hint}
+        </span>
+      )}
     </label>
   );
 }

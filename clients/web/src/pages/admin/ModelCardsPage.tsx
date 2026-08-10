@@ -41,6 +41,16 @@ function ModelCardsSection() {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+
+  // A seeded catalog is 44 rows. Answering "is DeepSeek in here?" by scrolling
+  // is the thing the row-not-form redesign was already trying to fix.
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? (cards ?? []).filter((c) =>
+        `${c.modelId} ${c.name}`.toLowerCase().includes(needle),
+      )
+    : (cards ?? []);
 
   return (
     <Section
@@ -57,9 +67,28 @@ function ModelCardsSection() {
       {isLoading && <p className="text-sm text-faint">Loading…</p>}
       {isError && <p className="text-sm text-red-ink">Couldn’t load model cards.</p>}
 
+      {(cards?.length ?? 0) > 8 && (
+        <input
+          className="field"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setFilter("");
+          }}
+          placeholder="Filter by model id or name…"
+          aria-label="Filter model cards"
+          data-testid="model-card-filter"
+        />
+      )}
+      {needle !== "" && shown.length === 0 && (
+        <p className="screen px-3 py-5 text-center text-sm text-faint">
+          No card matches “{filter.trim()}”.
+        </p>
+      )}
+
       {adding && <ModelCardEditor onDone={() => setAdding(false)} />}
 
-      {cards?.map((c) =>
+      {shown.map((c) =>
         editing === c.modelId ? (
           <ModelCardEditor
             key={c.modelId}

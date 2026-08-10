@@ -7,7 +7,12 @@ import {
   useSaveGithubAppConfig,
 } from "../../hooks/useGithub";
 import { usePublishDirty } from "../settings/dirty";
-import { Section, SettingsPane, TextField } from "../settings/fields";
+import {
+  Section,
+  SettingsPane,
+  TextAreaField,
+  TextField,
+} from "../settings/fields";
 import { SettingsHeader } from "../settings/SettingsHeader";
 
 /**
@@ -49,8 +54,25 @@ export function GithubAppPage() {
     setCallbackBase(cfg.callbackBase ?? "");
   }, [cfg, dirty]);
 
+  // What this form will not send. It used to send anything: `abc` in App ID
+  // became `Number("abc")` → NaN → JSON `null`, stored as NULL, and came back
+  // as a blank field with a green "SAVED" and nothing saying the input had
+  // been discarded.
+  const appIdError =
+    appId.trim() !== "" && !/^\d+$/.test(appId.trim())
+      ? "The App ID is the number on the app's page on GitHub."
+      : null;
+  const callbackBaseError =
+    callbackBase.trim() !== "" && !/^https?:\/\/[^\s]+$/.test(callbackBase.trim())
+      ? "An absolute URL, e.g. https://horsie.example.com."
+      : null;
+  const clientIdError =
+    clientId.trim() === "" ? "The client id is what identifies the app." : null;
+  const invalid = appIdError ?? callbackBaseError ?? clientIdError;
+
   const submit = async () => {
     setError(null);
+    if (invalid) return setError(invalid);
     try {
       await save.mutateAsync({
         clientId: clientId.trim(),
@@ -85,6 +107,7 @@ export function GithubAppPage() {
         dirty={dirty}
         saved={saved}
         saving={save.isPending}
+        saveBlocked={invalid !== null}
         onSave={submit}
         onDiscard={() => {
           setClientSecret("");
@@ -109,6 +132,8 @@ export function GithubAppPage() {
                 setClientId(v);
                 touch();
               }}
+              invalid={dirty ? clientIdError : null}
+              testId="github-client-id"
             />
             <TextField
               label="Client secret"
@@ -129,11 +154,21 @@ export function GithubAppPage() {
                 setAppId(v);
                 touch();
               }}
+              invalid={appIdError}
+              hint="The number on the app's page on GitHub."
+              testId="github-app-id"
             />
-            <TextField
+            {/* A textarea, not an <input type="password">. Chrome collapses
+                newlines to spaces when pasting into a single-line input, so the
+                documented primary format — a PEM, which is newline-delimited by
+                definition — was silently mangled into a key openssl refuses to
+                read, and only the base64 form ever worked. A key is not a
+                password field anyway: it is pasted once, and being able to see
+                that it pasted whole is worth more than the dots. */}
+            <TextAreaField
               label="Private key (PEM or base64)"
-              type="password"
               value={privateKey}
+              rows={4}
               onChange={(v) => {
                 setPrivateKey(v);
                 touch();
@@ -141,6 +176,8 @@ export function GithubAppPage() {
               placeholder={
                 cfg?.hasPrivateKey ? "•••• stored — blank keeps it" : "Not set"
               }
+              hint="Paste the whole PEM, BEGIN and END lines included."
+              testId="github-private-key"
             />
           </div>
 
@@ -183,6 +220,8 @@ export function GithubAppPage() {
               touch();
             }}
             placeholder="https://horsie.example.com"
+            invalid={callbackBaseError}
+            testId="github-callback-base"
           />
         </Section>
       </SettingsPane>
