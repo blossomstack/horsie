@@ -300,6 +300,16 @@ pub enum AgentDomainEvent {
     MessageComplete {
         message: Message,
     },
+    /// An assistant message the run never got to finish, rebuilt from the text
+    /// it had already streamed when the turn was cancelled.
+    ///
+    /// A separate variant from `MessageComplete` because it is a different
+    /// claim: the provider never said this message was done, and one day the
+    /// history sent back may want to say so. It folds into the same log entry,
+    /// because what was generated happened.
+    MessageAborted {
+        message: Message,
+    },
     ToolComplete {
         tool_call_id: String,
         output: String,
@@ -1332,6 +1342,18 @@ impl AgentActor {
         });
     }
 
+    /// The message a cancelled run was part-way through writing, if it had
+    /// written anything worth keeping.
+    ///
+    /// Reads the deltas, which are the only copy: a streamed message becomes
+    /// durable when the provider finishes it, and a cancelled call never
+    /// reaches that point. Whitespace alone is not an answer, so it is not
+    /// worth an entry.
+    fn aborted_message(&self) -> Option<Message> {
+        let text = self.deltas.concat();
+        (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
+    }
+
     /// Interpret a `conclude` payload (or plain-text completion) and deliver the
     /// outcome to the parent. The conversation events were already persisted
     /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
@@ -1451,6 +1473,18 @@ impl AgentActor {
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
+                // Whatever the model had already written is the only copy there
+                // is: deltas are unjournaled by design, and the boundary entry
+                // the stop is about to append clears them. Twenty-two minutes of
+                // generation used to end here, with the transcript showing no
+                // sign a turn had run at all.
+                //
+                // After the synthetic results, not before: a cancelled call's
+                // result belongs directly under the message that made it, and
+                // this text is a later message than that one.
+                if let Some(salvaged) = self.aborted_message() {
+                    events.push(AgentDomainEvent::MessageAborted { message: salvaged });
+                }
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
                 // Snapshot to compact the incrementally-persisted log on cancel.
                 self.events_since_snapshot = 0;
@@ -1730,7 +1764,8 @@ impl EventSourcedActor for AgentActor {
                 let at_ms = message.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
-            AgentDomainEvent::MessageComplete { message } => {
+            AgentDomainEvent::MessageComplete { message }
+            | AgentDomainEvent::MessageAborted { message } => {
                 let at_ms = message.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(message));
             }
@@ -2392,6 +2427,7 @@ fn coarse_appends_an_entry(e: &AgentDomainEvent) -> bool {
         e,
         AgentDomainEvent::InputMessage { .. }
             | AgentDomainEvent::MessageComplete { .. }
+            | AgentDomainEvent::MessageAborted { .. }
             | AgentDomainEvent::ToolComplete { .. }
             | AgentDomainEvent::HookRan { .. }
             | AgentDomainEvent::LifecycleRecorded { .. }
@@ -4902,6 +4938,109 @@ mod fence_tests {
         assert!(
             outcomes.try_recv().is_err(),
             "a superseded run's outcome must not reach the parent"
+        );
+    }
+
+    /// Stopping a turn keeps what it had already written.
+    ///
+    /// Streamed text lives only in the deltas — unjournaled by design, since a
+    /// finished message supersedes them within the second — and a cancelled
+    /// call never produces that finished message. The boundary entry the stop
+    /// appends then cleared them, so twenty-two minutes of generation ended
+    /// with a transcript showing no sign a turn had run.
+    #[tokio::test]
+    async fn a_stopped_turn_keeps_the_text_it_had_already_written() {
+        let (tx, _outcomes) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingProvider),
+            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            parent: Arc::new(OutcomeChannel(tx)),
+            session_id: uuid::Uuid::new_v4(),
+            ready: true,
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            output_schema: None,
+            allow_ask_user: false,
+            allow_timers: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        });
+        params.interactive = true;
+        let journal = Arc::new(InMemoryJournal::new());
+        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+
+        agent
+            .tell(AgentCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: "m1".into(),
+                    text: "write me an essay".into(),
+                },
+                ack: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The same road a streamed chunk takes: the sink tells the actor.
+        for chunk in ["Once upon ", "a time"] {
+            agent
+                .tell(AgentCommand::RecordDelta {
+                    text: chunk.to_string(),
+                })
+                .await
+                .unwrap();
+        }
+
+        let (ack, cancelled) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Cancel {
+                ack: Some(ReplyTo::from_sender(ack)),
+            })
+            .await
+            .unwrap();
+        cancelled.await.unwrap();
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::PageLog {
+                before: None,
+                max: 50,
+                reply: ReplyTo::from_sender(reply),
+            })
+            .await
+            .unwrap();
+        let page = rx.await.unwrap();
+        let kept: Vec<String> = page
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let AgentLogBody::Llm(m) = &e.body else {
+                    return None;
+                };
+                if m.role != Role::Assistant {
+                    return None;
+                }
+                let text: String = m
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text(t) => Some(t.text.clone()),
+                        ContentPart::Thinking(_)
+                        | ContentPart::ToolCall(_)
+                        | ContentPart::ToolResult(_)
+                        | ContentPart::SubAgentResult(_) => None,
+                    })
+                    .collect();
+                (!text.is_empty()).then_some(text)
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["Once upon a time"],
+            "the stopped turn's generation is gone: {:?}",
+            page.entries
         );
     }
 }
