@@ -608,8 +608,8 @@ impl ContextProvider for SessionContextProvider {
         // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
         // same pass as the workspace scan and only when this agent loads the
         // library at all — a session with no plugins asks for nothing.
-        let mut mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
-            Vec::new()
+        let mut mcp: crate::agent_loop::McpToolboxes = if settings.mcp_servers.is_empty() {
+            crate::agent_loop::McpToolboxes::default()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
                 emit_progress(
@@ -629,7 +629,7 @@ impl ContextProvider for SessionContextProvider {
                 session = %self.session_id,
                 "session names MCP servers but no MCP service is configured; ignoring"
             );
-            Vec::new()
+            crate::agent_loop::McpToolboxes::default()
         };
         // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
         // same pass as the workspace scan and only when this agent loads the
@@ -644,24 +644,40 @@ impl ContextProvider for SessionContextProvider {
                 Ok(discovery) => {
                     for failure in &discovery.failures {
                         match failure {
-                            McpServerFailure::Unreachable(f) => tracing::warn!(
-                                session = %self.session_id,
-                                server = %f.server,
-                                reason = %f.reason,
-                                "a plugin MCP server is unavailable; its tools are absent"
-                            ),
-                            McpServerFailure::NeedsAuth(f) => tracing::info!(
-                                session = %self.session_id,
-                                server = %f.server,
-                                "a plugin MCP server needs authorisation; its tools are absent"
-                            ),
+                            McpServerFailure::Unreachable(f) => {
+                                tracing::warn!(
+                                    session = %self.session_id,
+                                    server = %f.server,
+                                    reason = %f.reason,
+                                    "a plugin MCP server is unavailable; its tools are absent"
+                                );
+                                mcp.unavailable.push(
+                                    crate::agent_loop::McpUnavailable::Unreachable {
+                                        server: f.server.clone(),
+                                        reason: f.reason.clone(),
+                                    },
+                                );
+                            }
+                            McpServerFailure::NeedsAuth(f) => {
+                                tracing::info!(
+                                    session = %self.session_id,
+                                    server = %f.server,
+                                    "a plugin MCP server needs authorisation; its tools are absent"
+                                );
+                                mcp.unavailable.push(
+                                    crate::agent_loop::McpUnavailable::NeedsAuth {
+                                        server: f.server.clone(),
+                                    },
+                                );
+                            }
                         }
                     }
                     if !discovery.tools.is_empty() {
-                        mcp.push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
-                            runtime_client.clone(),
-                            discovery.tools,
-                        )));
+                        mcp.boxes
+                            .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
+                                runtime_client.clone(),
+                                discovery.tools,
+                            )));
                     }
                 }
                 // Never fatal: a plugin bringing a broken server must not stop a
