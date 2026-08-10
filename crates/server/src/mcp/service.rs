@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::agent_loop::McpToolbox;
+use crate::agent_loop::{McpToolbox, McpToolboxes, McpUnavailable};
 use async_trait::async_trait;
 use horsie_agentcore::Toolbox;
 use horsie_models::mcp::{
@@ -98,27 +98,37 @@ impl McpService {
         }
     }
 
-    /// Build a live [`McpToolbox`] per named server for an agent spawn. A server
-    /// that is unknown or fails to connect is skipped (logged, and its error
-    /// recorded) rather than failing the whole session; only a store error
+    /// Build a live [`McpToolbox`] per named server for an agent spawn.
+    ///
+    /// A server that is unknown or fails to connect does not fail the session —
+    /// but it is *reported* rather than merely skipped. Dropping the distinction
+    /// here is what left the agent with `no tool named 'mcp__…'` for both a
+    /// server that is down and one somebody deleted. Only a store error
     /// propagates. Connect + `tools/list` happen here, so tools reflect the live
     /// server on each turn.
-    pub async fn toolboxes_for(&self, names: &[String]) -> Result<Vec<Arc<dyn Toolbox>>, String> {
-        let mut out: Vec<Arc<dyn Toolbox>> = Vec::new();
+    pub async fn toolboxes_for(&self, names: &[String]) -> Result<McpToolboxes, String> {
+        let mut out = McpToolboxes::default();
         for name in names {
             let Some(row) = self.store.get(name).await? else {
                 tracing::warn!(server = %name, "session references unknown MCP server; skipping");
+                out.unavailable.push(McpUnavailable::Gone {
+                    server: name.clone(),
+                });
                 continue;
             };
             match self.build_toolbox(&row).await {
                 Ok(tb) => {
                     let count = u32::try_from(tb.specs().len()).unwrap_or(u32::MAX);
                     let _ = self.store.set_status(name, true, Some(count), None).await;
-                    out.push(Arc::new(tb));
+                    out.boxes.push(Arc::new(tb));
                 }
                 Err(e) => {
                     tracing::warn!(server = %name, error = %e, "MCP server connect failed; skipping");
                     let _ = self.store.set_status(name, false, None, Some(&e)).await;
+                    out.unavailable.push(McpUnavailable::Unreachable {
+                        server: name.clone(),
+                        reason: e,
+                    });
                 }
             }
         }
@@ -685,9 +695,10 @@ mod tests {
         let url = mock_mcp_server().await;
         svc.upsert(none_input("mock", &url)).await.unwrap();
 
-        let boxes = svc.toolboxes_for(&["mock".into()]).await.unwrap();
-        assert_eq!(boxes.len(), 1);
-        let mut names: Vec<String> = boxes[0].specs().into_iter().map(|s| s.name).collect();
+        let built = svc.toolboxes_for(&["mock".into()]).await.unwrap();
+        assert_eq!(built.boxes.len(), 1);
+        assert!(built.unavailable.is_empty());
+        let mut names: Vec<String> = built.boxes[0].specs().into_iter().map(|s| s.name).collect();
         names.sort();
         assert_eq!(names, vec!["mcp__mock__echo", "mcp__mock__ping"]);
     }
@@ -707,10 +718,39 @@ mod tests {
         assert!(view[0].last_error.is_some());
     }
 
+    /// A server the session names and the store has never heard of is *gone* —
+    /// someone deleted it. Skipping it silently is what made that identical, to
+    /// the agent and to the person reading its answer, to a server that is
+    /// merely down.
     #[tokio::test]
-    async fn toolboxes_for_skips_unknown_names() {
+    async fn toolboxes_for_reports_a_deleted_server_as_gone() {
         let (svc, _t) = service().await;
-        let boxes = svc.toolboxes_for(&["ghost".into()]).await.unwrap();
-        assert!(boxes.is_empty());
+        let built = svc.toolboxes_for(&["ghost".into()]).await.unwrap();
+        assert!(built.boxes.is_empty());
+        assert_eq!(
+            built.unavailable,
+            vec![McpUnavailable::Gone {
+                server: "ghost".into()
+            }]
+        );
+    }
+
+    /// Configured but not answering: a different answer, and one that may come
+    /// right on a later turn.
+    #[tokio::test]
+    async fn toolboxes_for_reports_an_unreachable_server_with_its_reason() {
+        let (svc, _t) = service().await;
+        svc.upsert(none_input("dead", "http://127.0.0.1:0/"))
+            .await
+            .unwrap();
+        let built = svc.toolboxes_for(&["dead".into()]).await.unwrap();
+        assert!(built.boxes.is_empty());
+        match built.unavailable.as_slice() {
+            [McpUnavailable::Unreachable { server, reason }] => {
+                assert_eq!(server, "dead");
+                assert!(!reason.is_empty(), "the reason is the whole point");
+            }
+            other => panic!("expected one unreachable server, got {other:?}"),
+        }
     }
 }

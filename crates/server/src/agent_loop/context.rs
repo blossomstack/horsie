@@ -294,7 +294,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
-        mcp: Vec<Arc<dyn Toolbox>>,
+        mcp: crate::agent_loop::McpToolboxes,
     ) -> Arc<dyn Toolbox>;
 }
 
@@ -309,7 +309,7 @@ impl ToolboxFactory for DefaultToolboxFactory {
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
-        mcp: Vec<Arc<dyn Toolbox>>,
+        mcp: crate::agent_loop::McpToolboxes,
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
@@ -319,10 +319,13 @@ impl ToolboxFactory for DefaultToolboxFactory {
         let composed: Arc<dyn Toolbox> = if mcp.is_empty() {
             Arc::new(runtime)
         } else {
-            let mut boxes: Vec<Arc<dyn Toolbox>> = Vec::with_capacity(1 + mcp.len());
+            // Composed even when *every* server failed: the composite is what
+            // knows why they are missing, and a bare runtime toolbox would
+            // answer a call for one with "no tool named …" all over again.
+            let mut boxes: Vec<Arc<dyn Toolbox>> = Vec::with_capacity(1 + mcp.boxes.len());
             boxes.push(Arc::new(runtime));
-            boxes.extend(mcp);
-            Arc::new(CompositeToolbox::new(boxes))
+            boxes.extend(mcp.boxes);
+            Arc::new(CompositeToolbox::new(boxes).with_unavailable(mcp.unavailable))
         };
         let base: Arc<dyn Toolbox> = match &agent_def.allowed_tools {
             None => composed,
@@ -785,7 +788,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
@@ -802,7 +805,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let err = tb
             .execute(CONCLUDE_TOOL, json!({}), "tc1")
@@ -819,7 +822,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&SKILL_TOOL.to_string()));
@@ -837,7 +840,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
 
         // Single workspace → `workspace` may be omitted.
@@ -886,7 +889,7 @@ mod tests {
             client,
             vec!["alpha".into(), "beta".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         // Omitting `workspace` with several workspaces is rejected before any scan.
         let err = tb
@@ -927,7 +930,7 @@ mod tests {
             client,
             vec!["october".into()],
             true,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let body = tb
             .execute(
@@ -959,7 +962,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let err = tb
             .execute(
@@ -983,7 +986,7 @@ mod tests {
             client.clone(),
             vec!["october".into()],
             true,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let out = tb
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
@@ -999,7 +1002,7 @@ mod tests {
             client,
             vec!["october".into()],
             false,
-            Vec::new(),
+            crate::agent_loop::McpToolboxes::default(),
         );
         let out = tb_off
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")

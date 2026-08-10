@@ -11,16 +11,92 @@ use horsie_support::mcp::{McpClient, McpError, McpToolDef};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// A configured MCP server whose tools are not in this turn's toolbox, and why.
+///
+/// Both cases used to reach the agent as `no tool named 'mcp__…'`, so "the
+/// server is down" and "somebody deleted it" were the same sentence — and the
+/// only thing that knew the difference had already dropped it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpUnavailable {
+    /// Named by the session, but no such server is configured any more.
+    Gone { server: String },
+    /// Configured, but this turn could not reach it.
+    Unreachable { server: String, reason: String },
+    /// Configured and reachable, but it has not been authorised.
+    NeedsAuth { server: String },
+}
+
+impl McpUnavailable {
+    #[must_use]
+    pub fn server(&self) -> &str {
+        match self {
+            Self::Gone { server }
+            | Self::Unreachable { server, .. }
+            | Self::NeedsAuth { server } => server,
+        }
+    }
+
+    /// What the agent is told when it calls one of this server's tools.
+    fn explain(&self) -> String {
+        match self {
+            Self::Gone { server } => format!(
+                "the MCP server '{server}' is no longer configured, so its tools are gone.                  Do not call them again; say so and carry on without them."
+            ),
+            Self::Unreachable { server, reason } => format!(
+                "the MCP server '{server}' could not be reached this turn ({reason}), so its                  tools are unavailable. It may recover on a later turn."
+            ),
+            Self::NeedsAuth { server } => format!(
+                "the MCP server '{server}' has not been authorised, so its tools are                  unavailable until someone connects it in Settings."
+            ),
+        }
+    }
+}
+
+/// The server name in `mcp__<server>__<tool>`, for a name that is one.
+fn mcp_server_of(tool: &str) -> Option<&str> {
+    tool.strip_prefix("mcp__")?.split("__").next()
+}
+
+/// What a turn got from the MCP servers it asked for: the toolboxes that
+/// connected, and the servers that did not, with why.
+#[derive(Default)]
+pub struct McpToolboxes {
+    pub boxes: Vec<Arc<dyn Toolbox>>,
+    pub unavailable: Vec<McpUnavailable>,
+}
+
+impl McpToolboxes {
+    /// Whether this turn has anything to say about MCP at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.boxes.is_empty() && self.unavailable.is_empty()
+    }
+}
+
 /// Composes several toolboxes into one, routing `execute` to the first box that
 /// advertises the tool. `specs` is every box's specs, first spelling of a name
 /// winning.
 pub struct CompositeToolbox {
     boxes: Vec<Arc<dyn Toolbox>>,
+    /// Servers this turn asked for and did not get. Advertised to nobody — a
+    /// tool that is not there cannot be offered — but consulted when a call
+    /// arrives for one anyway, which is exactly what happens when a server goes
+    /// down mid-conversation and the model calls a tool it saw earlier.
+    unavailable: Vec<McpUnavailable>,
 }
 
 impl CompositeToolbox {
     pub fn new(boxes: Vec<Arc<dyn Toolbox>>) -> Self {
-        Self { boxes }
+        Self {
+            boxes,
+            unavailable: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_unavailable(mut self, unavailable: Vec<McpUnavailable>) -> Self {
+        self.unavailable = unavailable;
+        self
     }
 }
 
@@ -49,6 +125,14 @@ impl Toolbox for CompositeToolbox {
             if b.specs().iter().any(|s| s.name == name) {
                 return b.execute(name, input, tool_call_id).await;
             }
+        }
+        // A call for a server that is configured-but-absent gets the reason
+        // rather than "no tool named …", which said nothing about whether it
+        // was worth trying again — or whether the tool had ever existed.
+        if let Some(server) = mcp_server_of(name)
+            && let Some(missing) = self.unavailable.iter().find(|u| u.server() == server)
+        {
+            return Err(ToolCallError::InvalidInput(missing.explain()));
         }
         Err(ToolCallError::InvalidInput(format!(
             "no tool named '{name}'"
@@ -315,6 +399,52 @@ mod tests {
             tb.execute("gamma", json!({}), "tc1").await,
             Err(ToolCallError::InvalidInput(_))
         ));
+    }
+
+    /// The reported case: a server that answered a moment ago is gone or down,
+    /// the model calls a tool it saw earlier, and the answer was
+    /// `no tool named 'mcp__…'` — which says nothing about whether it was worth
+    /// trying again, or whether the tool had ever existed.
+    #[tokio::test]
+    async fn a_missing_server_answers_with_the_reason_it_is_missing() {
+        let deleted = CompositeToolbox::new(vec![Arc::new(OneTool {
+            name: "bash".into(),
+        })])
+        .with_unavailable(vec![McpUnavailable::Gone {
+            server: "acme".into(),
+        }]);
+        let Err(ToolCallError::InvalidInput(said)) =
+            deleted.execute("mcp__acme__search", json!({}), "tc1").await
+        else {
+            panic!("a call for a deleted server must be refused");
+        };
+        assert!(said.contains("acme"), "{said}");
+        assert!(said.contains("no longer configured"), "{said}");
+
+        let down =
+            CompositeToolbox::new(Vec::new()).with_unavailable(vec![McpUnavailable::Unreachable {
+                server: "acme".into(),
+                reason: "connection refused".into(),
+            }]);
+        let Err(ToolCallError::InvalidInput(said)) =
+            down.execute("mcp__acme__search", json!({}), "tc1").await
+        else {
+            panic!("a call for an unreachable server must be refused");
+        };
+        assert!(said.contains("connection refused"), "{said}");
+        assert!(
+            said.contains("later turn"),
+            "down is recoverable and deleted is not: {said}"
+        );
+
+        // An unrelated name is still just unknown; the explanation is for the
+        // server that was asked for, not for every miss.
+        let Err(ToolCallError::InvalidInput(said)) =
+            down.execute("mcp__other__thing", json!({}), "tc1").await
+        else {
+            panic!("unknown tools are still refused");
+        };
+        assert_eq!(said, "no tool named 'mcp__other__thing'");
     }
 
     #[tokio::test]
