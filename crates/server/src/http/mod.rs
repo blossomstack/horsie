@@ -33,15 +33,28 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::{ServeDir, ServeFile};
 
-/// "http://host" from the request headers (horsie serves same-origin; a
+/// "scheme://host" from the request headers (horsie serves same-origin; a
 /// configured `callback_base` overrides this inside a service). Shared by the
 /// github and mcp OAuth callbacks.
+///
+/// The scheme has to come from `X-Forwarded-Proto`, because horsie itself
+/// almost never terminates TLS — it sits behind Caddy, nginx or a cloud load
+/// balancer, and sees plain HTTP on the inside no matter what the browser used.
+/// Hardcoding `http://` here meant every OAuth `redirect_uri` went out as
+/// `http://` on an HTTPS deployment, and GitHub rejects the mismatch outright,
+/// so the flow could not complete anywhere it mattered. MCP OAuth builds its
+/// redirect from the same function and had the same bug.
 pub(crate) fn request_base(headers: &axum::http::HeaderMap) -> String {
     let host = headers
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("localhost");
-    format!("http://{host}")
+    let scheme = if auth::arrived_over_tls(headers) {
+        "https"
+    } else {
+        "http"
+    };
+    format!("{scheme}://{host}")
 }
 
 /// What the deployment owns, and how a request reaches what its account owns.
@@ -401,6 +414,52 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use horsie_models::session_api::{CreateSessionResponse, ListSessionsResponse};
     use tower::util::ServiceExt;
+
+    #[test]
+    fn the_request_base_takes_its_scheme_from_the_forwarded_proto() {
+        let base = |pairs: &[(&str, &str)]| {
+            let mut h = axum::http::HeaderMap::new();
+            for (k, v) in pairs {
+                h.insert(
+                    axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    axum::http::HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            request_base(&h)
+        };
+
+        // The bug: horsie sits behind a TLS terminator and sees plain HTTP, so
+        // it built every OAuth `redirect_uri` as `http://` and GitHub rejected
+        // the mismatch on every HTTPS deployment there is.
+        assert_eq!(
+            base(&[
+                ("host", "horsie.example.com"),
+                ("x-forwarded-proto", "https")
+            ]),
+            "https://horsie.example.com"
+        );
+
+        // A proxy chain forwards a list; the first entry is the client's.
+        assert_eq!(
+            base(&[
+                ("host", "horsie.example.com"),
+                ("x-forwarded-proto", "https, http"),
+            ]),
+            "https://horsie.example.com"
+        );
+
+        // No header is the plain-HTTP self-host shape, which must keep working.
+        assert_eq!(base(&[("host", "localhost:3789")]), "http://localhost:3789");
+        assert_eq!(
+            base(&[("host", "localhost:3789"), ("x-forwarded-proto", "http")]),
+            "http://localhost:3789"
+        );
+        // Anything unrecognised is not a promise of TLS.
+        assert_eq!(
+            base(&[("host", "localhost:3789"), ("x-forwarded-proto", "gopher")]),
+            "http://localhost:3789"
+        );
+    }
 
     /// The real composition root, on a throwaway database, with one fake
     /// vendor process published under `mock` in the bootstrap account.

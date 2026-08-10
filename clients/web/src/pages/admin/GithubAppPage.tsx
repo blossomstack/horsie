@@ -32,6 +32,7 @@ export function GithubAppPage() {
   const [clientSecret, setClientSecret] = useState("");
   const [appId, setAppId] = useState("");
   const [privateKey, setPrivateKey] = useState("");
+  const [callbackBase, setCallbackBase] = useState("");
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -45,6 +46,7 @@ export function GithubAppPage() {
     if (!cfg || dirty) return;
     setClientId(cfg.clientId ?? "");
     setAppId(cfg.appId != null ? String(cfg.appId) : "");
+    setCallbackBase(cfg.callbackBase ?? "");
   }, [cfg, dirty]);
 
   const submit = async () => {
@@ -55,6 +57,11 @@ export function GithubAppPage() {
         clientSecret: clientSecret === "" ? undefined : clientSecret,
         appId: appId.trim() === "" ? undefined : Number(appId),
         privateKey: privateKey === "" ? undefined : privateKey,
+        // Submitted even when blank. The save is a full replacement, so
+        // omitting this field is what silently wiped it on every save — and
+        // it is the only override for a wrong `redirect_uri`, so one
+        // unrelated edit here used to re-break the whole OAuth flow.
+        callbackBase: callbackBase.trim() === "" ? undefined : callbackBase.trim(),
       });
       setClientSecret("");
       setPrivateKey("");
@@ -84,6 +91,7 @@ export function GithubAppPage() {
           setPrivateKey("");
           setClientId(cfg?.clientId ?? "");
           setAppId(cfg?.appId != null ? String(cfg.appId) : "");
+          setCallbackBase(cfg?.callbackBase ?? "");
           setDirty(false);
         }}
       />
@@ -161,6 +169,21 @@ export function GithubAppPage() {
               "Not configured yet — sessions cannot clone repositories until it is."
             )}
           </p>
+        </Section>
+
+        <Section
+          title="Callback"
+          desc="Where GitHub sends users back after they authorize. horsie derives this from the request, honouring X-Forwarded-Proto, so a correctly configured reverse proxy needs nothing here. Set it when horsie cannot see its own public address — a proxy that does not forward the scheme, or a path prefix."
+        >
+          <TextField
+            label="Callback base URL"
+            value={callbackBase}
+            onChange={(v) => {
+              setCallbackBase(v);
+              touch();
+            }}
+            placeholder="https://horsie.example.com"
+          />
         </Section>
       </SettingsPane>
     </div>
