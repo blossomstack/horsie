@@ -88,7 +88,15 @@ impl Turns {
                 reply,
             } => actor.on_answer(state, agent_id, answers, reply, ctx).await,
             TurnCommand::ReconcileInterrupted => {
-                if state.status == SessionStatus::Running {
+                // `Running` alone does not say whose turn it is. This command is
+                // self-sent from recovery, so anything the supervisor queued
+                // while the actor was loading — a message, an answer, a flushed
+                // subagent result — is handled first and may have started a
+                // turn of its own by now. Recording that one as interrupted
+                // reported `Idle` over a live run, wiped the client's streamed
+                // text, and left the run unstoppable and eligible for offload
+                // while it went on generating.
+                if state.status == SessionStatus::Running && !actor.turn_began_since_load {
                     actor.report(SessionStatus::Idle).await;
                     CommandEffect::persist(vec![SessionDomainEvent::TurnInterrupted {
                         at_ms: now_ms(),
@@ -483,6 +491,103 @@ mod tests {
             1,
             "a refused message journals nothing, here or on the agent"
         );
+    }
+
+    /// Recovery's reconciler must not interrupt a turn this incarnation started.
+    ///
+    /// It is self-sent from `on_start`, so it queues *behind* whatever the
+    /// supervisor sent while the session was loading — and by the time it is
+    /// handled, that work may have started a turn of its own. Asking only "is
+    /// the session Running?" then answered yes about a live run: the client got
+    /// `TurnEnded{Interrupted}` with no assistant entry, the streamed text it
+    /// held was wiped, and the run went on generating into a session that
+    /// called itself idle.
+    #[tokio::test]
+    async fn reconciling_an_interrupted_turn_leaves_a_live_one_alone() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        // A journal that ends mid-turn: exactly what a process killed during a
+        // run leaves behind, and what makes recovery send the reconciler.
+        journal
+            .persist(
+                &SessionActor::persistence_id_for(id),
+                &[serde_json::to_vec(&SessionDomainEvent::TurnBegan { at_ms: 0 }).unwrap()],
+                None,
+            )
+            .await
+            .unwrap();
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps,
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ));
+
+        // The live turn wins the race back into the mailbox, which is the 1-in-3
+        // ordering the sweep hit.
+        session
+            .tell(SessionCommand::AgentOutcome(
+                crate::agent_loop::AgentOutcome::Started { session_id: id },
+            ))
+            .await
+            .unwrap();
+        session
+            .tell(SessionCommand::Turn(TurnCommand::ReconcileInterrupted))
+            .await
+            .unwrap();
+
+        let events = wait_for_events(&journal, id, "the live turn to be recorded", |e| {
+            e.len() >= 2
+        })
+        .await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionDomainEvent::TurnInterrupted { .. })),
+            "the reconciler interrupted a turn that had just begun: {events:?}"
+        );
+        assert_eq!(
+            crate::sessions::events::fold_session_state(&journal, id)
+                .await
+                .status,
+            SessionStatus::Running,
+            "the live turn is still the session's status"
+        );
+    }
+
+    /// The other half: with no turn of its own, recovery still records that the
+    /// one the process died inside is over.
+    #[tokio::test]
+    async fn reconciling_still_ends_a_turn_no_incarnation_owns() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        journal
+            .persist(
+                &SessionActor::persistence_id_for(id),
+                &[serde_json::to_vec(&SessionDomainEvent::TurnBegan { at_ms: 0 }).unwrap()],
+                None,
+            )
+            .await
+            .unwrap();
+        let _session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps,
+                spawn_deaf_supervisor(),
+                crate::sessions::Positions::default(),
+            ));
+
+        wait_for_state(&journal, id, "the interrupted turn to be reconciled", |s| {
+            s.status == SessionStatus::Idle
+        })
+        .await;
     }
 
     /// A run works from its definition; there is nobody to send an unaddressed

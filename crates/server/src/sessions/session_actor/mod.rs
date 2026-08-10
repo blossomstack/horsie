@@ -199,6 +199,15 @@ pub struct SessionActor {
     /// that unloading an idle session leaves a reader waiting rather than
     /// disconnecting it.
     positions: crate::sessions::Positions,
+    /// Whether a turn has begun since this incarnation loaded.
+    ///
+    /// Recovery's reconciler asks only "is the session Running?", and that is
+    /// true of a turn *this* incarnation started as well as of the one the
+    /// previous one died inside. The two are told apart here and nowhere else:
+    /// the reconciler is self-sent from `on_start`, so anything the supervisor
+    /// queued while the actor was loading is handled first — including a
+    /// message that starts a real turn.
+    turn_began_since_load: bool,
 }
 
 impl SessionActor {
@@ -216,6 +225,7 @@ impl SessionActor {
             parent,
             agents: None,
             positions,
+            turn_began_since_load: false,
         }
     }
 
@@ -705,6 +715,7 @@ impl SessionActor {
         who: Uuid,
     ) -> CommandEffect<SessionDomainEvent> {
         if who == self.id {
+            self.turn_began_since_load = true;
             self.report(SessionStatus::Running).await;
             return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
         }
