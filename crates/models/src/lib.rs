@@ -1109,6 +1109,7 @@ mod agents_tests {
         let view = AgentView {
             name: "reviewer".into(),
             description: "reviews PRs".into(),
+            instructions: Some("Always cite file:line.".into()),
             model: "sonnet".into(),
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],

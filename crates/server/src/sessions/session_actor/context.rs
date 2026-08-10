@@ -677,7 +677,12 @@ impl ContextProvider for SessionContextProvider {
             ),
             SessionAgentKind::Sub(_) => with_spawn,
         };
-        let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        let system_prompt = compose_system_prompt(
+            Some(SESSION_AGENT_PROMPT),
+            &ws,
+            shared.as_ref(),
+            settings.instructions.as_deref(),
+        );
         // A typed subagent's own section follows the generic one, it does not
         // replace it: `SUBAGENT_PROMPT_SUFFIX` is the only place an agent is
         // told its final message is its report and that it cannot ask the user,

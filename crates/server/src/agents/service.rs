@@ -8,6 +8,11 @@ use crate::config::ConfigStore;
 use horsie_models::agents::{AgentPresetInput, AgentView};
 use std::sync::Arc;
 
+/// Longest set of preset instructions, in characters. They ride in every prompt
+/// this preset's agent sends, so the bound is a cost bound as much as a
+/// validation one.
+const MAX_INSTRUCTIONS_CHARS: usize = 8_000;
+
 /// Typed service errors so the HTTP layer can pick a status without string
 /// matching: NotFound → 404, Conflict → 409, Invalid → 422, Internal → 500.
 #[derive(Debug)]
@@ -127,6 +132,16 @@ impl AgentService {
     /// Save-time validation: slug, configured model, offered thinking effort.
     async fn validate(&self, input: &AgentPresetInput) -> Result<(), AgentError> {
         crate::memory::validate_slug(&input.name).map_err(AgentError::Invalid)?;
+        // Instructions ride in every one of this agent's prompts, so an
+        // accidental paste is a bill rather than a typo. The cap is generous
+        // enough for a page of guidance and nothing like a 51 KB document.
+        if let Some(instructions) = input.instructions.as_deref()
+            && instructions.chars().count() > MAX_INSTRUCTIONS_CHARS
+        {
+            return Err(AgentError::Invalid(format!(
+                "instructions must be at most {MAX_INSTRUCTIONS_CHARS} characters"
+            )));
+        }
         let view = self.config.view().await.map_err(AgentError::Internal)?;
         let model = view
             .models
@@ -150,6 +165,12 @@ fn row_from_input(input: AgentPresetInput, created_at: String, updated_at: Strin
     AgentRow {
         name: input.name,
         description: input.description.unwrap_or_default(),
+        // Empty is absent: a textarea someone opened and closed must not turn
+        // into a blank section in the system prompt.
+        instructions: input
+            .instructions
+            .map(|i| i.trim().to_string())
+            .filter(|i| !i.is_empty()),
         model: input.model,
         plugins: input.plugins.unwrap_or_default(),
         mcp_servers: input.mcp_servers.unwrap_or_default(),
@@ -164,6 +185,7 @@ fn agent_view(row: &AgentRow) -> AgentView {
     AgentView {
         name: row.name.clone(),
         description: row.description.clone(),
+        instructions: row.instructions.clone(),
         model: row.model.clone(),
         plugins: row.plugins.clone(),
         mcp_servers: row.mcp_servers.clone(),
@@ -259,6 +281,7 @@ mod tests {
         AgentPresetInput {
             name: name.into(),
             description: Some("d".into()),
+            instructions: None,
             model: model.into(),
             plugins: None,
             mcp_servers: None,
@@ -297,6 +320,35 @@ mod tests {
         let mut ok = input("a", "sonnet");
         ok.thinking_effort = Some("high".into());
         assert!(s.create(ok).await.is_ok());
+    }
+
+    /// The field that makes two presets on one model different agents. It is
+    /// trimmed, empty means absent, and it is bounded because it rides in every
+    /// prompt the preset's agent sends.
+    #[tokio::test]
+    async fn instructions_round_trip_trimmed_and_bounded() {
+        let (s, _t) = service().await;
+        let mut with = input("reviewer", "sonnet");
+        with.instructions = Some("  Always cite file:line.  ".into());
+        assert_eq!(
+            s.create(with).await.unwrap().instructions.as_deref(),
+            Some("Always cite file:line.")
+        );
+
+        let mut blank = input("blank", "sonnet");
+        blank.instructions = Some("   ".into());
+        assert_eq!(
+            s.create(blank).await.unwrap().instructions,
+            None,
+            "a textarea somebody opened and closed is not an instruction"
+        );
+
+        let mut huge = input("huge", "sonnet");
+        huge.instructions = Some("x".repeat(MAX_INSTRUCTIONS_CHARS + 1));
+        assert!(matches!(
+            s.create(huge).await.unwrap_err(),
+            AgentError::Invalid(m) if m.contains("at most")
+        ));
     }
 
     #[tokio::test]

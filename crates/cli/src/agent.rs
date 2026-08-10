@@ -93,6 +93,11 @@ fn render_agent_detail(a: &AgentView) -> String {
     if !a.memory_spaces.is_empty() {
         out.push_str(&format!("memory      {}\n", a.memory_spaces.join(", ")));
     }
+    // Last, and on its own lines: it is prose, and the only field here that is
+    // sent to the model rather than describing the preset to a person.
+    if let Some(i) = a.instructions.as_deref() {
+        out.push_str(&format!("\ninstructions\n{i}\n"));
+    }
     out
 }
 
@@ -110,6 +115,7 @@ mod tests {
         AgentView {
             name: name.into(),
             description: "reviews PRs".into(),
+            instructions: None,
             model: "sonnet".into(),
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],

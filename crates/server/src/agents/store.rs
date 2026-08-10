@@ -6,7 +6,7 @@ use crate::db::Db;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
-const COLS: &str = "name, description, model, plugins, \
+const COLS: &str = "name, description, instructions, model, plugins, \
                     mcp_servers, memory_spaces, thinking_effort, created_at, updated_at";
 
 /// One row of the `agents` table.
@@ -14,6 +14,9 @@ const COLS: &str = "name, description, model, plugins, \
 pub struct AgentRow {
     pub name: String,
     pub description: String,
+    /// Standing instructions the preset's agent runs under. `None` and empty
+    /// mean the same thing — no section is added to the system prompt.
+    pub instructions: Option<String>,
     pub model: String,
     pub plugins: Vec<String>,
     pub mcp_servers: Vec<String>,
@@ -61,11 +64,12 @@ impl AgentStore {
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
         .bind(&row.description)
+        .bind(&row.instructions)
         .bind(&row.model)
         .bind(to_json(&row.plugins)?)
         .bind(to_json(&row.mcp_servers)?)
@@ -81,10 +85,13 @@ impl AgentStore {
 
     /// Full replace. Returns false when no agent has that name.
     pub async fn replace(&self, row: &AgentRow) -> Result<bool, String> {
-        let res = sqlx::query(&self.db.q("UPDATE agents SET description = ?, model = ?, \
+        let res = sqlx::query(&self.db.q(
+            "UPDATE agents SET description = ?, instructions = ?, model = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
-             updated_at = ? WHERE user_id = ? AND name = ?"))
+             updated_at = ? WHERE user_id = ? AND name = ?",
+        ))
         .bind(&row.description)
+        .bind(&row.instructions)
         .bind(&row.model)
         .bind(to_json(&row.plugins)?)
         .bind(to_json(&row.mcp_servers)?)
@@ -131,6 +138,7 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
     Ok(AgentRow {
         name: get("name")?,
         description: get("description")?,
+        instructions: get_opt("instructions")?,
         model: get("model")?,
         plugins: from_json("plugins", get("plugins")?)?,
         mcp_servers: from_json("mcp_servers", get("mcp_servers")?)?,
@@ -156,6 +164,7 @@ mod tests {
         AgentRow {
             name: name.into(),
             description: "d".into(),
+            instructions: None,
             model: "sonnet".into(),
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],
