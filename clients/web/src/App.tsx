@@ -29,6 +29,7 @@ import { AppearanceSettings } from "./pages/settings/AppearanceSettings";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
 import { GithubAppPage } from "./pages/admin/GithubAppPage";
+import { NotFoundPage } from "./pages/NotFoundPage";
 
 const client = new QueryClient({
   defaultOptions: {
@@ -123,6 +124,9 @@ export default function App() {
                 <Route path="model-cards" element={<ModelCardsPage />} />
                 <Route path="github-app" element={<GithubAppPage />} />
               </Route>
+              {/* Inside the layout, so an unmatched route keeps the rail.
+                Without this, anything unrouted rendered an empty document. */}
+              <Route path="*" element={<NotFoundPage />} />
             </Route>
           </Routes>
         </AuthGate>

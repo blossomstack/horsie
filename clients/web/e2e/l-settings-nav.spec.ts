@@ -72,4 +72,28 @@ test.describe("settings navigation", () => {
     await page.getByTestId("settings-nav-model-cards").click();
     await expect(page).toHaveURL(/\/admin\/model-cards$/);
   });
+
+  // An unmatched route used to render a blank white page: zero DOM, not even
+  // the rail, so the only escape was the URL bar. `/admin/github` is not a
+  // hypothetical — it is one character from the real `/admin/github-app`.
+  test("an unmatched route renders a not-found page with navigation intact", async ({
+    page,
+    appBase,
+  }) => {
+    for (const path of ["/admin/github", "/nonsense", "/settings/memory/17"]) {
+      await page.goto(`${appBase}${path}`);
+      const notFound = page.getByTestId("not-found-page");
+      await expect(notFound).toBeVisible();
+      // The path is named, so the typo is visible rather than guessed at.
+      await expect(notFound).toContainText(path);
+      // The actual defect was the missing navigation, not the missing copy:
+      // the blank page had no rail at all, so nothing else was reachable.
+      await expect(page.getByTestId("agents-link")).toBeVisible();
+      await expect(page.getByTestId("new-session-button")).toBeVisible();
+    }
+
+    // And it is a dead end no longer.
+    await page.getByRole("link", { name: "your sessions" }).click();
+    await expect(page).toHaveURL(`${appBase}/`);
+  });
 });
