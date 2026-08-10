@@ -22,6 +22,7 @@ use horsie_models::{ENV_CONNECT_TOKEN, ENV_PLUGIN_MANIFEST, ENV_PLUGINS_DIR, ENV
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Records the manifest a plugins dir was last materialized from. A plain file,
 /// so `plugin_dirs` — which keeps only entries that are directories — never
@@ -90,7 +91,14 @@ async fn provision_into(
     // Whatever a previous manifest left behind is not what this session
     // selected, and the scanner reads the whole directory.
     clear_dir(dir);
-    let client = match reqwest::Client::builder().build() {
+    let client = match reqwest::Client::builder()
+        // A fetch that hangs is worse than one that fails: this runs before the
+        // dial-back, so nothing downstream is watching, and the session would
+        // simply never start.
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             eprintln!("plugins: http client init failed: {e}");
@@ -110,7 +118,7 @@ async fn provision_into(
     }
     let mut complete = true;
     for r in &refs {
-        if let Err(e) = materialize(&client, r, base, dir, token).await {
+        if let Err(e) = with_retries(|| materialize(&client, r, base, dir, token)).await {
             eprintln!("plugins: skipping bundle '{}': {e}", r.name);
             complete = false;
         }
@@ -145,6 +153,67 @@ fn clear_dir(dir: &Path) {
             std::fs::remove_file(&path)
         };
     }
+}
+
+/// How long to wait for the connection, and for the whole fetch.
+///
+/// A bundle is small and the server is the one this runtime is about to dial,
+/// so neither of these is a throughput bound — they exist so a boot that cannot
+/// reach the network fails and retries rather than hanging for ever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Attempts per bundle, and the backoff between them.
+///
+/// This is the runtime's *first* outbound call, made before the dial-back has
+/// proved the network works at all — on a cold machine it can run before DNS or
+/// the route is up. One attempt with no retry meant a fetch that lost that race
+/// cost the session its skills for good: no marker is written, so nothing tries
+/// again until the runtime is respawned, and nothing downstream is watching
+/// because there is no connection to the server yet. The dial-back that follows
+/// has retried for thirteen minutes since the beginning; this had none.
+const FETCH_ATTEMPTS: usize = 5;
+#[cfg(not(test))]
+const FETCH_BASE_DELAY: Duration = Duration::from_secs(1);
+/// The tests exercise the retry *decision*, not the wait: a real backoff would
+/// put fifteen seconds of sleeping in the suite for nothing.
+#[cfg(test)]
+const FETCH_BASE_DELAY: Duration = Duration::from_millis(1);
+
+/// Run `op` until it succeeds, an answer says retrying cannot help, or the
+/// attempts run out.
+async fn with_retries<F, Fut>(op: F) -> Result<(), String>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let mut delay = FETCH_BASE_DELAY;
+    for attempt in 1..=FETCH_ATTEMPTS {
+        match op().await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt == FETCH_ATTEMPTS || !worth_retrying(&e) => return Err(e),
+            Err(e) => {
+                eprintln!(
+                    "plugins: attempt {attempt}/{FETCH_ATTEMPTS} failed: {e}; retrying in {delay:?}"
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+    unreachable!("the loop returns inside its branches")
+}
+
+/// Whether asking again could plausibly answer differently.
+///
+/// A transport failure can be a machine that is not on the network yet. A 4xx,
+/// a hash mismatch or a corrupt archive are answers: the server has said what
+/// it thinks, and it will say the same thing next time.
+fn worth_retrying(error: &str) -> bool {
+    if let Some(status) = error.strip_prefix("HTTP ") {
+        return !status.starts_with('4');
+    }
+    !error.starts_with("hash mismatch")
 }
 
 /// Whether `dir` was already built from exactly this manifest.
@@ -335,6 +404,65 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Refuse the first `refuse` connections outright, then serve `body` once.
+    /// Stands in for a machine whose network is not up at the instant the
+    /// runtime boots.
+    fn serve_after_refusals(body: Vec<u8>, refuse: usize) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..refuse {
+                if let Ok((sock, _)) = listener.accept() {
+                    drop(sock); // accepted and hung up: a transport failure
+                }
+            }
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/zip\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes());
+                let _ = sock.write_all(&body);
+                let _ = sock.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The fetch is the runtime's first outbound call, made before the
+    /// dial-back has proved the network works — on a cold machine it can run
+    /// before DNS or the route is up. One attempt meant losing that race cost
+    /// the session its skills for good: no marker is written, so nothing tries
+    /// again until the runtime is respawned, and nothing downstream is watching
+    /// because there is no connection to the server yet.
+    #[tokio::test]
+    async fn a_fetch_that_loses_the_boot_race_tries_again() {
+        let bytes = make_zip();
+        let hash = sha256_hex(&bytes);
+        let base = serve_after_refusals(bytes, 2);
+        let manifest = serde_json::json!([{ "name": "demo", "hash": hash }]).to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plugins");
+        let out = provision_into(&manifest, &base, &dir, Some("tok")).await;
+        assert_eq!(out.as_deref(), Some(dir.as_path()), "the third attempt won");
+        assert!(dir.join("demo/skills/a/SKILL.md").is_file());
+    }
+
+    /// An answer is not a race. A refusal and a corrupt archive both say the
+    /// same thing next time, so asking again only delays the boot.
+    #[test]
+    fn only_a_transport_failure_is_worth_retrying() {
+        assert!(worth_retrying(
+            "error sending request for url (…): dns error"
+        ));
+        assert!(worth_retrying("HTTP 502 Bad Gateway"));
+        assert!(!worth_retrying("HTTP 403 Forbidden"));
+        assert!(!worth_retrying("hash mismatch (want a, got b)"));
     }
 
     #[tokio::test]
