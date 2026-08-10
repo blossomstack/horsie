@@ -16,9 +16,7 @@ use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
     AnswerError, AskAnswer, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
-use crate::sessions::session_actor::{
-    LifecycleCommand, ReadCommand, RunCommand, SubAgentCommand, TurnCommand,
-};
+use crate::sessions::session_actor::{LifecycleCommand, ReadCommand, RunCommand, TurnCommand};
 use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
@@ -79,9 +77,13 @@ pub enum SessionSupervisorCommand {
     List {
         reply: ReplyTo<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
     },
-    /// Fetch one session's row and the state its actor recovered. Loads the
-    /// session: its journal is the truth, and the actor is the only thing that
-    /// reads it.
+    /// Fetch one session's row and the state its actor recovered — its status,
+    /// its usage and its agents. Loads the session: its journal is the truth,
+    /// and the actor is the only thing that reads it.
+    ///
+    /// The whole session document in one ask. The supervisor owns the row; the
+    /// actor owns everything that is *happening*, and answers all of it at
+    /// once rather than a question at a time.
     Get {
         id: SessionId,
         reply: ReplyTo<Option<(SessionRecord, Option<SessionSnapshot>)>>,
@@ -143,11 +145,6 @@ pub enum SessionSupervisorCommand {
         index: u32,
         reply: ReplyTo<Option<Result<(), String>>>,
     },
-    /// Read a session's subagent tree (`None` when the session is unknown).
-    SubAgents {
-        id: SessionId,
-        reply: ReplyTo<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
-    },
     /// Answer every question one agent is parked on, at once.
     Answer {
         id: SessionId,
@@ -166,11 +163,13 @@ pub enum SessionSupervisorCommand {
         agent_id: Option<String>,
         reply: ReplyTo<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
     },
-    /// Read one agent's current values, for its document.
-    AgentState {
+    /// Read one agent's document: what it is, what became of it, what it ran
+    /// under, and its live values. `agent_id` absent or `"main"` for the
+    /// primary agent — which, on a run, is the step in flight.
+    AgentDetail {
         id: SessionId,
         agent_id: Option<String>,
-        reply: ReplyTo<Option<crate::agent_loop::AgentStateView>>,
+        reply: ReplyTo<Option<crate::sessions::session_actor::AgentDetail>>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
@@ -861,25 +860,6 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::SubAgents { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
-                    Some(child) => {
-                        let (tx, rx) = oneshot::channel();
-                        let _ = child
-                            .tell(SessionCommand::SubAgent(SubAgentCommand::Tree {
-                                reply: ReplyTo::from_sender(tx),
-                            }))
-                            .await;
-                        tokio::spawn(async move {
-                            let _ = reply.send(rx.await.ok());
-                        });
-                    }
-                    None => {
-                        let _ = reply.send(None);
-                    }
-                }
-                CommandEffect::none()
-            }
             SessionSupervisorCommand::Answer {
                 id,
                 agent_id,
@@ -921,7 +901,7 @@ impl EventSourcedActor for SessionSupervisor {
                 let _ = reply.send(Some(rx));
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::AgentState {
+            SessionSupervisorCommand::AgentDetail {
                 id,
                 agent_id,
                 reply,
@@ -930,7 +910,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::Read(ReadCommand::AgentState {
+                            .tell(SessionCommand::Read(ReadCommand::Agent {
                                 agent_id,
                                 reply: ReplyTo::from_sender(tx),
                             }))

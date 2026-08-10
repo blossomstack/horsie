@@ -54,13 +54,17 @@ struct MessagesPage {
 /// `task`, `output`, `error`) are absent for a session's main agent.
 struct AgentDocument {
     id: String,
-    /// Parent agent id; absent → the session's main agent.
+    /// Parent agent id; absent → rooted on whatever this session's primary
+    /// agent is: its main agent, or the step that spawned it.
     parent: Option<String>,
+    /// A subagent's label, or the step a workflow agent ran.
     label: Option<String>,
     /// The task a subagent was spawned to do.
     task: Option<String>,
     depth: u32,
-    /// "running" | "completed" | "failed".
+    /// What became of this agent. The same vocabulary the session's roster
+    /// speaks: "provisioning" | "running" | "idle" | "awaiting_input" |
+    /// "completed" | "failed" | "cancelled".
     status: String,
     output: Option<String>,
     error: Option<String>,

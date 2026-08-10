@@ -154,10 +154,6 @@ pub enum SubAgentCommand {
         id: Option<Uuid>,
         reply: ReplyTo<Result<String, String>>,
     },
-    /// Read every tree (backs `GET /api/sessions/:id/subagents`).
-    Tree {
-        reply: ReplyTo<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>,
-    },
     /// Internal: post-recovery reconciliation of subagents the process died
     /// under (tree nodes still `Running`). Their runs are over; the parents
     /// are owed the failure like any other terminal result.
@@ -182,12 +178,14 @@ pub enum ReadCommand {
         max: usize,
         reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
     },
-    /// Read one agent's current values (task list, usage) for its document.
-    AgentState {
+    /// Read one agent's document: what it is, what became of it, and its live
+    /// values. `agent_id` absent or `"main"` for the primary agent — which, on
+    /// a run, is the step in flight. `None` answers "no such agent".
+    Agent {
         agent_id: Option<String>,
-        reply: ReplyTo<Option<crate::agent_loop::AgentStateView>>,
+        reply: ReplyTo<Option<AgentDetail>>,
     },
-    /// Read this session's recovered state: status, pending ask, inbox.
+    /// Read this session's recovered state: status, usage, and its agents.
     Snapshot { reply: ReplyTo<SessionSnapshot> },
     /// Read this session's aggregated usage.
     UsageStats { reply: ReplyTo<SessionUsageStats> },
@@ -487,6 +485,14 @@ impl SessionState {
     /// What this session's own "Main" means right now: the step in flight for a
     /// run, the main agent otherwise. The single kind-shaped fact the subagent
     /// code is ever told, and it arrives as a value rather than a branch.
+    /// Tokens banked across every agent this session hosts. Banked, so a turn
+    /// in flight is not in it and nothing has to be asked of an agent.
+    pub fn session_usage_total(&self) -> UsageTotal {
+        self.agent_usage
+            .values()
+            .fold(UsageTotal::default(), |acc, u| acc.combine(u))
+    }
+
     pub fn root_owner(&self) -> TreeOwner {
         match self.run.as_ref().and_then(WorkflowRunState::current_agent) {
             Some(agent) => TreeOwner::Step(agent),
@@ -505,9 +511,98 @@ pub struct AgentUsageEntry {
 /// What a reader needs to know about a session, answered by the actor that owns
 /// it. Every field is recovered from the journal, so an unloaded session gives
 /// the same answers as a loaded one — it just has to be loaded to give them.
+///
+/// The whole live half of `GET /api/sessions/:id`, so that document is one ask.
+/// It used to be four — status here, usage, the subagent tree and the run log
+/// each separately — all four served by this same actor, and reassembled above
+/// it by an HTTP handler that had to know what kind of session this was to do
+/// it.
 #[derive(Debug, Clone)]
 pub struct SessionSnapshot {
     pub status: SessionStatus,
+    /// Tokens summed across every agent this session hosts. The per-agent
+    /// breakdown is [`SessionUsageStats`], which only the run graph needs.
+    pub usage_total: UsageTotal,
+    /// Every agent this session hosts, in the vocabulary of
+    /// `/sessions/:id/agents/:agent_id`.
+    pub agents: Vec<AgentEntry>,
+}
+
+/// What became of one of a session's agents.
+///
+/// One vocabulary for three different underlying facts — a conversation's main
+/// agent takes its state from the session, a run's step agent from the run log,
+/// a subagent from the tree — because to a reader they are one question. Asked
+/// three times above the actor, they became three projections that disagreed: a
+/// concluded step answered `running` for ever, and a session whose runtime
+/// never built answered `idle` beside a status that said `failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    /// The session's runtime is still being built. Nothing has run yet.
+    Provisioning,
+    Running,
+    /// Loaded and not working — where a conversation's agent rests between
+    /// turns, and the one state that is not an ending.
+    Idle,
+    /// Parked on a question, waiting for an answer.
+    AwaitingInput,
+    /// Ran to a result. Only a subagent or a step reaches it: a conversation is
+    /// never *done*.
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// One agent a session hosts: which agent it is, what became of it, and when.
+///
+/// What it *said* is not here — a transcript is read from the agent's own log,
+/// through `/history`.
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    /// `"main"`, or the agent's uuid. The vocabulary every agent-scoped route
+    /// speaks.
+    pub id: String,
+    /// The agent that spawned this one. Absent for a main agent, for a step —
+    /// which the definition chose, not an agent — and for a subagent rooted
+    /// directly on either.
+    pub parent: Option<Uuid>,
+    /// A subagent's label, or the name of the step this agent is one execution
+    /// of. Absent for a main agent, which is not one of several.
+    pub label: Option<String>,
+    pub depth: u32,
+    /// The plugin-declared agent type a typed subagent runs as.
+    pub agent_type: Option<String>,
+    pub status: AgentStatus,
+    pub error: Option<String>,
+    /// When this agent started and when it reached its result. Zero for a main
+    /// agent — nothing spawned it, and it is as old as the session, whose
+    /// `created_at` is on the same document — and zero for `ended_at_ms` while
+    /// an agent is still running.
+    pub started_at_ms: u64,
+    pub ended_at_ms: u64,
+}
+
+/// Everything a session knows about one of its agents: its entry in the roster,
+/// what it ran under, what it produced, and its live values.
+///
+/// One answer rather than a tree read, a run read and a state read stitched
+/// together by the caller — which is what left a step's document reporting the
+/// session's model and a permanent `running`.
+#[derive(Debug, Clone)]
+pub struct AgentDetail {
+    pub entry: AgentEntry,
+    /// The model this agent runs under: a step's own preset, or the session's.
+    pub model: String,
+    /// What a subagent was asked to do. A main agent is asked things one turn
+    /// at a time, and a step's brief is its definition's.
+    pub task: Option<String>,
+    /// Its terminal result, once it has one. A step's structured output is
+    /// rendered the same way a subagent's report is, because a reader wants the
+    /// same thing from both.
+    pub output: Option<String>,
+    /// Read from the agent itself: its task list, its usage, and where in its
+    /// log those were taken.
+    pub state: crate::agent_loop::AgentStateView,
 }
 
 /// A session's aggregated usage.

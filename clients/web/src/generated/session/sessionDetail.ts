@@ -55,8 +55,11 @@ export interface SessionDetail {
    */
   usageTotal: UsageView;
   /**
-   * Every agent this session hosts: the main agent first, then its subagent
-   * tree. Each is addressable at `/sessions/:id/agents/:agent_id`.
+   * Every agent this session hosts, each addressable at
+   * `/sessions/:id/agents/:agent_id`. A conversation lists its main agent
+   * first, then its subagent tree. A workflow run has no main agent — it
+   * *is* its steps — so it lists one entry per execution in its run log,
+   * labelled with the step that ran.
    */
   agents: SubAgentView[];
   /**

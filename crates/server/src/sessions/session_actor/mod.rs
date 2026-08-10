@@ -67,8 +67,10 @@ use std::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-/// The agent id a session's primary agent reports usage under.
-const MAIN_AGENT_ID: &str = "main";
+/// The path segment and usage key naming a session's primary agent, as opposed
+/// to a subagent's uuid. One spelling, shared by every agent-scoped route and
+/// by the actor that resolves them.
+pub const MAIN_AGENT_ID: &str = "main";
 
 /// How long a cancel waits for the run to actually finish before giving up.
 /// Cancellation is prompt (milliseconds); this is a backstop so a wedged run

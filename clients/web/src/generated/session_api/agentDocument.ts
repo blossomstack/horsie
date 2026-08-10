@@ -9,9 +9,13 @@ import { UsageView } from '../session';
 export interface AgentDocument {
   id: string;
   /**
-   * Parent agent id; absent → the session's main agent.
+   * Parent agent id; absent → rooted on whatever this session's primary
+   * agent is: its main agent, or the step that spawned it.
    */
   parent?: string;
+  /**
+   * A subagent's label, or the step a workflow agent ran.
+   */
   label?: string;
   /**
    * The task a subagent was spawned to do.
@@ -19,7 +23,9 @@ export interface AgentDocument {
   task?: string;
   depth: number;
   /**
-   * "running" | "completed" | "failed".
+   * What became of this agent. The same vocabulary the session's roster
+   * speaks: "provisioning" | "running" | "idle" | "awaiting_input" |
+   * "completed" | "failed" | "cancelled".
    */
   status: string;
   output?: string;

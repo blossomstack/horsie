@@ -5,11 +5,9 @@ use crate::http::Scope;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
-use crate::sessions::session_actor::AskAnswer;
+use crate::sessions::session_actor::{AgentEntry, AgentStatus, AskAnswer};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
-use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
-use crate::sessions::workflow::{StepStatus, WorkflowRunState};
 use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -23,11 +21,11 @@ use horsie_models::session_api::{
     GetSessionResponse, ListSessionsResponse, SendMessageRequest, SessionAck,
 };
 use std::collections::BTreeMap;
-use uuid::Uuid;
 
 /// The path segment naming a session's primary agent, as opposed to a
-/// subagent's uuid. One spelling, shared by every agent-scoped route.
-pub const MAIN_AGENT: &str = "main";
+/// subagent's uuid. Re-exported rather than spelled again: the session actor is
+/// what resolves it, so this layer and that one cannot drift apart.
+pub use crate::sessions::session_actor::MAIN_AGENT_ID as MAIN_AGENT;
 
 /// The wire shape of a session's annotations: sorted key-value pairs.
 pub(crate) fn wire_annotations(annotations: &BTreeMap<String, String>) -> Vec<AnnotationEntry> {
@@ -161,34 +159,6 @@ pub async fn get_session(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let status = snapshot.as_ref().map(|s| s.status.clone());
-    // Session-scoped current values, so they belong on this document rather
-    // than on a history page or a separate endpoint.
-    let usage_total = ask(&state, |reply| SessionSupervisorCommand::UsageStats {
-        id: id.clone(),
-        reply,
-    })
-    .await?
-    .map(|stats| stats.session_total)
-    .unwrap_or_default();
-    let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
-        id: id.clone(),
-        reply,
-    })
-    .await?
-    .unwrap_or_default();
-    // Only a run has one, and only a run needs one: this is the read that says
-    // which step agents exist and what became of each.
-    let run = match rec.spec.workflow.is_some() {
-        false => None,
-        true => {
-            ask(&state, |reply| SessionSupervisorCommand::RunState {
-                id: id.clone(),
-                reply,
-            })
-            .await?
-        }
-    };
-    let agents = agent_roster(&rec, status.as_ref(), run.as_ref(), &tree);
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
@@ -216,8 +186,15 @@ pub async fn get_session(
         memory_spaces: rec.spec.agent.memory_spaces.clone(),
         use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
         thinking_effort: rec.spec.agent.thinking_effort.clone(),
-        usage_total: to_wire_usage(usage_total),
-        agents,
+        // Session-scoped current values, so they belong on this document rather
+        // than on a history page or a separate endpoint. Both come off the same
+        // snapshot as `status` — the session's actor is the only thing that
+        // knows any of it, and it answers all of it at once.
+        usage_total: to_wire_usage(snapshot.as_ref().map(|s| s.usage_total).unwrap_or_default()),
+        agents: snapshot
+            .as_ref()
+            .map(|s| s.agents.iter().map(to_wire_agent).collect())
+            .unwrap_or_default(),
         progression: None,
         workflow: rec.spec.workflow_name().map(str::to_string),
     };
@@ -263,65 +240,37 @@ pub async fn answer_asks(
     Ok((StatusCode::ACCEPTED, Json(Ack {})))
 }
 
-/// The agents of this session a client can open at `/agents/:agent_id`.
+/// Project one of the session's agents onto its wire shape.
 ///
-/// A conversation's main agent is listed even though nothing spawned it, so
-/// every agent is reachable at one shape — but its status is the session's,
-/// not a constant. A workflow run has no main agent at all: it *is* its steps.
-/// Reporting one anyway meant a finished run answered with an agent that does
-/// not exist, permanently "running", stamped as spawned at the epoch.
-fn agent_roster(
-    session: &SessionRecord,
-    status: Option<&SessionStatus>,
-    run: Option<&WorkflowRunState>,
-    tree: &[(Uuid, SubAgentRecord)],
-) -> Vec<SubAgentView> {
-    let mut agents: Vec<SubAgentView> = match run {
-        Some(run) => run.steps.iter().map(step_agent_view).collect(),
-        None => vec![SubAgentView {
-            id: MAIN_AGENT.to_string(),
-            parent: None,
-            label: None,
-            depth: 0,
-            agent_type: None,
-            status: match status {
-                Some(SessionStatus::Running) => "running",
-                Some(SessionStatus::Failed { .. } | SessionStatus::Unrecoverable { .. }) => {
-                    "failed"
-                }
-                // Idle, awaiting input, provisioning, or not loaded at all. None
-                // of them is a *failure*, and none is work in flight.
-                _ => "idle",
-            }
-            .to_string(),
-            error: status.and_then(status_reason),
-            // A conversation's main agent is as old as the session.
-            spawned_at_ms: session.created_at,
-            ended_at_ms: 0,
-        }],
-    };
-    agents.extend(tree.iter().map(|(id, rec)| to_wire_subagent(*id, rec)));
-    agents
+/// The whole of this layer's business with an agent. What the roster contains,
+/// and what each entry's status *is*, is the session actor's — it is the only
+/// thing holding the session's status, its run log and its subagent tree
+/// together, and deriving any of it here meant deriving it differently in each
+/// place that asked.
+fn to_wire_agent(agent: &AgentEntry) -> SubAgentView {
+    SubAgentView {
+        id: agent.id.clone(),
+        parent: agent.parent.map(|id| id.to_string()),
+        label: agent.label.clone(),
+        depth: agent.depth,
+        agent_type: agent.agent_type.clone(),
+        status: wire_agent_status(agent.status).to_string(),
+        error: agent.error.clone(),
+        spawned_at_ms: agent.started_at_ms,
+        ended_at_ms: agent.ended_at_ms,
+    }
 }
 
-/// One execution from a run's log, as an agent a client can open.
-fn step_agent_view(execution: &crate::sessions::workflow::StepRun) -> SubAgentView {
-    SubAgentView {
-        id: execution.agent.to_string(),
-        parent: None,
-        label: Some(execution.step.clone()),
-        depth: 0,
-        agent_type: None,
-        status: match execution.status {
-            StepStatus::Running => "running",
-            StepStatus::Concluded => "completed",
-            StepStatus::Failed => "failed",
-            StepStatus::Cancelled => "cancelled",
-        }
-        .to_string(),
-        error: execution.error.clone(),
-        spawned_at_ms: execution.started_at_ms,
-        ended_at_ms: execution.ended_at_ms.unwrap_or(0),
+/// The one spelling of an agent's status on the wire.
+fn wire_agent_status(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Provisioning => "provisioning",
+        AgentStatus::Running => "running",
+        AgentStatus::Idle => "idle",
+        AgentStatus::AwaitingInput => "awaiting_input",
+        AgentStatus::Completed => "completed",
+        AgentStatus::Failed => "failed",
+        AgentStatus::Cancelled => "cancelled",
     }
 }
 
@@ -334,50 +283,14 @@ fn to_wire_usage(u: crate::agent_loop::UsageTotal) -> UsageView {
     }
 }
 
-/// The workflow step this agent is one execution of: its definition (for the
-/// preset it runs under) and its entry in the run log (for what became of it).
-///
-/// `None` for the main agent, for a subagent, and for every agent of a session
-/// that is not a run — all of which is what makes calling this unconditionally
-/// safe.
-async fn step_execution(
-    state: &crate::users::UserServices,
-    id: &str,
-    rec: &SessionRecord,
-    agent_id: &str,
-) -> Result<
-    Option<(
-        crate::sessions::workflow::WorkflowStepSpec,
-        crate::sessions::workflow::StepRun,
-    )>,
-    Api,
-> {
-    let Some(spec) = rec.spec.workflow.as_ref() else {
-        return Ok(None);
-    };
-    let Ok(uid) = Uuid::parse_str(agent_id) else {
-        return Ok(None);
-    };
-    let run = ask(state, |reply| SessionSupervisorCommand::RunState {
-        id: id.to_string(),
-        reply,
-    })
-    .await?
-    .unwrap_or_default();
-    let Some(execution) = run.index_of_agent(uid).and_then(|i| run.get(i).cloned()) else {
-        return Ok(None);
-    };
-    Ok(spec.step(&execution.step).cloned().map(|s| (s, execution)))
-}
-
-/// One agent's current values: its task list, its usage, and — for a subagent —
-/// its spawn metadata and terminal result. Everything here is a value the
-/// client re-reads rather than a log it accumulates; the log is `/history`.
+/// One agent's current values: what it is, what became of it, its task list and
+/// its usage. Everything here is a value the client re-reads rather than a log
+/// it accumulates; the log is `/history`.
 pub async fn get_agent(
     Scope(state): Scope,
     Path((id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, Api> {
-    let view = ask(&state, |reply| SessionSupervisorCommand::AgentState {
+    let detail = ask(&state, |reply| SessionSupervisorCommand::AgentDetail {
         id: id.clone(),
         agent_id: Some(agent_id.clone()),
         reply,
@@ -385,99 +298,36 @@ pub async fn get_agent(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such agent: {agent_id}")))?;
 
-    // `context_window` is the one field here that is not agent state — an agent
-    // does not know which models are configured, so the HTTP layer attaches it.
-    let (rec, _) = ask(&state, |reply| SessionSupervisorCommand::Get {
-        id: id.clone(),
-        reply,
-    })
-    .await?
-    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
+    // `context_window` is the one field on this document that is not the
+    // session's to answer: an agent does not know which models are configured,
+    // so the HTTP layer looks up the window for the model it reports running.
     let settings = state.config_store.view().await.map_err(Api::internal)?;
-    // A run's steps each carry their own preset, so the session's model — which
-    // is the *first* step's — is the wrong window for any other step. The run
-    // log names which execution this agent is, and the snapshot holds that
-    // step's resolved settings.
-    let step = step_execution(&state, &id, &rec, &agent_id).await?;
-    let model = match &step {
-        Some((step, _)) => step.settings.model.clone(),
-        None => rec.spec.agent.model.clone(),
-    };
     let context_window = settings
         .models
         .iter()
-        .find(|m| m.alias == model)
+        .find(|m| m.alias == detail.model)
         .and_then(|m| m.context_window);
-
-    // Spawn metadata comes from the session's tree, which is where a subagent's
-    // lifecycle is recorded; the main agent has none of it.
-    let node = if agent_id == MAIN_AGENT {
-        None
-    } else {
-        let tree = ask(&state, |reply| SessionSupervisorCommand::SubAgents {
-            id: id.clone(),
-            reply,
-        })
-        .await?
-        .unwrap_or_default();
-        Uuid::parse_str(&agent_id)
-            .ok()
-            .and_then(|uid| tree.into_iter().find(|(nid, _)| *nid == uid))
-    };
 
     let agent = AgentDocument {
         id: agent_id,
-        parent: node.as_ref().and_then(|(_, rec)| match rec.parent {
-            SubAgentParent::Main => None,
-            SubAgentParent::SubAgent(pid) => Some(pid.to_string()),
-        }),
-        label: node.as_ref().map(|(_, rec)| rec.label.clone()),
-        task: node.as_ref().map(|(_, rec)| rec.task.clone()),
-        depth: node.as_ref().map_or(0, |(_, rec)| rec.depth),
-        // A step is in no subagent tree, so it used to fall through to the
-        // `"running"` default and report that for ever — including long after it
-        // had concluded. Its execution in the run log is what became of it.
-        status: match (&node, &step) {
-            (Some((_, rec)), _) => match rec.status {
-                SubAgentStatus::Running => "running",
-                SubAgentStatus::Completed => "completed",
-                SubAgentStatus::Failed => "failed",
-            }
-            .to_string(),
-            (None, Some((_, execution))) => match execution.status {
-                StepStatus::Running => "running",
-                StepStatus::Concluded => "completed",
-                StepStatus::Failed => "failed",
-                StepStatus::Cancelled => "cancelled",
-            }
-            .to_string(),
-            (None, None) => "running".to_string(),
-        },
-        output: match (&node, &step) {
-            (Some((_, rec)), _) => rec.output.clone(),
-            // A step's output is structured; the transcript is the readable
-            // form, so this is the same summary a subagent gives.
-            (None, Some((_, execution))) => execution
-                .output
-                .as_ref()
-                .map(crate::sessions::workflow::output_as_input),
-            (None, None) => None,
-        },
-        error: match (&node, &step) {
-            (Some((_, rec)), _) => rec.error.clone(),
-            (None, Some((_, execution))) => execution.error.clone(),
-            (None, None) => None,
-        },
-        tasks: view
+        parent: detail.entry.parent.map(|id| id.to_string()),
+        label: detail.entry.label.clone(),
+        task: detail.task,
+        depth: detail.entry.depth,
+        status: wire_agent_status(detail.entry.status).to_string(),
+        output: detail.output,
+        error: detail.entry.error,
+        tasks: detail
+            .state
             .tasks
             .iter()
             .map(crate::sessions::events::wire_task)
             .collect(),
-        usage: to_wire_usage(view.usage_total),
-        last_turn_usage: view.last_turn_usage,
-        context_tokens: view.context_tokens,
+        usage: to_wire_usage(detail.state.usage_total),
+        last_turn_usage: detail.state.last_turn_usage,
+        context_tokens: detail.state.context_tokens,
         context_window,
-        as_of_seq: view.as_of_seq,
+        as_of_seq: detail.state.as_of_seq,
     };
     Ok(Json(GetAgentResponse { agent }))
 }
@@ -535,30 +385,6 @@ pub async fn delete_session(
     }
 }
 
-/// Project one tree node onto its wire shape. `output` never crosses here —
-/// transcripts are read through the history endpoint with an `agent_id`.
-fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
-    SubAgentView {
-        id: id.to_string(),
-        parent: match rec.parent {
-            SubAgentParent::Main => None,
-            SubAgentParent::SubAgent(pid) => Some(pid.to_string()),
-        },
-        label: Some(rec.label.clone()),
-        depth: rec.depth,
-        agent_type: rec.agent_type.clone(),
-        status: match rec.status {
-            SubAgentStatus::Running => "running",
-            SubAgentStatus::Completed => "completed",
-            SubAgentStatus::Failed => "failed",
-        }
-        .to_string(),
-        error: rec.error.clone(),
-        spawned_at_ms: rec.spawned_at_ms,
-        ended_at_ms: rec.ended_at_ms,
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -568,137 +394,51 @@ fn to_wire_subagent(id: Uuid, rec: &SubAgentRecord) -> SubAgentView {
 )]
 mod tests {
     use super::*;
-    use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
+    use uuid::Uuid;
 
-    fn record(parent: SubAgentParent, status: SubAgentStatus) -> SubAgentRecord {
-        SubAgentRecord {
-            parent,
-            label: "research".into(),
-            task: "dig".into(),
-            depth: 2,
-            agent_type: None,
-            status,
-            output: Some("answer".into()),
-            error: None,
-            notified: true,
-            spawned_at_ms: 100,
-            ended_at_ms: 400,
-        }
-    }
-
+    /// This layer's whole job with an agent: one projection, no derivation. The
+    /// roster it projects, and what each entry's status means, are tested where
+    /// they are decided — [`crate::sessions::session_actor`].
     #[test]
-    fn wire_subagent_projects_the_record_without_output() {
+    fn an_agent_crosses_the_wire_verbatim() {
         let parent = Uuid::new_v4();
         let id = Uuid::new_v4();
-        let view = to_wire_subagent(
-            id,
-            &record(SubAgentParent::SubAgent(parent), SubAgentStatus::Failed),
-        );
+        let view = to_wire_agent(&AgentEntry {
+            id: id.to_string(),
+            parent: Some(parent),
+            label: Some("research".into()),
+            depth: 2,
+            agent_type: Some("auditor".into()),
+            status: AgentStatus::Failed,
+            error: Some("boom".into()),
+            started_at_ms: 100,
+            ended_at_ms: 400,
+        });
         assert_eq!(view.id, id.to_string());
         assert_eq!(view.parent, Some(parent.to_string()));
         assert_eq!(view.label.as_deref(), Some("research"));
+        assert_eq!(view.agent_type.as_deref(), Some("auditor"));
         assert_eq!(view.depth, 2);
         assert_eq!(view.status, "failed");
-        // No `output` field exists on the wire type at all — transcripts are
-        // read via the history endpoint, never the tree.
-
-        let root = to_wire_subagent(id, &record(SubAgentParent::Main, SubAgentStatus::Running));
-        assert_eq!(root.parent, None);
-        assert_eq!(root.status, "running");
+        assert_eq!(view.error.as_deref(), Some("boom"));
+        assert_eq!((view.spawned_at_ms, view.ended_at_ms), (100, 400));
     }
 
-    fn session_record(workflow: bool) -> SessionRecord {
-        let mut spec = crate::sessions::spec::SessionSpec::for_vendor("local");
-        if workflow {
-            spec.workflow = Some(std::sync::Arc::new(
-                crate::sessions::workflow::WorkflowRunSpec {
-                    workflow: "triage".into(),
-                    start: "review".into(),
-                    steps: Vec::new(),
-                    input: "go".into(),
-                    max_steps: 10,
-                },
-            ));
-        }
-        SessionRecord {
-            spec,
-            created_at: 1_700_000_000_000,
-            annotations: BTreeMap::new(),
-        }
-    }
-
-    fn execution(step: &str, status: StepStatus) -> crate::sessions::workflow::StepRun {
-        crate::sessions::workflow::StepRun {
-            step: step.into(),
-            agent: Uuid::new_v4(),
-            attempt: 1,
-            from: None,
-            via: None,
-            status,
-            input: "go".into(),
-            output: None,
-            error: None,
-            started_at_ms: 10,
-            ended_at_ms: Some(20),
-        }
-    }
-
-    /// A conversation's main agent is not spawned by anything, so it is listed
-    /// anyway — but as what it is. It used to be reported permanently
-    /// `"running"` and stamped as spawned at the epoch, whatever the session
-    /// was actually doing.
+    /// Every state has a spelling, and one spelling: a `_ =>` arm here is how
+    /// the two documents that carry a status came to disagree about what a
+    /// failed provision looks like.
     #[test]
-    fn the_main_agent_reports_the_sessions_own_status() {
-        let rec = session_record(false);
-        let idle = agent_roster(&rec, Some(&SessionStatus::Idle), None, &[]);
-        assert_eq!(idle.len(), 1);
-        assert_eq!(idle[0].id, MAIN_AGENT);
-        assert_eq!(idle[0].status, "idle");
-        assert_eq!(idle[0].spawned_at_ms, rec.created_at);
-
-        assert_eq!(
-            agent_roster(&rec, Some(&SessionStatus::Running), None, &[])[0].status,
-            "running"
-        );
-        assert_eq!(
-            agent_roster(
-                &rec,
-                Some(&SessionStatus::Failed {
-                    reason: "boom".into()
-                }),
-                None,
-                &[]
-            )[0]
-            .status,
-            "failed"
-        );
-    }
-
-    /// A run has no main agent — it is its steps. Reporting one anyway meant a
-    /// finished run answered with an agent that does not exist, permanently
-    /// running, while `session.status` said `Idle` right beside it.
-    #[test]
-    fn a_run_lists_its_steps_and_no_main_agent() {
-        let rec = session_record(true);
-        let run = WorkflowRunState {
-            steps: vec![
-                execution("review", StepStatus::Concluded),
-                execution("fix", StepStatus::Running),
-            ],
-            ..WorkflowRunState::default()
-        };
-        let agents = agent_roster(&rec, Some(&SessionStatus::Idle), Some(&run), &[]);
-        assert!(
-            agents.iter().all(|a| a.id != MAIN_AGENT),
-            "a run has no main agent: {agents:?}"
-        );
-        assert_eq!(
-            agents
-                .iter()
-                .map(|a| (a.label.as_deref().unwrap_or(""), a.status.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("review", "completed"), ("fix", "running")],
-        );
-        assert_eq!(agents[0].id, run.steps[0].agent.to_string());
+    fn every_agent_status_has_one_spelling() {
+        for (status, expected) in [
+            (AgentStatus::Provisioning, "provisioning"),
+            (AgentStatus::Running, "running"),
+            (AgentStatus::Idle, "idle"),
+            (AgentStatus::AwaitingInput, "awaiting_input"),
+            (AgentStatus::Completed, "completed"),
+            (AgentStatus::Failed, "failed"),
+            (AgentStatus::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(wire_agent_status(status), expected);
+        }
     }
 }

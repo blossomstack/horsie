@@ -45,7 +45,7 @@ const PAGE_DEFAULT: usize = 50;
 const PAGE_MAX: usize = 1000;
 
 /// The agent every request means unless it names another.
-const MAIN_AGENT: &str = "main";
+use crate::http::handlers::MAIN_AGENT;
 
 #[derive(Deserialize)]
 pub struct MessagesParams {
