@@ -22,7 +22,7 @@ use crate::auth::UserId;
 use crate::db::Db;
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream, StreamExt};
-use horsie_actor::{Journal, JournalError, JournalResult, PersistenceId};
+use horsie_actor::{Epoch, Journal, JournalError, JournalResult, PersistenceId};
 use sqlx::{Any, Row, Transaction};
 use std::collections::VecDeque;
 
@@ -123,6 +123,60 @@ impl SqlJournal {
             .await
             .map_err(backend)
     }
+
+    /// Admit or reject a write carrying `fence`, inside the caller's transaction.
+    ///
+    /// `None` means nothing is arbitrating ownership — a single-process
+    /// deployment — and the write always proceeds. Otherwise the log's epoch is
+    /// raised to the writer's claim, and a claim below the current one is
+    /// refused.
+    ///
+    /// The single `UPDATE ... WHERE epoch <= ?` is the whole mechanism: check
+    /// and adopt are one statement inside the same transaction as the append, so
+    /// there is no window between deciding the write is allowed and performing
+    /// it. Splitting them — or checking in a wrapper around this type — is
+    /// exactly the race the fence exists to close.
+    async fn admit(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Any>,
+        log_id: i64,
+        fence: Option<Epoch>,
+    ) -> JournalResult<()> {
+        let Some(attempted) = fence else {
+            return Ok(());
+        };
+        let sql = self.db.q("UPDATE journal_logs SET epoch = ? \
+             WHERE user_id = ? AND log_id = ? AND epoch <= ?");
+        let affected = sqlx::query(&sql)
+            .bind(to_i64(attempted.0))
+            .bind(self.user.as_str())
+            .bind(log_id)
+            .bind(to_i64(attempted.0))
+            .execute(&mut **tx)
+            .await
+            .map_err(backend)?
+            .rows_affected();
+        if affected > 0 {
+            return Ok(());
+        }
+        // Nothing updated means the log is held above this claim. Read the
+        // current value so the error names both numbers rather than just
+        // saying no.
+        let sql = self
+            .db
+            .q("SELECT epoch FROM journal_logs WHERE user_id = ? AND log_id = ?");
+        let current: i64 = sqlx::query_scalar(&sql)
+            .bind(self.user.as_str())
+            .bind(log_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(backend)?;
+        Err(JournalError::Fenced {
+            pid: format!("log {log_id}"),
+            current: Epoch(current.unsigned_abs()),
+            attempted,
+        })
+    }
 }
 
 fn backend(e: sqlx::Error) -> JournalError {
@@ -142,12 +196,20 @@ fn to_u64(n: i64) -> u64 {
 
 #[async_trait]
 impl Journal for SqlJournal {
-    async fn persist(&self, pid: &PersistenceId, events: &[Vec<u8>]) -> JournalResult<()> {
+    async fn persist(
+        &self,
+        pid: &PersistenceId,
+        events: &[Vec<u8>],
+        fence: Option<Epoch>,
+    ) -> JournalResult<()> {
         if events.is_empty() {
             return Ok(());
         }
         let mut tx = self.db.begin_write().await.map_err(backend)?;
         let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
+        // Before anything is written, and inside this transaction: a rejected
+        // claim rolls back with the append rather than after it.
+        self.admit(&mut tx, log_id, fence).await?;
 
         // Allocate the whole batch's numbers in one update, then read the base.
         // The batch is one transaction, so a crash mid-write leaves neither the
@@ -224,9 +286,13 @@ impl Journal for SqlJournal {
         pid: &PersistenceId,
         state: Vec<u8>,
         seq_nr: u64,
+        fence: Option<Epoch>,
     ) -> JournalResult<()> {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
         let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
+        // Fenced like an append: a host that lost this log must not be able to
+        // overwrite the state of the history somebody else is now building.
+        self.admit(&mut tx, log_id, fence).await?;
         // A snapshot may be taken at a sequence this log has not reached when
         // the state came from elsewhere; keep `last_seq` monotonic so later
         // events never reuse a number the snapshot already covers.
@@ -342,6 +408,43 @@ impl Journal for SqlJournal {
             .await
             .map_err(backend)?;
         tx.commit().await.map_err(backend)
+    }
+
+    async fn claim_ownership(&self, pid: &PersistenceId) -> JournalResult<Epoch> {
+        let mut tx = self.db.begin_write().await.map_err(backend)?;
+        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
+        // Bump and read in one statement. Two hosts claiming concurrently are
+        // serialised by the write transaction and get two different numbers, so
+        // neither is told it won and the loser is locked out by the other's
+        // higher one on its next write.
+        let sql = self.db.q("UPDATE journal_logs SET epoch = epoch + 1 \
+             WHERE user_id = ? AND log_id = ? RETURNING epoch");
+        let epoch: i64 = sqlx::query_scalar(&sql)
+            .bind(self.user.as_str())
+            .bind(log_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(backend)?;
+        tx.commit().await.map_err(backend)?;
+        Ok(Epoch(epoch.unsigned_abs()))
+    }
+
+    async fn current_epoch(&self, pid: &PersistenceId) -> JournalResult<Option<Epoch>> {
+        let Some(log_id) = self.log_id(pid).await? else {
+            return Ok(None);
+        };
+        let sql = self
+            .db
+            .q("SELECT epoch FROM journal_logs WHERE user_id = ? AND log_id = ?");
+        let epoch: Option<i64> = sqlx::query_scalar(&sql)
+            .bind(self.user.as_str())
+            .bind(log_id)
+            .fetch_optional(self.db.pool())
+            .await
+            .map_err(backend)?;
+        // 0 means never claimed, which is a different thing from claimed at
+        // generation zero — there is no such generation.
+        Ok(epoch.filter(|e| *e > 0).map(|e| Epoch(e.unsigned_abs())))
     }
 
     async fn clear(&self, pid: &PersistenceId) -> JournalResult<()> {

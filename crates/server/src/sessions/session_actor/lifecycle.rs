@@ -402,6 +402,7 @@ mod tests {
                     serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
                         .unwrap(),
                 ],
+                None,
             )
             .await
             .unwrap();
@@ -535,6 +536,7 @@ mod tests {
                     })
                     .unwrap(),
                 ],
+                None,
             )
             .await
             .unwrap();
