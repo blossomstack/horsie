@@ -470,6 +470,11 @@ mod tests {
         // state is only "not usable yet".
         assert_eq!(parse_state("replacing"), MachineState::Other);
         assert_eq!(parse_state(""), MachineState::Other);
+        // The six seconds a fresh machine spends here are what made the first
+        // turn of every new session fail. `Other` is right; what was wrong was
+        // `fly.rs::get` treating it as startable.
+        assert_eq!(parse_state("created"), MachineState::Other);
+        assert_eq!(parse_state("starting"), MachineState::Other);
         assert_eq!(parse_state("started"), MachineState::Started);
         assert_eq!(parse_state("stopped"), MachineState::Stopped);
     }
