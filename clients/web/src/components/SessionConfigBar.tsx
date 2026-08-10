@@ -139,6 +139,7 @@ function LockedControls({ detail }: { detail: SessionDetail }) {
           icon={c.icon}
           label={c.label}
           marked={c.marked}
+          warn={c.warn}
           width={c.width}
         >
           {c.body}

@@ -291,7 +291,30 @@ impl MemoryToolbox {
                 })
             })
             .collect();
-        Ok(json!({ "memories": items }))
+
+        // A space this session selected can be deleted from under it, and an
+        // empty list is what that used to look like — identical to "there are
+        // no memories here". The agent then reports, truthfully as far as it
+        // can tell, that you have none. Saying which space is gone costs one
+        // query and turns silence into something a person can act on.
+        let live = self.service.list_spaces().await.map_err(exec)?;
+        let gone: Vec<&String> = spaces
+            .iter()
+            .filter(|s| !live.iter().any(|l| &l.name == *s))
+            .collect();
+        if gone.is_empty() {
+            return Ok(json!({ "memories": items }));
+        }
+        let names: Vec<&str> = gone.iter().map(|s| s.as_str()).collect();
+        Ok(json!({
+            "memories": items,
+            "unavailable_spaces": names,
+            "warning": format!(
+                "{} no longer exists, so nothing stored there is readable; \
+                 anything listed above comes from the session's other spaces",
+                names.join(", ")
+            ),
+        }))
     }
 
     /// Split a `space/name` address and confirm the space is one this session
@@ -516,6 +539,51 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("space/name"));
+    }
+
+    /// A space can be deleted from under a live session. An empty list was
+    /// indistinguishable from "there are no memories", so the agent would
+    /// report — truthfully, as far as it could tell — that you had none.
+    #[tokio::test]
+    async fn a_deleted_space_is_named_rather_than_read_as_empty() {
+        let (tb, _t) = toolbox(&["default", "project"]).await;
+        tb.execute(
+            "memory_create",
+            json!({"space": "project", "name": "alpha", "description": "d", "content": "c"}),
+            "tc1",
+        )
+        .await
+        .unwrap();
+        tb.execute(
+            "memory_create",
+            json!({"space": "default", "name": "kept", "description": "d", "content": "c"}),
+            "tc2",
+        )
+        .await
+        .unwrap();
+
+        tb.service.delete_space("project").await.unwrap();
+
+        let listed = tb.execute("memory_list", json!({}), "tc3").await.unwrap();
+        let warning = listed["warning"].as_str().unwrap_or_default();
+        assert!(
+            warning.contains("project"),
+            "the dead space must be named: {listed}"
+        );
+        assert_eq!(listed["unavailable_spaces"][0], "project");
+        // The surviving space still reads normally.
+        assert_eq!(listed["memories"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["memories"][0]["ref"], "default/kept");
+    }
+
+    /// The ordinary case stays quiet: no warning key when every selected space
+    /// is still there, empty or not.
+    #[tokio::test]
+    async fn an_empty_but_live_space_carries_no_warning() {
+        let (tb, _t) = toolbox(&["default"]).await;
+        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
+        assert!(listed["memories"].as_array().unwrap().is_empty());
+        assert!(listed.get("warning").is_none(), "unexpected: {listed}");
     }
 
     #[tokio::test]
