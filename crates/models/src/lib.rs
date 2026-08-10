@@ -282,6 +282,22 @@ impl agent::Message {
         }
     }
 
+    pub fn assistant_text(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        created_at_ms: u64,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            role: agent::Role::Assistant,
+            parts: vec![agent::ContentPart::Text(agent::TextPart {
+                text: text.into(),
+            })],
+            created_at_ms,
+            started_at_ms: None,
+        }
+    }
+
     pub fn tool_result(
         tool_call_id: impl Into<String>,
         output: impl Into<String>,
@@ -1109,6 +1125,7 @@ mod agents_tests {
         let view = AgentView {
             name: "reviewer".into(),
             description: "reviews PRs".into(),
+            instructions: Some("Always cite file:line.".into()),
             model: "sonnet".into(),
             plugins: vec!["superpowers".into()],
             mcp_servers: vec![],

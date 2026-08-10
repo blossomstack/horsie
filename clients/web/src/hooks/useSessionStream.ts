@@ -160,22 +160,14 @@ function reducer(state: State, action: Action): State {
     case "frame": {
       const frame = action.frame;
       if (frame.type === "Entry") {
-        const entry = frame.value;
-        const queuedIds = new Set(
-          entry.body.type === "Lifecycle" &&
-            entry.body.value.kind === "MessageQueued"
-            ? [entry.body.value.value.id]
-            : [],
-        );
+        // An echo is retired by `liveEchoes` off the folded log, not here: this
+        // arm only ever saw the one frame going past, so it could not retire an
+        // echo whose send had not been acknowledged yet.
         return {
           ...state,
-          entries: merge(state.entries, entry),
+          entries: merge(state.entries, frame.value),
           // An entry supersedes the chunks that preceded it.
           deltas: [],
-          // The server now owns this message, so the local echo is redundant.
-          optimistic: state.optimistic.filter(
-            (o) => !(o.serverId && queuedIds.has(o.serverId)),
-          ),
         };
       }
       if (frame.type === "Window") {
@@ -237,6 +229,11 @@ interface Folded {
   error: string | null;
   pendingAsks: AskLifecycle[];
   queued: { id: string; text: string }[];
+  /** Every message id the server has ever acknowledged, whether it is still
+   * parked or has since been drained into a turn. `queued` answers "what is
+   * still owed"; this answers "has the server got it", which is the only
+   * question a local echo needs to ask and the only one that stays true. */
+  accepted: Set<string>;
   tasks: TaskItem[] | null;
   /** Seq of the entry the task list came from, for comparing against a
    * document read. */
@@ -259,6 +256,7 @@ export function fold(entries: AgentLogEntry[]): Folded {
     error: null,
     pendingAsks: [],
     queued: [],
+    accepted: new Set(),
     tasks: null,
     tasksSeq: -1,
     progression: null,
@@ -294,6 +292,7 @@ export function fold(entries: AgentLogEntry[]): Folded {
         break;
       case "MessageQueued":
         out.queued.push({ id: ev.value.id, text: ev.value.text });
+        out.accepted.add(ev.value.id);
         break;
       case "TurnBegan": {
         const consumed = new Set(ev.value.consumed);
@@ -376,6 +375,22 @@ export function fold(entries: AgentLogEntry[]): Folded {
     }
   }
   return out;
+}
+
+/** The echoes this tab still has to draw itself, because the server's own
+ * account of them has not arrived.
+ *
+ * The test is "has the server acknowledged this id", not "is it still parked":
+ * an idle session queues and drains a message in the same breath, so by the
+ * time the send's own response hands the echo its server id the queue no
+ * longer mentions it. Asking the parked set left a permanent grey duplicate
+ * per message — and one more with every send, since nothing else retires an
+ * echo. */
+export function liveEchoes<T extends { serverId?: string }>(
+  accepted: ReadonlySet<string>,
+  optimistic: readonly T[],
+): T[] {
+  return optimistic.filter((o) => !(o.serverId && accepted.has(o.serverId)));
 }
 
 // ---- Entry → view model ----------------------------------------------------
@@ -594,9 +609,7 @@ export function useSessionStream(
         },
       });
     }
-    const queuedIds = new Set(folded.queued.map((q) => q.id));
-    for (const opt of state.optimistic) {
-      if (opt.serverId && queuedIds.has(opt.serverId)) continue;
+    for (const opt of liveEchoes(folded.accepted, state.optimistic)) {
       items.push({
         kind: "message",
         value: {

@@ -132,6 +132,31 @@ pub trait RuntimeVendor: Send + Sync {
         true
     }
 
+    /// Prove this vendor can be used, without creating anything.
+    ///
+    /// One cheap read-only call against the substrate, answering the two
+    /// questions a stored configuration cannot answer about itself: is the
+    /// credential good, and is the target it names really there. Nothing else
+    /// asks them until a session does, and by then the answer arrives as a
+    /// failed provision minutes after the mistake was made.
+    ///
+    /// **The error variant is the whole contract.** [`Provision`] means the
+    /// substrate answered and said no — a bad token, an app that does not
+    /// exist — and no retry changes that, so a caller may refuse the
+    /// configuration outright. [`Unavailable`] means the substrate could not be
+    /// reached, which says nothing about the configuration at all and must
+    /// never be treated as a verdict on it.
+    ///
+    /// Default `Ok`: a vendor that dialled in has already proved both by
+    /// connecting, and there is nothing to check that its presence has not
+    /// checked already.
+    ///
+    /// [`Provision`]: RuntimeVendorError::Provision
+    /// [`Unavailable`]: RuntimeVendorError::Unavailable
+    async fn preflight(&self) -> Result<(), RuntimeVendorError> {
+        Ok(())
+    }
+
     /// Destroy anything this vendor still holds for a runtime that no longer
     /// exists, and report what was destroyed.
     ///
@@ -677,6 +702,13 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(200), handle.closed())
             .await
             .expect("closed() must not wait for a flip that already happened");
+    }
+
+    #[tokio::test]
+    async fn a_vendor_that_announced_itself_is_already_proved() {
+        // The default exists so a dialled-in vendor is not asked to invent a
+        // check: it is connected, which is the check.
+        assert!(ImmediateVendor.preflight().await.is_ok());
     }
 
     #[tokio::test]

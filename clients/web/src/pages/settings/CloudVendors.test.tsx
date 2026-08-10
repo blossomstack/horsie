@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiRequestError } from "../../api/client";
 import type { RuntimeVendorConfigView } from "../../api/types";
 import { CloudVendors, withConnectPath } from "./CloudVendors";
 
@@ -7,7 +8,13 @@ afterEach(cleanup);
 
 const saved = vi.fn();
 const removed = vi.fn();
+const tested = vi.fn();
 const vendors: { current: RuntimeVendorConfigView[] } = { current: [] };
+const readFailed: { current: unknown } = { current: null };
+
+beforeEach(() => {
+  readFailed.current = null;
+});
 
 const vendor = (): RuntimeVendorConfigView => ({
   name: "fly",
@@ -32,9 +39,15 @@ const vendor = (): RuntimeVendorConfigView => ({
 });
 
 vi.mock("../../hooks/useRuntimeVendors", () => ({
-  useRuntimeVendors: () => ({ data: vendors.current, isLoading: false }),
+  useRuntimeVendors: () => ({
+    data: readFailed.current ? undefined : vendors.current,
+    isLoading: false,
+    isError: !!readFailed.current,
+    error: readFailed.current,
+  }),
   useSaveRuntimeVendor: () => ({ mutateAsync: saved, isPending: false }),
   useDeleteRuntimeVendor: () => ({ mutateAsync: removed, isPending: false }),
+  useTestRuntimeVendor: () => ({ mutateAsync: tested, isPending: false }),
 }));
 
 describe("CloudVendors", () => {
@@ -46,6 +59,29 @@ describe("CloudVendors", () => {
     // The row reports that a token exists and offers no way to see it; the
     // token input only appears once an edit is opened.
     expect(container.querySelector("input[type=password]")).toBeNull();
+  });
+
+  // A dead read used to reach the empty branch through `vendors?.length ?? 0`,
+  // so an unreachable server and an account that never configured a vendor
+  // rendered the same sentence — and the one it rendered was the false one.
+  it("reports a failed read instead of claiming there are none", () => {
+    readFailed.current = new ApiRequestError(
+      0,
+      "network",
+      "Could not reach the horsie server. Is `horsie serve` running?",
+    );
+    render(<CloudVendors />);
+    expect(screen.getByTestId("cloud-vendors-error").textContent).toContain(
+      "Couldn’t load cloud vendors",
+    );
+    expect(screen.queryByText("No cloud vendors are configured.")).toBeNull();
+  });
+
+  it("still says so when there genuinely are none", () => {
+    vendors.current = [];
+    render(<CloudVendors />);
+    expect(screen.queryByTestId("cloud-vendors-error")).toBeNull();
+    expect(screen.queryByText("No cloud vendors are configured.")).not.toBeNull();
   });
 
   it("saves a new fly vendor as an adjacently tagged union", async () => {
@@ -118,6 +154,35 @@ describe("CloudVendors", () => {
     expect(settings.kind).toBe("Velos");
     expect(settings.value.serverUrl).toBe("http://velos:8080");
     expect(settings.value).not.toHaveProperty("region");
+  });
+
+  it("reports a vendor that answers", async () => {
+    vendors.current = [vendor()];
+    tested.mockClear().mockResolvedValue({ ok: true });
+    render(<CloudVendors />);
+    fireEvent.click(screen.getByTestId("cloud-vendor-test-fly"));
+
+    await waitFor(() => expect(screen.getByTestId("cloud-vendor-ok-fly")).toBeTruthy());
+    expect(tested).toHaveBeenCalledWith("fly");
+  });
+
+  it("shows what the substrate said when a check fails", async () => {
+    // The failure this whole path exists for: a token that was good when it was
+    // saved and is not any more. The row has to say so in the substrate's own
+    // words — "unreachable" alone sends someone to check their network.
+    vendors.current = [vendor()];
+    tested
+      .mockClear()
+      .mockResolvedValue({ ok: false, error: "fly refused: 401: unauthorized" });
+    render(<CloudVendors />);
+    fireEvent.click(screen.getByTestId("cloud-vendor-test-fly"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("cloud-vendor-test-error-fly").textContent,
+      ).toContain("401"),
+    );
+    expect(screen.queryByTestId("cloud-vendor-ok-fly")).toBeNull();
   });
 
   it("omits the credential when an edit leaves it blank", async () => {

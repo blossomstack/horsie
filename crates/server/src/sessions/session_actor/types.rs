@@ -61,6 +61,10 @@ pub enum LifecycleCommand {
     /// keeps "provisioned exactly once" true without any bookkeeping beyond the
     /// status the journal already carries.
     Provision,
+    /// Internal: the detached create has word of the runtime it asked for —
+    /// "the machine is booting" — before it has an outcome. The vendor's own
+    /// sentence, carried unedited, because it is what the user is shown.
+    NarrateProvisioning { detail: String },
     /// Internal: the detached create finished. Carries the vendor's own error
     /// rather than a summary, because that string is what the user is shown.
     FinishProvisioning {
@@ -100,8 +104,6 @@ pub enum TurnCommand {
         answers: Vec<AskAnswer>,
         reply: ReplyTo<Result<(), AnswerError>>,
     },
-    /// Internal: post-recovery reconciliation of a turn the process died in.
-    ReconcileInterrupted,
 }
 
 /// The workflow graph.
@@ -223,6 +225,11 @@ pub enum CoreCommand {
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },
+    /// A rename that happened elsewhere. The supervisor owns the durable write,
+    /// so this only keeps the actor's own copy of the spec true — which one
+    /// thing reads: the fallback that titles an as-yet-unnamed session from its
+    /// first message, and which would otherwise overwrite the chosen name.
+    TitleSet { name: String },
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.
     Progress {
@@ -249,6 +256,17 @@ pub enum SessionDomainEvent {
     /// is safe to re-attempt precisely because no turn can have run under it.
     ProvisioningStarted {
         at_ms: u64,
+    },
+    /// What the vendor said about a create still in flight, in its own words.
+    ///
+    /// Narration, and the only variant here that decides nothing: the status is
+    /// settled by the three facts around it. It exists because a create is a
+    /// wait a person sits through, and "provisioning" on its own does not say
+    /// whether a machine is booting, resuming, or has been queued behind a
+    /// substrate that is out of capacity.
+    ProvisioningProgress {
+        at_ms: u64,
+        detail: String,
     },
     /// The vendor confirmed the runtime. The session becomes ordinary here,
     /// and whatever queued behind the create starts.
@@ -394,7 +412,7 @@ pub enum SessionDomainEvent {
 /// all: `UsageRecorded`, banked identically for every agent a session hosts,
 /// and `Started`, which reports a turn *beginning*. `on_agent_outcome` answers
 /// both once before routing. Narrowing them away here is what lets the three
-/// components that handle an outcome match exhaustively on the four real cases,
+/// components that handle an outcome match exhaustively on the five real cases,
 /// instead of each carrying an `unreachable!` for a variant it can never be
 /// handed.
 ///
@@ -419,6 +437,14 @@ pub(super) enum TurnEnd {
     Failed { error: String, terminal: bool },
     /// The agent parked awaiting its timers, which sessions do not support.
     Parked,
+    /// The process died inside the turn, and the agent said so at recovery.
+    ///
+    /// The one end that produces nothing — no output, no questions, no error to
+    /// show. Only the main agent's is acted on: a subagent's node and a step's
+    /// log entry are repaired from state the *session* owns, at session load,
+    /// and those agents stay cold long enough that their own report would
+    /// arrive after the repair rather than instead of it.
+    Interrupted,
 }
 
 impl TurnEnd {
@@ -430,22 +456,20 @@ impl TurnEnd {
     /// and nothing below it needs a case for a variant that never arrives.
     pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
         match outcome {
-            AgentOutcome::Concluded { session_id, output } => {
-                Ok((session_id, Self::Concluded { output }))
-            }
-            AgentOutcome::Asked { session_id, .. } => Ok((session_id, Self::Asked)),
-            AgentOutcome::Parked { session_id } => Ok((session_id, Self::Parked)),
+            AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
+            AgentOutcome::Asked { agent, .. } => Ok((agent, Self::Asked)),
+            AgentOutcome::Parked { agent } => Ok((agent, Self::Parked)),
+            AgentOutcome::Interrupted { agent } => Ok((agent, Self::Interrupted)),
             AgentOutcome::Failed {
-                session_id,
+                agent,
                 error,
                 terminal,
                 ..
-            } => Ok((session_id, Self::Failed { error, terminal })),
-            AgentOutcome::UsageRecorded {
-                session_id,
-                usage_total,
-            } => Err((session_id, NotAnEnd::Usage(usage_total))),
-            AgentOutcome::Started { session_id } => Err((session_id, NotAnEnd::Started)),
+            } => Ok((agent, Self::Failed { error, terminal })),
+            AgentOutcome::UsageRecorded { agent, usage_total } => {
+                Err((agent, NotAnEnd::Usage(usage_total)))
+            }
+            AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
         }
     }
 }

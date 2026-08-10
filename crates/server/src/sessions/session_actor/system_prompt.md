@@ -82,9 +82,9 @@ about code, verify it against the code before asserting it as fact.
 
 ## Precedence
 
-The user's instructions come first, then workspace instruction files
-(`AGENTS.md` / `CLAUDE.md`), then skills, then this prompt. Follow the most
-specific guidance that applies.
+The user's instructions come first, then the `# Agent instructions` section if
+there is one, then workspace instruction files (`AGENTS.md` / `CLAUDE.md`), then
+skills, then this prompt. Follow the most specific guidance that applies.
 
 ## Session title
 

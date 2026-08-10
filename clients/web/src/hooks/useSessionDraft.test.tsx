@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
+import { ApiRequestError } from "../api/client";
 import type {
   EnvironmentView,
   GitHubStatus,
@@ -103,7 +104,15 @@ const runtime = (vendor: string): EnvironmentDraft => ({
 
 function makeClient(): QueryClient {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    defaultOptions: {
+      queries: {
+        retry: false,
+        staleTime: Infinity,
+        // So a query deliberately left in an errored state stays there: an
+        // observer mounting on one refetches by default.
+        retryOnMount: false,
+      },
+    },
   });
   client.setQueryData(settingsKey, settings);
   client.setQueryData(pluginsKey, bundles);
@@ -294,5 +303,26 @@ describe("useSessionDraft workflow channel", () => {
     });
     // The environment's vendor decides whether repos mean anything.
     expect(result.current.provisions).toBe(true);
+  });
+});
+
+describe("useSessionDraft when the config read fails", () => {
+  // "Select a model to start." sent people to a menu that said there were no
+  // models to select — the wrong instruction, from the wrong cause.
+  it("blames the failed read rather than telling you to pick a model", async () => {
+    storeDraft({ environment: runtime("local"), model: "sonnet" });
+    const client = makeClient();
+    client
+      .getQueryCache()
+      .build(client, { queryKey: settingsKey })
+      .setState({
+        status: "error",
+        fetchStatus: "idle",
+        error: new ApiRequestError(0, "network", "unreachable"),
+      });
+    const { result } = render(client);
+    await waitFor(() => expect(result.current.canSend).toBe(false));
+    expect(result.current.blockedReason).toContain("Couldn’t load");
+    expect(result.current.blockedReason).not.toContain("Select a model");
   });
 });

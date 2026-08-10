@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ApiRequestError, api } from "../../api/client";
 import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
+import { ReadError } from "../../components/ReadError";
 import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
@@ -93,6 +94,17 @@ function MachineTokens() {
       )}
 
       <div className="space-y-1.5">
+        {tokens.isLoading && <p className="text-xs text-faint">Loading…</p>}
+        {/* A revoked-looking list is the worst possible failure mode here: the
+            reflex is to mint a replacement token, which does nothing about a
+            server that is not answering. */}
+        {tokens.isError && (
+          <ReadError
+            what="machine tokens"
+            error={tokens.error}
+            testId="tokens-error"
+          />
+        )}
         {tokens.data?.length === 0 && (
           <p className="text-xs text-faint">No machine tokens yet.</p>
         )}

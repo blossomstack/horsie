@@ -110,7 +110,7 @@ export interface SessionDraft
  * `Run` link arrives here with one in the query string.
  */
 export function useSessionDraft(initialWorkflow = ""): SessionDraft {
-  const { data: settings } = useSettings();
+  const { data: settings, isError: settingsFailed } = useSettings();
   const { data: ghStatus } = useGithubStatus();
   const { data: bundles } = usePlugins();
   const { data: mcpServers } = useMcpServers();
@@ -214,13 +214,26 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     Object.keys(environment.repos).length > 0;
 
   const blockedReason = useMemo(() => {
+    // Models and runtimes both come from `/api/config`. With that read dead,
+    // every picker below is empty for a reason that has nothing to do with the
+    // draft — telling someone to select a model from a menu that says there
+    // are none is the one thing this must not do.
+    if (settingsFailed)
+      return "Couldn’t load this server’s models and runtimes. Reload once the server is reachable.";
     // A run takes its model from each step's preset, so the model channel is
     // neither shown nor required while a workflow is selected.
     if (!selectedWorkflow && !draft.model.trim()) return "Select a model to start.";
     if (!chosen) return "Select an environment to start.";
     if (needsGithub && !githubConnected) return "Connect GitHub to use these repos.";
     return null;
-  }, [draft.model, chosen, needsGithub, githubConnected, selectedWorkflow]);
+  }, [
+    settingsFailed,
+    draft.model,
+    chosen,
+    needsGithub,
+    githubConnected,
+    selectedWorkflow,
+  ]);
 
   // The menu belongs to the model, so a persisted draft can name an effort the
   // currently-selected model no longer offers. Treat that as "use the default"

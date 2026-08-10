@@ -4,6 +4,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
 import { RailToggle } from "../../components/rail";
+import { ReadError } from "../../components/ReadError";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
 
 /**
@@ -17,7 +18,11 @@ import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
 export function WorkflowDetailPage() {
   const { name } = useParams<{ name: string }>();
   const { data: workflow, isLoading, isError } = useWorkflow(name);
-  const { data: runs } = useWorkflowRuns(name);
+  const {
+    data: runs,
+    isError: runsFailed,
+    error: runsError,
+  } = useWorkflowRuns(name);
 
   if (isLoading) return <p className="p-6 text-sm text-faint">Loading…</p>;
   if (isError || !workflow) {
@@ -75,7 +80,14 @@ export function WorkflowDetailPage() {
 
         <section className="panel p-4">
           <h2 className="legend">Runs</h2>
-          {(runs ?? []).length === 0 ? (
+          {runsFailed ? (
+            <ReadError
+              what="this workflow's runs"
+              error={runsError}
+              testId="workflow-runs-error"
+              className="mt-2"
+            />
+          ) : (runs ?? []).length === 0 ? (
             <p className="mt-2 text-sm text-faint">No runs yet.</p>
           ) : (
             <div className="mt-3 space-y-2">

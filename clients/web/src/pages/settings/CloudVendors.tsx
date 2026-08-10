@@ -1,17 +1,20 @@
-import { Pencil } from "lucide-react";
+import { Pencil, Stethoscope } from "lucide-react";
 import { useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import type {
   FlyVendorSettings,
   RuntimeVendorConfigView,
   RuntimeVendorSettings,
+  RuntimeVendorTestResult,
   VelosVendorSettings,
 } from "../../api/types";
 import {
   useDeleteRuntimeVendor,
   useRuntimeVendors,
   useSaveRuntimeVendor,
+  useTestRuntimeVendor,
 } from "../../hooks/useRuntimeVendors";
+import { ReadError } from "../../components/ReadError";
 import { ListRow, RowAction, RowShell, Section, TextField } from "./fields";
 
 /**
@@ -99,11 +102,37 @@ function summarise(v: RuntimeVendorConfigView): string {
 }
 
 export function CloudVendors() {
-  const { data: vendors, isLoading } = useRuntimeVendors();
+  const { data: vendors, isLoading, isError, error: loadError } =
+    useRuntimeVendors();
   const save = useSaveRuntimeVendor();
   const remove = useDeleteRuntimeVendor();
+  const test = useTestRuntimeVendor();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Per row, and only for this visit: nothing records a check, because what it
+  // reports about a remote credential can stop being true a second later.
+  const [checks, setChecks] = useState<Record<string, RuntimeVendorTestResult>>(
+    {},
+  );
+  const [checking, setChecking] = useState<string | null>(null);
+
+  const check = async (name: string) => {
+    setChecking(name);
+    try {
+      const result = await test.mutateAsync(name);
+      setChecks((c) => ({ ...c, [name]: result }));
+    } catch (e) {
+      setChecks((c) => ({
+        ...c,
+        [name]: {
+          ok: false,
+          error: e instanceof ApiRequestError ? e.message : "The check failed.",
+        },
+      }));
+    } finally {
+      setChecking(null);
+    }
+  };
 
   /** Patch the settings of whichever kind the draft is, keeping the tag. */
   const patch = (
@@ -193,11 +222,18 @@ export function CloudVendors() {
       title="Cloud vendors"
       desc="Vendors this server runs itself — no process of your own to deploy. Each sandbox dials back to the callback URL, so that URL must be reachable from outside this server."
       empty={
-        !isLoading && !draft && (vendors?.length ?? 0) === 0
+        !isLoading && !isError && !draft && (vendors?.length ?? 0) === 0
           ? "No cloud vendors are configured."
           : null
       }
     >
+      {isError && (
+        <ReadError
+          what="cloud vendors"
+          error={loadError}
+          testId="cloud-vendors-error"
+        />
+      )}
       {vendors?.map((v) => (
         <ListRow
           key={v.name}
@@ -206,27 +242,59 @@ export function CloudVendors() {
           subtitle={summarise(v)}
           meta={
             <span className="flex shrink-0 items-center gap-2">
+              {checking === v.name ? (
+                <span className="chip">Checking…</span>
+              ) : (
+                checks[v.name]?.ok && (
+                  <span
+                    className="chip text-lamp-ok"
+                    data-testid={`cloud-vendor-ok-${v.name}`}
+                  >
+                    Answering
+                  </span>
+                )
+              )}
               <span className="chip">
                 {v.hasCredential ? "Token set" : "No token"}
               </span>
             </span>
           }
           actions={
-            <RowAction
-              icon={<Pencil size={14} />}
-              label={`Edit ${v.name}`}
-              onClick={() =>
-                setDraft({
-                  name: v.name,
-                  settings: v.settings,
-                  credential: "",
-                  existing: true,
-                })
-              }
-              testId={`cloud-vendor-edit-${v.name}`}
-            />
+            <>
+              {/* A save proves a vendor before storing it, so this is for what
+                a save cannot see: a token revoked, or an app deleted, since. */}
+              <RowAction
+                icon={<Stethoscope size={14} />}
+                label={`Check ${v.name}`}
+                onClick={() => void check(v.name)}
+                disabled={checking !== null}
+                testId={`cloud-vendor-test-${v.name}`}
+              />
+              <RowAction
+                icon={<Pencil size={14} />}
+                label={`Edit ${v.name}`}
+                onClick={() =>
+                  setDraft({
+                    name: v.name,
+                    settings: v.settings,
+                    credential: "",
+                    existing: true,
+                  })
+                }
+                testId={`cloud-vendor-edit-${v.name}`}
+              />
+            </>
           }
-        />
+        >
+          {checks[v.name] && !checks[v.name].ok && (
+            <p
+              className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink"
+              data-testid={`cloud-vendor-test-error-${v.name}`}
+            >
+              {checks[v.name].error ?? "The vendor did not answer."}
+            </p>
+          )}
+        </ListRow>
       ))}
 
       {draft ? (

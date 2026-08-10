@@ -161,6 +161,25 @@ export function useDeleteSession() {
   });
 }
 
+/** Rename a session.
+ *
+ * The agent's title tool used to be the only writer of a session name, so a
+ * session the model never titled kept its raw first message as its name for
+ * good. Reported inline by the header that owns the field, hence no global
+ * notice. */
+export function useRenameSession() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      api.sessions.rename(id, name),
+    meta: { inlineError: true },
+    onSuccess: (_r, { id }) => {
+      client.invalidateQueries({ queryKey: qk.session(id) });
+      client.invalidateQueries({ queryKey: qk.sessions });
+    },
+  });
+}
+
 export function useStopSession() {
   const client = useQueryClient();
   return useMutation({

@@ -6,14 +6,19 @@ import {
   useMarketplaces,
   usePlugins,
 } from "../../hooks/usePlugins";
+import { ReadError } from "../../components/ReadError";
 import { TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 import { BundleRow } from "./skills/BundleRow";
 import { MarketplaceRow } from "./skills/MarketplaceRow";
 
 export function SkillsSettings() {
-  const { data: bundles, isLoading, isError } = usePlugins();
-  const { data: marketplaces } = useMarketplaces();
+  const { data: bundles, isLoading, isError, error: bundlesError } = usePlugins();
+  const {
+    data: marketplaces,
+    isError: marketplacesFailed,
+    error: marketplacesError,
+  } = useMarketplaces();
   const install = useInstallPlugin();
 
   const [sourceUrl, setSourceUrl] = useState("");
@@ -105,8 +110,10 @@ export function SkillsSettings() {
         </section>
 
         {/* Hidden entirely until there is a catalogue to show, so a server with
-            none looks exactly as it did before marketplaces existed. */}
-        {marketplaces && marketplaces.length > 0 && (
+            none looks exactly as it did before marketplaces existed — but a
+            *failed* read is not "none", and silently removing the section is
+            how a catalogue someone added appears to have been deleted. */}
+        {(marketplacesFailed || (marketplaces && marketplaces.length > 0)) && (
           <section className="panel p-4">
             <div className="mb-3 flex items-start gap-2">
               <Store size={15} className="mt-0.5 text-faint" />
@@ -120,7 +127,14 @@ export function SkillsSettings() {
             </div>
 
             <div className="space-y-2.5">
-              {marketplaces.map((m) => (
+              {marketplacesFailed && (
+                <ReadError
+                  what="marketplaces"
+                  error={marketplacesError}
+                  testId="marketplaces-error"
+                />
+              )}
+              {(marketplaces ?? []).map((m) => (
                 <MarketplaceRow
                   key={m.name}
                   marketplace={m}
@@ -150,9 +164,11 @@ export function SkillsSettings() {
               <p className="py-8 text-center text-sm text-faint">Loading…</p>
             )}
             {isError && (
-              <div className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
-                Couldn’t load bundles. Is <code>horsie serve</code> running?
-              </div>
+              <ReadError
+                what="skill bundles"
+                error={bundlesError}
+                testId="bundles-error"
+              />
             )}
             {bundles && bundles.length === 0 && (
               <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">

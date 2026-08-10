@@ -57,6 +57,12 @@ pub struct AgentSettings {
     /// [`crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
     #[serde(default)]
     pub max_concurrent_subagents: Option<u32>,
+    /// Standing instructions this session's agent runs under, resolved from its
+    /// preset at creation and snapshotted here like everything else a preset
+    /// contributes. `#[serde(default)]` so pre-instruction journal rows
+    /// deserialize.
+    #[serde(default)]
+    pub instructions: Option<String>,
 }
 
 impl AgentSettings {
@@ -154,6 +160,7 @@ impl SessionSpec {
         Self {
             name: None,
             agent: AgentSettings {
+                instructions: None,
                 model: "m".into(),
                 allowed_tools: None,
                 use_plugins: None,
@@ -332,6 +339,7 @@ mod tests {
         let spec = SessionSpec {
             name: None,
             agent: AgentSettings {
+                instructions: None,
                 model: "m".into(),
                 allowed_tools: None,
                 use_plugins: None,
@@ -381,6 +389,7 @@ mod tests {
         let spec = SessionSpec {
             name: None,
             agent: AgentSettings {
+                instructions: None,
                 model: "m".into(),
                 allowed_tools: None,
                 use_plugins: None,

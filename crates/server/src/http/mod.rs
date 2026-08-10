@@ -195,6 +195,7 @@ pub fn app(state: AppState) -> Router {
             "/api/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
+        .route("/api/sessions/{id}/name", put(handlers::rename_session))
         .route("/api/sessions/{id}/stop", post(handlers::stop_session))
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))
@@ -309,6 +310,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/runtime-vendors/{name}",
             put(runtime_vendors::put_runtime_vendor).delete(runtime_vendors::delete_runtime_vendor),
+        )
+        .route(
+            "/api/runtime-vendors/{name}/test",
+            post(runtime_vendors::test_runtime_vendor),
         )
         .route(
             "/api/environments",
@@ -2995,6 +3000,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // The substrate is unreachable from a test deployment, so a check
+        // answers rather than errors — the failure being tested for is the
+        // route reporting one as a 5xx, or as a saved vendor's absence.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/runtime-vendors/fly/test",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let result: horsie_models::runtime_vendor::RuntimeVendorTestResult = read_json(res).await;
+        assert!(!result.ok);
+        assert!(result.error.is_some(), "a failure has to say what happened");
+
+        // A name nothing is configured under is a different thing, and says so.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                "/api/runtime-vendors/nobody/test",
+                &serde_json::json!({}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let res = app
             .clone()

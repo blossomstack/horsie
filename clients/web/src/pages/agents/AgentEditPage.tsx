@@ -46,6 +46,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
   const navigate = useNavigate();
   const [agentName, setAgentName] = useState(initial?.name ?? "");
   const [description, setDescription] = useState(initial?.description ?? "");
+  const [instructions, setInstructions] = useState(initial?.instructions ?? "");
   const [error, setError] = useState<string | null>(null);
   const draft = useAgentDraft(initial);
   const busy = create.isPending || update.isPending;
@@ -62,7 +63,7 @@ function AgentForm({ initial }: { initial?: AgentView }) {
 
   const handleSave = async () => {
     setError(null);
-    const body = draft.buildAgentInput(agentName, description);
+    const body = draft.buildAgentInput(agentName, description, instructions);
     try {
       if (editing) await update.mutateAsync({ name: agentName.trim(), body });
       else await create.mutateAsync(body);
@@ -107,6 +108,28 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   onChange={(e) => setDescription(e.target.value)}
                   data-testid="agent-description-input"
                 />
+                <p className="mt-1 text-xs text-faint">
+                  For the roster. The agent never sees it.
+                </p>
+              </label>
+              <label className="block">
+                <RowLabel>Instructions</RowLabel>
+                {/* A textarea, and its own field: the description sat directly
+                    above the configuration and read like the place to say how
+                    the agent should behave, while being the one field that
+                    never reached the model. */}
+                <textarea
+                  className="field min-h-28 resize-y"
+                  placeholder="How this agent should work — added to its system prompt"
+                  value={instructions}
+                  maxLength={8000}
+                  onChange={(e) => setInstructions(e.target.value)}
+                  data-testid="agent-instructions-input"
+                />
+                <p className="mt-1 text-xs text-faint">
+                  Sent to the model on every turn, after the workspace's own
+                  instruction files.
+                </p>
               </label>
             </div>
 

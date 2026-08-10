@@ -127,6 +127,8 @@ pub async fn invoke_agent(
         memory_spaces: Some(agent.memory_spaces.clone()),
         thinking_effort: agent.thinking_effort.clone(),
         max_concurrent_subagents: None,
+        // What the preset says about *behaviour*, as opposed to what it gates.
+        instructions: agent.instructions.clone(),
     };
     let spec = build_session_spec(
         &state.config_store,

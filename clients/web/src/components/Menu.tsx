@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useReturnFocus } from "../hooks/useReturnFocus";
 import { cn } from "../lib/cn";
 
 const CloseContext = createContext<() => void>(() => {});
@@ -24,6 +25,12 @@ export function Menu({
 }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+
+  // Selecting an item unmounts the button the keyboard is standing on. In a
+  // session row that is 41 rows deep in the rail, losing the place means
+  // tabbing back to it from the top of the document.
+  useReturnFocus(open, trigger);
 
   useEffect(() => {
     if (!open) return;
@@ -44,6 +51,7 @@ export function Menu({
   return (
     <div className="relative" ref={root}>
       <button
+        ref={trigger}
         type="button"
         className="key-icon !h-6 !w-6"
         aria-label={label}

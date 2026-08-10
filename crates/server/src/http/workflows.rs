@@ -174,6 +174,7 @@ pub async fn start_run(
                 memory_spaces: preset.memory_spaces.clone(),
                 thinking_effort: preset.thinking_effort.clone(),
                 max_concurrent_subagents: None,
+                instructions: preset.instructions.clone(),
             },
         });
     }
@@ -203,6 +204,7 @@ pub async fn start_run(
         memory_spaces: Some(first.settings.memory_spaces.clone()),
         thinking_effort: first.settings.thinking_effort.clone(),
         max_concurrent_subagents: None,
+        instructions: first.settings.instructions.clone(),
     };
     let mut spec = build_session_spec(
         &state.config_store,

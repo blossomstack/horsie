@@ -216,6 +216,13 @@ impl SessionActor {
                 id,
                 error: "subagent parked; timers are not supported in sessions".to_string(),
             },
+            // A subagent's interruption is repaired from the forest at *session*
+            // load, by `SubAgents::on_load`, which is also where the parent is
+            // owed the failure. This report cannot arrive first: a subagent
+            // actor stays cold and spawns on demand, so its own recovery runs
+            // long after the node was reconciled, and acting on it would fail
+            // the same node a second time.
+            TurnEnd::Interrupted => return CommandEffect::none(),
         };
         self.persist_and_advance(state, vec![terminal], ctx).await
     }

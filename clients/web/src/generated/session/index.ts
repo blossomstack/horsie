@@ -10,7 +10,6 @@ export * from './subAgentView';
 export * from './messageFrame';
 export * from './messageWindow';
 export * from './messageDelta';
-export * from './progressionEvent';
 export * from './usageView';
 export * from './globalSessionStatusEvent';
 export * from './globalSessionTitleEvent';

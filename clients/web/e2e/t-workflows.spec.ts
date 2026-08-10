@@ -4,11 +4,13 @@
 // The steps deliberately declare no output schema. Such a step has no
 // `conclude` tool and ends its turn with plain text, which becomes its output —
 // so a run is two ordinary queued texts rather than a hand-built tool call.
+// T4 is the exception: asking needs `conclude`, so that workflow declares one.
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { expectStatus } from "./helpers";
 
 const WORKFLOW = "e2e-workflow";
+const ASK_WORKFLOW = "e2e-workflow-ask";
 const AGENT = "e2e-workflow-agent";
 
 interface WorkflowBody {
@@ -163,4 +165,86 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   // It landed under the workflow it was started from.
   await page.goto(`${appBase}/workflows/${WORKFLOW}`);
   await expect(page.getByTestId("workflow-run-row")).toHaveCount(1);
+});
+
+/** A one-step workflow whose step can ask. A step never gets `ask_user`;
+ * `conclude` is synthesized only once the step declares an output schema, and
+ * only then does that tool also carry `kind: "ask"`. */
+async function seedAskWorkflow(page: Page, appBase: string): Promise<void> {
+  await seedAgent(page, appBase);
+  const body = {
+    name: ASK_WORKFLOW,
+    description: "from e2e",
+    start: "triage",
+    steps: [
+      {
+        name: "triage",
+        agent: AGENT,
+        prompt: "triage the report",
+        outputSchema: {
+          type: "object",
+          required: ["severity"],
+          properties: { severity: { type: "string" } },
+        },
+      },
+    ],
+  };
+  const res = await page.request.post(`${appBase}/api/workflows`, { data: body });
+  if (res.status() === 201) return;
+  const put = await page.request.put(`${appBase}/api/workflows/${ASK_WORKFLOW}`, {
+    data: body,
+  });
+  expect(put.status()).toBe(200);
+}
+
+test("T4: a step's question and its answer stand in the step's transcript", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.reset();
+  await seedAskWorkflow(page, appBase);
+  // The step does some work and *then* asks. That is the shape that matters:
+  // a question sharing a turn with other tool calls used to be folded into the
+  // collapsed "Ran 2 tools" row, so neither it nor the answer was readable.
+  await mock.queueToolCall("bash", { command: "echo triaging" });
+  await mock.queueToolCall("conclude", {
+    kind: "ask",
+    question: "How bad is it?",
+    choices: ["p0", "p2"],
+  });
+  await mock.queueToolCall("conclude", { kind: "submit", output: { severity: "p0" } });
+
+  await page.goto(`${appBase}/workflows/${ASK_WORKFLOW}`);
+  await page.getByTestId("run-workflow").click();
+  await page.waitForURL((url) => url.searchParams.get("workflow") === ASK_WORKFLOW);
+  const input = page.getByTestId("composer-input");
+  await input.fill("the build is red");
+  await input.press("Enter");
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
+
+  // The run page says which step is blocked and hands you to it; the question
+  // itself lives in that step's own transcript.
+  await expect(page.getByTestId("run-status")).toHaveAttribute(
+    "data-status",
+    "AwaitingInput",
+    { timeout: 30_000 },
+  );
+  await page.getByTestId("open-parked-step").click();
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
+
+  // Standalone and answerable, with the tool call that preceded it still there.
+  await expect(page.getByTestId("ask-user-card")).toContainText("How bad is it?");
+  await expect(
+    page.locator('[data-testid="tool-call-card"][data-tool="bash"]'),
+  ).toBeVisible();
+
+  await page.locator('[data-testid="ask-user-choice"][data-value="p0"]').click();
+  await page.getByTestId("ask-user-send").click();
+
+  // And once answered it stays readable: the record that a human was asked
+  // something, and what they said.
+  await expect(page.getByTestId("ask-user-answer")).toHaveText("p0", {
+    timeout: 30_000,
+  });
 });

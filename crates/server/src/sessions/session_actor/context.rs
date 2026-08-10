@@ -19,7 +19,7 @@ use crate::agent_loop::{
     StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
 };
 use crate::{
-    runtime_manager::{RuntimeClientProvider, RuntimeError},
+    runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
         ask_tool::AskUserToolbox, spawn_tool::SubAgentToolbox, spec::AgentSettings,
         subagents::SubAgentParent, title_tool::SessionTitleToolbox,
@@ -63,6 +63,32 @@ async fn emit_progress(
             detail,
         }))
         .await;
+}
+
+/// Carry a vendor's running account of an acquisition into `key`'s log.
+///
+/// Every line arrives under `acquiring_runtime` — the stage the caller has
+/// already announced — because this is more of that stage rather than a new
+/// one: the agent is still waiting for the same runtime, and now says what the
+/// vendor says is happening to it.
+///
+/// Returns the sink to hand the acquisition and the task draining it. The task
+/// ends when the sink is dropped, which the acquisition does on its way out.
+fn narration_pump(
+    session: &ActorRef<SessionCommand>,
+    key: AgentKey,
+) -> (
+    crate::runtime_manager::NarrationSink,
+    tokio::task::JoinHandle<()>,
+) {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
+    let session = session.clone();
+    let task = tokio::spawn(async move {
+        while let Some(detail) = rx.recv().await {
+            emit_progress(&session, key, "acquiring_runtime", Some(detail)).await;
+        }
+    });
+    (tx, task)
 }
 
 /// The baseline system prompt given to every session agent.
@@ -125,6 +151,13 @@ impl SessionAgentKind {
             Self::Sub(id) => AgentKey::Sub(*id),
             Self::Step(id) => AgentKey::Step(*id),
         }
+    }
+
+    /// Whether this agent narrates its own setup. Everything a person opens a
+    /// session to watch does; a subagent is quiet by design, and its progress
+    /// reaches the reader as the parent's `SubAgent` entry instead.
+    fn broadcasts(&self) -> bool {
+        matches!(self, Self::Main | Self::Step(_))
     }
 }
 
@@ -253,7 +286,24 @@ impl SessionContextProvider {
     /// itself. A sink there would both duplicate them and race the turn they
     /// must precede.
     async fn runtime_client(&self) -> Result<RuntimeClient, ContextError> {
-        let client = self.runtimes.get().await.map_err(|e| match e {
+        // The wait this call *is*. A machine that has to resume takes minutes,
+        // and the vendor says why the whole time — first in what it returns,
+        // then on its sink — so those words are carried into this agent's log
+        // as they arrive rather than summarised once it is over.
+        let (narrate, task) = self
+            .kind
+            .broadcasts()
+            .then(|| narration_pump(&self.session, self.kind.agent_key()))
+            .unzip();
+        let acquired = self.runtimes.get(narrate).await;
+        // Joined rather than detached. The acquisition dropped the sender on
+        // its way out, so this ends immediately — and waiting for it is what
+        // keeps every line of narration ordered before whatever stage the
+        // caller reports next.
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+        let client = acquired.map_err(|e| match e {
             // The one failure the session can never retry: the vendor is alive
             // and says the runtime is gone. A vendor that is merely offline
             // (`Unavailable`) says nothing about the runtime's existence.
@@ -442,10 +492,7 @@ impl ContextProvider for SessionContextProvider {
         let mut def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
         // Preparation progress is main-only: subagents are quiet by design.
-        let broadcast = matches!(
-            self.kind,
-            SessionAgentKind::Main | SessionAgentKind::Step(_)
-        );
+        let broadcast = self.kind.broadcasts();
 
         if broadcast {
             emit_progress(
@@ -561,8 +608,8 @@ impl ContextProvider for SessionContextProvider {
         // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
         // same pass as the workspace scan and only when this agent loads the
         // library at all — a session with no plugins asks for nothing.
-        let mut mcp: Vec<Arc<dyn Toolbox>> = if settings.mcp_servers.is_empty() {
-            Vec::new()
+        let mut mcp: crate::agent_loop::McpToolboxes = if settings.mcp_servers.is_empty() {
+            crate::agent_loop::McpToolboxes::default()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
                 emit_progress(
@@ -582,7 +629,7 @@ impl ContextProvider for SessionContextProvider {
                 session = %self.session_id,
                 "session names MCP servers but no MCP service is configured; ignoring"
             );
-            Vec::new()
+            crate::agent_loop::McpToolboxes::default()
         };
         // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
         // same pass as the workspace scan and only when this agent loads the
@@ -597,24 +644,40 @@ impl ContextProvider for SessionContextProvider {
                 Ok(discovery) => {
                     for failure in &discovery.failures {
                         match failure {
-                            McpServerFailure::Unreachable(f) => tracing::warn!(
-                                session = %self.session_id,
-                                server = %f.server,
-                                reason = %f.reason,
-                                "a plugin MCP server is unavailable; its tools are absent"
-                            ),
-                            McpServerFailure::NeedsAuth(f) => tracing::info!(
-                                session = %self.session_id,
-                                server = %f.server,
-                                "a plugin MCP server needs authorisation; its tools are absent"
-                            ),
+                            McpServerFailure::Unreachable(f) => {
+                                tracing::warn!(
+                                    session = %self.session_id,
+                                    server = %f.server,
+                                    reason = %f.reason,
+                                    "a plugin MCP server is unavailable; its tools are absent"
+                                );
+                                mcp.unavailable.push(
+                                    crate::agent_loop::McpUnavailable::Unreachable {
+                                        server: f.server.clone(),
+                                        reason: f.reason.clone(),
+                                    },
+                                );
+                            }
+                            McpServerFailure::NeedsAuth(f) => {
+                                tracing::info!(
+                                    session = %self.session_id,
+                                    server = %f.server,
+                                    "a plugin MCP server needs authorisation; its tools are absent"
+                                );
+                                mcp.unavailable.push(
+                                    crate::agent_loop::McpUnavailable::NeedsAuth {
+                                        server: f.server.clone(),
+                                    },
+                                );
+                            }
                         }
                     }
                     if !discovery.tools.is_empty() {
-                        mcp.push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
-                            runtime_client.clone(),
-                            discovery.tools,
-                        )));
+                        mcp.boxes
+                            .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
+                                runtime_client.clone(),
+                                discovery.tools,
+                            )));
                     }
                 }
                 // Never fatal: a plugin bringing a broken server must not stop a
@@ -677,7 +740,12 @@ impl ContextProvider for SessionContextProvider {
             ),
             SessionAgentKind::Sub(_) => with_spawn,
         };
-        let system_prompt = compose_system_prompt(Some(SESSION_AGENT_PROMPT), &ws, shared.as_ref());
+        let system_prompt = compose_system_prompt(
+            Some(SESSION_AGENT_PROMPT),
+            &ws,
+            shared.as_ref(),
+            settings.instructions.as_deref(),
+        );
         // A typed subagent's own section follows the generic one, it does not
         // replace it: `SUBAGENT_PROMPT_SUFFIX` is the only place an agent is
         // told its final message is its report and that it cannot ask the user,
@@ -1306,6 +1374,132 @@ mod tests {
             events.iter().filter(|e| **e == "SessionStart").count(),
             1,
             "only the session's own agent may claim a session start, got {events:?}"
+        );
+    }
+
+    /// A session stand-in that keeps whatever progress it is told about, so a
+    /// test can watch the narration pump without assembling a whole session.
+    /// Every progress report a session was told about: the stage, and whatever
+    /// detail came with it.
+    type Reported = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    struct RecordingSession(Reported);
+
+    #[async_trait]
+    impl horsie_actor::EventSourcedActor for RecordingSession {
+        type Command = SessionCommand;
+        type Event = ();
+        type State = ();
+
+        fn persistence_id(&self) -> horsie_actor::PersistenceId {
+            horsie_actor::PersistenceId::new("test", "recording-session")
+        }
+
+        fn initial_state() {}
+
+        fn apply_event((): (), (): ()) {}
+
+        async fn handle_command(
+            &mut self,
+            (): &(),
+            cmd: SessionCommand,
+            _ctx: &mut horsie_actor::ActorContext<SessionCommand>,
+        ) -> super::super::CommandEffect<()> {
+            if let SessionCommand::Core(CoreCommand::Progress { stage, detail, .. }) = cmd {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((stage, detail));
+            }
+            super::super::CommandEffect::none()
+        }
+    }
+
+    /// A context provider over a vendor that has to boot something, reporting
+    /// into a session that keeps whatever it is told.
+    fn booting_provider(seen: &Reported, kind: SessionAgentKind) -> SessionContextProvider {
+        let mut vendors = std::collections::HashMap::new();
+        vendors.insert(
+            "mock".to_string(),
+            Arc::new(BootingVendor) as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
+        );
+        let vendors = Arc::new(std::sync::RwLock::new(vendors));
+        let id = Uuid::new_v4();
+        let session =
+            horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new()))
+                .spawn_persistent(RecordingSession(seen.clone()));
+        SessionContextProvider {
+            agent_type: None,
+            runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
+                id.to_string(),
+                "mock".into(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
+            registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            mcp: None,
+            memory: None,
+            settings: actor_spec_fixture().agent,
+            step_output_schema: None,
+            session_id: id,
+            kind,
+            unattended: false,
+            session,
+            plugins: Vec::new(),
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        }
+    }
+
+    /// Whatever the session was told, once it has had a chance to hear it.
+    async fn settled(seen: &Reported) -> Vec<(String, Option<String>)> {
+        for _ in 0..200 {
+            if !seen
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        seen.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// The wait a person actually sits through, and what it says. An
+    /// acquisition can hold here for minutes while a machine resumes; the
+    /// vendor describes it the whole time, and those words belong in the log of
+    /// the agent that is waiting, under the stage it already announced.
+    #[tokio::test]
+    async fn a_vendors_account_of_an_acquisition_reaches_the_agents_log() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = booting_provider(&seen, SessionAgentKind::Main);
+        provider.runtime_client().await.expect("acquire");
+
+        assert_eq!(
+            settled(&seen).await,
+            vec![(
+                "acquiring_runtime".to_string(),
+                Some(BOOTING_ACQUIRE.to_string())
+            )],
+            "the vendor's account of the wait has to reach the log, under the \
+             stage the agent is actually in"
+        );
+    }
+
+    /// And a subagent stays quiet, exactly as it does for every other
+    /// preparation stage: its progress reaches a reader as the parent's
+    /// `SubAgent` entry, not as a second narration of the same sandbox.
+    #[tokio::test]
+    async fn a_subagent_narrates_nothing() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = booting_provider(&seen, SessionAgentKind::Sub(Uuid::new_v4()));
+        provider.runtime_client().await.expect("acquire");
+        // Long enough for a line to have arrived if one were ever sent.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            seen.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
         );
     }
 }

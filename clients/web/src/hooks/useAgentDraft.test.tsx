@@ -78,7 +78,7 @@ describe("useAgentDraft", () => {
   it("starts blank without an initial preset", () => {
     const { result } = render();
     expect(result.current.model).toBe("");
-    const input = result.current.buildAgentInput("a", "");
+    const input = result.current.buildAgentInput("a", "", "");
     expect(input).toEqual({
       name: "a",
       description: undefined,
@@ -109,7 +109,7 @@ describe("useAgentDraft", () => {
 
   it("round-trips the preset through buildAgentInput", () => {
     const { result } = render(preset);
-    expect(result.current.buildAgentInput("reviewer", "reviews PRs")).toEqual({
+    expect(result.current.buildAgentInput("reviewer", "reviews PRs", "")).toEqual({
       name: "reviewer",
       description: "reviews PRs",
       model: "sonnet",
@@ -124,7 +124,7 @@ describe("useAgentDraft", () => {
   // omits is deleted.
   it("keeps every channel it does carry", () => {
     const { result } = render(preset);
-    const input = result.current.buildAgentInput("reviewer", "");
+    const input = result.current.buildAgentInput("reviewer", "", "");
     expect(input.plugins).toEqual(["superpowers"]);
     expect(input.mcpServers).toEqual(["mcp-x"]);
     expect(input.memorySpaces).toEqual(["horsie"]);
@@ -134,7 +134,7 @@ describe("useAgentDraft", () => {
     const { result } = render(preset);
     act(() => result.current.setSkills(new Set(["superpowers", "impeccable"])));
     act(() => result.current.setMcp(new Set(["mcp-x", "github"])));
-    const input = result.current.buildAgentInput("reviewer", "");
+    const input = result.current.buildAgentInput("reviewer", "", "");
     expect(input.plugins).toEqual(["superpowers", "impeccable"]);
     expect(input.mcpServers).toEqual(["mcp-x", "github"]);
   });
@@ -145,7 +145,7 @@ describe("useAgentDraft", () => {
     expect(result.current.thinkingEfforts).toEqual([]);
     expect(result.current.thinkingEffort).toBe("");
     expect(
-      result.current.buildAgentInput("reviewer", "").thinkingEffort,
+      result.current.buildAgentInput("reviewer", "", "").thinkingEffort,
     ).toBeUndefined();
   });
 });

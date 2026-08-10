@@ -301,6 +301,32 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         }
     }
 
+    /// Asks velos who this client is — the one call that needs the server URL
+    /// to be right and the token to be accepted, and schedules nothing.
+    ///
+    /// Classified more narrowly than [`From<VelosError>`] does, and
+    /// deliberately: only velos refusing the *credential* is a verdict on the
+    /// configuration. A velos running without auth need not serve this endpoint
+    /// at all, and taking its 404 as "your token is wrong" would make a working
+    /// deployment unconfigurable.
+    ///
+    /// [`From<VelosError>`]: RuntimeVendorError
+    async fn preflight(&self) -> Result<(), RuntimeVendorError> {
+        match self.api.preflight().await {
+            Ok(()) => Ok(()),
+            Err(VelosError::Status {
+                status: status @ (401 | 403),
+                body,
+            }) => Err(RuntimeVendorError::Provision(format!(
+                "velos refused this token ({status}: {body})"
+            ))),
+            Err(VelosError::Status { status, body }) => Err(RuntimeVendorError::Unavailable(
+                format!("velos answered {status}: {body}"),
+            )),
+            Err(VelosError::Request(m)) => Err(RuntimeVendorError::Unavailable(m)),
+        }
+    }
+
     async fn create(
         &self,
         runtime_id: &str,
@@ -418,6 +444,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         phase: Mutex<Option<ContainerPhase>>,
         reject_create: bool,
+        /// What `/auth/v1/me` answers, as a status code. `None` → 200.
+        whoami_status: Option<u16>,
     }
 
     impl FakeVelos {
@@ -449,6 +477,16 @@ mod tests {
         }
         async fn container_phase(&self, _name: &str) -> Result<Option<ContainerPhase>, VelosError> {
             Ok(*self.phase.lock().unwrap())
+        }
+        async fn preflight(&self) -> Result<(), VelosError> {
+            self.calls.lock().unwrap().push("preflight".to_string());
+            match self.whoami_status {
+                None => Ok(()),
+                Some(status) => Err(VelosError::Status {
+                    status,
+                    body: "no".to_string(),
+                }),
+            }
         }
     }
 
@@ -788,5 +826,31 @@ mod tests {
     #[test]
     fn a_container_is_named_for_its_runtime_so_nothing_has_to_be_written_down() {
         assert_eq!(container_name("abc-123"), "horsie-abc-123");
+    }
+
+    #[tokio::test]
+    async fn a_preflight_asks_velos_who_we_are_and_schedules_nothing() {
+        let (v, _reg) = vendor(FakeVelos::default());
+        assert!(v.preflight().await.is_ok());
+        assert_eq!(v.api.calls(), vec!["preflight".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn only_a_refused_token_is_the_configurations_own_fault() {
+        // A velos deployment without auth need not serve `/auth/v1/me` at all.
+        // Reading its 404 as "your token is wrong" would refuse a save for a
+        // deployment that works perfectly.
+        for (status, terminal) in [(401, true), (403, true), (404, false), (500, false)] {
+            let (v, _reg) = vendor(FakeVelos {
+                whoami_status: Some(status),
+                ..FakeVelos::default()
+            });
+            let err = v.preflight().await.unwrap_err();
+            assert_eq!(
+                matches!(err, RuntimeVendorError::Provision(_)),
+                terminal,
+                "{status} was classified wrong"
+            );
+        }
     }
 }

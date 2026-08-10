@@ -39,7 +39,7 @@ Starts one Fly Machine per session.
 | **Workspace root** | Where inside the machine workspaces are allocated. |
 | **Callback URL** | See below. |
 | **Volumes** | Give each runtime a volume, so a stopped machine keeps its workspace. |
-| **CPU kind / CPUs / Memory** | Machine size. At least one CPU and some memory. |
+| **CPU kind / CPUs / Memory** | Machine size. At least one CPU, and at least 256 MB — Fly's own smallest shape. |
 | **Volume size** | Required if volumes are on. |
 
 ### velos
@@ -56,6 +56,23 @@ Schedules one container per session on a
 | **Workspace root** | Where inside the container workspaces are allocated. |
 | **Callback URL** | See below. |
 | **CPU / Memory** | Container size. |
+
+## What saving checks
+
+Saving asks the substrate one cheap question before it stores anything: for
+Fly, list the app's machines; for velos, ask who the token belongs to. The Fly
+call needs both halves of the configuration to be right — the token
+authenticates it, the app is in the URL — so a mistyped token and an app that
+was never created are both refused **at the form**, with the substrate's own
+message, rather than hours later as a session that cannot get a runtime.
+
+A substrate that cannot be reached is not a refusal. A rate limit, a 5xx or a
+connection that never lands says nothing about the token or the app, so the
+vendor is saved anyway: an outage should not stop you editing your settings.
+
+The check answers for the configuration as it is being saved, and credentials
+outlive that. **Check** on a saved vendor's row asks the same question again —
+that is what tells you a token has been revoked, or an app deleted, since.
 
 ## The callback URL
 

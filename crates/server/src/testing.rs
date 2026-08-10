@@ -105,6 +105,15 @@ pub struct TestStateBuilder {
     supervisor: SupervisorConfig,
 }
 
+/// A Fly API root nothing is listening on, so a save's substrate check fails
+/// as a refused connection — instantly, locally, and as "unreachable", which is
+/// never a verdict on the configuration being saved.
+///
+/// The default for every test deployment: saving a Fly vendor calls this API,
+/// and a suite that reached the real one would either fail on a bogus token or
+/// spend a real request per save.
+pub const UNREACHABLE_FLY_API: &str = "http://127.0.0.1:1/v1";
+
 /// A deployment rooted at `state_dir`, on a fresh database, with auth off.
 ///
 /// Auth off is the default because a disabled deployment is a real supported
@@ -172,6 +181,7 @@ impl TestStateBuilder {
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
             anonymous: account.clone(),
             supervisor: self.supervisor,
+            fly_api_base: UNREACHABLE_FLY_API.to_string(),
         });
         let state = AppState {
             auth,

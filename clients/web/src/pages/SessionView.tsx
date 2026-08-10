@@ -21,6 +21,7 @@ import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
   useAnswerAsks,
+  useRenameSession,
   useSendMessage,
   useSession,
   useAgent,
@@ -28,27 +29,96 @@ import {
 } from "../hooks/useSessions";
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
-import { statusMeta } from "../lib/status";
+import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
-/** Friendly label for a resource-preparation progression stage. Unknown stages
- * fall back to a de-slugged form so a new backend stage still reads sensibly.
+/** The session's name, and the only way a person can change it.
  *
- * `ready` is deliberately absent. The preparation stages earn a line because
- * they explain a wait the operator is sitting through; "Ready" is the end of
- * that wait and reports nothing — it sat above the composer as a lamp and a
- * word saying only that nothing was happening. */
-function progressionLabel(stage: string): string {
-  const known: Record<string, string> = {
-    provisioning_runtime: "Starting runtime…",
-    scanning_workspace: "Scanning workspace…",
-    connecting_tools: "Connecting tools…",
-  };
-  return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
-}
+ * The agent's title tool was the sole writer: a session the model never titled
+ * kept its raw first message as its name indefinitely, and nothing could
+ * correct it. Editing in place rather than behind a dialog because the title is
+ * live state on an instrument face, and a rename is one word.
+ *
+ * A step is titled by its run, so it is read-only there. */
+function SessionTitle({
+  id,
+  name,
+  editable,
+}: {
+  id: string;
+  name: string | undefined;
+  editable: boolean;
+}) {
+  const rename = useRenameSession();
+  const [draft, setDraft] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-/** Stages worth showing. Anything terminal is the absence of news. */
-function showsProgression(stage: string | undefined): boolean {
-  return stage !== undefined && stage !== "ready";
+  if (draft === null) {
+    const title = sessionTitle(name);
+    if (!editable) {
+      return (
+        <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
+          {title}
+        </h1>
+      );
+    }
+    return (
+      <h1 className="min-w-0 flex-1">
+        <button
+          type="button"
+          className="page-title block w-full cursor-text truncate rounded-[var(--radius-control)] px-1 text-left hover:bg-raised"
+          onClick={() => {
+            setError(null);
+            setDraft(name ?? "");
+          }}
+          title="Rename this session"
+          data-testid="session-title"
+        >
+          {title}
+        </button>
+      </h1>
+    );
+  }
+
+  const commit = async () => {
+    const next = draft.trim();
+    if (!next || next === (name ?? "")) {
+      setDraft(null);
+      return;
+    }
+    try {
+      await rename.mutateAsync({ id, name: next });
+      setDraft(null);
+    } catch (e) {
+      setError(e instanceof ApiRequestError ? e.message : "Rename failed.");
+    }
+  };
+
+  return (
+    <div className="min-w-0 flex-1">
+      <input
+        className="field page-title w-full !py-0.5"
+        value={draft}
+        autoFocus
+        maxLength={60}
+        aria-label="Session name"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void commit();
+          if (e.key === "Escape") {
+            setDraft(null);
+            setError(null);
+          }
+        }}
+        data-testid="session-title-input"
+      />
+      {error && (
+        <p className="text-xs text-red-ink" data-testid="session-title-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function SessionView() {
@@ -208,7 +278,6 @@ export function SessionView() {
     }
   };
 
-  const title = sessionTitle(detail?.name);
   // Stop lives only in the composer. The header used to carry a second one
   // "for stopping a turn you have scrolled away from", which was never a real
   // case: the composer is pinned to the bottom of the pane and never scrolls.
@@ -252,12 +321,7 @@ export function SessionView() {
               its context is. Settled facts sit behind the info key. */}
           <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
             <RailToggle />
-            <h1
-              data-testid="session-title"
-              className="page-title min-w-0 flex-1 truncate"
-            >
-              {title}
-            </h1>
+            <SessionTitle id={id} name={detail?.name} editable={!agentId} />
             <StatusBadge status={status} />
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript

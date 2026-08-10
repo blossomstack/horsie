@@ -15,5 +15,6 @@ export * from './sessionGroupView';
 export * from './createGroupRequest';
 export * from './createGroupResponse';
 export * from './renameGroupRequest';
+export * from './renameSessionRequest';
 export * from './listGroupsResponse';
 export * from './setAnnotationsRequest';

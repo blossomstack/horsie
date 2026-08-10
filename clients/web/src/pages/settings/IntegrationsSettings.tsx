@@ -16,6 +16,7 @@ import {
   useUpsertMcpServer,
 } from "../../hooks/useMcp";
 import { useSettings } from "../../hooks/useSettings";
+import { ReadError } from "../../components/ReadError";
 import { RowLabel, RowShell, TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
@@ -263,7 +264,7 @@ function GithubMcpToggle() {
  * GitHub section, so it is excluded here.
  */
 function McpSection() {
-  const { data: servers } = useMcpServers();
+  const { data: servers, isError, error: loadError } = useMcpServers();
   const [adding, setAdding] = useState(false);
   const generic = (servers ?? []).filter((s) => s.auth.kind !== "GithubApp");
 
@@ -314,7 +315,14 @@ function McpSection() {
         </button>
       </div>
       <div className="space-y-2.5">
-        {generic.length === 0 && !adding && (
+        {isError && (
+          <ReadError
+            what="MCP servers"
+            error={loadError}
+            testId="mcp-servers-error"
+          />
+        )}
+        {!isError && generic.length === 0 && !adding && (
           <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
             No MCP servers configured.
           </p>

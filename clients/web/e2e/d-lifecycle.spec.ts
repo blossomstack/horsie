@@ -121,6 +121,35 @@ test("D6: a message sent during a turn is marked unsent, then answered by the ne
   expect(await mock.capturedContains("and also look at this")).toBe(true);
 });
 
+test("D7: messages sent from inside an idle session leave no duplicate bubble", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // The idle path, which is the one that broke: the session queues and drains
+  // in the same breath, so the send's own response — the only thing that hands
+  // the local echo its server id — lands after the log already stopped
+  // mentioning the message. The echo was retired on the *parked* queue, so it
+  // never matched, and one grey copy stayed at the foot of the transcript per
+  // message sent.
+  await mock.queueText("First reply.");
+  await mock.queueText("Second reply.");
+  await createSession(page, appBase);
+
+  await sendMessage(page, "first question");
+  await expect(page.getByTestId("assistant-text")).toContainText("First reply.");
+  await expectStatus(page, "Idle");
+
+  await sendMessage(page, "second question");
+  await expect(page.getByTestId("assistant-text").last()).toContainText("Second reply.");
+  await expectStatus(page, "Idle");
+
+  const userMessages = page.locator('[data-testid="message"][data-role="User"]');
+  await expect(userMessages).toHaveCount(2);
+  await expect(userMessages.first()).toContainText("first question");
+  await expect(userMessages.last()).toContainText("second question");
+});
+
 test("D5: transcript is restored from the journal after a reload", async ({
   page,
   appBase,

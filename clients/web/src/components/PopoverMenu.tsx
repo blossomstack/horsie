@@ -2,15 +2,38 @@ import { ChevronDown } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
+import { useReturnFocus } from "../hooks/useReturnFocus";
 import { cn } from "../lib/cn";
 
 /** Breathing room between a menu and whatever would otherwise clip it. */
 const EDGE = 8;
+
+/**
+ * Marks a button that behaves as one choice in a list of choices.
+ *
+ * Opt-in, because a panel's body is arbitrary: some are checklists of real
+ * checkboxes, one is a real radio group, several are read-only summaries, and
+ * all of those already have the keyboard behaviour their native control
+ * defines. Only the hand-rolled `<button>` lists — model, environment,
+ * workflow — need this component to supply arrow keys and a single tab stop,
+ * and only they carry the attribute.
+ */
+const OPTION_SELECTOR = "[data-popover-option]:not([disabled])";
+
+/** Give one option the tab stop and the focus; the rest step out of the way. */
+function focusOption(options: HTMLElement[], i: number) {
+  options.forEach((el, j) => {
+    el.tabIndex = j === i ? 0 : -1;
+  });
+  options[i]?.focus();
+}
 
 /**
  * The box a menu is actually allowed to occupy.
@@ -91,6 +114,11 @@ export function PopoverMenu({
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
+  // Set when the panel was opened from the keyboard, which is the one case
+  // where it should take the focus with it.
+  const grabFocus = useRef(false);
   // Horizontal correction and the width cap, both measured. The applied shift
   // is mirrored in a ref so `place` can subtract it without depending on the
   // state it sets — otherwise every measurement re-creates the callback and
@@ -157,15 +185,83 @@ export function PopoverMenu({
     };
   }, [open]);
 
+  useReturnFocus(open, triggerRef);
+
+  const optionList = useCallback(
+    () =>
+      Array.from(
+        panelRef.current?.querySelectorAll<HTMLElement>(OPTION_SELECTOR) ?? [],
+      ),
+    [],
+  );
+
+  // Roving tab stop. One option is tabbable so Tab out of the trigger lands on
+  // the current choice rather than on each of them in turn; the arrow keys
+  // move between them. No dependency list on purpose — a panel's options are
+  // re-rendered whenever the draft changes underneath it, and a freshly
+  // mounted <button> is tabbable again until this says otherwise.
+  useEffect(() => {
+    if (!open) return;
+    const options = optionList();
+    if (options.length === 0) return;
+    const held = options.findIndex((el) => el.getAttribute("tabindex") === "0");
+    const chosen = options.findIndex(
+      (el) => el.getAttribute("aria-pressed") === "true",
+    );
+    const at = held >= 0 ? held : chosen >= 0 ? chosen : 0;
+    options.forEach((el, i) => {
+      el.tabIndex = i === at ? 0 : -1;
+    });
+  });
+
+  useEffect(() => {
+    if (!open || !grabFocus.current) return;
+    grabFocus.current = false;
+    const options = optionList();
+    if (options.length > 0) focusOption(options, 0);
+  }, [open, optionList]);
+
+  const onPanelKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const options = optionList();
+    if (options.length === 0) return;
+    const at = options.indexOf(document.activeElement as HTMLElement);
+    const last = options.length - 1;
+    let next: number;
+    if (e.key === "ArrowDown") next = at < 0 ? 0 : (at + 1) % options.length;
+    else if (e.key === "ArrowUp") next = at <= 0 ? last : at - 1;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = last;
+    else return;
+    e.preventDefault();
+    focusOption(options, next);
+  };
+
+  const onTriggerKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (disabled || open || e.key !== "ArrowDown") return;
+    e.preventDefault();
+    grabFocus.current = true;
+    setOpen(true);
+  };
+
   // Both the tooltip and the accessible name. An icon-only control that only
   // says "Model" tells you which control it is but not what it is set to,
   // which is the half that matters at a glance.
   const described = legend ? `${legend} — ${labelText(label)}` : labelText(label);
 
+  // The panel holds arbitrary form content — checklists, a radio group, a
+  // read-only summary — so it is a non-modal dialog rather than a menu, whose
+  // children would all have to be menu items.
+  const triggerAria = {
+    "aria-expanded": disabled ? undefined : open,
+    "aria-haspopup": disabled ? undefined : ("dialog" as const),
+    "aria-controls": open && !disabled ? panelId : undefined,
+  };
+
   return (
     <div className={cn("relative", className)} ref={ref}>
       {variant === "icon" ? (
         <button
+          ref={triggerRef}
           type="button"
           className={cn(
             "key-icon",
@@ -182,8 +278,9 @@ export function PopoverMenu({
             open && "bg-raised !text-legend",
           )}
           onClick={() => !disabled && setOpen((o) => !o)}
+          onKeyDown={onTriggerKeyDown}
           disabled={disabled}
-          aria-expanded={disabled ? undefined : open}
+          {...triggerAria}
           title={described}
           aria-label={described}
           data-testid={testId}
@@ -194,6 +291,7 @@ export function PopoverMenu({
         </button>
       ) : (
         <button
+          ref={triggerRef}
           type="button"
           className={cn(
             "flex w-full items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
@@ -202,8 +300,9 @@ export function PopoverMenu({
             open && "bg-raised",
           )}
           onClick={() => !disabled && setOpen((o) => !o)}
+          onKeyDown={onTriggerKeyDown}
           disabled={disabled}
-          aria-expanded={disabled ? undefined : open}
+          {...triggerAria}
           data-testid={testId}
         >
           {icon && <span className="text-faint">{icon}</span>}
@@ -221,6 +320,10 @@ export function PopoverMenu({
       {open && !disabled && (
         <div
           ref={panelRef}
+          id={panelId}
+          role="dialog"
+          aria-label={described || undefined}
+          onKeyDown={onPanelKeyDown}
           className={cn(
             // z-30, not z-20: the overlaid plan panel is also z-20 and later in
             // the DOM, so a tie went to the panel. Its scrim happens to make
