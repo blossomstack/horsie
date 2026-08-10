@@ -106,8 +106,11 @@ pub enum MachineState {
     Started,
     Stopped,
     Suspended,
-    /// Anything transitional or unknown. Treated as "not usable yet", never as
-    /// gone: guessing a machine away would destroy a workspace.
+    /// Anything transitional or unknown — `created`, `starting`, `replacing`
+    /// and whatever Fly adds next. Treated as "not usable yet", never as gone
+    /// (guessing a machine away would destroy a workspace) and never as
+    /// startable: only [`Stopped`](Self::Stopped) and
+    /// [`Suspended`](Self::Suspended) are states Fly will start from.
     Other,
 }
 
@@ -415,10 +418,21 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         // seconds from reconnecting, and take its in-flight work with it.
         let detail = match machine.state {
             MachineState::Started => "the machine is up; waiting for it to dial back",
-            MachineState::Stopped | MachineState::Suspended | MachineState::Other => {
+            // `stopped` and `suspended` are the only two states Fly will start
+            // from, and they are exactly the two a hibernate leaves behind.
+            MachineState::Stopped | MachineState::Suspended => {
                 self.api.start(&machine.id).await?;
                 "the machine is resuming"
             }
+            // Everything else is already moving under its own power. A fresh
+            // machine sits in `created` for about six seconds before `started`,
+            // and starting one is a `412 failed_precondition` — which is what
+            // made the first turn of every new session fail. So honour what
+            // `Other` has always claimed to mean and wait. The wait is bounded
+            // by `READY_WINDOW`, so a state that never becomes a live runtime
+            // still resolves, as "never dialed back" rather than as a start Fly
+            // was always going to reject.
+            MachineState::Other => "the machine is still coming up",
         };
         // Unused: a Fly machine keeps its volume across a hibernate, so
         // resuming one needs nothing rebuilt from the spec.
@@ -992,6 +1006,27 @@ mod tests {
         let (tx, _rx) = sink();
         v.get("s1", &spec(), tx).await.unwrap();
         assert_eq!(v.api.calls(), vec!["start:m-s1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_get_for_a_booting_machine_waits_instead_of_starting_it() {
+        // The first turn of every new session used to fail with `412
+        // failed_precondition: unable to start machine from current state:
+        // 'created'`. A fresh machine sits in `created` for about six seconds,
+        // `parse_state` maps that to `Other`, and `get` used to group `Other`
+        // with `Stopped` and start it — which Fly rejects, every time.
+        let (v, _reg) = vendor(
+            FakeFly::default().with_machine("s1", MachineState::Other),
+            false,
+        );
+        let (tx, _rx) = sink();
+        let progress = v.get("s1", &spec(), tx).await.unwrap();
+        assert!(matches!(progress, RuntimeProgress::Starting { .. }));
+        assert!(
+            v.api.calls().is_empty(),
+            "a booting machine must be left to finish booting, got {:?}",
+            v.api.calls()
+        );
     }
 
     #[tokio::test]
