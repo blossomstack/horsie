@@ -245,8 +245,10 @@ export function Sidebar() {
       </div>
 
       {/* Only once there is enough to search. Below that the box is a control
-          with nothing to do, taking rail height from the list itself. */}
-      {(sessions?.length ?? 0) > 8 && (
+          with nothing to do, taking rail height from the list itself — but it
+          stays once it holds a filter, or deleting down to eight sessions
+          would strand one with no way to clear it. */}
+      {((sessions?.length ?? 0) > 8 || filter !== "") && (
         <div className="px-2 pb-1.5">
           <input
             className="w-full rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none placeholder:text-faint focus:border-[var(--rule-strong)]"
@@ -335,31 +337,31 @@ export function Sidebar() {
             // While filtering, a section with no surviving rows is noise.
             .filter((g) => needle === "" || (parts.get(g)?.length ?? 0) > 0)
             .map((g) => (
-            <SessionGroupSection
-              key={g}
-              name={g}
-              sessions={parts.get(g) ?? []}
-              groups={groups}
-              ungrouped={g === UNGROUPED}
-              // A filter that hides its matches inside a collapsed group has
-              // found nothing as far as the user is concerned.
-              collapsed={needle === "" && collapsed.includes(g)}
-              onToggleCollapsed={() =>
-                setCollapsed(
-                  collapsed.includes(g)
-                    ? collapsed.filter((x) => x !== g)
-                    : [...collapsed, g],
-                )
-              }
-              // Until a group exists there is nothing to be un-grouped from,
-              // so the Ungrouped header would be a label with no job — and
-              // grouping chrome nobody asked for. The rows render bare, and
-              // the header appears the moment the first group does.
-              bare={g === UNGROUPED && groups.length === 0}
-              order={ordered}
-              onReorder={setSavedOrder}
-            />
-          ))}
+              <SessionGroupSection
+                key={g}
+                name={g}
+                sessions={parts.get(g) ?? []}
+                groups={groups}
+                ungrouped={g === UNGROUPED}
+                // A filter that hides its matches inside a collapsed group has
+                // found nothing as far as the user is concerned.
+                collapsed={needle === "" && collapsed.includes(g)}
+                onToggleCollapsed={() =>
+                  setCollapsed(
+                    collapsed.includes(g)
+                      ? collapsed.filter((x) => x !== g)
+                      : [...collapsed, g],
+                  )
+                }
+                // Until a group exists there is nothing to be un-grouped from,
+                // so the Ungrouped header would be a label with no job — and
+                // grouping chrome nobody asked for. The rows render bare, and
+                // the header appears the moment the first group does.
+                bare={g === UNGROUPED && groups.length === 0}
+                order={ordered}
+                onReorder={setSavedOrder}
+              />
+            ))}
       </nav>
 
       <div className="flex items-center gap-0.5 border-t px-1.5 py-2">

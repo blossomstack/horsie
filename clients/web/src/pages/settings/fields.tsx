@@ -1,5 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 
 /**
@@ -161,10 +161,7 @@ export function ListRow({
           </span>
         )}
       </span>
-      {/* `min-w-0` so a row's badges shrink before its name does. Without it
-          the badge cluster held its full width at 390px and the provider name
-          was squeezed to nothing while the badges drew over the actions. */}
-      {meta && <span className="flex min-w-0 items-center">{meta}</span>}
+      {meta}
     </>
   );
 
@@ -201,6 +198,38 @@ export function RowLabel({ children }: { children: ReactNode }) {
   return <span className="legend mb-1 block">{children}</span>;
 }
 
+/**
+ * The note under a field: what it wants, or why it cannot be saved.
+ *
+ * Deliberately a sibling of the `<label>` rather than inside it. A wrapping
+ * label contributes *all* its text to the control's accessible name, so a hint
+ * placed inside would rename the field to "App ID The number on the app's page
+ * on GitHub" for anyone listening. `aria-describedby` is the relationship this
+ * actually is.
+ */
+function FieldNote({
+  id,
+  hint,
+  invalid,
+}: {
+  id: string;
+  hint?: ReactNode;
+  invalid?: string | null;
+}) {
+  if (!invalid && !hint) return null;
+  return (
+    <span
+      id={id}
+      className={cn(
+        "mt-1 block text-xs leading-relaxed",
+        invalid ? "text-red-ink" : "text-dim",
+      )}
+    >
+      {invalid ?? hint}
+    </span>
+  );
+}
+
 export function TextField({
   label,
   value,
@@ -223,29 +252,25 @@ export function TextField({
   invalid?: string | null;
   testId?: string;
 }) {
+  const noteId = useId();
+  const described = invalid || hint ? noteId : undefined;
   return (
-    <label className="block">
-      <RowLabel>{label}</RowLabel>
-      <input
-        className={cn("field field-mono", invalid && "border-red")}
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        aria-invalid={invalid ? true : undefined}
-        data-testid={testId}
-      />
-      {(invalid || hint) && (
-        <span
-          className={cn(
-            "mt-1 block text-xs leading-relaxed",
-            invalid ? "text-red-ink" : "text-dim",
-          )}
-        >
-          {invalid ?? hint}
-        </span>
-      )}
-    </label>
+    <div className="block">
+      <label className="block">
+        <RowLabel>{label}</RowLabel>
+        <input
+          className={cn("field field-mono", invalid && "border-red")}
+          type={type}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={described}
+          data-testid={testId}
+        />
+      </label>
+      <FieldNote id={noteId} hint={hint} invalid={invalid} />
+    </div>
   );
 }
 
@@ -269,29 +294,25 @@ export function TextAreaField({
   invalid?: string | null;
   testId?: string;
 }) {
+  const noteId = useId();
+  const described = invalid || hint ? noteId : undefined;
   return (
-    <label className="block">
-      <RowLabel>{label}</RowLabel>
-      <textarea
-        className={cn("field field-mono", invalid && "border-red")}
-        rows={rows}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        aria-invalid={invalid ? true : undefined}
-        data-testid={testId}
-      />
-      {(invalid || hint) && (
-        <span
-          className={cn(
-            "mt-1 block text-xs leading-relaxed",
-            invalid ? "text-red-ink" : "text-dim",
-          )}
-        >
-          {invalid ?? hint}
-        </span>
-      )}
-    </label>
+    <div className="block">
+      <label className="block">
+        <RowLabel>{label}</RowLabel>
+        <textarea
+          className={cn("field field-mono", invalid && "border-red")}
+          rows={rows}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-invalid={invalid ? true : undefined}
+          aria-describedby={described}
+          data-testid={testId}
+        />
+      </label>
+      <FieldNote id={noteId} hint={hint} invalid={invalid} />
+    </div>
   );
 }
 

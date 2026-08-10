@@ -123,8 +123,7 @@ pub fn redact_url_credentials(text: &str) -> String {
         let (head, tail) = rest.split_at(at + MARK.len());
         out.push_str(head);
         // Userinfo runs to the first `@`, and cannot contain any of these.
-        let end = tail
-            .find(['@', '/', '?', '#', ' ', '\t', '\n', '"', '\'']);
+        let end = tail.find(['@', '/', '?', '#', ' ', '\t', '\n', '"', '\'']);
         match end {
             Some(i) if tail.as_bytes().get(i) == Some(&b'@') => {
                 out.push_str("***@");
