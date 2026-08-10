@@ -699,6 +699,41 @@
     box-shadow: inset 0 0 0 1.5px currentColor;
     opacity: 0.55;
   }
+
+  /* ------------------------------------------------------------------ *
+   * The skip link. Off-screen rather than `display: none`, because a
+   * control that is not rendered is not a tab stop either — and being the
+   * first tab stop is the whole job. It shows itself the moment it has
+   * the focus, as a legend plate lifted off the chassis.
+   * ------------------------------------------------------------------ */
+  .skip-link {
+    position: absolute;
+    left: -10000px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+  .skip-link:focus {
+    position: fixed;
+    left: 0.75rem;
+    top: 0.75rem;
+    z-index: 60;
+    width: auto;
+    height: auto;
+    padding: 0.5rem 0.875rem;
+    border-radius: var(--radius-control);
+    background: var(--panel-raised);
+    box-shadow:
+      var(--panel-lift),
+      inset 0 0 0 1px var(--rule-strong);
+    color: var(--legend);
+    font-family: var(--legend-face);
+    font-size: var(--legend-size);
+    font-weight: 500;
+    letter-spacing: var(--legend-tracking);
+    text-transform: var(--legend-transform);
+    font-variation-settings: "wdth" var(--legend-width);
+  }
 }
 
 /* ==================================================================== *
