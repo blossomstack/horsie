@@ -13,27 +13,6 @@ import remarkGfm from "remark-gfm";
 const HIGHLIGHT_MAX_CHARS = 40_000;
 
 /**
- * Themed markdown renderer with GFM + syntax highlighting. Loaded lazily via
- * `./Prose` so highlight.js stays out of the initial bundle.
- *
- * **Highlighting is deliberately conditional**, because unconditional
- * highlighting hard-locked the browser tab: 100% CPU, no recovery, surviving
- * the turn being stopped server-side, needing `kill -9` on the renderer.
- *
- * Three things combined to do it. The plugin ran with `detect: true` —
- * highlight.js *auto-detection*, which runs every registered grammar over
- * every code block. This component is memoised on `text`, and a streamed reply
- * changes `text` on every token, so the whole pipeline re-ran over the whole
- * message hundreds of times. And the cost is super-linear in line length, so
- * 60 growing prefixes of one 3000-char line cost 9.3s of pure CPU — while real
- * streaming issues hundreds of updates, not 60.
- *
- * So: no `detect` (an unlabelled fence renders as plain text rather than
- * costing every grammar), nothing highlighted mid-stream, and nothing
- * highlighted above [`HIGHLIGHT_MAX_CHARS`]. The finished message highlights
- * once, which is the only render anyone actually reads.
- */
-/**
  * Blocks that carry the reply's own text, and therefore its own direction.
  *
  * react-markdown emits a bare `<p>`, which inherits the app's `ltr`, so an
@@ -57,6 +36,27 @@ const directionalComponents = {
   th: (props: object) => <th dir="auto" {...props} />,
 };
 
+/**
+ * Themed markdown renderer with GFM + syntax highlighting. Loaded lazily via
+ * `./Prose` so highlight.js stays out of the initial bundle.
+ *
+ * **Highlighting is deliberately conditional**, because unconditional
+ * highlighting hard-locked the browser tab: 100% CPU, no recovery, surviving
+ * the turn being stopped server-side, needing `kill -9` on the renderer.
+ *
+ * Three things combined to do it. The plugin ran with `detect: true` —
+ * highlight.js *auto-detection*, which runs every registered grammar over
+ * every code block. This component is memoised on `text`, and a streamed reply
+ * changes `text` on every token, so the whole pipeline re-ran over the whole
+ * message hundreds of times. And the cost is super-linear in line length, so
+ * 60 growing prefixes of one 3000-char line cost 9.3s of pure CPU — while real
+ * streaming issues hundreds of updates, not 60.
+ *
+ * So: no `detect` (an unlabelled fence renders as plain text rather than
+ * costing every grammar), nothing highlighted mid-stream, and nothing
+ * highlighted above [`HIGHLIGHT_MAX_CHARS`]. The finished message highlights
+ * once, which is the only render anyone actually reads.
+ */
 const Markdown = memo(function Markdown({
   text,
   highlight = true,
