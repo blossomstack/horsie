@@ -100,6 +100,82 @@ describe("buildSegments work spans", () => {
   });
 });
 
+/** A workflow step has no `ask_user`: it asks through `conclude({kind: "ask"})`,
+ * and submits its output through the very same tool. */
+function conclude(id: string, input: unknown): RenderedToolCall {
+  return { id, name: "conclude", input, running: false, hooks: [] };
+}
+
+describe("questions break out of a work group", () => {
+  it("gives a step's `conclude` ask its own segment", () => {
+    const segments = buildSegments([
+      assistant({
+        id: "m1",
+        toolCalls: [
+          tool("t1", 4_000),
+          conclude("t2", { kind: "ask", question: "p0 or p2?" }),
+        ],
+        startedAtMs: 1_000,
+        createdAtMs: 2_000,
+      }),
+    ]);
+    expect(segments.map((s) => s.kind)).toEqual(["work", "ask"]);
+    const ask = segments[1];
+    if (ask.kind !== "ask") throw new Error("expected an ask segment");
+    expect(ask.call.id).toBe("t2");
+  });
+
+  /** The answered case is the one that reads as data loss: the question and the
+   * human's reply are both hung on the call, and a collapsed "ran 2 tools" row
+   * is the only trace left that anyone was asked at all. */
+  it("keeps an answered step ask standalone", () => {
+    const answered = conclude("t2", { kind: "ask", question: "p0 or p2?" });
+    answered.output = "p0";
+    const segments = buildSegments([
+      assistant({
+        id: "m1",
+        toolCalls: [tool("t1", 4_000), answered],
+        startedAtMs: 1_000,
+        createdAtMs: 2_000,
+      }),
+    ]);
+    const ask = segments.find((s) => s.kind === "ask");
+    if (ask?.kind !== "ask") throw new Error("expected an ask segment");
+    expect(ask.call.output).toBe("p0");
+    const work = segments.find((s) => s.kind === "work");
+    if (work?.kind !== "work") throw new Error("expected a work segment");
+    expect(work.items).toHaveLength(1);
+  });
+
+  /** `conclude` is also how a step submits its result. That call is not a
+   * question and must stay grouped, or every step ends in a bare row. */
+  it("leaves a submitting `conclude` in the group", () => {
+    const segments = buildSegments([
+      assistant({
+        id: "m1",
+        toolCalls: [
+          tool("t1", 4_000),
+          conclude("t2", { kind: "submit", output: { severity: "p0" } }),
+        ],
+        startedAtMs: 1_000,
+        createdAtMs: 2_000,
+      }),
+    ]);
+    expect(segments.map((s) => s.kind)).toEqual(["work"]);
+  });
+
+  it("breaks out a live ask too", () => {
+    const segments = buildSegments([], {
+      text: "",
+      orphanTools: [
+        tool("t1"),
+        conclude("t2", { kind: "ask", question: "which branch?" }),
+      ],
+    });
+    expect(segments.map((s) => s.kind)).toEqual(["work", "ask"]);
+  });
+});
+
 function sub(label: string, over: Partial<RenderedSubAgent> = {}): RenderedSubAgent {
   return {
     subagentId: `id-${label}`,
