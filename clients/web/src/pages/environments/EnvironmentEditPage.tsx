@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Plus, Trash2 } from "lucide-react";
 import { ApiRequestError } from "../../api/client";
 import { RailToggle } from "../../components/rail";
+import { ReadError } from "../../components/ReadError";
 import type {
   EnvironmentView,
   EnvVar,
@@ -322,7 +323,12 @@ function RepoPicker({
 }) {
   const { data: status } = useGithubStatus();
   const connected = !!status?.connected;
-  const { data: repoList, isLoading } = useGithubRepos(connected);
+  const {
+    data: repoList,
+    isLoading,
+    isError,
+    error: loadError,
+  } = useGithubRepos(connected);
   const [filter, setFilter] = useState("");
 
   const chosen = new Map(repos.map((r) => [r.url, r.gitRef ?? ""]));
@@ -368,6 +374,13 @@ function RepoPicker({
         to take the repo's default branch.
       </p>
 
+      {/* Above the chain rather than inside it: the repos already ticked still
+          render below, so a failed listing does not take away the only control
+          that can untick one. */}
+      {connected && isError && (
+        <ReadError what="repos" error={loadError} testId="repo-list-error" />
+      )}
+
       {!connected ? (
         <p
           className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint"
@@ -387,16 +400,20 @@ function RepoPicker({
           Loading repos…
         </p>
       ) : rows.length === 0 ? (
-        <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
-          No repos are visible to the app installation.{" "}
-          <Link
-            to="/settings/integrations"
-            className="text-legend underline underline-offset-2"
-          >
-            Check its access
-          </Link>
-          .
-        </p>
+        // A failed listing has already said so above; "no repos are visible to
+        // the app installation" would name the wrong cause.
+        isError ? null : (
+          <p className="screen px-3 py-5 text-center text-sm leading-relaxed text-faint">
+            No repos are visible to the app installation.{" "}
+            <Link
+              to="/settings/integrations"
+              className="text-legend underline underline-offset-2"
+            >
+              Check its access
+            </Link>
+            .
+          </p>
+        )
       ) : (
         <>
           <input

@@ -12,6 +12,7 @@ import {
   useRuntimeVendors,
   useSaveRuntimeVendor,
 } from "../../hooks/useRuntimeVendors";
+import { ReadError } from "../../components/ReadError";
 import { ListRow, RowAction, RowShell, Section, TextField } from "./fields";
 
 /**
@@ -99,7 +100,8 @@ function summarise(v: RuntimeVendorConfigView): string {
 }
 
 export function CloudVendors() {
-  const { data: vendors, isLoading } = useRuntimeVendors();
+  const { data: vendors, isLoading, isError, error: loadError } =
+    useRuntimeVendors();
   const save = useSaveRuntimeVendor();
   const remove = useDeleteRuntimeVendor();
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -193,11 +195,18 @@ export function CloudVendors() {
       title="Cloud vendors"
       desc="Vendors this server runs itself — no process of your own to deploy. Each sandbox dials back to the callback URL, so that URL must be reachable from outside this server."
       empty={
-        !isLoading && !draft && (vendors?.length ?? 0) === 0
+        !isLoading && !isError && !draft && (vendors?.length ?? 0) === 0
           ? "No cloud vendors are configured."
           : null
       }
     >
+      {isError && (
+        <ReadError
+          what="cloud vendors"
+          error={loadError}
+          testId="cloud-vendors-error"
+        />
+      )}
       {vendors?.map((v) => (
         <ListRow
           key={v.name}

@@ -18,6 +18,7 @@ import { useSettings } from "../hooks/useSettings";
 import type { SessionDetail } from "../api/types";
 import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
+import { ReadError } from "./ReadError";
 import type {
   ConfigDraft,
   EnvironmentChannel,
@@ -139,8 +140,10 @@ const INERT_ENVIRONMENT: EnvironmentChannel = {
  * identical rather than merely similar.
  */
 export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
-  const { data: settings } = useSettings();
-  const { data: repoList } = useGithubRepos(d.provisions && d.githubConnected);
+  const { data: settings, isError: settingsFailed, error: settingsError } =
+    useSettings();
+  const { data: repoList, isError: reposFailed, error: reposError } =
+    useGithubRepos(d.provisions && d.githubConnected);
   const activeVendors = settings?.vendors ?? [];
   const chosen =
     d.environment.kind === "named"
@@ -166,8 +169,11 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
     marked: !!chosen,
     // The new-session page used to carry a whole roster panel answering "is
     // my laptop connected?". The answer is one bit, and this is where it is
-    // actionable.
-    warn: activeVendors.length === 0 && d.environments.length === 0,
+    // actionable. A failed read is not that answer, but it is still something
+    // to look at — the popover says which of the two it is.
+    warn:
+      settingsFailed ||
+      (activeVendors.length === 0 && d.environments.length === 0),
     width: "w-80",
     testId: "config-environment",
     body: (close) => (
@@ -210,7 +216,17 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
         <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
           Runtimes
         </p>
-        {activeVendors.length === 0 ? (
+        {settingsFailed ? (
+          // Without the config read there is no roster to be empty: saying "no
+          // runtime is connected" here would send someone to re-run `horsie
+          // connect` for a runtime that is probably already there.
+          <ReadError
+            what="runtimes"
+            error={settingsError}
+            testId="environment-read-error"
+            className="mx-1 my-0.5"
+          />
+        ) : activeVendors.length === 0 ? (
           <p className="px-2 py-1.5 text-sm leading-relaxed text-dim">
             No runtime is connected, so a session can’t run a turn yet. Run{" "}
             <code className="font-mono text-legend">horsie connect</code> on the
@@ -302,7 +318,14 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
                     repos: Object.fromEntries(next),
                   });
                 },
-                empty: (
+                empty: reposFailed ? (
+                  <ReadError
+                    what="repos"
+                    error={reposError}
+                    testId="environment-repos-read-error"
+                    className="mx-1 my-0.5"
+                  />
+                ) : (
                   <p className="px-2 py-1 text-sm text-dim">
                     No repos visible to the app installation.
                   </p>
@@ -324,10 +347,14 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
  * single decision rather than two unrelated switches.
  */
 export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
-  const { data: settings } = useSettings();
-  const { data: bundles } = usePlugins();
-  const { data: mcpServers } = useMcpServers();
-  const { data: memorySpaces } = useMemorySpaces();
+  const { data: settings, isError: settingsFailed, error: settingsError } =
+    useSettings();
+  const { data: bundles, isError: bundlesFailed, error: bundlesError } =
+    usePlugins();
+  const { data: mcpServers, isError: mcpFailed, error: mcpError } =
+    useMcpServers();
+  const { data: memorySpaces, isError: memoryFailed, error: memoryError } =
+    useMemorySpaces();
   const env = hasEnvironment(draft) ? draft : undefined;
   // Called unconditionally with an inert channel when the draft has none: a
   // hook cannot be conditional, and an agent-preset form has no environment.
@@ -428,7 +455,14 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           else next.add(name);
           draft.setSkills(next);
         },
-        empty: (
+        empty: bundlesFailed ? (
+          <ReadError
+            what="skill bundles"
+            error={bundlesError}
+            testId="skills-read-error"
+            className="mx-1 my-0.5"
+          />
+        ) : (
           <EmptyLink to="/settings/skills">
             Install skill bundles in Settings
           </EmptyLink>
@@ -454,7 +488,14 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           else next.add(name);
           draft.setMcp(next);
         },
-        empty: (
+        empty: mcpFailed ? (
+          <ReadError
+            what="MCP servers"
+            error={mcpError}
+            testId="mcp-read-error"
+            className="mx-1 my-0.5"
+          />
+        ) : (
           <EmptyLink to="/settings/integrations">
             Add MCP servers in Settings
           </EmptyLink>
@@ -482,7 +523,16 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
           else next.add(name);
           draft.setMemorySpaces(next);
         },
-        empty: <EmptyLink to="/settings/memory">Create a memory space first</EmptyLink>,
+        empty: memoryFailed ? (
+          <ReadError
+            what="memory spaces"
+            error={memoryError}
+            testId="memory-read-error"
+            className="mx-1 my-0.5"
+          />
+        ) : (
+          <EmptyLink to="/settings/memory">Create a memory space first</EmptyLink>
+        ),
       }),
   });
 
@@ -494,8 +544,19 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     marked: !!draft.model,
     width: "w-72",
     testId: "config-model",
+    // `marked` stays false on a failed read, so the key does not claim a model
+    // was chosen — but the popover has to say why the list is empty, or it
+    // reads as an account with no models while Send says "Select a model".
+    warn: settingsFailed,
     body: (close) =>
-      models.length === 0 ? (
+      settingsFailed ? (
+        <ReadError
+          what="models"
+          error={settingsError}
+          testId="model-read-error"
+          className="mx-1 my-0.5"
+        />
+      ) : models.length === 0 ? (
         <EmptyLink to="/settings/models">
           No models configured — add one in Settings
         </EmptyLink>
