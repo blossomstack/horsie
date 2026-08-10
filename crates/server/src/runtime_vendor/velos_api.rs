@@ -85,6 +85,13 @@ pub trait ContainerApi: Send + Sync {
 
     /// The container's current phase, or `None` if it no longer exists.
     async fn container_phase(&self, name: &str) -> Result<Option<ContainerPhase>, VelosError>;
+
+    /// Prove the server is there and the token is good, without scheduling
+    /// anything. Defaulted so a double that only models containers is
+    /// unaffected; the real client answers it with [`VelosClient::whoami`].
+    async fn preflight(&self) -> Result<(), VelosError> {
+        Ok(())
+    }
 }
 
 pub struct VelosClient {
@@ -234,6 +241,10 @@ impl ContainerApi for VelosClient {
             .pointer("/status/phase")
             .and_then(serde_json::Value::as_str)
             .map(ContainerPhase::parse))
+    }
+
+    async fn preflight(&self) -> Result<(), VelosError> {
+        self.whoami().await.map(|_| ())
     }
 }
 
@@ -447,6 +458,21 @@ mod tests {
         let client = VelosClient::new(base, Some(Secret::from("bad"))).unwrap();
         let err = client.whoami().await.unwrap_err();
         match err {
+            VelosError::Status { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected Status error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_is_whoami() {
+        // The check a vendor runs before a configuration is stored. It was
+        // written for a button that was never built, and nothing called it.
+        let (base, st) = spawn_mock().await;
+        let client = VelosClient::new(base, Some(Secret::from("tok"))).unwrap();
+        client.preflight().await.unwrap();
+
+        *st.whoami_status.lock().unwrap() = 401;
+        match client.preflight().await.unwrap_err() {
             VelosError::Status { status, .. } => assert_eq!(status, 401),
             other => panic!("expected Status error, got {other:?}"),
         }

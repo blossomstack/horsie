@@ -11,7 +11,9 @@ use crate::runtime_vendor::config::VendorConfigError;
 use axum::Json;
 use axum::extract::Path;
 use axum::http::StatusCode;
-use horsie_models::runtime_vendor::{RuntimeVendorConfigInput, RuntimeVendorConfigView};
+use horsie_models::runtime_vendor::{
+    RuntimeVendorConfigInput, RuntimeVendorConfigView, RuntimeVendorTestResult,
+};
 
 fn api_err(e: VendorConfigError) -> Api {
     match e {
@@ -49,6 +51,26 @@ pub async fn put_runtime_vendor(
         .await
         .map(Json)
         .map_err(api_err)
+}
+
+/// POST /api/runtime-vendors/:name/test — ask the substrate whether this
+/// vendor is usable right now, without creating anything.
+///
+/// `200` with the result envelope for a configured vendor; the substrate saying
+/// no is `ok: false` with a message, not an HTTP error, because the request
+/// itself succeeded. A name nothing is configured under is a 404, which is a
+/// different thing entirely.
+pub async fn test_runtime_vendor(
+    Scope(state): Scope,
+    Path(name): Path<String>,
+) -> Result<Json<RuntimeVendorTestResult>, Api> {
+    state
+        .runtime_vendors
+        .test_named(&name)
+        .await
+        .map_err(api_err)?
+        .map(Json)
+        .ok_or_else(|| Api::not_found(format!("no runtime vendor named '{name}'")))
 }
 
 /// DELETE /api/runtime-vendors/:name

@@ -48,6 +48,13 @@ pub struct Shared {
     /// policy, not account preference — and the seam a test drives time
     /// through.
     pub supervisor: SupervisorConfig,
+    /// The Fly Machines API root every account's Fly vendors are built against.
+    ///
+    /// Deployment-wide because it is a property of where this server runs, not
+    /// of who is configuring a vendor: a server inside Fly's own network can
+    /// use the internal endpoint. It is also the seam a test points somewhere
+    /// harmless, since saving a Fly vendor now calls this API.
+    pub fly_api_base: String,
 }
 
 /// Everything one account owns.
@@ -172,14 +179,17 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         opened.vendors.clone(),
     ));
     let connected_runtimes = Arc::new(horsie_runtime_host::ConnectedRuntimeRegistry::new());
-    let runtime_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorConfigService::new(
-        crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
-        opened.vendors.clone(),
-        // The registry's own table, so the two publishers of one map can see
-        // each other's names rather than silently overwriting them.
-        connected_vendors.links(),
-        connected_runtimes.clone(),
-    ));
+    let runtime_vendors = Arc::new(
+        crate::runtime_vendor::RuntimeVendorConfigService::new(
+            crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
+            opened.vendors.clone(),
+            // The registry's own table, so the two publishers of one map can see
+            // each other's names rather than silently overwriting them.
+            connected_vendors.links(),
+            connected_runtimes.clone(),
+        )
+        .with_fly_api_base(shared.fly_api_base.clone()),
+    );
     // Before anything can select a vendor: a session started early would
     // otherwise be told its configured vendor does not exist.
     runtime_vendors.publish_all().await;
@@ -364,6 +374,7 @@ mod tests {
             model_card_seed_marker: model_cards::seed_marker(&[]),
             anonymous: UserId::bootstrap(),
             supervisor: SupervisorConfig::default(),
+            fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
         }))
     }
 

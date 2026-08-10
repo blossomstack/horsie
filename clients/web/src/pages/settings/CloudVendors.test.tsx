@@ -8,6 +8,7 @@ afterEach(cleanup);
 
 const saved = vi.fn();
 const removed = vi.fn();
+const tested = vi.fn();
 const vendors: { current: RuntimeVendorConfigView[] } = { current: [] };
 const readFailed: { current: unknown } = { current: null };
 
@@ -46,6 +47,7 @@ vi.mock("../../hooks/useRuntimeVendors", () => ({
   }),
   useSaveRuntimeVendor: () => ({ mutateAsync: saved, isPending: false }),
   useDeleteRuntimeVendor: () => ({ mutateAsync: removed, isPending: false }),
+  useTestRuntimeVendor: () => ({ mutateAsync: tested, isPending: false }),
 }));
 
 describe("CloudVendors", () => {
@@ -152,6 +154,35 @@ describe("CloudVendors", () => {
     expect(settings.kind).toBe("Velos");
     expect(settings.value.serverUrl).toBe("http://velos:8080");
     expect(settings.value).not.toHaveProperty("region");
+  });
+
+  it("reports a vendor that answers", async () => {
+    vendors.current = [vendor()];
+    tested.mockClear().mockResolvedValue({ ok: true });
+    render(<CloudVendors />);
+    fireEvent.click(screen.getByTestId("cloud-vendor-test-fly"));
+
+    await waitFor(() => expect(screen.getByTestId("cloud-vendor-ok-fly")).toBeTruthy());
+    expect(tested).toHaveBeenCalledWith("fly");
+  });
+
+  it("shows what the substrate said when a check fails", async () => {
+    // The failure this whole path exists for: a token that was good when it was
+    // saved and is not any more. The row has to say so in the substrate's own
+    // words — "unreachable" alone sends someone to check their network.
+    vendors.current = [vendor()];
+    tested
+      .mockClear()
+      .mockResolvedValue({ ok: false, error: "fly refused: 401: unauthorized" });
+    render(<CloudVendors />);
+    fireEvent.click(screen.getByTestId("cloud-vendor-test-fly"));
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("cloud-vendor-test-error-fly").textContent,
+      ).toContain("401"),
+    );
+    expect(screen.queryByTestId("cloud-vendor-ok-fly")).toBeNull();
   });
 
   it("omits the credential when an edit leaves it blank", async () => {

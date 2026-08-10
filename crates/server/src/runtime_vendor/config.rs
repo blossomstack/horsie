@@ -18,7 +18,7 @@ use crate::db::Db;
 use crate::runtime_vendor::fly::{FlyRuntimeVendor, FlySettings};
 use crate::runtime_vendor::fly_api::{FlyHttpApi, FlyMachineSize};
 use crate::runtime_vendor::velos::{VelosRuntimeVendor, VelosSettings};
-use crate::runtime_vendor::{RuntimeVendor, WebsocketVendorTable};
+use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError, WebsocketVendorTable};
 use crate::sessions::spec::RuntimeVendorMap;
 use horsie_runtime_host::ConnectedRuntimeRegistry;
 use sqlx::Row;
@@ -234,7 +234,18 @@ impl StoredVendorSettings {
     }
 }
 
+/// The smallest machine Fly will build. Below it a save is refused here rather
+/// than by a machine-create rejection in the first session — and unlike a
+/// *ceiling*, this is Fly's own documented minimum rather than a guess at a
+/// shape catalogue that changes without us.
+const MIN_FLY_MEMORY_MB: u32 = 256;
+
 /// Reject a configuration that cannot possibly work, at save time.
+///
+/// Everything here is answerable without leaving the process. What only the
+/// substrate can answer — is this token good, does this app exist — is asked
+/// separately, by [`RuntimeVendor::preflight`], which is why this function
+/// stays offline and total.
 ///
 /// The alternative is a vendor that saves cleanly and then fails every session
 /// with a timeout, because a machine on Fly dialled a hostname that only
@@ -254,6 +265,11 @@ pub fn validate(settings: &StoredVendorSettings, credential: &str) -> Result<(),
             }
             if fly.cpus == 0 || fly.memory_mb == 0 {
                 return Err("a machine needs at least one cpu and some memory".to_string());
+            }
+            if fly.memory_mb < MIN_FLY_MEMORY_MB {
+                return Err(format!(
+                    "a fly machine needs at least {MIN_FLY_MEMORY_MB} MB of memory"
+                ));
             }
             if fly.volumes && fly.volume_size_gb == 0 {
                 return Err("a volume needs a size".to_string());
@@ -324,6 +340,44 @@ pub fn validate_callback(url: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Why a save is refused after asking the substrate, or `None` when the answer
+/// was not about the configuration at all.
+///
+/// The whole distinction lives here, in one place, because getting it backwards
+/// is expensive in both directions: treat a reachability failure as a verdict
+/// and a cloud outage stops anyone editing a vendor; treat a rejection as a
+/// blip and the check buys nothing.
+async fn preflight_refusal(vendor: &dyn RuntimeVendor) -> Option<String> {
+    match vendor.preflight().await {
+        Ok(()) => None,
+        // The substrate answered, and the answer was no. No retry changes that,
+        // so the configuration is not stored.
+        Err(e @ (RuntimeVendorError::Provision(_) | RuntimeVendorError::Gone(_))) => {
+            Some(refusal_message(e))
+        }
+        // It could not be reached, which says nothing about the configuration.
+        // Refusing to store a vendor because a cloud API is having an outage
+        // would be a worse failure than storing one that might be wrong.
+        Err(e @ RuntimeVendorError::Unavailable(_)) => {
+            tracing::warn!(
+                vendor = %vendor.name(),
+                error = %e,
+                "a runtime vendor was saved unproved: its substrate could not be reached"
+            );
+            None
+        }
+    }
+}
+
+/// A check's failure, as the person looking at the settings form reads it.
+fn refusal_message(e: RuntimeVendorError) -> String {
+    match e {
+        // Already written for them by the vendor that produced it.
+        RuntimeVendorError::Provision(m) | RuntimeVendorError::Gone(m) => m,
+        RuntimeVendorError::Unavailable(m) => format!("could not reach the vendor: {m}"),
+    }
 }
 
 pub struct RuntimeVendorStore {
@@ -441,6 +495,13 @@ pub struct RuntimeVendorConfigService {
     /// take a live agent's name out from under it.
     websockets: WebsocketVendorTable,
     connected: Arc<ConnectedRuntimeRegistry>,
+    /// The Fly Machines API root every Fly vendor here is built against.
+    ///
+    /// A value rather than the constant because a save now *calls* this API,
+    /// which makes it something a deployment has to be able to point: at Fly's
+    /// internal endpoint from inside an organisation's network, or at a stub in
+    /// a test that must not reach the internet to save a vendor.
+    fly_api_base: String,
 }
 
 impl RuntimeVendorConfigService {
@@ -456,7 +517,15 @@ impl RuntimeVendorConfigService {
             vendors,
             websockets,
             connected,
+            fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
         }
+    }
+
+    /// Point Fly vendors at another API root — see [`Self::fly_api_base`].
+    #[must_use]
+    pub fn with_fly_api_base(mut self, base: String) -> Self {
+        self.fly_api_base = base;
+        self
     }
 
     pub async fn list(&self) -> Result<Vec<RuntimeVendorRow>, String> {
@@ -603,8 +672,9 @@ impl RuntimeVendorConfigService {
         }
     }
 
-    /// Validate, store, and publish. The published vendor replaces any previous
-    /// one under the same name, which is how an edited token takes effect.
+    /// Validate, prove against the substrate, store, and publish. The published
+    /// vendor replaces any previous one under the same name, which is how an
+    /// edited token takes effect.
     pub async fn save(&self, row: RuntimeVendorRow) -> Result<RuntimeVendorRow, String> {
         if row.name.trim().is_empty() {
             return Err("a runtime vendor needs a name".to_string());
@@ -618,9 +688,60 @@ impl RuntimeVendorConfigService {
         // Stored exactly as it arrived: `validate` no longer rewrites anything,
         // so there is nothing to fold back into the row.
         validate(&row.settings, &row.credential)?;
+        let vendor = self.build(&row)?;
+        // One cheap call before anything is written. Until this existed, a
+        // token with a typo in it and an app that was never created both saved
+        // cleanly and failed hours later, inside a session, as a machine-create
+        // rejection nobody could attribute to the form that caused it.
+        if let Some(refusal) = preflight_refusal(vendor.as_ref()).await {
+            return Err(refusal);
+        }
         self.store.upsert(&row).await?;
-        self.publish(&row)?;
+        self.vendors
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(row.name.clone(), vendor);
         Ok(row)
+    }
+
+    /// Ask a stored vendor's substrate whether it is usable right now.
+    ///
+    /// `Ok(None)` for a name nothing is configured under — the caller's
+    /// mistake, which the route turns into a 404. Every other outcome is a
+    /// result rather than an error, including the substrate saying no: the
+    /// question was answered, and the answer is what was asked for.
+    ///
+    /// A save already refuses a configuration the substrate rejects, so this
+    /// exists for what a save cannot cover — a token revoked, an app deleted,
+    /// or a vendor stored while Fly was down.
+    pub async fn test_named(
+        &self,
+        name: &str,
+    ) -> Result<Option<horsie_models::runtime_vendor::RuntimeVendorTestResult>, VendorConfigError>
+    {
+        use horsie_models::runtime_vendor::RuntimeVendorTestResult as TestResult;
+        let Some(row) = self
+            .store
+            .get(name)
+            .await
+            .map_err(VendorConfigError::Internal)?
+        else {
+            return Ok(None);
+        };
+        // Built from the row rather than read out of the published map: the
+        // stored configuration is what a restart would come up with, and it is
+        // the thing an operator is asking about.
+        let vendor = self.build(&row).map_err(VendorConfigError::Invalid)?;
+        Ok(Some(match vendor.preflight().await {
+            Ok(()) => TestResult {
+                ok: true,
+                error: None,
+            },
+            Err(e) => TestResult {
+                ok: false,
+                error: Some(refusal_message(e)),
+            },
+        }))
     }
 
     /// Forget a vendor and unpublish it.
@@ -673,7 +794,8 @@ impl RuntimeVendorConfigService {
                         memory_mb: fly.memory_mb,
                         volume_size_gb: fly.volume_size_gb,
                     },
-                );
+                )
+                .with_base(self.fly_api_base.clone());
                 Ok(Arc::new(FlyRuntimeVendor::new(
                     row.name.clone(),
                     api,
@@ -752,6 +874,48 @@ mod tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             Arc::new(ConnectedRuntimeRegistry::new()),
         )
+        // Saving a fly vendor now calls the Machines API. Every test that is
+        // not *about* that answer points it at a port nothing listens on, so
+        // the check fails as "unreachable" — instantly, locally, and without a
+        // verdict on the configuration.
+        .with_fly_api_base(crate::testing::UNREACHABLE_FLY_API.to_string())
+    }
+
+    /// A stub Machines API that answers `GET /apps/{app}/machines` with
+    /// `status`, and records what it was asked.
+    async fn fly_stub(status: u16) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::extract::{Path, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+
+        type Seen = Arc<std::sync::Mutex<Vec<String>>>;
+        async fn machines(
+            State((status, seen)): State<(u16, Seen)>,
+            Path(app): Path<String>,
+            headers: HeaderMap,
+        ) -> impl IntoResponse {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            seen.lock().unwrap().push(format!("{app} {auth}"));
+            (
+                StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+                axum::Json(serde_json::json!([])),
+            )
+        }
+
+        let seen: Seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = axum::Router::new()
+            .route("/apps/{app}/machines", axum::routing::get(machines))
+            .with_state((status, seen.clone()));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), seen)
     }
 
     fn empty_map() -> RuntimeVendorMap {
@@ -844,7 +1008,10 @@ mod tests {
 
     fn velos_settings() -> StoredVendorSettings {
         StoredVendorSettings::Velos(StoredVelosSettings {
-            server_url: "http://velos:8080".to_string(),
+            // A port nothing listens on: saving this vendor asks velos who we
+            // are, and a hostname would put a DNS lookup in the middle of a
+            // unit test.
+            server_url: "http://127.0.0.1:1".to_string(),
             image: "ghcr.io/x/runtime:1".to_string(),
             callback_url: "ws://horsie.internal:8080/api/runtime/connect".to_string(),
             ..StoredVelosSettings::default()
@@ -1015,6 +1182,161 @@ mod tests {
         assert!(
             !service.delete("fly").await.unwrap(),
             "delete is idempotent"
+        );
+    }
+
+    /// The finding this whole path exists for: a token with a typo in it and an
+    /// app that was never created both used to save cleanly, and both surfaced
+    /// hours later inside a session as a machine-create rejection.
+    #[tokio::test]
+    async fn a_token_or_an_app_fly_rejects_is_refused_at_save_time() {
+        let db = crate::db::testing::db().await;
+        let (base, seen) = fly_stub(401).await;
+        let vendors = empty_map();
+        let saving = service(vendors.clone(), db.clone()).with_fly_api_base(base);
+
+        let err = saving.save(row()).await.unwrap_err();
+        assert!(
+            err.contains("401") && err.contains("app already exists"),
+            "the refusal has to say what to go and check: {err}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["horsie-runtimes Bearer fly-token".to_string()],
+            "one listing, with the app in the path and the token on it — that is what proves both"
+        );
+        assert!(
+            vendors.read().unwrap().is_empty(),
+            "a refused vendor must not be published"
+        );
+        assert!(
+            service(empty_map(), db).list().await.unwrap().is_empty(),
+            "nor stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vendor_fly_accepts_is_saved() {
+        let db = crate::db::testing::db().await;
+        let (base, _seen) = fly_stub(200).await;
+        let vendors = empty_map();
+        service(vendors.clone(), db)
+            .with_fly_api_base(base)
+            .save(row())
+            .await
+            .unwrap();
+        assert!(vendors.read().unwrap().contains_key("fly"));
+    }
+
+    #[tokio::test]
+    async fn a_vendor_is_still_saved_when_fly_itself_is_down() {
+        // The other half of the rule. A 5xx says nothing about this token or
+        // this app, and an operator locked out of editing their vendors until
+        // someone else's outage ends is a worse failure than an unproved row.
+        let db = crate::db::testing::db().await;
+        let (base, _seen) = fly_stub(503).await;
+        let vendors = empty_map();
+        service(vendors.clone(), db)
+            .with_fly_api_base(base)
+            .save(row())
+            .await
+            .unwrap();
+        assert!(vendors.read().unwrap().contains_key("fly"));
+    }
+
+    #[tokio::test]
+    async fn boot_publishes_a_stored_vendor_without_asking_fly_anything() {
+        // Republishing is not the moment to re-litigate a configuration: a
+        // vendor that failed a check at boot would take its sessions away over
+        // an outage, and every restart would pay a round trip per vendor.
+        let db = crate::db::testing::db().await;
+        let (base, seen) = fly_stub(200).await;
+        service(empty_map(), db.clone())
+            .with_fly_api_base(base.clone())
+            .save(row())
+            .await
+            .unwrap();
+        seen.lock().unwrap().clear();
+
+        let vendors = empty_map();
+        service(vendors.clone(), db)
+            .with_fly_api_base(base)
+            .publish_all()
+            .await;
+        assert!(vendors.read().unwrap().contains_key("fly"));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "publish_all called fly: {:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn testing_a_vendor_reports_what_the_substrate_said() {
+        let db = crate::db::testing::db().await;
+        let (ok_base, _) = fly_stub(200).await;
+        let live = service(empty_map(), db.clone()).with_fly_api_base(ok_base);
+        live.save(row()).await.unwrap();
+        let result = live.test_named("fly").await.unwrap().unwrap();
+        assert!(result.ok && result.error.is_none(), "{result:?}");
+
+        // The case a save cannot cover: the same stored row, a token the
+        // substrate has since stopped accepting.
+        let (bad_base, _) = fly_stub(401).await;
+        let stale = service(empty_map(), db).with_fly_api_base(bad_base);
+        let result = stale.test_named("fly").await.unwrap().unwrap();
+        assert!(!result.ok, "{result:?}");
+        assert!(
+            result.error.unwrap_or_default().contains("401"),
+            "the substrate's own answer is what the operator needs"
+        );
+    }
+
+    #[tokio::test]
+    async fn testing_a_vendor_that_does_not_exist_is_not_a_failed_test() {
+        // Absent is not "unreachable": the route answers 404 for it, and
+        // reporting `ok: false` would have a name nobody configured look like a
+        // vendor with a bad token.
+        let db = crate::db::testing::db().await;
+        assert!(
+            service(empty_map(), db)
+                .test_named("nobody")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_machine_too_small_to_boot_is_refused() {
+        // Not covered by the listing check — machine size only rides a create —
+        // and 256 MB is fly's own floor rather than a guess at a catalogue that
+        // changes without us. There is deliberately no ceiling for the same
+        // reason: any number here would eventually refuse a shape fly is happy
+        // to build.
+        let StoredVendorSettings::Fly(fly) = settings() else {
+            panic!("the fixture is a fly vendor")
+        };
+        let err = validate(
+            &StoredVendorSettings::Fly(StoredFlySettings {
+                memory_mb: 1,
+                ..fly.clone()
+            }),
+            "t",
+        )
+        .unwrap_err();
+        assert!(err.contains("256"), "{err}");
+        assert!(
+            validate(
+                &StoredVendorSettings::Fly(StoredFlySettings {
+                    memory_mb: 256,
+                    cpus: 999,
+                    ..fly
+                }),
+                "t"
+            )
+            .is_ok(),
+            "an unusual cpu count is fly's call to make, not ours"
         );
     }
 
