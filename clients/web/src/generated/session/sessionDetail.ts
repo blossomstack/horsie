@@ -1,6 +1,5 @@
 
 import { AnnotationEntry } from './annotationEntry';
-import { ProgressionEvent } from './progressionEvent';
 import { SessionStatusKind } from './sessionStatusKind';
 import { SubAgentView } from './subAgentView';
 import { UsageView } from './usageView';
@@ -59,11 +58,6 @@ export interface SessionDetail {
    * tree. Each is addressable at `/sessions/:id/agents/:agent_id`.
    */
   agents: SubAgentView[];
-  /**
-   * The resource-preparation stage a turn is currently at, when one is
-   * spinning up. Live-only history: past stages are not replayable.
-   */
-  progression?: ProgressionEvent;
   /**
    * The workflow this session is a run of, if it is one. Decides which view
    * the page renders: a run has a graph rather than a conversation.

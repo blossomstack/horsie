@@ -756,6 +756,7 @@ impl EventSourcedActor for SessionActor {
     fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
         match event {
             SessionDomainEvent::ProvisioningStarted { .. }
+            | SessionDomainEvent::ProvisioningProgress { .. }
             | SessionDomainEvent::ProvisioningSucceeded { .. }
             | SessionDomainEvent::ProvisioningFailed { .. } => {
                 RuntimeLifecycle::apply(&mut state, &event)

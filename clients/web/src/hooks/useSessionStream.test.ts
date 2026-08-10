@@ -171,6 +171,37 @@ describe("fold", () => {
     expect(failed.reason).toBe("vendor offline");
   });
 
+  // What the vendor said, carried all the way through. The server has always
+  // had these words — "the machine is booting" — and used to drop them at the
+  // runtime manager, so a provisioning session reported a stage and nothing
+  // else for as long as the machine took to come up.
+  it("carries the vendor's own words through both sources of a wait", () => {
+    reset();
+    const provisioning = fold([
+      lifecycle("Runtime", {
+        status: { kind: "Acquiring", value: {} },
+        detail: "the machine is booting",
+      }),
+    ]);
+    expect(provisioning.progression).toEqual({
+      stage: "runtime_acquiring",
+      detail: "the machine is booting",
+    });
+
+    reset();
+    const acquiring = fold([
+      lifecycle("TurnBegan", { consumed: [], answered: [] }),
+      lifecycle("Preparing", {
+        stage: "acquiring_runtime",
+        detail: "the machine is resuming",
+      }),
+    ]);
+    expect(acquiring.progression).toEqual({
+      stage: "acquiring_runtime",
+      detail: "the machine is resuming",
+    });
+  });
+
   // The server used to send these facts twice: once as a typed entry nothing
   // read, and once as a free-text `Provisioning` entry built for display. It now
   // sends only the typed one, so the progress line is derived here.

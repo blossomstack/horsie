@@ -1350,3 +1350,106 @@ pub(super) async fn a_run_with_a_step_in_flight() -> (
     wait_for_run(&journal, id, |r| r.current().is_some()).await;
     (f, session, id, journal)
 }
+
+/// A substrate that has to boot something, and says so.
+///
+/// No websocket-backed fake can stand in for one: a `horsie connect` link only
+/// ever answers once its runtime is already up, which is exactly the case with
+/// nothing to narrate. This is the other case — the one every cloud vendor in
+/// the tree is — where the words are the only thing a person waiting has.
+pub(super) struct BootingVendor;
+
+/// The words this vendor uses, named so a test asserts on the same string the
+/// vendor produced rather than on a copy of it.
+pub(super) const BOOTING_CREATE: &str = "the machine is booting";
+pub(super) const BOOTING_ACQUIRE: &str = "the machine is resuming";
+
+#[derive(Debug)]
+pub(super) struct StubHandle;
+
+#[async_trait]
+impl crate::runtime_vendor::RuntimeHandle for StubHandle {
+    fn id(&self) -> &str {
+        "stub"
+    }
+    async fn relay(
+        &self,
+        _: horsie_models::runtime::RuntimeInboundMessage,
+    ) -> Result<horsie_models::runtime::RuntimeOutboundMessage, horsie_runtime_host::TransportError>
+    {
+        Err(horsie_runtime_host::TransportError::Disconnected)
+    }
+    async fn relay_oneway(
+        &self,
+        _: horsie_models::runtime::RuntimeInboundMessage,
+    ) -> Result<(), horsie_runtime_host::TransportError> {
+        Ok(())
+    }
+    async fn closed(&self) {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[async_trait]
+impl crate::runtime_vendor::RuntimeVendor for BootingVendor {
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+        horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+            supports_provisioning: true,
+        }
+    }
+    async fn create(
+        &self,
+        _: &str,
+        _: &horsie_models::runtime_vendor::RuntimeSpec,
+        _: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, crate::runtime_vendor::RuntimeVendorError>
+    {
+        Ok(horsie_runtime_host::RuntimeProgress::Starting {
+            detail: BOOTING_CREATE.into(),
+        })
+    }
+    /// `Starting` first and the outcome on the sink, per the vendor contract —
+    /// which is what makes this the acquisition a person waits through.
+    async fn get(
+        &self,
+        runtime_id: &str,
+        _: &horsie_models::runtime_vendor::RuntimeSpec,
+        progress: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, crate::runtime_vendor::RuntimeVendorError>
+    {
+        let id = runtime_id.to_string();
+        // Spawned after the return value is built, per the ordering rule.
+        tokio::spawn(async move {
+            let _ = progress
+                .send(horsie_runtime_host::RuntimeEvent {
+                    runtime_id: id,
+                    progress: horsie_runtime_host::RuntimeProgress::Ready(Arc::new(StubHandle)),
+                })
+                .await;
+        });
+        Ok(horsie_runtime_host::RuntimeProgress::Starting {
+            detail: BOOTING_ACQUIRE.into(),
+        })
+    }
+    async fn hibernate(
+        &self,
+        _: &str,
+        _: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, crate::runtime_vendor::RuntimeVendorError>
+    {
+        Ok(horsie_runtime_host::RuntimeProgress::Stopped)
+    }
+    async fn delete(
+        &self,
+        _: &str,
+        _: horsie_runtime_host::RuntimeProgressSink,
+    ) -> Result<horsie_runtime_host::RuntimeProgress, crate::runtime_vendor::RuntimeVendorError>
+    {
+        Ok(horsie_runtime_host::RuntimeProgress::Gone {
+            reason: "deleted".into(),
+        })
+    }
+}

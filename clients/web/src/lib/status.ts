@@ -87,6 +87,44 @@ export function statusMeta(
   return META[status] ?? UNKNOWN_STATUS;
 }
 
+/** Friendly label for a progression stage.
+ *
+ * The keys are the server's own stage vocabulary, and there are two sources of
+ * it: a `Preparing` entry carries the stage the context provider named
+ * (`acquiring_runtime`, `scanning_workspace`, `connecting_tools`, `ready`),
+ * while a `Runtime` entry is folded into `runtime_<status>`. Both sit in this
+ * one map because both land in the same line on screen — and a key that is in
+ * neither vocabulary is how the whole provisioning wait came to render as
+ * "runtime acquiring…".
+ *
+ * Unknown stages still fall back to a de-slugged form, so a stage added
+ * server-side reads sensibly before this map hears about it. */
+export function progressionLabel(stage: string): string {
+  const known: Record<string, string> = {
+    // The session's sandbox.
+    runtime_acquiring: "Starting runtime…",
+    runtime_failed: "Runtime failed",
+    // This turn's setup.
+    acquiring_runtime: "Starting runtime…",
+    scanning_workspace: "Scanning workspace…",
+    connecting_tools: "Connecting tools…",
+  };
+  return known[stage] ?? `${stage.replace(/_/g, " ")}…`;
+}
+
+/** Stages that have settled: the wait is over and there is nothing to report.
+ *
+ * Both ends of it, which is the fix — a turn's setup finishing (`ready`) and
+ * the sandbox coming up (`runtime_ready`) are the same non-news said by the two
+ * different sources, and only the first was ever hidden. The second sat above
+ * the composer as a lamp and the words "runtime ready…" until a turn began. */
+const SETTLED = new Set(["ready", "runtime_ready"]);
+
+/** Whether a stage is worth a line on screen. */
+export function showsProgression(stage: string | undefined): boolean {
+  return stage !== undefined && !SETTLED.has(stage);
+}
+
 export const TONE_TEXT: Record<StatusTone, string> = {
   live: "text-amber-ink",
   ready: "text-lamp-ok",

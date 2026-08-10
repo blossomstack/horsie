@@ -61,6 +61,10 @@ pub enum LifecycleCommand {
     /// keeps "provisioned exactly once" true without any bookkeeping beyond the
     /// status the journal already carries.
     Provision,
+    /// Internal: the detached create has word of the runtime it asked for —
+    /// "the machine is booting" — before it has an outcome. The vendor's own
+    /// sentence, carried unedited, because it is what the user is shown.
+    NarrateProvisioning { detail: String },
     /// Internal: the detached create finished. Carries the vendor's own error
     /// rather than a summary, because that string is what the user is shown.
     FinishProvisioning {
@@ -256,6 +260,17 @@ pub enum SessionDomainEvent {
     /// is safe to re-attempt precisely because no turn can have run under it.
     ProvisioningStarted {
         at_ms: u64,
+    },
+    /// What the vendor said about a create still in flight, in its own words.
+    ///
+    /// Narration, and the only variant here that decides nothing: the status is
+    /// settled by the three facts around it. It exists because a create is a
+    /// wait a person sits through, and "provisioning" on its own does not say
+    /// whether a machine is booting, resuming, or has been queued behind a
+    /// substrate that is out of capacity.
+    ProvisioningProgress {
+        at_ms: u64,
+        detail: String,
     },
     /// The vendor confirmed the runtime. The session becomes ordinary here,
     /// and whatever queued behind the create starts.
