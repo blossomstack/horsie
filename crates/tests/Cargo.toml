@@ -15,7 +15,7 @@ horsie-runtime-host = { path = "../runtime-host", features = ["test-util"] }
 horsie-agentcore = { path = "../agentcore", features = ["test-util"] }
 horsie-llm-providers = { path = "../llm-providers" }
 horsie-server = { path = "../server", features = ["test-util"] }
-horsie-actor = { path = "../actor" }
+horsie-actor = { workspace = true }
 horsie-models = { path = "../models" }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-util  = { workspace = true }

@@ -25,6 +25,13 @@ futures-util      = "0.3"
 uuid              = { version = "1", features = ["v4", "v5", "serde"] }
 rand              = "0.10"
 argon2            = "0.5"
+# The event-sourced actor runtime the session and agent trees are built on. It
+# used to live at `crates/actor`; it is domain-free, so it was moved out to
+# github.com/blossomstack/horsie-actor and is consumed by version like any other
+# third-party crate. Declared here rather than per-crate so both consumers move
+# in lockstep — two members on different versions would be two incompatible
+# `Journal` traits.
+horsie-actor      = "0.2"
 # Protocol modules are opt-in per crate: `anthropic`, `openai`, `responses`,
 # `mock`. TLS is picked here so every member links the same reqwest backend.
 async-llm         = { version = "0.10.0", default-features = false, features = ["rustls"] }

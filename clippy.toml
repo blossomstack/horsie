@@ -7,6 +7,11 @@
 # The owning actor still has to call this, so it is an opt-out rather than a
 # ban: write `#[expect(clippy::disallowed_methods, reason = "...")]` at the call
 # site, and the justification shows up in the diff next to it.
+#
+# The path still resolves now that the crate lives in its own repo
+# (github.com/blossomstack/horsie-actor) rather than at `crates/actor`: the crate
+# name did not change, and clippy.toml is per-workspace, so this rule binds
+# horsie's own code and never the dependency's.
 disallowed-methods = [
     { path = "horsie_actor::Journal::replay", reason = "read a journal through the actor that owns it" },
 ]
