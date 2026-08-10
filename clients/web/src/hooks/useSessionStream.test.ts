@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SessionStatusKind, type AgentLogEntry } from "../api/types";
-import { fold } from "./useSessionStream";
+import { fold, liveEchoes } from "./useSessionStream";
 
 /// The client owns a fold that must agree with the server's. That duplication
 /// is the price of having one source instead of two, and these are what keep it
@@ -213,6 +213,16 @@ describe("fold", () => {
     expect(f.reason).toBe("vendor refused");
   });
 
+  it("remembers an accepted id after the turn that drained it", () => {
+    reset();
+    const f = fold([
+      lifecycle("MessageQueued", { id: "m1", text: "one" }),
+      lifecycle("TurnBegan", { consumed: ["m1"], answered: [] }),
+    ]);
+    expect(f.queued).toEqual([]);
+    expect([...f.accepted]).toEqual(["m1"]);
+  });
+
   it("ignores entries that are not lifecycle", () => {
     reset();
     const f = fold([
@@ -226,5 +236,38 @@ describe("fold", () => {
       } as unknown as AgentLogEntry,
     ]);
     expect(f.status).toBeNull();
+  });
+});
+
+/// The local echo of a message this tab sent. Retiring it on the *parked* queue
+/// left one permanent grey duplicate per message, because an idle session
+/// queues and drains in the same breath and the send's own response — the only
+/// thing that tells the echo its server id — lands after both.
+describe("liveEchoes", () => {
+  const echo = (id: string, serverId?: string) => ({ id, text: id, serverId });
+
+  it("keeps an echo the server has not acknowledged", () => {
+    expect(liveEchoes(new Set(), [echo("optim-0")])).toHaveLength(1);
+  });
+
+  it("keeps an echo whose send was acknowledged before the log said so", () => {
+    // The 202 beat the SSE frame: the server has the message, but this tab's
+    // log does not mention it yet, so the echo is still the only copy.
+    expect(liveEchoes(new Set(), [echo("optim-0", "m1")])).toHaveLength(1);
+  });
+
+  it("retires an echo the queue is still holding", () => {
+    reset();
+    const f = fold([lifecycle("MessageQueued", { id: "m1", text: "one" })]);
+    expect(liveEchoes(f.accepted, [echo("optim-0", "m1")])).toEqual([]);
+  });
+
+  it("retires an echo of a message already drained into a turn", () => {
+    reset();
+    const f = fold([
+      lifecycle("MessageQueued", { id: "m1", text: "one" }),
+      lifecycle("TurnBegan", { consumed: ["m1"], answered: [] }),
+    ]);
+    expect(liveEchoes(f.accepted, [echo("optim-0", "m1")])).toEqual([]);
   });
 });
