@@ -126,6 +126,9 @@ impl McpStore {
         if url.is_empty() {
             return Err("MCP server url cannot be empty".into());
         }
+        // This was the whole of the URL validation: one `is_empty`. The server
+        // then dialled whatever it was given.
+        horsie_support::remote_url::check_fetch_url(url)?;
         let existing = self.get(name).await?;
         let auth = auth_from_input(&input.auth, existing.as_ref());
         let now = now_secs().to_string();
@@ -434,6 +437,30 @@ mod tests {
             auth: McpAuthInput::Bearer(McpBearerInput {
                 token: token.map(str::to_string),
             }),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_url_the_server_will_not_dial_is_refused_at_the_store() {
+        let (s, _t) = store().await;
+        let with_url = |url: &str| McpServerInput {
+            name: "x".into(),
+            url: url.into(),
+            auth: McpAuthInput::None(McpNoAuth {}),
+        };
+        for url in ["not a url", "file:///etc/passwd", "ftp://example.com/x"] {
+            assert!(
+                s.upsert(&with_url(url)).await.is_err(),
+                "{url} should be refused"
+            );
+        }
+        // A LAN or loopback MCP server stays configurable — deliberately, see
+        // `horsie_support::remote_url`.
+        for url in ["http://localhost:3000/mcp", "http://192.168.1.9:8080/mcp"] {
+            assert!(
+                s.upsert(&with_url(url)).await.is_ok(),
+                "{url} must stay configurable"
+            );
         }
     }
 
