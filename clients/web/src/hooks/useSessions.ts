@@ -234,6 +234,10 @@ export function useSendMessage() {
   return useMutation({
     mutationFn: ({ id, text }: { id: string; text: string }) =>
       api.sessions.send(id, text),
+    // The session view renders a failed send inline, right above the composer
+    // that produced it. Without this the global notice reported it a second
+    // time, in a corner, in the same words.
+    meta: { inlineError: true },
     onMutate: ({ id, text }) => applyOptimisticTitle(client, id, text),
   });
 }

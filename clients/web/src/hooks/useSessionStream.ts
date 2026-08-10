@@ -465,7 +465,19 @@ export function useSessionStream(
 
     const es = new EventSource(api.messagesUrl(sessionId, agentId));
     es.onopen = () => dispatch({ kind: "connected", value: true });
-    es.onerror = () => dispatch({ kind: "connected", value: false });
+    es.onerror = () => {
+      dispatch({ kind: "connected", value: false });
+      // A closed `EventSource` is not reconnecting — the browser gives up for
+      // good on a non-200, which is what a deleted session answers with. Left
+      // alone the panel sat on "Reconnecting… replays anything missed" forever
+      // over a session that was gone. Re-ask whether it exists and let the
+      // answer decide what to draw; a reset rather than an invalidation
+      // because a refetch that fails *over* cached data is not an error state,
+      // and the cached copy is exactly what is no longer true.
+      if (es.readyState === EventSource.CLOSED) {
+        void queryClient.resetQueries({ queryKey: qk.session(sessionId) });
+      }
+    };
     es.onmessage = (e: MessageEvent<string>) => {
       try {
         dispatch({ kind: "frame", frame: JSON.parse(e.data) as MessageFrame });
@@ -474,7 +486,7 @@ export function useSessionStream(
       }
     };
     return () => es.close();
-  }, [sessionId, agentId]);
+  }, [sessionId, agentId, queryClient]);
 
   // Re-read the documents when a turn boundary passes. Only the numbers live
   // there now — usage, context size — plus the task list, which is compared by

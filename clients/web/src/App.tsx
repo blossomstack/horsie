@@ -3,6 +3,7 @@ import {
   QueryClient,
   QueryClientProvider,
 } from "@tanstack/react-query";
+import { ApiRequestError } from "./api/client";
 import { pushMutationError } from "./api/mutationErrors";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { MutationErrors } from "./components/MutationErrors";
@@ -56,7 +57,16 @@ const client = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 5_000,
-      retry: 1,
+      // One retry, but never against an answer. A 4xx is the server saying it
+      // understood and refused; asking again cannot change it, and doing so
+      // turned every dead session id into a burst of repeated 404s behind a
+      // page that had already decided to render as if nothing were wrong.
+      retry: (count, error) =>
+        !(
+          error instanceof ApiRequestError &&
+          error.status >= 400 &&
+          error.status < 500
+        ) && count < 1,
       refetchOnWindowFocus: false,
     },
   },
