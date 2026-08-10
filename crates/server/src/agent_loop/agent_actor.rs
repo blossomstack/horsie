@@ -341,6 +341,17 @@ pub enum AgentDomainEvent {
         context_tokens: u32,
         at_ms: u64,
     },
+    /// A run that ended badly, and what it had spent by then.
+    ///
+    /// The accounting half of `RunComplete` without the turn half: no turn
+    /// completed, so there is no `last_turn_usage` to set and no iteration count
+    /// worth recording. Exactly one of the two ends a run, so folding both into
+    /// `usage_total` cannot double-count.
+    RunAborted {
+        usage: Usage,
+        context_tokens: u32,
+        at_ms: u64,
+    },
     RunCancelled {
         at_ms: u64,
     },
@@ -1462,6 +1473,16 @@ impl AgentActor {
                 }
             }
             RunOutcome::Cancelled => {
+                // The tokens were spent whatever became of the turn that spent
+                // them, and `RunAborted` has already landed — the sink awaits
+                // each coarse write before `RunFinished` is told — so the total
+                // read here is the one that includes them.
+                parent
+                    .deliver(AgentOutcome::UsageRecorded {
+                        session_id,
+                        usage_total: state.usage_total,
+                    })
+                    .await;
                 // A cancelled tool call has no result and never will get one.
                 // Journal the synthetic result now, where it belongs — directly
                 // after the assistant message that made the call — rather than
@@ -1498,6 +1519,12 @@ impl AgentActor {
                 CommandEffect::persist(events).and_snapshot()
             }
             RunOutcome::Failed { error, recoverable } => {
+                parent
+                    .deliver(AgentOutcome::UsageRecorded {
+                        session_id,
+                        usage_total: state.usage_total,
+                    })
+                    .await;
                 parent
                     .deliver(AgentOutcome::Failed {
                         session_id,
@@ -1870,6 +1897,14 @@ impl EventSourcedActor for AgentActor {
                 state.usage_total.add(&usage);
                 state.context_tokens = context_tokens;
                 state.last_turn_usage = Some(usage);
+            }
+            AgentDomainEvent::RunAborted {
+                usage,
+                context_tokens,
+                ..
+            } => {
+                state.usage_total.add(&usage);
+                state.context_tokens = context_tokens;
             }
             AgentDomainEvent::RunCancelled { .. } => {}
         }
@@ -2456,6 +2491,11 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             context_tokens: ev.context_tokens,
             at_ms: ev.at_ms,
         }),
+        AgentEvent::RunAborted(ev) => Some(AgentDomainEvent::RunAborted {
+            usage: ev.usage.clone(),
+            context_tokens: ev.context_tokens,
+            at_ms: ev.at_ms,
+        }),
         AgentEvent::InputMessage(_)
         | AgentEvent::MessageStart(_)
         | AgentEvent::MessageStop(_)
@@ -2700,7 +2740,13 @@ async fn run_with_retries(
                 // Whether the failed attempt already wrote something durable.
                 // `PersistSink` journals exactly the events `coarse_event` maps,
                 // so this is the same test it applied — no proxy, no guessing.
-                let journaled = captured.iter().any(|ev| coarse_event(ev).is_some());
+                // `RunAborted` is the exception: it is written *by* this
+                // failure rather than by anything the attempt achieved, so
+                // counting it would make every transient error look like
+                // partial progress and no attempt would ever be retried.
+                let journaled = captured.iter().any(|ev| {
+                    !matches!(ev, AgentEvent::RunAborted(_)) && coarse_event(ev).is_some()
+                });
                 // Three independent conditions, all required:
                 //
                 // 1. Budget remains.
@@ -4422,6 +4468,38 @@ mod tests {
         assert_eq!(state.usage_total.output_tokens, 8);
     }
 
+    /// A run that was cancelled or failed still spent what it spent. It used to
+    /// bank nothing at all: `usage_total` only advanced on `RunComplete`, which
+    /// an aborted run never emits, so an interrupted workflow step reported
+    /// `0 tokens` after burning provider turns.
+    #[test]
+    fn an_aborted_run_banks_what_it_spent() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunComplete {
+                at_ms: 0,
+                usage: Usage::without_cache(10, 5),
+                iterations: 1,
+                context_tokens: 10,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::RunAborted {
+                at_ms: 1,
+                usage: Usage::without_cache(7, 3),
+                context_tokens: 7,
+            },
+        );
+        assert_eq!(state.usage_total.input_tokens, 17);
+        assert_eq!(state.usage_total.output_tokens, 8);
+        assert_eq!(state.context_tokens, 7);
+        // No turn completed, so the last *completed* turn is still the first
+        // one — an aborted run has no turn usage to report.
+        assert_eq!(state.last_turn_usage.as_ref().unwrap().input_tokens, 10);
+    }
+
     #[test]
     fn run_complete_tracks_last_turn_and_context_tokens_separately_from_total() {
         let mut state = AgentActor::initial_state();
@@ -4666,6 +4744,24 @@ mod retry_tests {
             "got {outcome:?}"
         );
         assert_eq!(calls, 2, "the transient failure should have been retried");
+    }
+
+    /// The accounting event a failed attempt writes must not be mistaken for
+    /// progress. It is written *by* the failure, so counting it as "something
+    /// durable was written" would suppress every retry there is.
+    #[tokio::test]
+    async fn a_runs_own_accounting_does_not_count_as_journaled_progress() {
+        let provider = MockProvider::scripted(Script::of([
+            Err(LlmError::Overloaded),
+            Err(LlmError::Overloaded),
+            Ok(text_response("third time lucky")),
+        ]));
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 2).await;
+        assert!(
+            matches!(outcome, RunOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(calls, 3, "both transient failures should have been retried");
     }
 
     #[tokio::test]

@@ -44,6 +44,19 @@ struct ToolCompleteEvent  { message_id: String, tool_call_id: String, output: St
 /// `at_ms` is the unix-epoch millisecond the run finished.
 struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, context_tokens: u32, at_ms: u64 }
 
+/// A run that ended badly — cancelled, or failed anywhere in the loop. The
+/// tokens it spent were spent whatever became of it, so `usage` and
+/// `context_tokens` mean exactly what they do on `RunCompleteEvent`. Both are
+/// zero for a run cancelled before its first provider call answered.
+///
+/// Exactly one of `RunComplete` and `RunAborted` ends a run, never both, so a
+/// reader may add either one's `usage` to a running total without
+/// double-counting. A *turn* retried after a transient provider failure is
+/// several runs and reports each — which is the truth, since each one called
+/// the provider. Unlike `RunComplete` this says nothing about a turn, because
+/// no turn completed.
+struct RunAbortedEvent { message_id: String, usage: Usage, context_tokens: u32, at_ms: u64 }
+
 /// All events emitted during agent execution.
 ///
 /// Flow per assistant turn:
@@ -54,7 +67,7 @@ struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, con
 ///       ThinkingBlockStart → (ThinkingChunk | ThinkingSignatureChunk)* → ContentBlockStop
 ///       ToolCallStart      → ToolCallInputDelta*                     → ContentBlockStop
 ///   ToolExecuting → ToolComplete  (one pair per tool call)
-///   RunComplete
+///   RunComplete   (or RunAborted, if the run ended in an error instead)
 #[type_tag = "type"]
 union AgentEvent {
     InputMessage(InputMessageEvent),
@@ -72,4 +85,5 @@ union AgentEvent {
     ToolExecuting(ToolExecutingEvent),
     ToolComplete(ToolCompleteEvent),
     RunComplete(RunCompleteEvent),
+    RunAborted(RunAbortedEvent),
 }
