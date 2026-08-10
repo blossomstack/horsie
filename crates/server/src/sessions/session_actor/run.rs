@@ -22,9 +22,9 @@ use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
+use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
 use serde_json::Value;
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// WorkflowRun.
@@ -35,7 +35,7 @@ impl WorkflowRun {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: RunCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             RunCommand::State { reply } => {
@@ -69,7 +69,7 @@ impl SessionActor {
         &mut self,
         start: StepStart,
         state: &SessionState,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> Vec<SessionDomainEvent> {
         let StepStart {
             index,
@@ -155,8 +155,8 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         index: u32,
-        reply: oneshot::Sender<Result<(), String>>,
-        ctx: &ActorContext<Self>,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let Some(run) = state.run.as_ref() else {
             let _ = reply.send(Err("this session is not a workflow run".into()));
@@ -223,7 +223,7 @@ impl SessionActor {
         state: &SessionState,
         index: u32,
         end: TurnEnd,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         let (events, advance) = match end {
             TurnEnd::Concluded { output } => (
@@ -291,7 +291,7 @@ impl SessionActor {
     /// step so it roots its own subagent tree.
     pub(super) fn spawn_step_agent(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionCommand>,
         state: &SessionState,
         agent_id: Uuid,
         step_name: &str,
@@ -615,16 +615,14 @@ mod tests {
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = horsie_actor::spawn_root(
-            SessionActor::new(
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -780,16 +778,14 @@ mod tests {
         .collect();
         journal.persist(&pid, &events).await.unwrap();
 
-        let _session = horsie_actor::spawn_root(
-            SessionActor::new(
+        let _session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
 
         let run = wait_for_run(&journal, id, |r| {
             r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended
@@ -839,16 +835,14 @@ mod tests {
             workflow: "fix-bug".into(),
         };
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
-        let reloaded = horsie_actor::spawn_root(
-            SessionActor::new(
+        let reloaded =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
 
         let log = reloaded
             .ask(|reply| {

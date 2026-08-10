@@ -18,7 +18,7 @@ use crate::plugins::ArtifactStore;
 use crate::sessions::spec::ServerDeps;
 use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
-use horsie_actor::{ActorRef, Journal, spawn_root};
+use horsie_actor::{ActorRef, ActorSystem, Journal};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::session::GlobalSessionEvent;
 use horsie_models::settings::ServerInfo;
@@ -204,15 +204,12 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 
     let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
-    let supervisor = spawn_root(
-        SessionSupervisor::with_config(
-            user.clone(),
-            deps,
-            global_events.clone(),
-            shared.supervisor.clone(),
-        ),
-        journal,
-    );
+    let supervisor = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+        user.clone(),
+        deps,
+        global_events.clone(),
+        shared.supervisor.clone(),
+    ));
 
     // Destroy substrate left over from sessions that no longer exist. Deleting a
     // session already tells its vendor; this covers the case where the vendor
@@ -284,7 +281,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 pub struct UserRegistry {
     shared: Arc<Shared>,
     /// The `OnceCell` is load-bearing, not tidiness. Two concurrent first
-    /// requests that each ran `build_user` would `spawn_root` two
+    /// requests that each ran `build_user` would `ActorSystem` two
     /// `SessionSupervisor`s on one persistence id — two event-sourced actors
     /// writing one journal. The write lock is taken only to insert the empty
     /// cell, so the build itself never runs under it.

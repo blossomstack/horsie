@@ -47,7 +47,7 @@ pub async fn health() -> impl IntoResponse {
 /// Ask the supervisor a question, mapping a closed mailbox to a 500.
 pub(crate) async fn ask<T, F>(state: &crate::users::UserServices, make: F) -> Result<T, Api>
 where
-    F: FnOnce(tokio::sync::oneshot::Sender<T>) -> SessionSupervisorCommand,
+    F: FnOnce(horsie_actor::ReplyTo<T>) -> SessionSupervisorCommand,
     T: Send + 'static,
 {
     state

@@ -14,6 +14,7 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::agent_loop::UsageTotal;
+use crate::sessions::session_actor::SessionCommand;
 use horsie_actor::ActorContext;
 
 /// Reads.
@@ -24,7 +25,7 @@ impl Reads {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: ReadCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             ReadCommand::ReadLog {
@@ -232,16 +233,14 @@ mod tests {
         );
         let counting = Arc::new(CountingJournal::new());
         let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
-        let session = horsie_actor::spawn_root(
-            SessionActor::new(
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
 
         // Drive one turn so both actors are loaded and have history.
         session

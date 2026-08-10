@@ -240,7 +240,7 @@ impl Toolbox for SubAgentToolbox {
 mod tests {
     use super::*;
     use horsie_actor::{
-        ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId, spawn_root,
+        ActorContext, ActorSystem, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
     };
     use horsie_agentcore::EmptyToolbox;
     use serde::{Deserialize, Serialize};
@@ -273,7 +273,7 @@ mod tests {
             &mut self,
             _state: &Empty,
             cmd: SessionCommand,
-            _ctx: &mut ActorContext<Self>,
+            _ctx: &mut ActorContext<SessionCommand>,
         ) -> CommandEffect<()> {
             match cmd {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn { reply, .. }) => {
@@ -296,10 +296,8 @@ mod tests {
     }
 
     fn with_catalog(spawn_result: Result<Uuid, String>, catalog: AgentCatalog) -> SubAgentToolbox {
-        let session = spawn_root(
-            StubSession { spawn_result },
-            Arc::new(InMemoryJournal::new()),
-        );
+        let session = ActorSystem::new(Arc::new(InMemoryJournal::new()))
+            .spawn_persistent(StubSession { spawn_result });
         SubAgentToolbox::new(
             Arc::new(EmptyToolbox),
             session,

@@ -194,7 +194,7 @@ pub(crate) mod tests {
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{ServerDeps, SessionSpec};
     use crate::sessions::supervisor::SessionSupervisor;
-    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
     use horsie_models::routines::{EverySchedule, ManualSchedule, RoutineSchedule};
     use std::collections::HashMap;
     use std::time::Duration;
@@ -238,9 +238,8 @@ pub(crate) mod tests {
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = tokio::sync::broadcast::channel(64);
-        let supervisor = spawn_root(
+        let supervisor = ActorSystem::new(journal.clone()).spawn_persistent(
             SessionSupervisor::new(crate::auth::UserId::bootstrap(), deps, gtx),
-            journal.clone(),
         );
         let runner = Arc::new(RoutineRunner::new(
             f.routines.clone(),

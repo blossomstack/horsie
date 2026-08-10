@@ -137,7 +137,7 @@ impl EventSourcedActor for DeafSupervisor {
         &mut self,
         (): &(),
         _cmd: SessionSupervisorCommand,
-        _ctx: &mut ActorContext<Self>,
+        _ctx: &mut ActorContext<SessionSupervisorCommand>,
     ) -> CommandEffect<()> {
         CommandEffect::none()
     }
@@ -146,10 +146,8 @@ impl EventSourcedActor for DeafSupervisor {
 /// The frame channel a supervisor would hand the actor. Owned by the test,
 /// exactly as the real one is owned by the supervisor rather than the actor.
 pub(super) fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
-    horsie_actor::spawn_root(
-        DeafSupervisor,
-        Arc::new(horsie_actor::InMemoryJournal::new()),
-    )
+    horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new()))
+        .spawn_persistent(DeafSupervisor)
 }
 
 pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
@@ -251,16 +249,14 @@ pub(super) async fn spawn_session_with_provider(
         .insert("mock".to_string(), provider);
     let parent = spawn_deaf_supervisor();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
+    let session =
+        horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
             id,
             actor_spec_fixture(),
             f.deps.clone(),
             parent,
             crate::sessions::Positions::default(),
-        ),
-        journal.clone(),
-    );
+        ));
     (f, session, id, journal)
 }
 
@@ -352,16 +348,14 @@ pub(super) async fn spawn_run_with_provider(
         .insert("mock".to_string(), provider);
     let parent = spawn_deaf_supervisor();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
+    let session =
+        horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
             id,
             spec,
             f.deps.clone(),
             parent,
             crate::sessions::Positions::default(),
-        ),
-        journal.clone(),
-    );
+        ));
     (f, session, id, journal)
 }
 
@@ -455,16 +449,14 @@ pub(super) fn spawn_unprovisioned(
     id: Uuid,
 ) -> (ActorRef<SessionCommand>, Arc<dyn horsie_actor::Journal>) {
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
+    let session =
+        horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
             id,
             actor_spec_fixture(),
             f.deps.clone(),
             spawn_deaf_supervisor(),
             crate::sessions::Positions::default(),
-        ),
-        journal.clone(),
-    );
+        ));
     (session, journal)
 }
 
@@ -866,16 +858,14 @@ pub(super) async fn stop_harness_full(
         Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
     );
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
+    let session =
+        horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
             id,
             actor_spec_fixture(),
             f.deps.clone(),
             spawn_deaf_supervisor(),
             crate::sessions::Positions::default(),
-        ),
-        journal.clone(),
-    );
+        ));
     (f, session, prompts, id, journal)
 }
 
@@ -1065,16 +1055,16 @@ pub(super) async fn catalog_harness_with(
         "mock".to_string(),
         Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>,
     );
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            spawn_deaf_supervisor(),
-            crate::sessions::Positions::default(),
-        ),
-        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
-    );
+    let session = horsie_actor::ActorSystem::new(
+        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>
+    )
+    .spawn_persistent(SessionActor::new(
+        id,
+        actor_spec_fixture(),
+        f.deps.clone(),
+        spawn_deaf_supervisor(),
+        crate::sessions::Positions::default(),
+    ));
     (f, session, id)
 }
 
@@ -1168,16 +1158,16 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
         "mock".to_string(),
         Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
     );
-    let session = horsie_actor::spawn_root(
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            spawn_deaf_supervisor(),
-            crate::sessions::Positions::default(),
-        ),
-        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>,
-    );
+    let session = horsie_actor::ActorSystem::new(
+        Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>
+    )
+    .spawn_persistent(SessionActor::new(
+        id,
+        actor_spec_fixture(),
+        f.deps.clone(),
+        spawn_deaf_supervisor(),
+        crate::sessions::Positions::default(),
+    ));
     drop(prompts);
     (f, session, id)
 }

@@ -23,7 +23,9 @@ use crate::sessions::spec::{
     ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
 };
 use async_trait::async_trait;
-use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
+use horsie_actor::{
+    ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
+};
 use horsie_models::session::{
     GlobalSessionEvent, GlobalSessionStatusEvent, GlobalSessionTitleEvent,
 };
@@ -71,18 +73,18 @@ pub enum SessionSupervisorCommand {
         spec: SessionSpec,
         /// Unix epoch millis (supplied by the caller for deterministic tests).
         created_at: u64,
-        reply: oneshot::Sender<SessionId>,
+        reply: ReplyTo<SessionId>,
     },
     /// List every known session. `status` is `None` for one that is not loaded.
     List {
-        reply: oneshot::Sender<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
+        reply: ReplyTo<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
     },
     /// Fetch one session's row and the state its actor recovered. Loads the
     /// session: its journal is the truth, and the actor is the only thing that
     /// reads it.
     Get {
         id: SessionId,
-        reply: oneshot::Sender<Option<(SessionRecord, Option<SessionSnapshot>)>>,
+        reply: ReplyTo<Option<(SessionRecord, Option<SessionSnapshot>)>>,
     },
     /// Route a user message to one of the session's agents, loading the session
     /// if necessary. `agent_id` absent or `"main"` for the primary agent, else a
@@ -94,17 +96,17 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         agent_id: Option<String>,
         text: String,
-        reply: oneshot::Sender<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<String, UserMessageError>>,
     },
     /// Cancel the session's turn in flight.
     Stop {
         id: SessionId,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: ReplyTo<Result<(), String>>,
     },
     /// Delete a session; the vendor decides its runtime's fate.
     Delete {
         id: SessionId,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: ReplyTo<Result<(), String>>,
     },
     /// Read forward from a cursor in one of a session's agent logs. `agent_id`
     /// selects the agent: absent or `"main"` for the primary agent, else a
@@ -114,7 +116,7 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         agent_id: Option<String>,
         after: Option<crate::agent_loop::Cursor>,
-        reply: oneshot::Sender<Option<crate::agent_loop::ReadOutcome>>,
+        reply: ReplyTo<Option<crate::agent_loop::ReadOutcome>>,
     },
     /// Read a window backwards from a cursor — scroll-back.
     PageLog {
@@ -122,36 +124,36 @@ pub enum SessionSupervisorCommand {
         agent_id: Option<String>,
         before: Option<u64>,
         max: usize,
-        reply: oneshot::Sender<Option<crate::agent_loop::LogPage>>,
+        reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
     },
     /// Read a session's aggregated usage.
     UsageStats {
         id: SessionId,
-        reply: oneshot::Sender<Option<SessionUsageStats>>,
+        reply: ReplyTo<Option<SessionUsageStats>>,
     },
     /// Read a session's workflow run (`None` when the session is unknown or
     /// is not a run).
     RunState {
         id: SessionId,
-        reply: oneshot::Sender<Option<crate::sessions::workflow::WorkflowRunState>>,
+        reply: ReplyTo<Option<crate::sessions::workflow::WorkflowRunState>>,
     },
     /// Re-run one execution of a run's step.
     RetryStep {
         id: SessionId,
         index: u32,
-        reply: oneshot::Sender<Option<Result<(), String>>>,
+        reply: ReplyTo<Option<Result<(), String>>>,
     },
     /// Read a session's subagent tree (`None` when the session is unknown).
     SubAgents {
         id: SessionId,
-        reply: oneshot::Sender<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
+        reply: ReplyTo<Option<Vec<(Uuid, crate::sessions::subagents::SubAgentRecord)>>>,
     },
     /// Answer every question one agent is parked on, at once.
     Answer {
         id: SessionId,
         agent_id: Option<String>,
         answers: Vec<AskAnswer>,
-        reply: oneshot::Sender<Result<(), AnswerError>>,
+        reply: ReplyTo<Result<(), AnswerError>>,
     },
     /// Watch one agent's position — `(tail_seq, delta_count)` — so a reader
     /// knows when to look again. `None` when the session or agent is unknown.
@@ -162,19 +164,19 @@ pub enum SessionSupervisorCommand {
     WatchAgent {
         id: SessionId,
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
+        reply: ReplyTo<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
     },
     /// Read one agent's current values, for its document.
     AgentState {
         id: SessionId,
         agent_id: Option<String>,
-        reply: oneshot::Sender<Option<crate::agent_loop::AgentStateView>>,
+        reply: ReplyTo<Option<crate::agent_loop::AgentStateView>>,
     },
     /// Unload every session that has gone idle. Sent by the ticker, or by a
     /// test that has moved its clock.
     Tick,
     /// Tear down every loaded session for a clean shutdown.
-    Shutdown { reply: oneshot::Sender<()> },
+    Shutdown { reply: ReplyTo<()> },
     /// Internal: a session actor reports its status changed.
     SessionStatusChanged {
         id: SessionId,
@@ -184,7 +186,7 @@ pub enum SessionSupervisorCommand {
     RenameSession {
         id: SessionId,
         name: String,
-        reply: oneshot::Sender<Result<(), horsie_actor::JournalError>>,
+        reply: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
@@ -193,29 +195,29 @@ pub enum SessionSupervisorCommand {
     CreateGroup {
         name: String,
         created_at: u64,
-        reply: oneshot::Sender<Result<(), GroupError>>,
+        reply: ReplyTo<Result<(), GroupError>>,
     },
     /// Rename a registered *or annotation-only* group; sessions follow.
     RenameGroup {
         old: String,
         new: String,
-        reply: oneshot::Sender<Result<(), GroupError>>,
+        reply: ReplyTo<Result<(), GroupError>>,
     },
     /// Delete a group and strip its annotation from every session.
     DeleteGroup {
         name: String,
-        reply: oneshot::Sender<Result<(), GroupError>>,
+        reply: ReplyTo<Result<(), GroupError>>,
     },
     /// The group registry, name-sorted.
     ListGroups {
-        reply: oneshot::Sender<Vec<(String, GroupRecord)>>,
+        reply: ReplyTo<Vec<(String, GroupRecord)>>,
     },
     /// Merge-update one session's annotations. Err when the session is unknown.
     SetSessionAnnotations {
         id: SessionId,
         set: BTreeMap<String, String>,
         remove: Vec<String>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: ReplyTo<Result<(), String>>,
     },
 }
 
@@ -392,7 +394,7 @@ impl SessionSupervisor {
     /// reach it. Loading reads two journals and calls no vendor.
     fn ensure_loaded(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionSupervisorCommand>,
         state: &SessionSupervisorState,
         id: &SessionId,
     ) -> Option<ActorRef<SessionCommand>> {
@@ -413,7 +415,7 @@ impl SessionSupervisor {
     /// being persisted when the session is first told to provision.
     fn spawn_session(
         &mut self,
-        ctx: &ActorContext<Self>,
+        ctx: &ActorContext<SessionSupervisorCommand>,
         id: &SessionId,
         spec: &SessionSpec,
     ) -> Option<ActorRef<SessionCommand>> {
@@ -427,7 +429,7 @@ impl SessionSupervisor {
                 return None;
             }
         };
-        let child = ctx.spawn(SessionActor::new(
+        let child = ctx.spawn_persistent(SessionActor::new(
             uuid,
             spec.clone(),
             self.deps.clone(),
@@ -609,7 +611,7 @@ impl EventSourcedActor for SessionSupervisor {
         &mut self,
         state: &SessionSupervisorState,
         cmd: SessionSupervisorCommand,
-        ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<SessionSupervisorCommand>,
     ) -> CommandEffect<SessionSupervisorEvent> {
         match cmd {
             SessionSupervisorCommand::Create {
@@ -663,7 +665,9 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::Read(ReadCommand::Snapshot { reply: tx }))
+                            .tell(SessionCommand::Read(ReadCommand::Snapshot {
+                                reply: ReplyTo::from_sender(tx),
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(Some((record, rx.await.ok())));
@@ -705,7 +709,9 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         if child
-                            .tell(SessionCommand::Turn(TurnCommand::Stop { reply: tx }))
+                            .tell(SessionCommand::Turn(TurnCommand::Stop {
+                                reply: ReplyTo::from_sender(tx),
+                            }))
                             .await
                             .is_err()
                         {
@@ -731,7 +737,7 @@ impl EventSourcedActor for SessionSupervisor {
                     let (tx, rx) = oneshot::channel();
                     if child
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
-                            reply: tx,
+                            reply: ReplyTo::from_sender(tx),
                         }))
                         .await
                         .is_ok()
@@ -756,7 +762,7 @@ impl EventSourcedActor for SessionSupervisor {
                             .tell(SessionCommand::Read(ReadCommand::ReadLog {
                                 agent_id,
                                 after,
-                                reply: tx,
+                                reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
                         tokio::spawn(async move {
@@ -784,7 +790,7 @@ impl EventSourcedActor for SessionSupervisor {
                                 agent_id,
                                 before,
                                 max,
-                                reply: tx,
+                                reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
                         tokio::spawn(async move {
@@ -802,7 +808,9 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::Read(ReadCommand::UsageStats { reply: tx }))
+                            .tell(SessionCommand::Read(ReadCommand::UsageStats {
+                                reply: ReplyTo::from_sender(tx),
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
@@ -819,7 +827,9 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
-                            .tell(SessionCommand::Run(RunCommand::State { reply: tx }))
+                            .tell(SessionCommand::Run(RunCommand::State {
+                                reply: ReplyTo::from_sender(tx),
+                            }))
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok().flatten());
@@ -838,7 +848,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = child
                             .tell(SessionCommand::Run(RunCommand::RetryStep {
                                 index,
-                                reply: tx,
+                                reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
                         tokio::spawn(async move {
@@ -857,7 +867,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
                             .tell(SessionCommand::SubAgent(SubAgentCommand::Tree {
-                                reply: tx,
+                                reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
                         tokio::spawn(async move {
@@ -922,7 +932,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = child
                             .tell(SessionCommand::Read(ReadCommand::AgentState {
                                 agent_id,
-                                reply: tx,
+                                reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
                         tokio::spawn(async move {
@@ -1058,7 +1068,7 @@ impl EventSourcedActor for SessionSupervisor {
     async fn on_recovery_complete(
         &mut self,
         _state: &SessionSupervisorState,
-        ctx: &mut ActorContext<Self>,
+        ctx: &mut ActorContext<SessionSupervisorCommand>,
     ) {
         if let Some(interval) = self.config.tick_interval {
             let me = ctx.self_ref();
@@ -1089,7 +1099,7 @@ mod tests {
     use crate::sessions::clock::TestClock;
     use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
-    use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
     use std::collections::HashMap;
 
     fn spec_fixture() -> SessionSpec {
@@ -1175,15 +1185,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        )
+        ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ))
     }
 
     async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
@@ -1346,15 +1353,13 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
 
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
+        let sup =
+            ActorSystem::new(journal.clone()).spawn_persistent(SessionSupervisor::with_config(
                 crate::auth::UserId::bootstrap(),
                 f.deps.clone(),
                 gtx.clone(),
                 manual_config(&clock),
-            ),
-            journal.clone(),
-        );
+            ));
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
         sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
@@ -1364,15 +1369,12 @@ mod tests {
 
         // Second incarnation on the same journal: the registry comes back, but
         // nothing is loaded and no vendor is touched.
-        let sup2 = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup2 = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
         let rows = sup2
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
@@ -1398,15 +1400,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -1436,15 +1435,13 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
+        let sup =
+            ActorSystem::new(journal.clone()).spawn_persistent(SessionSupervisor::with_config(
                 crate::auth::UserId::bootstrap(),
                 f.deps.clone(),
                 gtx,
                 manual_config(&clock),
-            ),
-            journal.clone(),
-        );
+            ));
         let id = create(&sup).await;
         // Creating a session loads it — it has a runtime to build — so unload it
         // first. Seeding the journal behind a live actor would prove nothing
@@ -1503,15 +1500,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
         let id = create(&sup).await;
         let mut rx = sup
             .ask(|reply| SessionSupervisorCommand::WatchAgent {
@@ -1567,15 +1561,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
         let id = create(&sup).await;
         sup.ask(|reply| SessionSupervisorCommand::UsageStats {
             id: id.clone(),
@@ -1614,15 +1605,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -1659,15 +1647,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps,
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps,
+            gtx,
+            manual_config(&clock),
+        ));
         let res = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
@@ -1686,15 +1671,12 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, mut grx) = broadcast::channel(16);
-        let sup = spawn_root(
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps,
-                gtx,
-                manual_config(&clock),
-            ),
-            journal,
-        );
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps,
+            gtx,
+            manual_config(&clock),
+        ));
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {

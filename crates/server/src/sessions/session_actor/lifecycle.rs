@@ -42,7 +42,7 @@ impl RuntimeLifecycle {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: LifecycleCommand,
-        ctx: &ActorContext<SessionActor>,
+        ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             LifecycleCommand::Provision => {
@@ -350,7 +350,7 @@ mod tests {
             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                 agent_id: None,
                 text: "hello".into(),
-                reply: tx,
+                reply: ReplyTo::from_sender(tx),
             }))
             .await
             .unwrap();
@@ -406,16 +406,14 @@ mod tests {
             .await
             .unwrap();
 
-        let _session2 = horsie_actor::spawn_root(
-            SessionActor::new(
+        let _session2 =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
             s.status != SessionStatus::Provisioning
         })
@@ -483,7 +481,7 @@ mod tests {
             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                 agent_id: None,
                 text: "try again".into(),
-                reply: tx,
+                reply: ReplyTo::from_sender(tx),
             }))
             .await
             .unwrap();
@@ -541,16 +539,14 @@ mod tests {
             .await
             .unwrap();
 
-        let _session = horsie_actor::spawn_root(
-            SessionActor::new(
+        let _session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
                 crate::sessions::Positions::default(),
-            ),
-            journal.clone(),
-        );
+            ));
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
             !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
         })
@@ -584,16 +580,13 @@ mod tests {
         let parent = spawn_deaf_supervisor();
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = horsie_actor::spawn_root(
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                parent,
-                crate::sessions::Positions::default(),
-            ),
-            journal,
-        );
+        let session = horsie_actor::ActorSystem::new(journal).spawn_persistent(SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            parent,
+            crate::sessions::Positions::default(),
+        ));
 
         session
             .ask(|reply| {
@@ -629,7 +622,9 @@ mod tests {
         provider.release();
         let (tx, rx) = oneshot::channel();
         session
-            .tell(SessionCommand::Read(ReadCommand::UsageStats { reply: tx }))
+            .tell(SessionCommand::Read(ReadCommand::UsageStats {
+                reply: ReplyTo::from_sender(tx),
+            }))
             .await
             .unwrap();
         rx.await.unwrap();

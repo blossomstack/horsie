@@ -14,7 +14,8 @@
 
 use async_llm::mock::MockLlmServer;
 use async_trait::async_trait;
-use horsie_actor::{InMemoryJournal, Journal, spawn_root};
+use horsie_actor::ReplyTo;
+use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
 use horsie_agentcore::{
     ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolSpec, Toolbox,
 };
@@ -236,7 +237,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
     // message rather than self-continuing.
     params.interactive = true;
 
-    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
     agent
         .tell(AgentCommand::Enqueue {
             item: horsie_server::agent_loop::Incoming::User {
@@ -356,14 +357,14 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // `SessionActor` configures its agent.
     params.optional_handoff_tool = Some("ask_user".into());
 
-    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
     agent
         .tell(AgentCommand::Answer {
             answers: vec![horsie_server::agent_loop::AskAnswer {
                 tool_call_id: "ask-1".into(),
                 text: "validate, daemon, job".into(),
             }],
-            reply: answered,
+            reply: ReplyTo::from_sender(answered),
         })
         .await
         .unwrap();
@@ -456,7 +457,7 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         });
         params.interactive = true;
 
-        let agent = spawn_root(AgentActor::new(ctx, params), journal);
+        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
         agent
             .tell(AgentCommand::Enqueue {
                 item: horsie_server::agent_loop::Incoming::User {
@@ -474,7 +475,9 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         // genuinely over, not when the token was merely flipped.
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Cancel { ack: Some(ack_tx) })
+            .tell(AgentCommand::Cancel {
+                ack: Some(ReplyTo::from_sender(ack_tx)),
+            })
             .await
             .unwrap();
 
@@ -534,7 +537,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     params.interactive = true;
 
     // Recovering alone must repair it — no turn is taken here at all.
-    let agent = spawn_root(AgentActor::new(ctx, params), journal.clone());
+    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
     let page = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
@@ -542,7 +545,7 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
                 .tell(AgentCommand::PageLog {
                     before: None,
                     max: 100,
-                    reply,
+                    reply: ReplyTo::from_sender(reply),
                 })
                 .await
                 .unwrap();
@@ -589,14 +592,14 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         allowed_tools: None,
     });
     params2.interactive = true;
-    let agent2 = spawn_root(AgentActor::new(ctx2, params2), journal);
+    let agent2 = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx2, params2));
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
         .tell(AgentCommand::PageLog {
             before: None,
             max: 100,
-            reply,
+            reply: ReplyTo::from_sender(reply),
         })
         .await
         .unwrap();
