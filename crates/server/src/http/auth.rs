@@ -184,10 +184,18 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-/// `Secure` only when the request actually arrived over TLS. Setting it
-/// unconditionally would make the cookie unusable on a plain-HTTP localhost
-/// deployment, which is the default self-host shape.
-fn arrived_over_tls(headers: &HeaderMap) -> bool {
+/// Whether the request reached the *browser's* edge over TLS.
+///
+/// horsie is almost always behind a terminator, so its own connection says
+/// nothing: only `X-Forwarded-Proto` does. Used for two things that must agree
+/// — the `Secure` flag on the session cookie, and the scheme in
+/// [`request_base`](super::request_base), which is what OAuth `redirect_uri`s
+/// are built from.
+///
+/// Setting either unconditionally would break the other shape: an
+/// unconditional `Secure` makes the cookie unusable on a plain-HTTP localhost
+/// deployment, which is the default self-host setup.
+pub(crate) fn arrived_over_tls(headers: &HeaderMap) -> bool {
     headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())

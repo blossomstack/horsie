@@ -96,4 +96,32 @@ test.describe("settings navigation", () => {
     await page.getByRole("link", { name: "your sessions" }).click();
     await expect(page).toHaveURL(`${appBase}/`);
   });
+
+  // `callback_base` is the only override for a wrong OAuth `redirect_uri`, and
+  // the form did not submit it — so every Admin save silently wiped it and
+  // re-broke the flow. Setting it by API worked; one unrelated edit here undid
+  // that.
+  test("the GitHub App form round-trips the callback base", async ({
+    page,
+    appBase,
+  }) => {
+    await page.goto(`${appBase}/admin/github-app`);
+    await page.getByLabel("Callback base URL").fill("https://horsie.example.com");
+    await page.getByLabel("Client ID").fill("Iv1.round.trip");
+    await page.getByTestId("settings-save").click();
+
+    await page.reload();
+    await expect(page.getByLabel("Callback base URL")).toHaveValue(
+      "https://horsie.example.com",
+    );
+
+    // And an edit that has nothing to do with it leaves it alone — this is the
+    // exact sequence that used to destroy it.
+    await page.getByLabel("Client ID").fill("Iv1.something.else");
+    await page.getByTestId("settings-save").click();
+    await page.reload();
+    await expect(page.getByLabel("Callback base URL")).toHaveValue(
+      "https://horsie.example.com",
+    );
+  });
 });
