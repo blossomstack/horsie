@@ -3,7 +3,7 @@ import type {
   RenderedSubAgent,
   RenderedToolCall,
 } from "../hooks/useSessionStream";
-import { ASK_USER_TOOL } from "./askUser";
+import { isAskCall } from "./askUser";
 
 export type WorkItem =
   | { kind: "thinking"; text: string }
@@ -32,10 +32,13 @@ export type Segment =
  * of text / grouped-work / standalone-question / pulse segments.
  *
  * Consecutive thinking blocks and regular tool calls — across message
- * (LLM-iteration) boundaries, as long as no text or `ask_user` call
- * interrupts them — collapse into one `work` segment. `ask_user` always
- * breaks the run and renders standalone: a pending question must never be
- * hidden inside a collapsed group.
+ * (LLM-iteration) boundaries, as long as no text or question interrupts
+ * them — collapse into one `work` segment. A question always breaks the run
+ * and renders standalone: a pending question must never be hidden inside a
+ * collapsed group, and an answered one is the record that a human was asked.
+ *
+ * What counts as a question is `isAskCall`, not the `ask_user` name: a
+ * workflow step has no `ask_user` and asks through `conclude` instead.
  */
 export function buildSegments(
   msgs: RenderedMessage[],
@@ -69,7 +72,7 @@ export function buildSegments(
   };
 
   const pushToolCall = (call: RenderedToolCall) => {
-    if (call.name === ASK_USER_TOOL) {
+    if (isAskCall(call.name, call.input)) {
       flushWork(false);
       segments.push({ kind: "ask", key: `ask${seq++}`, call });
     } else {
