@@ -73,11 +73,13 @@ test("a machine token is shown once, works as a credential, and can be revoked",
   expect(secret).toMatch(/^hsk_agt_/);
   await expect(page.getByTestId("token-row-ci-box")).toBeVisible();
 
-  // It authenticates.
-  const ok = await fetch(`${baseURL}/api/sessions`, {
+  // It authenticates, and reaches only what a runtime vendor process needs:
+  // 403 (not 401) is what says the token verified and was then refused this
+  // route. It used to answer 200 here — full session transcripts.
+  const restricted = await fetch(`${baseURL}/api/sessions`, {
     headers: { authorization: `Bearer ${secret}` },
   });
-  expect(ok.status).toBe(200);
+  expect(restricted.status).toBe(403);
 
   // The secret is not recoverable: a reload lists the token without it.
   await page.reload();

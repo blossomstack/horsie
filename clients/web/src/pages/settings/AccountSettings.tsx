@@ -44,7 +44,9 @@ function MachineTokens() {
         <p className="mt-0.5 text-xs text-faint">
           For runtime vendor processes that run unattended. On your own machine,
           <code className="mx-1">horsie auth login</code> is enough — use a
-          token where nobody is there to approve one.
+          token where nobody is there to approve one. A machine token connects a
+          runtime and can do nothing else: it cannot read sessions, change
+          settings, or create another token.
         </p>
       </div>
 

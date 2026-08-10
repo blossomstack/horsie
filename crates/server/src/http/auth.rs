@@ -52,6 +52,39 @@ fn is_public(path: &str) -> bool {
         || path == "/api/runtime/github-credential"
 }
 
+/// Whether a credential of this kind may reach this path.
+///
+/// `Web`, `Access` and `Refresh` are *logins* — a person authenticated as
+/// themselves — and reach everything their account owns. `Agent` is not a
+/// login. It is the "machine token" the UI describes as being for runtime
+/// vendor processes that run unattended, and `vendor_connect.rs` is explicit
+/// that `/api/vendor/connect` is the one endpoint those processes dial.
+///
+/// Until this existed, that token was an unrestricted, never-expiring admin
+/// credential: it read whole session transcripts, wrote config, could call
+/// `POST /api/auth/password`, and could mint *further* machine tokens — so
+/// revoking a leaked one did not lock the holder out. An operator pasting one
+/// into a CI job was handing over the deployment.
+///
+/// Deliberately an allowlist of one rather than a denylist of the dangerous
+/// routes: a denylist silently re-opens every time a route is added.
+fn kind_may_reach(kind: crate::auth::TokenKind, path: &str) -> bool {
+    match kind {
+        crate::auth::TokenKind::Agent => path == "/api/vendor/connect",
+        crate::auth::TokenKind::Web
+        | crate::auth::TokenKind::Access
+        | crate::auth::TokenKind::Refresh => true,
+    }
+}
+
+fn forbidden_for_machine_token() -> Response {
+    Api::forbidden(
+        "a machine token authenticates runtime vendor processes and reaches only \
+         /api/vendor/connect; use a login for anything else",
+    )
+    .into_response()
+}
+
 /// The account a delegating front layer has already authenticated.
 ///
 /// A request extension rather than a header: an extension can only have been
@@ -99,6 +132,9 @@ pub async fn require_auth(State(state): State<AppState>, mut req: Request, next:
     };
     match state.auth.verify(&secret).await {
         Ok(Some(v)) => {
+            if !kind_may_reach(v.kind, req.uri().path()) {
+                return forbidden_for_machine_token();
+            }
             req.extensions_mut().insert(v.principal);
             next.run(req).await
         }
