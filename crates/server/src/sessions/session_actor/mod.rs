@@ -195,12 +195,12 @@ pub struct SessionActor {
     /// which is why the topology inside is a value rather than a second
     /// `Option`: a session's shape is decided at creation and never changes.
     agents: Option<SessionAgents>,
-    /// The supervisor's per-agent position channels for this session.
+    /// The supervisor's per-agent revision channels for this session.
     ///
     /// Cloned in rather than created here: it has to outlive this actor, so
     /// that unloading an idle session leaves a reader waiting rather than
     /// disconnecting it.
-    positions: crate::sessions::Positions,
+    revisions: crate::sessions::Revisions,
 }
 
 impl SessionActor {
@@ -209,7 +209,7 @@ impl SessionActor {
         spec: SessionSpec,
         deps: ServerDeps,
         parent: ActorRef<SessionSupervisorCommand>,
-        positions: crate::sessions::Positions,
+        revisions: crate::sessions::Revisions,
     ) -> Self {
         Self {
             id,
@@ -217,7 +217,7 @@ impl SessionActor {
             deps,
             parent,
             agents: None,
-            positions,
+            revisions,
         }
     }
 
@@ -253,11 +253,11 @@ impl SessionActor {
     ) -> ResidentAgent {
         // A subagent and a step journal under their own id; the main agent
         // journals under the session's, because its transcript *is* the
-        // session's. The position channel follows the same split.
-        let (journal_id, position) = match plan.kind {
-            SessionAgentKind::Main => (self.id, self.positions.for_agent(MAIN_AGENT_ID)),
+        // session's. The revision channel follows the same split.
+        let (journal_id, revision) = match plan.kind {
+            SessionAgentKind::Main => (self.id, self.revisions.for_agent(MAIN_AGENT_ID)),
             SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
-                (id, self.positions.for_agent(&id.to_string()))
+                (id, self.revisions.for_agent(&id.to_string()))
             }
         };
         let key = plan.kind.agent_key();
@@ -310,7 +310,7 @@ impl SessionActor {
             .and_then(horsie_agentcore::ThinkingEffort::parse);
         let agent_ctx = AgentRuntimeContext {
             context_provider: provider.clone(),
-            position,
+            revision,
             parent: StopHookParent::wrap(ctx.self_ref(), key, provider.clone()),
             journal_id,
             // Computed from the state this spawn was decided against, never

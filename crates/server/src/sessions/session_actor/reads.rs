@@ -532,7 +532,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
 
         // Drive one turn so both actors are loaded and have history.

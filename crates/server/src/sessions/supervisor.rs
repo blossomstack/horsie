@@ -43,6 +43,14 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 /// How often the supervisor looks for sessions to unload.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long a reader's poll parks before being answered with no news.
+///
+/// Any value is correct — expiring only costs a round trip — so this trades
+/// idle chatter against how long a caller's slot in the reply table is held.
+/// Half a minute is short enough that a departed reader is noticed promptly and
+/// long enough that a quiet session costs two asks a minute.
+const POLL_WINDOW: Duration = Duration::from_secs(30);
+
 /// Knobs the idle policy reads. Separated so tests drive time explicitly.
 ///
 /// One per deployment, cloned into every account's supervisor: how long a
@@ -154,16 +162,29 @@ pub enum SessionSupervisorCommand {
         answers: Vec<AskAnswer>,
         reply: ReplyTo<Result<(), AnswerError>>,
     },
-    /// Watch one agent's position — `(tail_seq, delta_count)` — so a reader
-    /// knows when to look again. `None` when the session or agent is unknown.
+    /// Wait until one agent's revision differs from `after`, so a reader knows
+    /// when to look again. `None` when the session or agent is unknown.
     ///
-    /// A `watch`, not a subscription to the data: it holds only the latest
-    /// position and overwrites, so a slow reader cannot fall behind it and
-    /// there is nothing to overflow.
-    WatchAgent {
+    /// A long poll, not a subscription. It answers with a *number*, never with
+    /// a handle to one: a handle is a pointer into this process's memory, and a
+    /// reader may be served by a different host from the one its session runs
+    /// on. A number travels; a `watch::Receiver` cannot be encoded at all.
+    ///
+    /// Polling is also the honest shape once hosts are involved, because
+    /// nothing about delivery between them is promised. A pushed notification
+    /// that goes missing leaves a reader waiting forever; a poll that goes
+    /// missing costs one window, and then the reader asks again.
+    ///
+    /// Answers straight away when the revision already differs, and otherwise
+    /// waits until it moves or `POLL_WINDOW` passes — on expiry answering with
+    /// the revision unchanged, which the reader reads as "still nothing".
+    AwaitAgentRevision {
         id: SessionId,
         agent_id: Option<String>,
-        reply: ReplyTo<Option<tokio::sync::watch::Receiver<(u64, usize)>>>,
+        /// The last revision this reader saw. `None` on a first ask, which
+        /// answers immediately with wherever the agent currently is.
+        after: Option<crate::sessions::Revision>,
+        reply: ReplyTo<Option<crate::sessions::Revision>>,
     },
     /// Read one agent's document: what it is, what became of it, what it ran
     /// under, and its live values. `agent_id` absent or `"main"` for the
@@ -390,7 +411,7 @@ pub struct SessionSupervisor {
     /// tied to the actor's life turns idle offload into an offload/reconnect/
     /// load loop. Keeping it here means a reader simply waits, and hears from
     /// the session the next time something wakes it.
-    positions: BTreeMap<SessionId, crate::sessions::Positions>,
+    revisions: BTreeMap<SessionId, crate::sessions::Revisions>,
 }
 
 impl SessionSupervisor {
@@ -416,7 +437,7 @@ impl SessionSupervisor {
             children: BTreeMap::new(),
             status: BTreeMap::new(),
             last_activity: BTreeMap::new(),
-            positions: BTreeMap::new(),
+            revisions: BTreeMap::new(),
         }
     }
 
@@ -464,7 +485,7 @@ impl SessionSupervisor {
             spec.clone(),
             self.deps.clone(),
             ctx.self_ref(),
-            self.positions_for(id),
+            self.revisions_for(id),
         ));
         self.children.insert(id.clone(), child.clone());
         Some(child)
@@ -496,14 +517,14 @@ impl SessionSupervisor {
         // The registry outlives the actor while anyone is still reading: an
         // unloaded session has nothing to say until something reloads it, and
         // ending the stream would only make the client reconnect and reload it.
-        if self.positions.get(id).is_none_or(|p| !p.watched()) {
-            self.positions.remove(id);
+        if self.revisions.get(id).is_none_or(|p| !p.watched()) {
+            self.revisions.remove(id);
         }
     }
 
     /// This session's position registry, created on first use.
-    fn positions_for(&mut self, id: &SessionId) -> crate::sessions::Positions {
-        self.positions.entry(id.clone()).or_default().clone()
+    fn revisions_for(&mut self, id: &SessionId) -> crate::sessions::Revisions {
+        self.revisions.entry(id.clone()).or_default().clone()
     }
 
     /// Unload every session that has been idle past the timeout.
@@ -913,9 +934,10 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::WatchAgent {
+            SessionSupervisorCommand::AwaitAgentRevision {
                 id,
                 agent_id,
+                after,
                 reply,
             } => {
                 // Answered here, not by the actor, and deliberately without
@@ -928,8 +950,27 @@ impl EventSourcedActor for SessionSupervisor {
                     return CommandEffect::none();
                 }
                 let wire_id = agent_id.as_deref().unwrap_or("main");
-                let rx = self.positions_for(&id).for_agent(wire_id).subscribe();
-                let _ = reply.send(Some(rx));
+                let revisions = self.revisions_for(&id);
+                revisions.touch();
+                let mut rx = revisions.for_agent(wire_id).subscribe();
+                let current = *rx.borrow_and_update();
+                if after != Some(current) {
+                    let _ = reply.send(Some(current));
+                    return CommandEffect::none();
+                }
+                // Nothing new yet, so wait — off this mailbox, which has to stay
+                // free to serve every other session while one reader waits.
+                tokio::spawn(async move {
+                    let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
+                    // A closed channel is not the end of the stream: the
+                    // registry outlives the session precisely so a reader can
+                    // sit through an offload. Answer with what we last saw and
+                    // let the reader ask again.
+                    let _ = reply.send(Some(match moved {
+                        Ok(Ok(())) => *rx.borrow(),
+                        Ok(Err(_)) | Err(_) => current,
+                    }));
+                });
                 CommandEffect::none()
             }
             SessionSupervisorCommand::AgentDetail {
@@ -1531,7 +1572,23 @@ mod tests {
         );
     }
 
-    /// A reader parked on an agent's position must survive an idle offload.
+    /// Ask whether an agent has moved, the way the SSE handler does.
+    async fn poll(
+        sup: &ActorRef<SessionSupervisorCommand>,
+        id: &SessionId,
+        after: Option<crate::sessions::Revision>,
+    ) -> Option<crate::sessions::Revision> {
+        sup.ask(|reply| SessionSupervisorCommand::AwaitAgentRevision {
+            id: id.clone(),
+            agent_id: None,
+            after,
+            reply,
+        })
+        .await
+        .unwrap()
+    }
+
+    /// A reader waiting on an agent's position must survive an idle offload.
     ///
     /// Not a nicety — it is what stops offload from being a loop. Disconnect a
     /// browser and it reconnects; a reconnect reads, a read loads the session,
@@ -1553,18 +1610,12 @@ mod tests {
             manual_config(&clock),
         ));
         let id = create(&sup).await;
-        let mut rx = sup
-            .ask(|reply| SessionSupervisorCommand::WatchAgent {
-                id: id.clone(),
-                agent_id: None,
-                reply,
-            })
+        let start = poll(&sup, &id, None)
             .await
-            .unwrap()
             .expect("the main agent is watchable");
-        // Subscribing must not load the session: waiting on one is no reason to
-        // wake it, and a subscribe that loaded would restart the idle clock on
-        // every reconnect.
+        // Asking must not load the session: waiting on one is no reason to wake
+        // it, and an ask that loaded would restart the idle clock on every
+        // reconnect.
         let _ = sup
             .ask(|reply| SessionSupervisorCommand::UsageStats {
                 id: id.clone(),
@@ -1573,6 +1624,24 @@ mod tests {
             .await
             .unwrap();
 
+        // Move the agent off its starting revision first. A session that never
+        // moved sits at the same zero a discarded registry would be rebuilt at,
+        // which would let this test pass without the registry surviving at all.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::UserMessage {
+                id: id.clone(),
+                agent_id: None,
+                text: "first".into(),
+                reply,
+            })
+            .await
+            .unwrap();
+        let seen = tokio::time::timeout(Duration::from_secs(5), poll(&sup, &id, Some(start)))
+            .await
+            .expect("the agent moves once it has something to answer")
+            .expect("the main agent is watchable");
+        assert_ne!(seen, start, "the agent must have actually moved");
+
         clock.advance(Duration::from_secs(181));
         sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
         assert!(
@@ -1580,25 +1649,77 @@ mod tests {
             "the session must actually unload for this test to mean anything"
         );
 
+        // The reader is between polls when the offload lands, holding no
+        // receiver at all. Its next ask must still find the session watchable
+        // and its revision where it left it — an offload is not news.
+        let mut waiting = Box::pin(poll(&sup, &id, Some(seen)));
         assert!(
-            rx.has_changed().is_ok(),
-            "an offload must not disconnect a reader"
+            tokio::time::timeout(Duration::from_millis(200), &mut waiting)
+                .await
+                .is_err(),
+            "an offload must not look to a reader like the agent moved"
         );
 
-        // And the same receiver hears the session's next move.
+        // And that same wait hears the session's next move.
         let _ = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: id.clone(),
                 agent_id: None,
-                text: "hello".into(),
+                text: "second".into(),
                 reply,
             })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+        let moved = tokio::time::timeout(Duration::from_secs(5), waiting)
             .await
             .expect("the reloaded session must publish into the same channel")
-            .expect("the channel is still open");
+            .expect("the agent is still watchable");
+        assert_ne!(moved, seen, "the reloaded session moved the agent on");
+    }
+
+    /// The two halves of the long poll: answer at once when there is news, and
+    /// hold when there is not.
+    #[tokio::test]
+    async fn a_poll_answers_at_once_only_when_the_agent_moved() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ));
+        let id = create(&sup).await;
+
+        // A first ask carries no revision, so there is nothing it could be
+        // waiting for. It says where the agent is and returns.
+        let seen = tokio::time::timeout(Duration::from_secs(5), poll(&sup, &id, None))
+            .await
+            .expect("a first ask never waits")
+            .expect("the main agent is watchable");
+
+        // Asking again from that same revision is a wait, and waiting is the
+        // whole point: an ask that returned here would spin the reader.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), poll(&sup, &id, Some(seen)))
+                .await
+                .is_err(),
+            "a reader that is up to date must wait, not be answered"
+        );
+
+        // A revision from a session that does not exist is not a wait either.
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                poll(&sup, &"nope".to_string(), None)
+            )
+            .await
+            .expect("an unknown session is answered, not waited on"),
+            None,
+            "an unknown session ends the reader's stream"
+        );
     }
 
     #[tokio::test]

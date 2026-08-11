@@ -621,7 +621,7 @@ mod tests {
                 actor_spec_fixture(),
                 _f.deps.clone(),
                 parent,
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
@@ -700,7 +700,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 parent,
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         wait_for_tree(&journal, id, |t| {
             t.node(sub)

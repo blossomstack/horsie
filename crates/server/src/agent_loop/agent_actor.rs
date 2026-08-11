@@ -917,20 +917,20 @@ pub struct AgentActor {
     /// persisting one would put a write transaction on the critical path of
     /// every token for data nothing will ever read again.
     deltas: Vec<String>,
-    /// `(tail_seq, delta_count)`, published for readers to wait on. Only the
-    /// position travels through here; the data itself is read from state, which
-    /// is what leaves nothing to overflow.
+    /// A counter, bumped whenever this agent moves, for readers to wait on.
+    /// Only the fact that something happened travels through here; what
+    /// happened is read from state, which is what leaves nothing to overflow.
     ///
     /// Held behind an `Arc` because the *owner* is whoever outlives this actor
     /// — for a session agent that is the supervisor, so an idle offload does
     /// not disconnect a reader and send it round the reconnect-reload loop. A
     /// standalone agent owns its own and the distinction costs nothing.
-    position: std::sync::Arc<tokio::sync::watch::Sender<(u64, usize)>>,
+    revision: std::sync::Arc<tokio::sync::watch::Sender<crate::sessions::Revision>>,
 }
 
 impl AgentActor {
     pub fn new(ctx: AgentRuntimeContext, params: AgentParams) -> Self {
-        let position = ctx.position.clone();
+        let revision = ctx.revision.clone();
         let ready = ctx.ready;
         Self {
             ctx,
@@ -944,19 +944,17 @@ impl AgentActor {
             start_hook_fired: false,
             cancel_acks: Vec::new(),
             deltas: Vec::new(),
-            position,
+            revision,
         }
     }
 
-    /// Publish where this agent now is, waking every reader parked on it.
+    /// Announce that this agent has moved, waking every reader waiting on it.
     ///
-    /// Called after anything that moves either half of the position. Sending
-    /// the same value twice is harmless — a reader that finds nothing new
-    /// simply parks again.
-    fn publish_position(&self, state: &AgentState) {
-        let _ = self
-            .position
-            .send((state.tail_seq().unwrap_or(0), self.deltas.len()));
+    /// Called after anything a reader could want to see — a new entry, another
+    /// delta, a cleared delta buffer. Announcing twice for one change is
+    /// harmless: a reader that finds nothing new simply waits again.
+    fn publish_revision(&self) {
+        self.revision.send_modify(|r| *r += 1);
     }
 
     /// Same actor, publishing its durable history to `observer` — what a session
@@ -2117,7 +2115,7 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::RecordDelta { text } => {
                 self.deltas.push(text);
-                self.publish_position(state);
+                self.publish_revision();
                 CommandEffect::none()
             }
             AgentCommand::ReadLog { after, reply } => {
@@ -2163,7 +2161,7 @@ impl EventSourcedActor for AgentActor {
         if events.iter().any(coarse_appends_an_entry) {
             self.deltas.clear();
         }
-        self.publish_position(state);
+        self.publish_revision();
         let Some(observer) = &self.observer else {
             return;
         };
@@ -2181,7 +2179,7 @@ impl EventSourcedActor for AgentActor {
         // actor, so after an idle offload it still holds the position from
         // before — republishing costs nothing and keeps a reader that has been
         // waiting through the offload from having to guess.
-        self.publish_position(state);
+        self.publish_revision();
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
         let now = now_ms();
@@ -2914,7 +2912,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(StubContext),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(StubParent),
             journal_id: session_id,
             ready: true,
@@ -2996,7 +2994,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(NoContext),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(DeafParent),
             journal_id: session_id,
             ready: true,
@@ -3079,7 +3077,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(MockContext(provider.clone())),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(ReportingParent(tx)),
             journal_id: session_id,
             ready: true,
@@ -3230,7 +3228,7 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: provider,
-                position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+                revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
                 parent: Arc::new(ReportingParent(tx)),
                 journal_id: uuid::Uuid::new_v4(),
                 ready: true,
@@ -3456,7 +3454,7 @@ mod tests {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let ctx = AgentRuntimeContext {
                 context_provider: Arc::new(GoneContext),
-                position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+                revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
                 parent: Arc::new(ReportingParent(tx)),
                 journal_id: uuid::Uuid::new_v4(),
                 ready: true,
@@ -4989,7 +4987,7 @@ mod fence_tests {
         let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingProvider),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
             journal_id: uuid::Uuid::new_v4(),
             ready: true,
@@ -5098,7 +5096,7 @@ mod fence_tests {
         let (tx, _outcomes) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingProvider),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
             journal_id: uuid::Uuid::new_v4(),
             ready: true,
@@ -5242,7 +5240,7 @@ mod queue_tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: provider,
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
             journal_id: uuid::Uuid::new_v4(),
             ready,
@@ -5496,7 +5494,7 @@ mod interruption_tests {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = AgentRuntimeContext {
             context_provider: Arc::new(HangingContext),
-            position: std::sync::Arc::new(tokio::sync::watch::Sender::new((0, 0))),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
             parent: Arc::new(OutcomeChannel(tx)),
             journal_id: id,
             ready: true,

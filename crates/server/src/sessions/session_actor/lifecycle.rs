@@ -443,7 +443,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
             s.status != SessionStatus::Provisioning
@@ -577,7 +577,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
             !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
@@ -735,7 +735,7 @@ mod tests {
             actor_spec_fixture(),
             f.deps.clone(),
             parent,
-            crate::sessions::Positions::default(),
+            crate::sessions::Revisions::default(),
         ));
 
         session

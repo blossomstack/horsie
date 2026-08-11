@@ -627,7 +627,7 @@ mod tests {
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
@@ -790,7 +790,7 @@ mod tests {
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
 
         let run = wait_for_run(&journal, id, |r| {
@@ -847,7 +847,7 @@ mod tests {
                 spec,
                 f.deps.clone(),
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
 
         let log = reloaded
