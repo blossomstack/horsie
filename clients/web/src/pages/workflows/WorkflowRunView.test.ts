@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowRunGraph } from "../../api/types";
+import { SessionStatusKind, type WorkflowRunGraph } from "../../api/types";
 import { formatOutput, parkedStep, resumePoint } from "./WorkflowRunView";
 
 /** A two-node run whose second node holds the execution at log index 1. */
@@ -19,7 +19,6 @@ function graph(over: Partial<WorkflowRunGraph> = {}): WorkflowRunGraph {
   });
   return {
     workflow: "w",
-    status: { type: "AwaitingInput", value: {} },
     current: 1,
     start: "triage",
     nodes: [
@@ -39,31 +38,32 @@ describe("parkedStep", () => {
   /** `current` indexes the run log, not `nodes`, so the execution has to be
    * found across nodes — the whole reason this is worth its own function. */
   it("names the execution a parked run is waiting on", () => {
-    expect(parkedStep(graph())).toEqual({ step: "fix", agentId: "agent-1" });
+    expect(parkedStep(graph(), SessionStatusKind.AwaitingInput)).toEqual({
+      step: "fix",
+      agentId: "agent-1",
+    });
   });
 
   it("is silent unless the run is actually waiting", () => {
-    expect(
-      parkedStep(graph({ status: { type: "Running", value: {} } })),
-    ).toBeUndefined();
-    expect(
-      parkedStep(graph({ status: { type: "Finished", value: {} } })),
-    ).toBeUndefined();
+    expect(parkedStep(graph(), SessionStatusKind.Running)).toBeUndefined();
+    expect(parkedStep(graph(), SessionStatusKind.Finished)).toBeUndefined();
   });
 
-  /** A run can report `AwaitingInput` with nothing in flight only if the two
-   * reads raced; the banner must not claim a step then. */
+  /** A session can report `AwaitingInput` with nothing in flight only if the
+   * two reads raced; the banner must not claim a step then. */
   it("is silent when nothing is in flight", () => {
-    expect(parkedStep(graph({ current: undefined }))).toBeUndefined();
+    expect(
+      parkedStep(graph({ current: undefined }), SessionStatusKind.AwaitingInput),
+    ).toBeUndefined();
   });
 });
 
 describe("resumePoint", () => {
-  /** A suspended run moves only by a retry, so the page has to name the step to
-   * retry. This state became reachable at all once interruption stopped leaving
-   * runs wedged as `Running`. */
+  /** A run stopped part-way moves only by a retry, so the page has to name the
+   * step to retry. Read off the log rather than a status word: `Suspended` was
+   * a second vocabulary for what the newest execution already says. */
   it("names the interrupted step of a suspended run", () => {
-    const g = graph({ status: { type: "Suspended", value: {} } });
+    const g = graph();
     g.nodes[1]!.runs[0]!.status = { type: "Cancelled", value: {} };
     expect(resumePoint(g)).toEqual({ step: "fix", index: 1 });
   });
@@ -71,16 +71,24 @@ describe("resumePoint", () => {
   /** A run can hold several cancelled attempts — a retry cancels the one it
    * supersedes — and only the newest is where it stopped. */
   it("takes the newest cancelled execution", () => {
-    const g = graph({ status: { type: "Suspended", value: {} } });
+    const g = graph();
     g.nodes[0]!.runs[0]!.status = { type: "Cancelled", value: {} };
     g.nodes[1]!.runs[0]!.status = { type: "Cancelled", value: {} };
     expect(resumePoint(g)?.index).toBe(1);
   });
 
-  it("is silent for every other status", () => {
-    for (const type of ["Running", "AwaitingInput", "Finished", "Failed"] as const) {
-      expect(resumePoint(graph({ status: { type, value: {} } }))).toBeUndefined();
-    }
+  /** The case a status gate could not express: a retry appends rather than
+   * truncating, so a later execution over a cancelled one means the run moved
+   * on and there is nothing to resume. */
+  it("is silent once a later execution has run", () => {
+    const g = graph();
+    g.nodes[0]!.runs[0]!.status = { type: "Cancelled", value: {} };
+    g.nodes[1]!.runs[0]!.status = { type: "Concluded", value: {} };
+    expect(resumePoint(g)).toBeUndefined();
+  });
+
+  it("is silent while the newest execution is still going", () => {
+    expect(resumePoint(graph())).toBeUndefined();
   });
 });
 
