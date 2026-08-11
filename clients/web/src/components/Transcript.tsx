@@ -2,11 +2,13 @@ import { useRef } from "react";
 import type { HookRecord } from "../api/types";
 import { cn } from "../lib/cn";
 import type {
+  RenderedCompaction,
   RenderedMessage,
   RenderedToolCall,
   TranscriptItem,
 } from "../hooks/useSessionStream";
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
+import { CompactionDivider } from "./CompactionDivider";
 import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
@@ -176,7 +178,11 @@ export type TurnGroup =
   | { kind: "assistant"; id: string; msgs: RenderedMessage[] }
   // Never folded into an assistant turn: a plugin acting *around* the
   // conversation is not something the agent said.
-  | { kind: "notice"; id: string; record: HookRecord };
+  | { kind: "notice"; id: string; record: HookRecord }
+  // A boundary between conversations, not a thing anyone said. Always breaks
+  // the assistant thread: the messages either side of it belong to different
+  // working sets, and running them together would read as one exchange.
+  | { kind: "compaction"; id: string; value: RenderedCompaction };
 
 export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
@@ -191,6 +197,14 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
         kind: "notice",
         id: item.value.id,
         record: item.value.record,
+      });
+      continue;
+    }
+    if (item.kind === "compaction") {
+      turns.push({
+        kind: "compaction",
+        id: `compaction:${item.value.seq}`,
+        value: item.value,
       });
       continue;
     }
@@ -244,6 +258,8 @@ export function Transcript({
       {turns.map((t, i) =>
         t.kind === "notice" ? (
           <HookNoticeRow key={t.id} record={t.record} />
+        ) : t.kind === "compaction" ? (
+          <CompactionDivider key={t.id} value={t.value} />
         ) : t.kind === "user" ? (
           <UserTurn key={t.msg.id} msg={t.msg} />
         ) : (

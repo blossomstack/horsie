@@ -12,6 +12,7 @@ import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
+import { TranscriptSpine } from "../components/TranscriptSpine";
 import { WorkflowRunView } from "./workflows/WorkflowRunView";
 import { askConfirm } from "../lib/confirm";
 import { usePersistentState } from "../hooks/usePersistentState";
@@ -274,6 +275,32 @@ export function SessionView() {
     answerableIds.every((id) => (answers[id] ?? "").trim().length > 0);
 
   // Stick-to-bottom auto scroll; also trigger scroll-back near the top.
+  // Every compaction boundary in the transcript, oldest first — what the spine
+  // puts a tick on.
+  const boundaries = stream.items
+    .filter((i) => i.kind === "compaction")
+    .map((i) => i.value);
+
+  /** Scroll to a boundary by seq, or to either end. */
+  const seek = (target: number | "start" | "end") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (target === "start") {
+      // Scrolling to the top is not the same as reaching the start of the
+      // session: history pages in, so the first thing rendered may not be the
+      // first thing there is. This goes as far back as has loaded, and the
+      // existing scroll-back handler fetches the rest.
+      el.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    if (target === "end") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      return;
+    }
+    el.querySelector(`[data-testid="compaction-divider"][data-seq="${target}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  };
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -449,8 +476,11 @@ export function SessionView() {
             ref={scrollRef}
             onScroll={onScroll}
             data-testid="transcript-scroll"
-            className="flex-1 overflow-y-auto"
+            className="relative flex-1 overflow-y-auto"
           >
+            {/* Inside the scroller so the spine's own `sticky` keeps it in
+                view; outside it there would be nothing to stick to. */}
+            <TranscriptSpine boundaries={boundaries} onSeek={seek} />
             {isLoading && stream.items.length === 0 ? (
               <div className="flex h-full items-center justify-center gap-2">
                 <span className="lamp lamp-live text-amber-ink" aria-hidden />

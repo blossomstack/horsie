@@ -28,6 +28,8 @@ export interface DraftPayload {
   memorySpaces: string[];
   /** Canonical thinking effort; "" = use the model's configured default. */
   thinkingEffort: string;
+  /** Whether the session compacts automatically; `false` turns it off. */
+  autoCompact: boolean;
 }
 
 export function emptyDraft(): DraftPayload {
@@ -39,6 +41,7 @@ export function emptyDraft(): DraftPayload {
     mcp: [],
     memorySpaces: [],
     thinkingEffort: "",
+    autoCompact: true,
   };
 }
 
@@ -95,6 +98,9 @@ export function parseDraftPayload(raw: unknown): DraftPayload | undefined {
     memorySpaces: p.memorySpaces,
     // Added after v1 shipped; older stored drafts simply have no value.
     thinkingEffort: typeof p.thinkingEffort === "string" ? p.thinkingEffort : "",
+    // Added after v1 shipped. A stored draft with no value means on, which is
+    // also what the server does with an absent flag.
+    autoCompact: typeof p.autoCompact === "boolean" ? p.autoCompact : true,
   };
 }
 

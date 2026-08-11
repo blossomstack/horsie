@@ -60,9 +60,24 @@ export interface RenderedHookNotice {
   atMs: number;
 }
 
+/** A compaction boundary, as the transcript shows it. */
+export interface RenderedCompaction {
+  /** The log seq of the boundary entry — the conversation's own id. */
+  seq: number;
+  summary: string;
+  carriedState: string;
+  /** How many entries the summary covers. */
+  covered: number;
+  tokensBefore: number;
+  tokensAfter: number;
+  manual: boolean;
+  atMs: number;
+}
+
 export type TranscriptItem =
   | { kind: "message"; value: RenderedMessage }
-  | { kind: "notice"; value: RenderedHookNotice };
+  | { kind: "notice"; value: RenderedHookNotice }
+  | { kind: "compaction"; value: RenderedCompaction };
 
 export interface SessionStream {
   items: TranscriptItem[];
@@ -600,6 +615,23 @@ export function useSessionStream(
         items.push({
           kind: "notice",
           value: { id: entry.body.value.id, record, atMs: entry.body.value.createdAtMs },
+        });
+      } else if (entry.body.type === "Compaction") {
+        const c = entry.body.value;
+        items.push({
+          kind: "compaction",
+          value: {
+            seq: entry.seq,
+            summary: c.summary,
+            carriedState: c.carriedState,
+            // The span it closed, in log entries. `retainedFromSeq` is where
+            // the model resumed reading, which is not the same number.
+            covered: c.coversThroughSeq + 1,
+            tokensBefore: c.tokensBefore,
+            tokensAfter: c.tokensAfter,
+            manual: c.trigger.kind === "Manual",
+            atMs: entry.atMs,
+          },
         });
       }
       // Lifecycle entries drive the fold above; they are not transcript rows.
