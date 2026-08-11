@@ -30,7 +30,7 @@ export function useRoutine(name: string | undefined) {
 export function useRoutineSessions(name: string | undefined) {
   return useQuery({
     queryKey: name ? routineKeys.sessions(name) : ["routines", "none", "sessions"],
-    queryFn: () => api.routines.sessions(name as string),
+    queryFn: () => api.sessions.list({ routine: name as string }),
     enabled: !!name,
     refetchInterval: 5_000,
     select: (r) => r.sessions,

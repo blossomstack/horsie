@@ -50,13 +50,11 @@ import type {
   RenameGroupRequest,
   RoutineInput,
   RoutineRunResponse,
-  RoutineSessionsResponse,
   RoutineView,
   WorkflowInput,
   WorkflowRunGraph,
   WorkflowRunRequest,
   WorkflowRunResponse,
-  WorkflowRunsResponse,
   WorkflowView,
   Ack,
   SessionAck,
@@ -204,7 +202,22 @@ export const api = {
   },
 
   sessions: {
-    list: (): Promise<ListSessionsResponse> => request("/sessions"),
+    /** Every session a person started, newest first.
+     *
+     * A run of a workflow or a routine is an ordinary session, so naming one
+     * scopes the list to it rather than reading a second endpoint. With neither
+     * filter, routine runs are left out — a routine on a timer would otherwise
+     * bury the sessions somebody is actually having. */
+    list: (filter?: {
+      workflow?: string;
+      routine?: string;
+    }): Promise<ListSessionsResponse> => {
+      const q = new URLSearchParams();
+      if (filter?.workflow) q.set("workflow", filter.workflow);
+      if (filter?.routine) q.set("routine", filter.routine);
+      const query = q.toString();
+      return request(`/sessions${query ? `?${query}` : ""}`);
+    },
 
     get: (id: string): Promise<GetSessionResponse> =>
       request(`/sessions/${encodeURIComponent(id)}`),
@@ -409,10 +422,6 @@ export const api = {
         body: "{}",
       }),
 
-    /** The routine's runs, newest first. They are deliberately absent from
-     * the session list. */
-    sessions: (name: string): Promise<RoutineSessionsResponse> =>
-      request(`/routines/${encodeURIComponent(name)}/sessions`),
   },
 
   workflows: {
@@ -443,11 +452,6 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
-
-    /** This workflow's runs, newest first. Unlike a routine's, these are also
-     * in the ordinary session list. */
-    runs: (name: string): Promise<WorkflowRunsResponse> =>
-      request(`/workflows/${encodeURIComponent(name)}/runs`),
 
     /** A run, projected onto its definition's graph. Keyed by session id,
      * because that is what a run is. */

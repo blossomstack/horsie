@@ -195,6 +195,10 @@ pub struct SessionActor {
     /// which is why the topology inside is a value rather than a second
     /// `Option`: a session's shape is decided at creation and never changes.
     agents: Option<SessionAgents>,
+    /// The last status this actor told the supervisor, so an unchanged one is
+    /// not re-sent. `None` until it has reported once, which is why a freshly
+    /// loaded session always reports.
+    last_reported: Option<SessionStatus>,
     /// The supervisor's per-agent revision channels for this session.
     ///
     /// Cloned in rather than created here: it has to outlive this actor, so
@@ -217,6 +221,7 @@ impl SessionActor {
             deps,
             parent,
             agents: None,
+            last_reported: None,
             revisions,
         }
     }
@@ -236,7 +241,18 @@ impl SessionActor {
     /// That drift was the shape of the old code: thirteen `report(LITERAL)`
     /// calls, each one duplicating the status the event on the very next line
     /// was about to fold.
-    async fn report_status(&self, state: &SessionState) {
+    /// Only on a change, because this is called after *every* persisted batch
+    /// and most batches move nothing: a tool result, a subagent's outcome, a
+    /// usage row. The supervisor drops an unchanged report anyway, but it is
+    /// still a message on the mailbox that also serves every read.
+    ///
+    /// `None` at load, so a freshly recovered session always reports once —
+    /// which is the moment anyone can first learn its status.
+    async fn report_status(&mut self, state: &SessionState) {
+        if self.last_reported.as_ref() == Some(&state.status) {
+            return;
+        }
+        self.last_reported = Some(state.status.clone());
         let _ = self
             .parent
             .tell(SessionSupervisorCommand::SessionStatusChanged {

@@ -132,16 +132,39 @@ pub async fn create_session(
     ))
 }
 
-/// Every session a person started. A routine's runs are deliberately absent:
-/// they are listed on the routine's own page, and a routine on a timer would
-/// otherwise bury the sessions somebody is actually having.
-pub async fn list_sessions(Scope(state): Scope) -> Result<impl IntoResponse, Api> {
-    let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let sessions = sessions
+/// Which sessions to list.
+///
+/// A run of a workflow or a routine is an ordinary session, so it is listed here
+/// rather than from a second endpoint that would re-derive the same row from the
+/// same registry read. Naming one is what scopes the list to it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsQuery {
+    workflow: Option<String>,
+    routine: Option<String>,
+}
+
+/// Every session a person started, newest first.
+///
+/// With neither filter a routine's runs are deliberately absent: they are listed
+/// from `?routine=`, and a routine on a timer would otherwise bury the sessions
+/// somebody is actually having. Workflow runs are present — they are started by
+/// hand, and the row says which workflow it came from.
+pub async fn list_sessions(
+    Scope(state): Scope,
+    Query(q): Query<ListSessionsQuery>,
+) -> Result<impl IntoResponse, Api> {
+    let all = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
+    let mut sessions: Vec<_> = all
         .iter()
-        .filter(|(_, rec)| rec.spec.routine().is_none())
+        .filter(|(_, rec)| match (&q.workflow, &q.routine) {
+            (Some(w), _) => rec.spec.workflow_name() == Some(w.as_str()),
+            (_, Some(r)) => rec.spec.routine() == Some(r.as_str()),
+            _ => rec.spec.routine().is_none(),
+        })
         .map(|(id, rec)| summary(id, rec))
         .collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
     Ok(Json(ListSessionsResponse { sessions }))
 }
 

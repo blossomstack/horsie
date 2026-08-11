@@ -32,7 +32,7 @@ export function useWorkflow(name: string | undefined) {
 export function useWorkflowRuns(name: string | undefined) {
   return useQuery({
     queryKey: name ? workflowKeys.runs(name) : ["workflows", "none", "runs"],
-    queryFn: () => api.workflows.runs(name as string),
+    queryFn: () => api.sessions.list({ workflow: name as string }),
     enabled: !!name,
     refetchInterval: 5_000,
     select: (r) => r.sessions,
@@ -58,9 +58,18 @@ export function useWorkflowRun(
     status === SessionStatusKind.Failed ||
     status === SessionStatusKind.Unrecoverable;
   return useQuery({
-    queryKey: sessionId ? workflowKeys.graph(sessionId) : ["workflows", "graph", "none"],
+    // Keyed by the status too, so the graph is re-read once more when the run
+    // settles. Without it a graph fetched while the run was still going would
+    // be the last one ever taken — the poll stops on the status, and the run's
+    // output only exists in the snapshot after it finished.
+    queryKey: sessionId
+      ? [...workflowKeys.graph(sessionId), status ?? "unknown"]
+      : ["workflows", "graph", "none"],
     queryFn: () => api.workflows.graph(sessionId as string),
     enabled: !!sessionId,
+    // Kept while the previous key's data is still the best answer, so the page
+    // does not flash back to "Loading run…" on every transition.
+    placeholderData: (prev) => prev,
     refetchInterval: settled ? false : 2_000,
   });
 }

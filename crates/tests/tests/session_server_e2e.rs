@@ -2596,57 +2596,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     let client = reqwest::Client::new();
     let base = format!("http://{}", server.addr);
 
-    // A run resolves each step's preset and checks its model is still
-    // configured, so both have to exist over the wire rather than be injected.
-    // Pointing the provider at the mock is what `provider_at` already does, so
-    // swapping the live registry changes nothing but the route.
-    let res = client
-        .put(format!("{base}/api/config/model-providers/p"))
-        .json(&serde_json::json!({
-            "name": "p", "kind": "anthropic",
-            "baseUrl": mock.url(), "apiKey": "test-key"
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 200, "configure the provider");
-    let res = client
-        .put(format!("{base}/api/config/models/mock"))
-        .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        res.status().as_u16(),
-        200,
-        "configure the model a step runs"
-    );
-
-    let res = client
-        .post(format!("{base}/api/agents"))
-        .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
-
-    let res = client
-        .post(format!("{base}/api/workflows"))
-        .json(&serde_json::json!({
-            "name": "e2e-flow",
-            "start": "triage",
-            "steps": [
-                {
-                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
-                    "transitions": [{"to": "fix"}]
-                },
-                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
-            ]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status().as_u16(), 201, "create the definition");
+    define_e2e_workflow(&client, &base, &mock.url()).await;
 
     // Creating the run is what starts it: there is no message to send.
     let res = client
@@ -2665,7 +2615,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     // The graph is the run's document, and it hangs off the session because a
     // run *is* one.
     let graph_url = format!("{base}/api/sessions/{id}/workflow");
-    let graph = wait_for_run_status(&client, &graph_url, "Finished").await;
+    let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
     let visited: Vec<&str> = graph["nodes"]
         .as_array()
         .unwrap()
@@ -2730,7 +2680,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 202, "retry one execution");
-    let graph = wait_for_run_status(&client, &graph_url, "Finished").await;
+    let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
     let fix = graph["nodes"]
         .as_array()
         .unwrap()
@@ -2747,25 +2697,216 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     server.shutdown().await;
 }
 
-/// Poll a run's graph until its status is `want` (10s cap).
+/// Everything a workflow run needs to exist before it can be started: the
+/// provider and model a step's preset names, the preset itself, and a two-step
+/// `e2e-flow` definition.
 ///
-/// Asserts against the status rather than a step count: this suite is serial
-/// against one long-lived server, so a baseline is the only safe comparison.
+/// A run resolves each step's preset and checks its model is still configured,
+/// so all of it has to exist over the wire rather than be injected. Pointing the
+/// provider at the mock is what `provider_at` already does, so swapping the live
+/// registry changes nothing but the route.
+async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &str) {
+    let res = client
+        .put(format!("{base}/api/config/model-providers/p"))
+        .json(&serde_json::json!({
+            "name": "p", "kind": "anthropic",
+            "baseUrl": mock_url, "apiKey": "test-key"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200, "configure the provider");
+    let res = client
+        .put(format!("{base}/api/config/models/mock"))
+        .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        200,
+        "configure the model a step runs"
+    );
+
+    let res = client
+        .post(format!("{base}/api/agents"))
+        .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
+
+    let res = client
+        .post(format!("{base}/api/workflows"))
+        .json(&serde_json::json!({
+            "name": "e2e-flow",
+            "start": "triage",
+            "steps": [
+                {
+                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
+                    "transitions": [{"to": "fix"}]
+                },
+                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "create the definition");
+}
+
+/// A workflow's runs are sessions, so they are read from the session list with
+/// a filter — and a cold run still says what became of it, because the registry
+/// keeps its status rather than caching it for as long as it happens to be
+/// loaded.
+///
+/// Cold is the state every past run on the page is in: nothing is loaded at
+/// boot either, and the idle sweep gets whatever is. Reading a row through the
+/// session actor is not the fix, because loading re-attempts an interrupted
+/// provision — so the vendor must hear nothing at all from a list request.
+#[tokio::test]
+async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
+    let mock = MockLlmServer::builder().build().await;
+    for _ in 0..4 {
+        mock.queue_response("step done");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let clock = Arc::new(TestClock::new());
+    let server = start_server_with(
+        tmp.path(),
+        Some(agent.link()),
+        &mock.url(),
+        Some(clock.clone()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", server.addr);
+    define_e2e_workflow(&client, &base, &mock.url()).await;
+
+    // An ordinary conversation, so the filter has something to leave out.
+    let plain = create_session(&client, &server.addr, &agent, "hello").await;
+
+    let res = client
+        .post(format!("{base}/api/workflows/e2e-flow/runs"))
+        .json(&serde_json::json!({
+            "input": "the build is red",
+            "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "start a run");
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    wait_for_session_status(&client, &base, &id, "Finished").await;
+
+    // Let it go cold.
+    clock.advance(Duration::from_secs(600));
+    let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
+    wait_until("the finished run to be unloaded", async || {
+        agent
+            .signals()
+            .contains(&format!("hibernate:{id}"))
+            .then_some(())
+    })
+    .await;
+    let before = agent.signals();
+
+    let res = client
+        .get(format!("{base}/api/sessions?workflow=e2e-flow"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 200, "list the workflow's runs");
+    let body: serde_json::Value = res.json().await.unwrap();
+    let row = body["sessions"]
+        .as_array()
+        .expect("a list of sessions")
+        .iter()
+        .find(|s| s["id"] == serde_json::json!(id))
+        .unwrap_or_else(|| panic!("the run is missing from the filtered list: {body}"));
+    assert_eq!(
+        row["status"],
+        serde_json::json!("Finished"),
+        "a cold run still knows how it ended: {body}"
+    );
+    assert!(
+        !body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == serde_json::json!(plain)),
+        "the filter must leave out everything that is not a run of it: {body}"
+    );
+    assert_eq!(
+        agent.signals(),
+        before,
+        "listing runs woke one, which re-attempts its provision"
+    );
+
+    // The unfiltered list is every session a person started, runs included.
+    let res = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap();
+    let all: serde_json::Value = res.json().await.unwrap();
+    let ids: Vec<&str> = all["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&id.as_str()) && ids.contains(&plain.as_str()),
+        "a run is an ordinary session: {all}"
+    );
+
+    server.shutdown().await;
+}
+
+/// Poll a session until its status is `want` (10s cap).
+///
+/// Replaces polling the run graph: the graph no longer carries a status,
+/// because a run's status is its session's.
+async fn wait_for_session_status(client: &reqwest::Client, base: &str, id: &str, want: &str) {
+    wait_until(&format!("the run to reach {want}"), async || {
+        let body: serde_json::Value = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        // The detail rides in an envelope: `{ "session": { ... } }`.
+        (body["session"]["status"] == serde_json::json!(want)).then_some(())
+    })
+    .await;
+}
+
+/// Poll a run's graph until its session reports `want`, then return the graph.
+///
+/// Two reads because they answer different questions now: the session says what
+/// state the run is in, the graph says where it got to.
 async fn wait_for_run_status(
     client: &reqwest::Client,
+    base: &str,
+    id: &str,
     graph_url: &str,
     want: &str,
 ) -> serde_json::Value {
-    let mut last = serde_json::Value::Null;
-    for _ in 0..200 {
-        let res = client.get(graph_url).send().await.unwrap();
-        if res.status().is_success() {
-            last = res.json().await.unwrap();
-            if last["status"]["type"] == serde_json::json!(want) {
-                return last;
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("run never reached {want}: {last}");
+    wait_for_session_status(client, base, id, want).await;
+    client
+        .get(graph_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }

@@ -23,7 +23,7 @@ use horsie_models::session::AgentSettings as WireAgentSettings;
 use horsie_models::workflow::{
     RunEdge, RunNode, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
     StepRunning, WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph, WorkflowRunRequest,
-    WorkflowRunResponse, WorkflowRunsResponse, WorkflowView,
+    WorkflowRunResponse, WorkflowView,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -254,24 +254,6 @@ pub async fn start_run(
             session: handlers::summary(&id, &rec),
         }),
     ))
-}
-
-/// GET /api/workflows/:name/runs — this workflow's runs, newest first.
-pub async fn list_runs(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<WorkflowRunsResponse>, Api> {
-    // Confirms the workflow exists, so an unknown name is a 404 rather than an
-    // empty list that reads like "no runs yet".
-    state.workflows.get(&name).await.map_err(api_err)?;
-    let all = handlers::ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let mut sessions: Vec<_> = all
-        .iter()
-        .filter(|(_, rec)| rec.spec.workflow_name() == Some(name.as_str()))
-        .map(|(id, rec)| handlers::summary(id, rec))
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(WorkflowRunsResponse { sessions }))
 }
 
 /// GET /api/sessions/:id/workflow — the run, projected onto its graph.

@@ -12,9 +12,7 @@ use axum::Json;
 use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::now_ms;
-use horsie_models::routines::{
-    RoutineInput, RoutineRunResponse, RoutineSessionsResponse, RoutineView,
-};
+use horsie_models::routines::{RoutineInput, RoutineRunResponse, RoutineView};
 use horsie_models::session::SessionSummary;
 
 /// Map the typed service error onto the envelope without string matching.
@@ -113,22 +111,10 @@ pub async fn run_routine(
         .map_err(api_err)
 }
 
-/// GET /api/routines/:name/sessions — the routine's runs, newest first.
-pub async fn get_routine_sessions(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<RoutineSessionsResponse>, Api> {
-    state.routines.get(&name).await.map_err(api_err)?;
-    let mut sessions: Vec<SessionSummary> = routine_sessions(&state, &name)
-        .await?
-        .into_iter()
-        .map(|(_, summary)| summary)
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(RoutineSessionsResponse { sessions }))
-}
-
 /// Every session created by `name`, as (id, summary).
+///
+/// Not a route: `GET /api/sessions?routine=<name>` is the list. This is what
+/// deleting a routine uses to find the sessions to delete with it.
 async fn routine_sessions(
     state: &crate::users::UserServices,
     name: &str,

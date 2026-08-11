@@ -92,9 +92,6 @@ struct WorkflowRunRequest {
 /// The session a run created. It is running by the time this is returned.
 struct WorkflowRunResponse { session: SessionSummary }
 
-/// A workflow's runs, newest first.
-struct WorkflowRunsResponse { sessions: Vec<SessionSummary> }
-
 /// What became of one step execution.
 #[type_tag = "type"]
 union StepRunStatus {

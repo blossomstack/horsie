@@ -5,7 +5,6 @@ export * from './workflowView';
 export * from './workflowInput';
 export * from './workflowRunRequest';
 export * from './workflowRunResponse';
-export * from './workflowRunsResponse';
 export * from './stepRunStatus';
 export * from './stepRunning';
 export * from './stepConcluded';

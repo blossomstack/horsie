@@ -162,9 +162,17 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   await page.reload();
   await expectStatus(page, "Idle");
 
-  // It landed under the workflow it was started from.
+  // It landed under the workflow it was started from, and the row says what
+  // became of it. This column read a status that only existed while the session
+  // was loaded, so every past run showed an em dash and a finished run, a
+  // failed one and one parked on a question were indistinguishable.
   await page.goto(`${appBase}/workflows/${WORKFLOW}`);
   await expect(page.getByTestId("workflow-run-row")).toHaveCount(1);
+  const runStatus = page
+    .getByTestId("workflow-run-row")
+    .getByTestId("status-badge");
+  await expect(runStatus).toHaveAttribute("data-status", "Finished");
+  await expect(runStatus).toHaveText("Finished");
 });
 
 /** A one-step workflow whose step can ask. A step never gets `ask_user`;
