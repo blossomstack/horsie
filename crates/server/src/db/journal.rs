@@ -22,7 +22,7 @@ use crate::auth::UserId;
 use crate::db::Db;
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream, StreamExt};
-use horsie_actor::{Epoch, Journal, JournalError, JournalResult, PersistenceId};
+use horsie_actor::{Journal, JournalError, JournalResult, PersistenceId};
 use sqlx::{Any, Row, Transaction};
 use std::collections::VecDeque;
 
@@ -124,33 +124,32 @@ impl SqlJournal {
             .map_err(backend)
     }
 
-    /// Admit or reject a write carrying `fence`, inside the caller's transaction.
+    /// Reject a write whose picture of the log is out of date, inside the
+    /// caller's transaction.
     ///
-    /// `None` means nothing is arbitrating ownership — a single-process
-    /// deployment — and the write always proceeds. Otherwise the log's epoch is
-    /// raised to the writer's claim, and a claim below the current one is
-    /// refused.
+    /// Written as an `UPDATE` that sets `last_seq` to the value it already has,
+    /// which looks pointless and is not: a `SELECT` followed by a write is two
+    /// statements with a gap between them, and under PostgreSQL's default
+    /// isolation another writer can slip into that gap. An update that filters
+    /// on the value it is checking takes the row lock and does the check in one
+    /// indivisible step.
     ///
-    /// Check and adopt are one statement inside the same transaction as the
-    /// write, so there is no window between deciding a write is allowed and
-    /// performing it. `persist` folds this into the update it was already doing;
-    /// this stands alone for callers with no such update to fold into.
+    /// `persist` does not call this — it folds the same condition into the
+    /// update it was already making, which is cheaper still. This is for
+    /// writers with no such update to fold into.
     async fn admit(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Any>,
         log_id: i64,
-        fence: Option<Epoch>,
+        expected_last_seq: u64,
     ) -> JournalResult<()> {
-        let Some(attempted) = fence else {
-            return Ok(());
-        };
-        let sql = self.db.q("UPDATE journal_logs SET epoch = ? \
-             WHERE user_id = ? AND log_id = ? AND epoch <= ?");
+        let sql = self.db.q("UPDATE journal_logs SET last_seq = ? \
+             WHERE user_id = ? AND log_id = ? AND last_seq = ?");
         let affected = sqlx::query(&sql)
-            .bind(to_i64(attempted.0))
+            .bind(to_i64(expected_last_seq))
             .bind(self.user.as_str())
             .bind(log_id)
-            .bind(to_i64(attempted.0))
+            .bind(to_i64(expected_last_seq))
             .execute(&mut **tx)
             .await
             .map_err(backend)?
@@ -158,29 +157,29 @@ impl SqlJournal {
         if affected > 0 {
             return Ok(());
         }
-        Err(self.fenced_error(tx, log_id, attempted).await)
+        Err(self.conflict_error(tx, log_id, expected_last_seq).await)
     }
 
     /// Name both numbers in the rejection rather than just saying no.
-    async fn fenced_error(
+    async fn conflict_error(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Any>,
         log_id: i64,
-        attempted: Epoch,
+        expected: u64,
     ) -> JournalError {
         let sql = self
             .db
-            .q("SELECT epoch FROM journal_logs WHERE user_id = ? AND log_id = ?");
-        let current: Result<i64, _> = sqlx::query_scalar(&sql)
+            .q("SELECT last_seq FROM journal_logs WHERE user_id = ? AND log_id = ?");
+        let actual: Result<i64, _> = sqlx::query_scalar(&sql)
             .bind(self.user.as_str())
             .bind(log_id)
             .fetch_one(&mut **tx)
             .await;
-        match current {
-            Ok(current) => JournalError::Fenced {
+        match actual {
+            Ok(actual) => JournalError::Conflict {
                 pid: format!("log {log_id}"),
-                current: Epoch(current.unsigned_abs()),
-                attempted,
+                expected,
+                actual: to_u64(actual),
             },
             Err(e) => backend(e),
         }
@@ -208,7 +207,7 @@ impl Journal for SqlJournal {
         &self,
         pid: &PersistenceId,
         events: &[Vec<u8>],
-        fence: Option<Epoch>,
+        expected_last_seq: u64,
     ) -> JournalResult<()> {
         if events.is_empty() {
             return Ok(());
@@ -218,48 +217,33 @@ impl Journal for SqlJournal {
 
         // Allocate the whole batch's numbers in one update, then read the base.
         // The batch is one transaction, so a crash mid-write leaves neither the
-        // numbers nor the rows — the actor advances `seq_nr` only after `persist`
-        // returns `Ok`, so a half-written batch must not be half-applied.
+        // numbers nor the rows — the actor advances `seq_nr` only after
+        // `persist` returns `Ok`, so a half-written batch must not be
+        // half-applied.
         //
-        // The ownership check rides along in the same statement rather than
-        // taking one of its own: it guards the same row this already updates, so
-        // folding it in costs nothing and keeps check-and-write indivisible by
-        // construction rather than by remembering to keep them together.
-        //
-        // Two statements rather than one parameterised over both cases, because
-        // an unfenced write must neither be filtered by an epoch it did not
-        // claim nor overwrite the epoch the log already carries. Either way this
-        // is exactly one statement against `journal_logs`.
-        let last_seq: i64 = if let Some(claimed) = fence {
-            let sql = self.db.q(
-                "UPDATE journal_logs SET last_seq = last_seq + ?, epoch = ? \
-                 WHERE user_id = ? AND log_id = ? AND epoch <= ? RETURNING last_seq",
-            );
-            let admitted: Option<i64> = sqlx::query_scalar(&sql)
-                .bind(to_i64(events.len() as u64))
-                .bind(to_i64(claimed.0))
-                .bind(self.user.as_str())
-                .bind(log_id)
-                .bind(to_i64(claimed.0))
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(backend)?;
-            // No row means the log is held above this claim, so nothing was
-            // numbered and nothing will be appended.
-            match admitted {
-                Some(seq) => seq,
-                None => return Err(self.fenced_error(&mut tx, log_id, claimed).await),
-            }
-        } else {
-            let sql = self.db.q("UPDATE journal_logs SET last_seq = last_seq + ? \
-                 WHERE user_id = ? AND log_id = ? RETURNING last_seq");
-            sqlx::query_scalar(&sql)
-                .bind(to_i64(events.len() as u64))
-                .bind(self.user.as_str())
-                .bind(log_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(backend)?
+        // The write fence rides along in the same statement rather than taking
+        // one of its own. `last_seq = ?` is the whole check: it admits the
+        // writer only if the log still ends where that writer believes, which is
+        // false the moment anybody else has appended. Folding it into the update
+        // that was happening anyway costs nothing and makes check-and-write
+        // indivisible by construction rather than by remembering to keep them
+        // together.
+        let sql = self.db.q("UPDATE journal_logs SET last_seq = last_seq + ? \
+             WHERE user_id = ? AND log_id = ? AND last_seq = ? RETURNING last_seq");
+        let admitted: Option<i64> = sqlx::query_scalar(&sql)
+            .bind(to_i64(events.len() as u64))
+            .bind(self.user.as_str())
+            .bind(log_id)
+            .bind(to_i64(expected_last_seq))
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?;
+        // No row means the log has moved past this writer, so nothing was
+        // numbered and nothing will be appended.
+        let Some(last_seq) = admitted else {
+            return Err(self
+                .conflict_error(&mut tx, log_id, expected_last_seq)
+                .await);
         };
         let base = last_seq - events.len() as i64;
 
@@ -323,28 +307,15 @@ impl Journal for SqlJournal {
         pid: &PersistenceId,
         state: Vec<u8>,
         seq_nr: u64,
-        fence: Option<Epoch>,
     ) -> JournalResult<()> {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
         let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
-        // Fenced like an append: a host that lost this log must not be able to
-        // overwrite the state of the history somebody else is now building.
-        self.admit(&mut tx, log_id, fence).await?;
-        // A snapshot may be taken at a sequence this log has not reached when
-        // the state came from elsewhere; keep `last_seq` monotonic so later
-        // events never reuse a number the snapshot already covers.
-        let statement = format!(
-            "UPDATE journal_logs SET last_seq = {} WHERE user_id = ? AND log_id = ?",
-            self.db.greatest("last_seq", "?")
-        );
-        let bump = self.db.q(&statement);
-        sqlx::query(&bump)
-            .bind(to_i64(seq_nr))
-            .bind(self.user.as_str())
-            .bind(log_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(backend)?;
+        // Conditional like an append, and on the same value: a snapshot claims
+        // what the log contains, so a writer whose log has moved on is claiming
+        // something false. It is also the more destructive of the two writes —
+        // a snapshot is where the next recovery starts, so a stale one rewrites
+        // history rather than adding to it.
+        self.admit(&mut tx, log_id, seq_nr).await?;
         let upsert = self.db.q(
             "INSERT INTO journal_snapshots (log_id, seq, state) VALUES (?, ?, ?) \
              ON CONFLICT(log_id) DO UPDATE SET seq = excluded.seq, state = excluded.state",
@@ -447,41 +418,23 @@ impl Journal for SqlJournal {
         tx.commit().await.map_err(backend)
     }
 
-    async fn claim_ownership(&self, pid: &PersistenceId) -> JournalResult<Epoch> {
-        let mut tx = self.db.begin_write().await.map_err(backend)?;
-        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
-        // Bump and read in one statement. Two hosts claiming concurrently are
-        // serialised by the write transaction and get two different numbers, so
-        // neither is told it won and the loser is locked out by the other's
-        // higher one on its next write.
-        let sql = self.db.q("UPDATE journal_logs SET epoch = epoch + 1 \
-             WHERE user_id = ? AND log_id = ? RETURNING epoch");
-        let epoch: i64 = sqlx::query_scalar(&sql)
-            .bind(self.user.as_str())
-            .bind(log_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(backend)?;
-        tx.commit().await.map_err(backend)?;
-        Ok(Epoch(epoch.unsigned_abs()))
-    }
-
-    async fn current_epoch(&self, pid: &PersistenceId) -> JournalResult<Option<Epoch>> {
+    async fn last_seq(&self, pid: &PersistenceId) -> JournalResult<u64> {
         let Some(log_id) = self.log_id(pid).await? else {
-            return Ok(None);
+            // A log nobody has written to ends at 0, which is exactly what its
+            // first writer must expect. Creating a row to answer a read would
+            // make an observer able to change what it is observing.
+            return Ok(0);
         };
         let sql = self
             .db
-            .q("SELECT epoch FROM journal_logs WHERE user_id = ? AND log_id = ?");
-        let epoch: Option<i64> = sqlx::query_scalar(&sql)
+            .q("SELECT last_seq FROM journal_logs WHERE user_id = ? AND log_id = ?");
+        let last: Option<i64> = sqlx::query_scalar(&sql)
             .bind(self.user.as_str())
             .bind(log_id)
             .fetch_optional(self.db.pool())
             .await
             .map_err(backend)?;
-        // 0 means never claimed, which is a different thing from claimed at
-        // generation zero — there is no such generation.
-        Ok(epoch.filter(|e| *e > 0).map(|e| Epoch(e.unsigned_abs())))
+        Ok(last.map_or(0, to_u64))
     }
 
     async fn clear(&self, pid: &PersistenceId) -> JournalResult<()> {

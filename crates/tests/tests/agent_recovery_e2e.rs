@@ -122,10 +122,11 @@ async fn seed(journal: &Arc<InMemoryJournal>, session_id: uuid::Uuid, events: &[
         .iter()
         .map(|e| serde_json::to_vec(e).unwrap())
         .collect();
-    journal
-        .persist(&AgentActor::persistence_id_for(session_id), &encoded, None)
-        .await
-        .unwrap();
+    // Appends where the log currently ends, so seeding twice works and the
+    // helper never has to be told what it has already written.
+    let pid = AgentActor::persistence_id_for(session_id);
+    let at = journal.last_seq(&pid).await.unwrap();
+    journal.persist(&pid, &encoded, at).await.unwrap();
 }
 
 /// The most recent request body the mock LLM received.

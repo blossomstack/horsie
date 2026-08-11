@@ -418,9 +418,9 @@ async fn journals_are_isolated() {
     let theirs = SqlJournal::new(db, b);
     let pid = PersistenceId::new("session", "same-id");
 
-    mine.persist(&pid, &[b"mine".to_vec()], None).await.unwrap();
+    mine.persist(&pid, &[b"mine".to_vec()], 0).await.unwrap();
     theirs
-        .persist(&pid, &[b"theirs".to_vec()], None)
+        .persist(&pid, &[b"theirs".to_vec()], 0)
         .await
         .unwrap();
 
