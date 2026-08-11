@@ -3959,6 +3959,50 @@ mod tests {
     /// Without this the boundary that just shrank the context leaves the old
     /// size in state, and the next iteration compacts again — every iteration,
     /// forever, each one costing a provider call.
+    /// `AgentState` is a serialization contract, and a boundary is the newest
+    /// thing in it. A snapshot that lost one would silently un-compact every
+    /// recovered session — the prompt would jump back to the whole log, which
+    /// is the failure mode that took the supervisor down on 2026-08-02, only
+    /// quieter: it would cost money rather than crash.
+    #[test]
+    fn a_boundary_survives_a_snapshot_round_trip() {
+        let mut state = state_with_messages(3);
+        state = AgentActor::apply_event(state, compacted(Some("m2"), "what came before"));
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AgentState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.boundary_seqs(), state.boundary_seqs());
+        assert_eq!(
+            texts(&back.prompt_messages()),
+            texts(&state.prompt_messages()),
+            "a recovered agent must prompt from exactly the boundary the live \
+             one did"
+        );
+        let (_, entry) = back.last_boundary().expect("the boundary survived");
+        assert_eq!(entry.summary, "what came before");
+        assert_eq!(entry.carried_state, "No tasks.");
+        assert!(matches!(
+            entry.trigger,
+            horsie_agentcore::CompactionTrigger::Auto(_)
+        ));
+    }
+
+    /// The compatibility half: a snapshot written before compaction existed
+    /// has no `Compaction` entries and must recover to exactly what it always
+    /// did, rather than failing `recover()` for every existing session.
+    #[test]
+    fn a_snapshot_that_predates_compaction_still_recovers() {
+        let state = state_with_messages(2);
+        let json = serde_json::to_string(&state).unwrap();
+        let back: AgentState = serde_json::from_str(&json).unwrap();
+        assert!(back.boundary_seqs().is_empty());
+        assert_eq!(
+            texts(&back.prompt_messages()),
+            vec!["message 0", "message 1"]
+        );
+    }
+
     #[test]
     fn a_boundary_resets_the_context_size_it_reports() {
         let mut state = state_with_messages(2);
