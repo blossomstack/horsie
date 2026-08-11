@@ -721,7 +721,8 @@ pub(super) fn hook_ids(page: &crate::agent_loop::LogPage) -> Vec<String> {
         .filter_map(|e| match &e.body {
             horsie_agentcore::AgentLogBody::Hook(h) => Some(h.id.clone()),
             horsie_agentcore::AgentLogBody::Llm(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }
@@ -897,7 +898,8 @@ pub(super) async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<Strin
             }
             horsie_agentcore::AgentLogBody::Llm(_)
             | horsie_agentcore::AgentLogBody::Hook(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }
@@ -914,7 +916,8 @@ pub(super) async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<Sto
                 other => panic!("only Stop hooks run in these tests, got {other:?}"),
             },
             horsie_agentcore::AgentLogBody::Llm(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }

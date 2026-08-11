@@ -2,6 +2,7 @@
 package events;
 
 use agent.AgentInput;
+use agent.CompactionEntry;
 use agent.Message;
 use agent.Usage;
 use agent.Role;
@@ -57,6 +58,14 @@ struct RunCompleteEvent { message_id: String, usage: Usage, iterations: u32, con
 /// no turn completed.
 struct RunAbortedEvent { message_id: String, usage: Usage, context_tokens: u32, at_ms: u64 }
 
+/// Older history stopped being shown to the model. `message_id` is the run this
+/// happened inside, or a fresh uuid for a `/compact` that ran on its own.
+///
+/// Emitted from the top of the tool loop, which is the only point in a run
+/// where every `tool_use` already has its `tool_result` — a boundary taken
+/// anywhere else could split a call from its answer.
+struct CompactedEvent { message_id: String, entry: CompactionEntry, at_ms: u64 }
+
 /// All events emitted during agent execution.
 ///
 /// Flow per assistant turn:
@@ -86,4 +95,5 @@ union AgentEvent {
     ToolComplete(ToolCompleteEvent),
     RunComplete(RunCompleteEvent),
     RunAborted(RunAbortedEvent),
+    Compacted(CompactedEvent),
 }

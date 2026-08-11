@@ -28,6 +28,8 @@ export * from './subAgentLifecycle';
 export * from './stepLifecycle';
 export * from './taskListLifecycle';
 export * from './sessionFailedLifecycle';
+export * from './compactionEntry';
+export * from './compactionTrigger';
 export * from './usage';
 export * from './userMessageInput';
 export * from './toolResultInput';

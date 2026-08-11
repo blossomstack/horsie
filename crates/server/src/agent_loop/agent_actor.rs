@@ -7,8 +7,9 @@ use horsie_actor::{
 };
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
-    AgentResult, AskLifecycle, ContentPart, EventSink, EventSinkError, HandoffCall, LifecycleEvent,
-    LlmProvider, Message, QueuedLifecycle, Role, Toolbox, TurnBeganLifecycle, Usage,
+    AgentResult, AskLifecycle, CompactionEntry, ContentPart, EventSink, EventSinkError,
+    HandoffCall, LifecycleEvent, LlmProvider, Message, QueuedLifecycle, Role, Toolbox,
+    TurnBeganLifecycle, Usage,
 };
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
@@ -395,6 +396,16 @@ pub enum AgentDomainEvent {
         event: LifecycleEvent,
         at_ms: u64,
     },
+    /// Older history stopped being shown to the model.
+    ///
+    /// Journaled like any other append: the log keeps everything it held, and
+    /// this only records where the prompt now starts. Folding it is therefore
+    /// deterministic under replay, and a recovered agent prompts from exactly
+    /// the boundary the live one did.
+    Compacted {
+        entry: CompactionEntry,
+        at_ms: u64,
+    },
     /// Something was accepted into this agent's queue.
     ///
     /// Journaled before anything is done with it, which is what makes an
@@ -617,6 +628,37 @@ pub fn hook_entry(
     }
 }
 
+/// The one message a compaction boundary shows the model.
+///
+/// Two labelled sections rather than one blob, because they have different
+/// truth conditions. The summary is the model's own prose and may be wrong at
+/// the edges. The carried state is exact and must survive verbatim — a
+/// summariser that renders "task 3: in progress" as prose has destroyed the id
+/// the agent needs to call `task_list` correctly.
+///
+/// A `User` message because that is the role every provider accepts as
+/// context-setting; there is no wire on which a synthetic assistant turn with
+/// no request behind it is safe.
+#[must_use]
+pub fn boundary_message(entry: &CompactionEntry, at_ms: u64) -> Message {
+    let text = format!(
+        "This conversation was compacted: earlier history is summarised below \
+         rather than shown in full. The messages after this one are verbatim.\n\n\
+         ## Summary of earlier work\n{}\n\n## Current state\n{}",
+        entry.summary.trim(),
+        entry.carried_state.trim(),
+    );
+    Message {
+        // Derived from the boundary's own position, never generated, for the
+        // reason `hook:{n}` is: replay must reproduce the id it produced live.
+        id: format!("compaction:{}", entry.covers_through_seq),
+        role: Role::User,
+        parts: vec![ContentPart::Text(horsie_models::agent::TextPart { text })],
+        created_at_ms: at_ms,
+        started_at_ms: None,
+    }
+}
+
 /// The cursor id of the `seq`-th hook entry in a transcript.
 ///
 /// Counts entries rather than records-per-call, because not every record has a
@@ -684,17 +726,65 @@ impl AgentState {
     /// [`crate::agent_loop::hook_translation::translate`] is where that is decided, in one
     /// exhaustive match, and any future non-model entry inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
+        // Where the prompt starts. Everything below the newest boundary is
+        // represented by that boundary's own message and nothing else — which
+        // is the only thing compaction changes about this function.
+        let boundary = self.last_boundary();
+        let from_seq = boundary.map_or(0, |(_, e)| e.retained_from_seq);
+
+        boundary
+            .map(|(at_ms, e)| boundary_message(e, at_ms))
+            .into_iter()
+            .chain(
+                self.log
+                    .iter()
+                    .filter(|e| e.seq >= from_seq)
+                    .filter_map(|e| match &e.body {
+                        AgentLogBody::Llm(m) => Some(m.clone()),
+                        AgentLogBody::Hook(h) => crate::agent_loop::hook_translation::translate(h),
+                        // Every lifecycle variant, present and future. This arm is the
+                        // reason `Lifecycle` is one union rather than nine flattened
+                        // ones: provider isolation cannot be forgotten for a variant
+                        // added later.
+                        AgentLogBody::Lifecycle(_) => None,
+                        // A boundary reached here is never the newest one — the
+                        // newest was lifted out above — so it is history. Its
+                        // span is already folded into the summary of every
+                        // boundary that followed it, and replaying it would put
+                        // the same account in the prompt twice.
+                        AgentLogBody::Compaction(_) => None,
+                    }),
+            )
+            .collect()
+    }
+
+    /// The newest compaction boundary and the moment it was taken, if this
+    /// agent has ever compacted.
+    ///
+    /// A reverse scan rather than a stored pointer: state is a serialization
+    /// contract, and a cached index is a second thing that can disagree with
+    /// the log after a partial fold. Boundaries are rare and the scan stops at
+    /// the first one.
+    #[must_use]
+    pub fn last_boundary(&self) -> Option<(u64, &CompactionEntry)> {
+        self.log.iter().rev().find_map(|e| match &e.body {
+            AgentLogBody::Compaction(c) => Some((e.at_ms, c)),
+            AgentLogBody::Llm(_) | AgentLogBody::Hook(_) | AgentLogBody::Lifecycle(_) => None,
+        })
+    }
+
+    /// The seq of every compaction boundary, oldest first.
+    ///
+    /// These are the conversation ids: conversation N is the span
+    /// `(previous boundary, this boundary]`, so the boundary that closes a
+    /// conversation is what names it. A client seeking across compactions pages
+    /// on these.
+    #[must_use]
+    pub fn boundary_seqs(&self) -> Vec<u64> {
         self.log
             .iter()
-            .filter_map(|e| match &e.body {
-                AgentLogBody::Llm(m) => Some(m.clone()),
-                AgentLogBody::Hook(h) => crate::agent_loop::hook_translation::translate(h),
-                // Every lifecycle variant, present and future. This arm is the
-                // reason `Lifecycle` is one union rather than nine flattened
-                // ones: provider isolation cannot be forgotten for a variant
-                // added later.
-                AgentLogBody::Lifecycle(_) => None,
-            })
+            .filter(|e| matches!(e.body, AgentLogBody::Compaction(_)))
+            .map(|e| e.seq)
             .collect()
     }
 
@@ -1827,6 +1917,14 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
                 state.push(at_ms, AgentLogBody::Lifecycle(event));
             }
+            AgentDomainEvent::Compacted { entry, at_ms } => {
+                // `context_tokens` is what the next auto-compaction check
+                // reads, and the whole point of a compaction is that this
+                // number just dropped. Leaving it at the pre-compaction size
+                // would make the very next turn compact again immediately.
+                state.context_tokens = entry.tokens_after;
+                state.push(at_ms, AgentLogBody::Compaction(entry));
+            }
             AgentDomainEvent::Received { item, at_ms } => {
                 // Only a person's message becomes a visible queue entry. A
                 // report and a timer are already narrated elsewhere — the
@@ -2541,6 +2639,10 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
         AgentEvent::RunAborted(ev) => Some(AgentDomainEvent::RunAborted {
             usage: ev.usage.clone(),
             context_tokens: ev.context_tokens,
+            at_ms: ev.at_ms,
+        }),
+        AgentEvent::Compacted(ev) => Some(AgentDomainEvent::Compacted {
+            entry: ev.entry.clone(),
             at_ms: ev.at_ms,
         }),
         AgentEvent::InputMessage(_)
@@ -3496,6 +3598,208 @@ mod tests {
             );
             assert_eq!(llm.calls(), 1, "the turn still runs");
         }
+    }
+
+    // --- Compaction boundaries ---------------------------------------------
+    //
+    // The whole of the compaction contract as seen from state: where a prompt
+    // starts, and what a boundary that is no longer the newest one means.
+
+    fn boundary(covers_through: u64, retained_from: u64, summary: &str) -> CompactionEntry {
+        CompactionEntry {
+            summary: summary.into(),
+            carried_state: "No tasks.".into(),
+            covers_through_seq: covers_through,
+            retained_from_seq: retained_from,
+            trigger: horsie_agentcore::CompactionTrigger::Auto(horsie_agentcore::EmptyOutcome {}),
+            instructions: None,
+            tokens_before: 1_000,
+            tokens_after: 100,
+        }
+    }
+
+    /// Builds a state holding `n` user messages at seqs `0..n`.
+    fn state_with_messages(n: u64) -> AgentState {
+        let mut state = AgentActor::initial_state();
+        for i in 0..n {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::InputMessage {
+                    message: Message {
+                        id: format!("m{i}"),
+                        ..user_msg(&format!("message {i}"))
+                    },
+                },
+            );
+        }
+        state
+    }
+
+    fn texts(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_log_with_no_boundary_prompts_exactly_as_before() {
+        let state = state_with_messages(3);
+        assert_eq!(
+            texts(&state.prompt_messages()),
+            vec!["message 0", "message 1", "message 2"],
+            "adding the arm must not change a log that has never compacted"
+        );
+    }
+
+    #[test]
+    fn a_boundary_replaces_everything_it_covers_with_one_message() {
+        let mut state = state_with_messages(4);
+        // Covers seqs 0..=2, retains from 3.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(2, 3, "they discussed the first three things"),
+                at_ms: 500,
+            },
+        );
+
+        let prompt = texts(&state.prompt_messages());
+        assert_eq!(
+            prompt.len(),
+            2,
+            "one synthetic message, then the retained one"
+        );
+        assert!(
+            prompt[0].contains("they discussed the first three things"),
+            "the summary leads the prompt, got {:?}",
+            prompt[0]
+        );
+        assert!(
+            prompt[0].contains("No tasks."),
+            "carried state rides in the same synthetic message"
+        );
+        assert_eq!(prompt[1], "message 3");
+    }
+
+    #[test]
+    fn entries_retained_across_a_boundary_are_sent_raw() {
+        let mut state = state_with_messages(4);
+        // Covers 0..=2 but retains from 2 — the overlap a recency window creates.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(2, 2, "summary"),
+                at_ms: 500,
+            },
+        );
+
+        let prompt = texts(&state.prompt_messages());
+        assert_eq!(
+            prompt[1..],
+            ["message 2", "message 3"],
+            "a message the summary also covers is still sent verbatim when retained"
+        );
+    }
+
+    #[test]
+    fn only_the_newest_of_two_boundaries_is_honoured() {
+        let mut state = state_with_messages(3);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(1, 2, "the first summary"),
+                at_ms: 500,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: Message {
+                    id: "m9".into(),
+                    ..user_msg("message 9")
+                },
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(4, 5, "the second summary"),
+                at_ms: 600,
+            },
+        );
+
+        let prompt = texts(&state.prompt_messages());
+        assert_eq!(prompt.len(), 1, "nothing survives past the newest boundary");
+        assert!(prompt[0].contains("the second summary"));
+        assert!(
+            !prompt[0].contains("the first summary"),
+            "a superseded boundary is history; its span is already folded into \
+             the summary that replaced it, so replaying it says the same thing \
+             twice"
+        );
+    }
+
+    #[test]
+    fn a_superseded_boundary_translates_to_nothing() {
+        let mut state = state_with_messages(2);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(0, 1, "old"),
+                at_ms: 500,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(2, 0, "new"),
+                at_ms: 600,
+            },
+        );
+
+        // `retained_from_seq: 0` pulls the whole log back into the window, which
+        // is the case that proves the older boundary is skipped on its own
+        // merits rather than by falling outside the range.
+        let prompt = texts(&state.prompt_messages());
+        assert!(
+            !prompt.iter().any(|t| t.contains("old")),
+            "an older boundary inside the retained window still shows nothing, \
+             got {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn boundary_seqs_name_every_conversation() {
+        let mut state = state_with_messages(2);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(1, 2, "first"),
+                at_ms: 500,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::Compacted {
+                entry: boundary(2, 3, "second"),
+                at_ms: 600,
+            },
+        );
+        assert_eq!(
+            state.boundary_seqs(),
+            vec![2, 3],
+            "a conversation's id is the seq of the boundary that closes it"
+        );
     }
 
     #[test]
@@ -5312,7 +5616,10 @@ mod queue_tests {
                 AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(_)) => {
                     Some("AskRecorded".to_string())
                 }
-                AgentLogBody::Llm(_) | AgentLogBody::Hook(_) | AgentLogBody::Lifecycle(_) => None,
+                AgentLogBody::Llm(_)
+                | AgentLogBody::Hook(_)
+                | AgentLogBody::Lifecycle(_)
+                | AgentLogBody::Compaction(_) => None,
             })
             .collect()
     }
