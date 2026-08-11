@@ -449,7 +449,7 @@ impl SessionSupervisor {
 
     /// The live child for `id`, spawning it if this is the first command to
     /// reach it. Loading reads two journals and calls no vendor.
-    fn ensure_loaded(
+    async fn ensure_loaded(
         &mut self,
         ctx: &ActorContext<SessionSupervisorCommand>,
         state: &SessionSupervisorState,
@@ -462,7 +462,7 @@ impl SessionSupervisor {
         }
         let record = state.sessions.get(id)?;
         let spec = record.spec.clone();
-        self.spawn_session(ctx, id, &spec)
+        self.spawn_session(ctx, id, &spec).await
     }
 
     /// Spawn the actor for `id` and remember it.
@@ -470,7 +470,7 @@ impl SessionSupervisor {
     /// Separate from [`Self::ensure_loaded`] because creating a session has to
     /// spawn one that is not in `state` yet: the `SessionCreated` event is still
     /// being persisted when the session is first told to provision.
-    fn spawn_session(
+    async fn spawn_session(
         &mut self,
         ctx: &ActorContext<SessionSupervisorCommand>,
         id: &SessionId,
@@ -494,6 +494,15 @@ impl SessionSupervisor {
             self.revisions_for(id),
         ));
         self.children.insert(id.clone(), child.clone());
+        // Ahead of anything else this session will be told, because this is the
+        // first message into a mailbox nobody else has a reference to yet. The
+        // session ignores it once its log already says what it is, so this is a
+        // seed for a session that has none rather than a write on every load.
+        let _ = child
+            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+                spec: Box::new(spec.clone()),
+            }))
+            .await;
         Some(child)
     }
 
@@ -722,7 +731,7 @@ impl EventSourcedActor for SessionSupervisor {
                 // runtime manager. And the attempt is journaled by the session,
                 // so a process that dies mid-create leaves a session that knows
                 // to finish it, which no in-memory gate could.
-                let child = self.spawn_session(ctx, &id, &spec);
+                let child = self.spawn_session(ctx, &id, &spec).await;
                 if let Some(child) = &child {
                     let _ = child
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
@@ -753,7 +762,7 @@ impl EventSourcedActor for SessionSupervisor {
                     let _ = reply.send(None);
                     return CommandEffect::none();
                 };
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -777,7 +786,7 @@ impl EventSourcedActor for SessionSupervisor {
                 text,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     None => {
                         let _ = reply.send(Err(UserMessageError::NotFound));
                     }
@@ -794,7 +803,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Stop { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     None => {
                         let _ = reply.send(Err(format!("no such session: {id}")));
                     }
@@ -825,7 +834,7 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 // Loading it first is deliberate: the session actor is what
                 // knows how to cancel a run and tell the vendor.
-                if let Some(child) = self.ensure_loaded(ctx, state, &id) {
+                if let Some(child) = self.ensure_loaded(ctx, state, &id).await {
                     let (tx, rx) = oneshot::channel();
                     if child
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
@@ -847,7 +856,7 @@ impl EventSourcedActor for SessionSupervisor {
                 after,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -874,7 +883,7 @@ impl EventSourcedActor for SessionSupervisor {
                 max,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -896,7 +905,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UsageStats { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -915,7 +924,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::RunState { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -934,7 +943,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::RetryStep { id, index, reply } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child
@@ -959,7 +968,7 @@ impl EventSourcedActor for SessionSupervisor {
                 answers,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     None => {
                         let _ = reply.send(Err(AnswerError::NothingPending));
                     }
@@ -1019,7 +1028,7 @@ impl EventSourcedActor for SessionSupervisor {
                 agent_id,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id) {
+                match self.ensure_loaded(ctx, state, &id).await {
                     Some(child) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = child

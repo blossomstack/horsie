@@ -781,7 +781,9 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::SubAgentCompleted { .. }
             | SessionDomainEvent::SubAgentFailed { .. }
             | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
-            SessionDomainEvent::UsageRecorded { .. } => SessionCore::apply(&mut state, &event),
+            SessionDomainEvent::UsageRecorded { .. }
+            | SessionDomainEvent::SpecRecorded { .. }
+            | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
         }
         state
     }
@@ -824,6 +826,16 @@ impl EventSourcedActor for SessionActor {
         state: &SessionState,
         ctx: &mut ActorContext<SessionCommand>,
     ) {
+        // The journal is the truth about this session; the spec handed in at
+        // construction is only a seed. Adopt what was recorded — and if nothing
+        // was, keep the seed and wait, because the `RecordSpec` the supervisor
+        // sends on every load is already ahead of every other command in this
+        // mailbox. Writing it from here instead would race them, and a rename
+        // that arrived first would have nothing to rename.
+        if let Some(spec) = state.spec.as_ref() {
+            self.spec = spec.clone();
+        }
+
         if self.spec.workflow.is_some() {
             // A run has no main agent. Step actors, like subagent actors, stay
             // cold: they spawn on demand for a history read, a retry, or the
