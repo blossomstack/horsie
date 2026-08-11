@@ -1,4 +1,5 @@
 mod agent;
+pub mod compaction;
 mod error;
 mod events;
 mod provider;
@@ -9,6 +10,9 @@ mod thinking;
 mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
+pub use compaction::{
+    CompactionBudget, CompactionPlan, CompactionPolicy, CompactionResult, PreCompactDecision,
+};
 pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
 pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
