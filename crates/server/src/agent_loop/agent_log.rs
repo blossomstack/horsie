@@ -10,6 +10,7 @@
 //! part is a table of cases, and a table of cases wants isolated tests.
 
 use horsie_agentcore::AgentLogEntry;
+use serde::{Deserialize, Serialize};
 
 /// A client's position in an agent's stream.
 ///
@@ -23,7 +24,7 @@ use horsie_agentcore::AgentLogEntry;
 /// that has since restarted. A single flat counter across both kinds would
 /// reissue the same numbers to different content after a crash, and nothing
 /// could tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     pub entry_seq: u64,
     pub delta_seq: usize,
@@ -67,7 +68,7 @@ impl std::fmt::Display for Cursor {
 /// without the forward-page ambiguity `has_more_after` produced, where a
 /// backfill could not tell "nothing newer" from "nothing newer *in this
 /// direction*".
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogPage {
     pub entries: Vec<AgentLogEntry>,
 }

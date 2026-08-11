@@ -24,7 +24,8 @@ use crate::sessions::spec::{
 };
 use async_trait::async_trait;
 use horsie_actor::{
-    ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
+    ActorContext, ActorRef, ActorSystem, ClusterActor, CommandEffect, EventSourcedActor,
+    PersistenceId, ReplyTo,
 };
 use horsie_models::session::{
     GlobalSessionEvent, GlobalSessionStatusEvent, GlobalSessionTitleEvent,
@@ -42,6 +43,10 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// How often the supervisor looks for sessions to unload.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Names this actor type in both the journal and the cluster. Changing it
+/// orphans every existing supervisor log.
+const SUPERVISOR_KIND: &str = "session-supervisor";
 
 /// How long a reader's poll parks before being answered with no news.
 ///
@@ -75,6 +80,7 @@ impl Default for SupervisorConfig {
 
 /// Commands accepted by the [`SessionSupervisor`].
 #[allow(clippy::large_enum_variant)]
+#[derive(Serialize, Deserialize)]
 pub enum SessionSupervisorCommand {
     /// Create a new session; replies with its generated id.
     Create {
@@ -296,7 +302,7 @@ pub enum SessionSupervisorEvent {
 }
 
 /// Why a rename was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenameSessionError {
     NotFound(String),
     /// Empty, multi-line, or over-long — the same rule the title tool applies.
@@ -313,7 +319,7 @@ impl std::fmt::Display for RenameSessionError {
 }
 
 /// Why a group command was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GroupError {
     /// Neither registered nor referenced by any session annotation.
     NotFound(String),
@@ -579,6 +585,41 @@ impl SessionSupervisor {
     }
 }
 
+/// Everything a supervisor needs that is not in its journal.
+///
+/// Node-local by definition: pools, clients, registries. A host that never saw
+/// the request creating an account's supervisor builds one from these plus the
+/// account id, which is what lets the supervisor move.
+#[derive(Clone)]
+pub struct SupervisorDeps {
+    pub server: ServerDeps,
+    pub global_tx: broadcast::Sender<GlobalSessionEvent>,
+    pub config: SupervisorConfig,
+}
+
+impl ClusterActor for SessionSupervisor {
+    /// The same kind its journal is keyed by, so a supervisor started here and
+    /// one started on another host read the same log.
+    const KIND: &'static str = SUPERVISOR_KIND;
+
+    type Command = SessionSupervisorCommand;
+    type Deps = SupervisorDeps;
+
+    /// `id` is the account, and so is the system's journal — horsie builds one
+    /// [`ActorSystem`] per account, each over an account-scoped journal, so the
+    /// two always agree. Taking the account from the id rather than from the
+    /// deps is what keeps that true even so: a factory is registered once and
+    /// the id is the only thing that varies.
+    fn spawn(id: &str, deps: Self::Deps, system: &ActorSystem) -> ActorRef<Self::Command> {
+        system.spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::new(id),
+            deps.server,
+            deps.global_tx,
+            deps.config,
+        ))
+    }
+}
+
 #[async_trait]
 impl EventSourcedActor for SessionSupervisor {
     type Command = SessionSupervisorCommand;
@@ -591,7 +632,7 @@ impl EventSourcedActor for SessionSupervisor {
     /// what keeps two accounts' lists apart — there is no filter anywhere and
     /// nothing to forget to apply.
     fn persistence_id(&self) -> PersistenceId {
-        PersistenceId::new("session-supervisor", self.user.as_str())
+        PersistenceId::new(SUPERVISOR_KIND, self.user.as_str())
     }
 
     fn initial_state() -> SessionSupervisorState {
@@ -1675,6 +1716,52 @@ mod tests {
             .expect("the reloaded session must publish into the same channel")
             .expect("the agent is still watchable");
         assert_ne!(moved, seen, "the reloaded session moved the agent on");
+    }
+
+    /// A host that never saw the request creating an account can still build
+    /// that account's supervisor, from the id alone.
+    ///
+    /// This is what `actor_of` does after a failover, so the test resolves one
+    /// the same way rather than constructing it: a factory that needed anything
+    /// the original caller had would compile and then fail in exactly the
+    /// situation clustering exists for.
+    #[tokio::test]
+    async fn a_supervisor_can_be_built_from_its_account_id_alone() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        let system = ActorSystem::new(journal);
+        system.register::<SessionSupervisor>(SupervisorDeps {
+            server: f.deps.clone(),
+            global_tx: gtx,
+            config: manual_config(&clock),
+        });
+
+        let sup = system
+            .actor_of::<SessionSupervisor>("some-account")
+            .await
+            .expect("the factory builds one");
+        let id = create(&sup).await;
+
+        // Asking again returns the same instance rather than a second one
+        // racing it for the same log.
+        let again = system
+            .actor_of::<SessionSupervisor>("some-account")
+            .await
+            .expect("the factory is idempotent");
+        let sessions = again
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .map(|(id, _, _)| id.clone())
+                .collect::<Vec<_>>(),
+            vec![id],
+            "the second resolution must be the same supervisor, not a fresh one"
+        );
     }
 
     /// The two halves of the long poll: answer at once when there is news, and

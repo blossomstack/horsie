@@ -99,14 +99,14 @@ pub struct Turn {
 }
 
 /// One answer to one pending question.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskAnswer {
     pub tool_call_id: String,
     pub text: String,
 }
 
 /// Why a set of answers was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnswerError {
     /// This agent is not parked on anything answerable.
     NothingPending,

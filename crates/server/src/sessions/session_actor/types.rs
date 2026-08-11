@@ -526,7 +526,7 @@ impl SessionState {
 }
 
 /// One agent's own usage/context-size snapshot, labeled with the model it ran.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentUsageEntry {
     pub model: String,
     pub snapshot: AgentUsageSnapshot,
@@ -541,7 +541,7 @@ pub struct AgentUsageEntry {
 /// each separately — all four served by this same actor, and reassembled above
 /// it by an HTTP handler that had to know what kind of session this was to do
 /// it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub status: SessionStatus,
     /// Tokens summed across every agent this session hosts. The per-agent
@@ -560,7 +560,7 @@ pub struct SessionSnapshot {
 /// three times above the actor, they became three projections that disagreed: a
 /// concluded step answered `running` for ever, and a session whose runtime
 /// never built answered `idle` beside a status that said `failed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentStatus {
     /// The session's runtime is still being built. Nothing has run yet.
     Provisioning,
@@ -581,7 +581,7 @@ pub enum AgentStatus {
 ///
 /// What it *said* is not here — a transcript is read from the agent's own log,
 /// through `/history`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEntry {
     /// `"main"`, or the agent's uuid. The vocabulary every agent-scoped route
     /// speaks.
@@ -612,7 +612,7 @@ pub struct AgentEntry {
 /// One answer rather than a tree read, a run read and a state read stitched
 /// together by the caller — which is what left a step's document reporting the
 /// session's model and a permanent `running`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDetail {
     pub entry: AgentEntry,
     /// The model this agent runs under: a step's own preset, or the session's.
@@ -630,7 +630,7 @@ pub struct AgentDetail {
 }
 
 /// A session's aggregated usage.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionUsageStats {
     pub session_total: UsageTotal,
     pub main_agent: AgentUsageEntry,

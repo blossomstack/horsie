@@ -242,7 +242,7 @@ pub enum AbandonedStart {
 /// Entries and deltas are answered together because they are two halves of one
 /// position, and separating them would let a client hold a delta that belongs
 /// after an entry it has not seen.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadOutcome {
     /// Set only on a cursorless read: what the replayed window covers, and
     /// whether the cap left anything behind. A resuming caller already knows
@@ -264,7 +264,7 @@ pub struct ReadOutcome {
 }
 
 /// What a cursorless replay covered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayWindow {
     pub has_more_before: bool,
     pub earliest_seq: Option<u64>,
@@ -578,7 +578,7 @@ fn combine_optional(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 /// One agent's own usage + context-size snapshot, with no message/task
 /// payload — cheaper than [`AgentHistoryPage`] when only the numbers are
 /// needed. Backs the session-level usage aggregation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentUsageSnapshot {
     pub usage_total: UsageTotal,
     pub last_turn_usage: Option<Usage>,
@@ -588,7 +588,7 @@ pub struct AgentUsageSnapshot {
 /// One agent's current values: the task list and its usage/context numbers.
 /// Everything here is a value the client re-reads, never a log it accumulates —
 /// which is why none of it rides on a history page.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentStateView {
     pub tasks: Vec<crate::agent_loop::task_list::TaskRecord>,
     pub usage_total: UsageTotal,
