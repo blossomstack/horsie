@@ -256,7 +256,7 @@ pub(super) async fn spawn_session_with_provider(
             actor_spec_fixture(),
             f.deps.clone(),
             parent,
-            crate::sessions::Positions::default(),
+            crate::sessions::Revisions::default(),
         ));
     (f, session, id, journal)
 }
@@ -356,7 +356,7 @@ pub(super) async fn spawn_run_with_provider(
             spec,
             f.deps.clone(),
             parent,
-            crate::sessions::Positions::default(),
+            crate::sessions::Revisions::default(),
         ));
     (f, session, id, journal)
 }
@@ -457,7 +457,7 @@ pub(super) fn spawn_unprovisioned(
             actor_spec_fixture(),
             f.deps.clone(),
             spawn_deaf_supervisor(),
-            crate::sessions::Positions::default(),
+            crate::sessions::Revisions::default(),
         ));
     (session, journal)
 }
@@ -874,7 +874,7 @@ pub(super) async fn stop_harness_full(
             actor_spec_fixture(),
             f.deps.clone(),
             spawn_deaf_supervisor(),
-            crate::sessions::Positions::default(),
+            crate::sessions::Revisions::default(),
         ));
     (f, session, prompts, id, journal)
 }
@@ -1073,7 +1073,7 @@ pub(super) async fn catalog_harness_with(
         actor_spec_fixture(),
         f.deps.clone(),
         spawn_deaf_supervisor(),
-        crate::sessions::Positions::default(),
+        crate::sessions::Revisions::default(),
     ));
     (f, session, id)
 }
@@ -1176,7 +1176,7 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
         actor_spec_fixture(),
         f.deps.clone(),
         spawn_deaf_supervisor(),
-        crate::sessions::Positions::default(),
+        crate::sessions::Revisions::default(),
     ));
     drop(prompts);
     (f, session, id)

@@ -7,13 +7,13 @@
 //! actor tells an agent to record what happened to it, so a viewer reads one
 //! ordered thing instead of reconciling three.
 //!
-//! **Nothing is pushed at a reader.** The agent publishes its position — a
-//! `(tail_seq, delta_count)` pair — into a `watch`, and each connection reads
-//! forward from its own cursor when that changes. A `watch` keeps only the
-//! latest value and overwrites it, so a slow reader cannot fall behind it; it
-//! simply sees a larger jump when it next looks. That is why there is no
-//! backfill loop here, no `Resync` frame, and no capacity constant to tune —
-//! the overflow those existed to handle cannot occur.
+//! **Nothing is pushed at a reader.** The agent bumps a revision counter, each
+//! connection asks the supervisor to tell it when that counter moves, and then
+//! reads forward from its own cursor. The counter keeps only its latest value,
+//! so a slow reader cannot fall behind it; it simply sees a larger jump when it
+//! next looks. That is why there is no backfill loop here, no `Resync` frame,
+//! and no capacity constant to tune — the overflow those existed to handle
+//! cannot occur.
 
 use crate::agent_loop::Cursor;
 use crate::http::Scope;
@@ -138,15 +138,16 @@ async fn stream(
     agent_id: String,
     after: Option<Cursor>,
 ) -> Result<Response, Api> {
-    // Watch first, read second. Subscribing before the first read is what
-    // closes the gap a read-then-subscribe would leave exactly the width of the
-    // connect: anything appended in between is already reflected in the
-    // position, so the first wakeup finds it.
-    let mut position = state
+    // Revision first, read second. Learning where the agent is before reading it
+    // is what closes the gap a read-then-ask would leave exactly the width of
+    // the connect: anything appended in between moves the counter past the value
+    // we recorded, so the first wait returns immediately and we find it.
+    let mut revision = state
         .supervisor
-        .ask(|reply| SessionSupervisorCommand::WatchAgent {
+        .ask(|reply| SessionSupervisorCommand::AwaitAgentRevision {
             id: id.clone(),
             agent_id: Some(agent_id.clone()),
+            after: None,
             reply,
         })
         .await
@@ -256,12 +257,27 @@ async fn stream(
                 cursor = Some(out.cursor);
             }
 
-            // Nothing new, so wait to be told there is. `changed()` also
-            // returns immediately if the position moved while we were writing,
-            // which is what keeps a fast producer from outrunning a slow
-            // reader without any of them losing data.
-            if !advanced && position.changed().await.is_err() {
-                return;
+            // Nothing new, so wait to be told there is. The ask returns
+            // immediately if the agent moved while we were writing, which is
+            // what keeps a fast producer from outrunning a slow reader without
+            // either of them losing data. It also returns, unchanged, when the
+            // window expires — that is not news, so we simply ask again.
+            if !advanced {
+                let next = state
+                    .supervisor
+                    .ask(|reply| SessionSupervisorCommand::AwaitAgentRevision {
+                        id: id.clone(),
+                        agent_id: Some(agent_id.clone()),
+                        after: Some(revision),
+                        reply,
+                    })
+                    .await;
+                match next {
+                    Ok(Some(seen)) => revision = seen,
+                    // The agent is gone, or the supervisor is. Either way this
+                    // stream is over; the browser reconnects.
+                    Ok(None) | Err(_) => return,
+                }
             }
         }
     });

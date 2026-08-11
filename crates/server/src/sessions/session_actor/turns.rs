@@ -471,7 +471,7 @@ mod tests {
                 actor_spec_fixture(),
                 f.deps,
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
 
         let err = session
@@ -519,7 +519,7 @@ mod tests {
                 actor_spec_fixture(),
                 deps,
                 spawn_deaf_supervisor(),
-                crate::sessions::Positions::default(),
+                crate::sessions::Revisions::default(),
             ));
         (session, journal)
     }
