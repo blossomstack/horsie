@@ -1,7 +1,10 @@
-//! HTTP surface for routines: CRUD, `POST /api/routines/:name/run` (the manual
-//! and API trigger, sharing the runner with the scheduler's timer), and
-//! `GET /api/routines/:name/sessions` — the run list, which is the only place a
-//! routine's sessions appear.
+//! HTTP surface for routines: CRUD, and `POST /api/routines/:name/run` — the
+//! manual and API trigger, sharing the runner with the scheduler's timer.
+//!
+//! A routine's runs are not listed here. A run is an ordinary session, so it is
+//! read from `GET /api/sessions?routine=<name>`, which is also the only place
+//! they appear: the unfiltered session list leaves them out, or a routine on a
+//! timer would bury the sessions somebody is actually having.
 
 use super::Scope;
 use super::error::Api;

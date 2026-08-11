@@ -116,7 +116,7 @@ pub(super) async fn actor_fixture_from(
 }
 
 /// A supervisor stand-in for tests that spawn a bare `SessionActor`: it
-/// answers nothing, and exists only so `report()`'s `.tell()` has a live
+/// answers nothing, and exists only so `report_status()`'s `.tell()` has a live
 /// mailbox to land in.
 pub(super) struct DeafSupervisor;
 
@@ -211,7 +211,7 @@ pub(super) fn respawn_session(
         actor_spec_fixture(),
         f.deps.clone(),
         parent,
-        crate::sessions::Positions::default(),
+        crate::sessions::Revisions::default(),
     ))
 }
 

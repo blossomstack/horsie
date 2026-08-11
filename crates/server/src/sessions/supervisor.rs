@@ -1940,7 +1940,7 @@ mod tests {
         assert_eq!(
             sessions
                 .iter()
-                .map(|(id, _, _)| id.clone())
+                .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>(),
             vec![id],
             "the second resolution must be the same supervisor, not a fresh one"
