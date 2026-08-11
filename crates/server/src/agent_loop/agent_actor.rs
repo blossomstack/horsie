@@ -5490,7 +5490,7 @@ mod interruption_tests {
             .map(|e| serde_json::to_vec(e).unwrap())
             .collect();
         journal
-            .persist(&AgentActor::persistence_id_for(id), &encoded, None)
+            .persist(&AgentActor::persistence_id_for(id), &encoded, 0)
             .await
             .unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

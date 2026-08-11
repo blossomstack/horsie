@@ -782,7 +782,7 @@ mod tests {
         .iter()
         .map(|e| serde_json::to_vec(e).unwrap())
         .collect();
-        journal.persist(&pid, &events, None).await.unwrap();
+        journal.persist(&pid, &events, 0).await.unwrap();
 
         let _session =
             horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(

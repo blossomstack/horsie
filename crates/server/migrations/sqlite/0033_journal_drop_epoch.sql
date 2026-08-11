@@ -1,0 +1,15 @@
+-- The ownership epoch is gone. The write fence is now the log's own sequence
+-- number: an append states where the writer believes the log ends and is
+-- admitted only if it still ends there.
+--
+-- That is the same guarantee by a shorter route, and a stricter one. The epoch
+-- said "this writer holds a generation at least as high as the log's", which
+-- required a claim before an actor could serve. The sequence number says "this
+-- writer has seen everything in the log", which is false the moment anybody
+-- else appends — so it catches actual divergence rather than a suspicion of it,
+-- and it needs no claim, no generation, and nothing to bump.
+--
+-- Dropping rather than leaving in place: a column nothing reads is a standing
+-- invitation to write something that reads it. The column is neither indexed
+-- nor referenced, so this is safe on both dialects.
+ALTER TABLE journal_logs DROP COLUMN epoch;

@@ -461,7 +461,7 @@ mod tests {
                     reason: "runtime gone".into(),
                 })
                 .unwrap()],
-                None,
+                0,
             )
             .await
             .unwrap();
@@ -510,7 +510,7 @@ mod tests {
             .map(|e| serde_json::to_vec(e).unwrap())
             .collect();
         journal
-            .persist(&SessionActor::persistence_id_for(id), &encoded, None)
+            .persist(&SessionActor::persistence_id_for(id), &encoded, 0)
             .await
             .unwrap();
         let session =

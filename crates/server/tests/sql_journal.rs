@@ -23,7 +23,7 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use horsie_actor::testkit::conformance;
-use horsie_actor::{Epoch, Journal, PersistenceId};
+use horsie_actor::{Journal, PersistenceId};
 use horsie_server::db::journal::SqlJournal;
 use horsie_server::db::testing;
 
@@ -33,6 +33,16 @@ async fn journal() -> SqlJournal {
 
 fn pid(id: &str) -> PersistenceId {
     PersistenceId::new("t", id)
+}
+
+/// Every event in a log, by `PersistenceId` rather than by bare id.
+async fn read(j: &SqlJournal, pid: &PersistenceId) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut s = j.replay(pid, 0).await;
+    while let Some(item) = s.next().await {
+        out.push(item.unwrap().1);
+    }
+    out
 }
 
 async fn drain(j: &SqlJournal, id: &str, after: u64) -> Vec<(u64, Vec<u8>)> {
@@ -66,6 +76,14 @@ conformance_tests!(
     copy_snapshot_seeds_new_id,
     copy_snapshot_without_source_errors,
     snapshot_then_compact_leaves_only_later_events,
+    last_seq_reports_where_the_log_ends,
+    // The write fence. These are the assertions that matter most here: the
+    // condition and the append have to be one statement, and only a real
+    // database can show that.
+    persist_rejects_a_stale_writer,
+    persist_rejects_a_writer_ahead_of_the_log,
+    save_snapshot_rejects_a_stale_writer,
+    only_one_writer_can_start_a_log,
 );
 
 // ── backend specifics ────────────────────────────────────────────────────────
@@ -75,7 +93,7 @@ conformance_tests!(
 #[tokio::test]
 async fn compaction_never_renumbers_the_survivors() {
     let j = journal().await;
-    j.persist(&pid("n"), &[vec![1], vec![2], vec![3], vec![4]], None)
+    j.persist(&pid("n"), &[vec![1], vec![2], vec![3], vec![4]], 0)
         .await
         .unwrap();
     assert_eq!(
@@ -98,7 +116,7 @@ async fn compaction_never_renumbers_the_survivors() {
         "survivors keep their original numbers"
     );
 
-    j.persist(&pid("n"), &[vec![5]], None).await.unwrap();
+    j.persist(&pid("n"), &[vec![5]], 4).await.unwrap();
     assert_eq!(
         drain(&j, "n", 4).await,
         vec![(5, vec![5])],
@@ -115,11 +133,11 @@ async fn numbering_survives_a_restart_after_full_compaction() {
     let db = testing::db().await;
     let first = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
     first
-        .persist(&pid("compacted"), &[vec![1], vec![2]], None)
+        .persist(&pid("compacted"), &[vec![1], vec![2]], 0)
         .await
         .unwrap();
     first
-        .save_snapshot(&pid("compacted"), vec![99], 2, None)
+        .save_snapshot(&pid("compacted"), vec![99], 2)
         .await
         .unwrap();
     first
@@ -130,7 +148,7 @@ async fn numbering_survives_a_restart_after_full_compaction() {
     // A new instance over the same database stands in for a restart.
     let second = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
     second
-        .persist(&pid("compacted"), &[vec![3]], None)
+        .persist(&pid("compacted"), &[vec![3]], 2)
         .await
         .unwrap();
     assert_eq!(
@@ -146,7 +164,7 @@ async fn numbering_survives_a_restart_after_full_compaction() {
 async fn replay_from_a_cursor_yields_only_the_tail() {
     let j = journal().await;
     let events: Vec<Vec<u8>> = (0u8..50).map(|i| vec![i]).collect();
-    j.persist(&pid("long"), &events, None).await.unwrap();
+    j.persist(&pid("long"), &events, 0).await.unwrap();
 
     let tail = drain(&j, "long", 47).await;
     assert_eq!(
@@ -166,7 +184,7 @@ async fn replay_pages_a_log_longer_than_one_page() {
     let j = journal().await;
     // 2 500 events: two full pages plus a partial one.
     let events: Vec<Vec<u8>> = (0..2_500u32).map(|i| i.to_le_bytes().to_vec()).collect();
-    j.persist(&pid("paging"), &events, None).await.unwrap();
+    j.persist(&pid("paging"), &events, 0).await.unwrap();
 
     let seen = drain(&j, "paging", 0).await;
     assert_eq!(
@@ -184,8 +202,8 @@ async fn replay_pages_a_log_longer_than_one_page() {
 #[tokio::test]
 async fn a_batch_is_numbered_contiguously_from_the_log_head() {
     let j = journal().await;
-    j.persist(&pid("b"), &[vec![1]], None).await.unwrap();
-    j.persist(&pid("b"), &[vec![2], vec![3], vec![4]], None)
+    j.persist(&pid("b"), &[vec![1]], 0).await.unwrap();
+    j.persist(&pid("b"), &[vec![2], vec![3], vec![4]], 1)
         .await
         .unwrap();
     assert_eq!(
@@ -197,15 +215,13 @@ async fn a_batch_is_numbered_contiguously_from_the_log_head() {
 #[tokio::test]
 async fn a_fork_continues_numbering_from_the_copied_snapshot() {
     let j = journal().await;
-    j.persist(&pid("src"), &[vec![1], vec![2]], None)
+    j.persist(&pid("src"), &[vec![1], vec![2]], 0)
         .await
         .unwrap();
-    j.save_snapshot(&pid("src"), vec![9], 2, None)
-        .await
-        .unwrap();
+    j.save_snapshot(&pid("src"), vec![9], 2).await.unwrap();
     j.copy_snapshot(&pid("src"), &pid("dst")).await.unwrap();
 
-    j.persist(&pid("dst"), &[vec![3]], None).await.unwrap();
+    j.persist(&pid("dst"), &[vec![3]], 2).await.unwrap();
     assert_eq!(
         drain(&j, "dst", 2).await,
         vec![(3, vec![3])],
@@ -233,7 +249,7 @@ async fn reading_an_unknown_log_creates_nothing() {
 async fn payloads_survive_arbitrary_bytes() {
     let j = journal().await;
     let payload = vec![0u8, b'\n', 255, b'"', 0x1f];
-    j.persist(&pid("bin"), std::slice::from_ref(&payload), None)
+    j.persist(&pid("bin"), std::slice::from_ref(&payload), 0)
         .await
         .unwrap();
     assert_eq!(drain(&j, "bin", 0).await, vec![(1, payload)]);
@@ -243,8 +259,8 @@ async fn payloads_survive_arbitrary_bytes() {
 async fn clear_removes_events_and_snapshot_together() {
     let db = testing::db().await;
     let j = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
-    j.persist(&pid("c"), &[vec![1]], None).await.unwrap();
-    j.save_snapshot(&pid("c"), vec![7], 1, None).await.unwrap();
+    j.persist(&pid("c"), &[vec![1]], 0).await.unwrap();
+    j.save_snapshot(&pid("c"), vec![7], 1).await.unwrap();
     j.clear(&pid("c")).await.unwrap();
     assert!(drain(&j, "c", 0).await.is_empty());
     assert_eq!(j.latest_snapshot(&pid("c")).await.unwrap(), None);
@@ -264,7 +280,7 @@ async fn clear_removes_events_and_snapshot_together() {
     }
 
     // Numbering restarts, because the log itself is gone.
-    j.persist(&pid("c"), &[vec![2]], None).await.unwrap();
+    j.persist(&pid("c"), &[vec![2]], 0).await.unwrap();
     assert_eq!(drain(&j, "c", 0).await, vec![(1, vec![2])]);
 }
 
@@ -376,52 +392,42 @@ async fn identical_persistence_ids_do_not_collide_across_accounts() {
     let theirs = SqlJournal::new(db, horsie_server::auth::UserId::new("k3m9x0abc7qr"));
     let pid = PersistenceId::new("session", "same-id");
 
-    mine.persist(&pid, &[b"mine".to_vec()], None).await.unwrap();
+    mine.persist(&pid, &[b"mine".to_vec()], 0).await.unwrap();
     theirs
-        .persist(&pid, &[b"theirs".to_vec()], None)
+        .persist(&pid, &[b"theirs".to_vec()], 0)
         .await
         .unwrap();
-
-    async fn read(j: &SqlJournal, pid: &PersistenceId) -> Vec<Vec<u8>> {
-        let mut out: Vec<Vec<u8>> = Vec::new();
-        let mut s = j.replay(pid, 0).await;
-        while let Some(item) = s.next().await {
-            out.push(item.unwrap().1);
-        }
-        out
-    }
 
     assert_eq!(read(&mine, &pid).await, vec![b"mine".to_vec()]);
     assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
 }
 
-/// A stale host's write is rejected by the database, not merged.
+/// A stale writer's append is rejected by the database, not merged.
 ///
 /// The in-memory journal has the same test, but this is the implementation that
-/// matters: the check and the append have to be one transaction, and only SQL
-/// can prove that here.
+/// matters: the condition and the append have to be one statement, and only SQL
+/// can show that here.
 #[tokio::test]
-async fn a_write_below_the_current_epoch_is_rejected() {
+async fn a_stale_writers_append_is_rejected() {
     let db = testing::db().await;
     let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
-    let pid = PersistenceId::new("session", "fenced");
+    let pid = PersistenceId::new("session", "conflict");
 
-    let first = j.claim_ownership(&pid).await.unwrap();
-    j.persist(&pid, &[b"first".to_vec()], Some(first))
-        .await
-        .unwrap();
+    // Two writers recovered at the same point; one of them writes.
+    j.persist(&pid, &[b"first".to_vec()], 0).await.unwrap();
 
-    // Somebody else takes the log.
-    let second = j.claim_ownership(&pid).await.unwrap();
-    assert!(second > first, "a claim must outrank the one it replaces");
-
-    // The displaced host has not been told; its next write is where it finds out.
-    let err = j
-        .persist(&pid, &[b"stale".to_vec()], Some(first))
-        .await
-        .unwrap_err();
+    // The other still believes the log is empty, and its next write is where it
+    // finds out. Nothing told it, and nothing could have.
+    let err = j.persist(&pid, &[b"stale".to_vec()], 0).await.unwrap_err();
     assert!(
-        matches!(err, horsie_actor::JournalError::Fenced { .. }),
+        matches!(
+            err,
+            horsie_actor::JournalError::Conflict {
+                expected: 0,
+                actual: 1,
+                ..
+            }
+        ),
         "a stale write was accepted: {err:?}"
     );
 
@@ -433,74 +439,83 @@ async fn a_write_below_the_current_epoch_is_rejected() {
     }
     assert_eq!(events, vec![b"first".to_vec()]);
 
-    // The current owner still works.
-    j.persist(&pid, &[b"second".to_vec()], Some(second))
-        .await
-        .unwrap();
+    // The writer that is up to date still works.
+    j.persist(&pid, &[b"second".to_vec()], 1).await.unwrap();
 }
 
-/// Snapshots are fenced too: a displaced host that only ever snapshots would
-/// otherwise overwrite the state of a log it no longer owns.
+/// A whole batch is rejected together, not partly applied.
+///
+/// The fold is what makes this true: the numbers are allocated by the same
+/// statement that checks the condition, so a rejected batch never gets any.
 #[tokio::test]
-async fn a_snapshot_below_the_current_epoch_is_rejected() {
+async fn a_rejected_batch_leaves_no_partial_write() {
     let db = testing::db().await;
     let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
-    let pid = PersistenceId::new("session", "fenced-snapshot");
+    let pid = PersistenceId::new("session", "batch");
 
-    let first = j.claim_ownership(&pid).await.unwrap();
-    let second = j.claim_ownership(&pid).await.unwrap();
+    j.persist(&pid, &[b"a".to_vec()], 0).await.unwrap();
+    assert!(
+        j.persist(&pid, &[b"b".to_vec(), b"c".to_vec(), b"d".to_vec()], 0)
+            .await
+            .is_err()
+    );
+
+    assert_eq!(
+        j.last_seq(&pid).await.unwrap(),
+        1,
+        "a rejected batch consumed sequence numbers"
+    );
+    assert_eq!(read(&j, &pid).await, vec![b"a".to_vec()]);
+}
+
+/// Snapshots carry the same condition: a writer whose log has moved on would
+/// otherwise overwrite the state the next recovery starts from.
+#[tokio::test]
+async fn a_stale_writers_snapshot_is_rejected() {
+    let db = testing::db().await;
+    let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
+    let pid = PersistenceId::new("session", "stale-snapshot");
+
+    j.persist(&pid, &[b"a".to_vec(), b"b".to_vec()], 0)
+        .await
+        .unwrap();
 
     let err = j
-        .save_snapshot(&pid, b"stale".to_vec(), 1, Some(first))
+        .save_snapshot(&pid, b"stale".to_vec(), 1)
         .await
         .unwrap_err();
-    assert!(matches!(err, horsie_actor::JournalError::Fenced { .. }));
+    assert!(matches!(err, horsie_actor::JournalError::Conflict { .. }));
     assert!(j.latest_snapshot(&pid).await.unwrap().is_none());
 
-    j.save_snapshot(&pid, b"current".to_vec(), 1, Some(second))
-        .await
-        .unwrap();
+    j.save_snapshot(&pid, b"current".to_vec(), 2).await.unwrap();
 }
 
-/// An unclaimed log has no owner, so a caller can tell "never hosted" from
-/// "hosted at the first generation".
+/// Sequence numbers are scoped per account like everything else here: one
+/// account's writes must not make another account's identically-named log look
+/// stale to its own writer.
 #[tokio::test]
-async fn an_unclaimed_log_reports_no_epoch() {
-    let db = testing::db().await;
-    let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
-    let pid = PersistenceId::new("session", "unclaimed");
-
-    assert_eq!(j.current_epoch(&pid).await.unwrap(), None);
-    let claimed = j.claim_ownership(&pid).await.unwrap();
-    assert_eq!(j.current_epoch(&pid).await.unwrap(), Some(claimed));
-}
-
-/// Ownership is scoped per account like everything else here: one account
-/// claiming its log must not fence another account's identically-named one.
-#[tokio::test]
-async fn ownership_does_not_leak_across_accounts() {
+async fn sequence_numbers_do_not_leak_across_accounts() {
     let db = testing::db().await;
     let mine = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
     let theirs = SqlJournal::new(db, horsie_server::auth::UserId::new("k3m9x0abc7qr"));
     let pid = PersistenceId::new("session", "same-id");
 
-    let mine_epoch = mine.claim_ownership(&pid).await.unwrap();
-    // Several claims on one account must not move the other account's log.
-    mine.claim_ownership(&pid).await.unwrap();
-    mine.claim_ownership(&pid).await.unwrap();
+    // Several writes on one account must not move the other account's log.
+    mine.persist(&pid, &[b"a".to_vec()], 0).await.unwrap();
+    mine.persist(&pid, &[b"b".to_vec()], 1).await.unwrap();
+    mine.persist(&pid, &[b"c".to_vec()], 2).await.unwrap();
 
-    let theirs_epoch = theirs.claim_ownership(&pid).await.unwrap();
     assert_eq!(
-        theirs_epoch, mine_epoch,
-        "one account's claims advanced another account's log"
+        theirs.last_seq(&pid).await.unwrap(),
+        0,
+        "one account's writes advanced another account's log"
     );
 
-    // And each can still write under its own generation.
-    mine.persist(&pid, &[b"mine".to_vec()], Some(Epoch(3)))
-        .await
-        .unwrap();
+    // So the other account's first writer still expects an empty log, and is
+    // admitted.
     theirs
-        .persist(&pid, &[b"theirs".to_vec()], Some(theirs_epoch))
+        .persist(&pid, &[b"theirs".to_vec()], 0)
         .await
         .unwrap();
+    assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
 }

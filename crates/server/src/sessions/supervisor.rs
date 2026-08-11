@@ -1519,12 +1519,16 @@ mod tests {
         // The session asked a question in an earlier incarnation. `Create` left
         // a status in the cache, so a cache read would answer with the wrong
         // thing.
+        // Appended where the log actually ends: this session has already run, so
+        // its log is not empty and a writer claiming otherwise is exactly what
+        // the fence rejects.
         let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
+        let at = journal.last_seq(&pid).await.unwrap();
         journal
             .persist(
                 &pid,
                 &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
-                None,
+                at,
             )
             .await
             .unwrap();

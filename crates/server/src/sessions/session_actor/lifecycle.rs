@@ -423,14 +423,16 @@ mod tests {
         // to the actor it reports to — so dropping a handle is not death.
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
+        let pid = SessionActor::persistence_id_for(id);
+        let at = journal.last_seq(&pid).await.unwrap();
         journal
             .persist(
-                &SessionActor::persistence_id_for(id),
+                &pid,
                 &[
                     serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
                         .unwrap(),
                 ],
-                None,
+                at,
             )
             .await
             .unwrap();
@@ -564,7 +566,7 @@ mod tests {
                     })
                     .unwrap(),
                 ],
-                None,
+                0,
             )
             .await
             .unwrap();
