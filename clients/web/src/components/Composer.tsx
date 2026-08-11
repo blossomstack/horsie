@@ -7,7 +7,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { SessionStatusKind, type CatalogEntryView } from "../api/types";
-import { statusMeta } from "../lib/status";
+import { UNLOADED, statusMeta } from "../lib/status";
 import { EntryMenu, filterEntries, invocationPrefix } from "./EntryMenu";
 
 /**
@@ -33,7 +33,10 @@ export function Composer({
   onSend,
   onStop,
 }: {
-  status: SessionStatusKind | null | undefined;
+  /** `undefined` only while the session document is still being fetched — the
+   * server always knows a status. Sending stays enabled meanwhile: sending is
+   * queued behind whatever the session turns out to be doing. */
+  status: SessionStatusKind | undefined;
   busy: boolean;
   blockedReason?: string | null;
   /** What an idle, unblocked field invites. A workflow run is handed an input
@@ -51,7 +54,7 @@ export function Composer({
   const [text, setText] = useState("");
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const meta = statusMeta(status);
+  const meta = status ? statusMeta(status) : UNLOADED;
   const running = status === SessionStatusKind.Running;
   const awaiting = status === SessionStatusKind.AwaitingInput;
   const blocked = blockedReason != null;

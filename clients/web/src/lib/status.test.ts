@@ -36,9 +36,15 @@ describe("status presentation metadata", () => {
     expect(TONE_TEXT[meta.tone]).toBe("text-dim");
   });
 
-  it("keeps an unknown status separate from Idle", () => {
-    expect(statusMeta(undefined).tone).toBe("off");
-    expect(statusMeta(null).tone).toBe("off");
+  // There is no unknown state left to keep separate: the registry keeps a
+  // durable status for every session, so every kind the server can send has a
+  // lamp and none of them is unlit.
+  it("has a lit lamp for every status the server can send", () => {
+    for (const kind of Object.values(SessionStatusKind)) {
+      const meta = statusMeta(kind);
+      expect(meta.label).not.toBe("—");
+      expect(meta.tone).not.toBe("off");
+    }
   });
 });
 

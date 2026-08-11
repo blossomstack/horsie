@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionSummary } from "../api/types";
+import { SessionStatusKind } from "../api/types";
 import {
   UNGROUPED,
   moveBefore,
@@ -12,6 +13,7 @@ import {
 function session(id: string, group?: string): SessionSummary {
   return {
     id,
+    status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: group ? [{ key: "group", value: group }] : [],
   };

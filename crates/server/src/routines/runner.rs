@@ -171,7 +171,7 @@ impl RoutineRunner {
         Ok(SessionSummary {
             id,
             name: spec.name.clone(),
-            status: Some(status_kind(&status)),
+            status: status_kind(&status),
             created_at: now_ms,
             last_error: status_reason(&status),
             // A routine invokes an agent preset, never a workflow.

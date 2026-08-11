@@ -59,9 +59,7 @@ pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
-        // Still `Some(..)`: the wire field stays optional until the option is
-        // removed along with the em-dash path it fed.
-        status: Some(status_kind(&rec.status)),
+        status: status_kind(&rec.status),
         created_at: rec.created_at,
         last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
@@ -157,13 +155,19 @@ pub async fn get_session(
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    let status = snapshot.as_ref().map(|s| s.status.clone());
+    // The actor's own status when it answered, the registry's copy otherwise —
+    // and the registry always has one, so this document never has to say it
+    // does not know. They agree except in the window where the actor has folded
+    // a transition it has not reported yet, and there the actor is right.
+    let status = snapshot
+        .as_ref()
+        .map_or_else(|| rec.status.clone(), |s| s.status.clone());
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
-        status: status.as_ref().map(status_kind),
+        status: status_kind(&status),
         created_at: rec.created_at,
-        last_error: status.as_ref().and_then(status_reason),
+        last_error: status_reason(&status),
         annotations: wire_annotations(&rec.annotations),
         model: rec.spec.agent.model.clone(),
         environment: rec.spec.environment.clone(),

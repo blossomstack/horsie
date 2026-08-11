@@ -8,7 +8,7 @@ export function StatusDot({
   status,
   className,
 }: {
-  status: SessionStatusKind | null | undefined;
+  status: SessionStatusKind;
   className?: string;
 }) {
   const meta = statusMeta(status);
@@ -18,7 +18,6 @@ export function StatusDot({
         "lamp",
         TONE_TEXT[meta.tone],
         meta.busy && "lamp-live",
-        meta.tone === "off" && "lamp-off",
         className,
       )}
       aria-hidden
@@ -27,16 +26,12 @@ export function StatusDot({
 }
 
 /** Lamp plus engraved legend, as it reads on the panel face. */
-export function StatusBadge({
-  status,
-}: {
-  status: SessionStatusKind | null | undefined;
-}) {
+export function StatusBadge({ status }: { status: SessionStatusKind }) {
   const meta = statusMeta(status);
   return (
     <span
       data-testid="status-badge"
-      data-status={status ?? "Unknown"}
+      data-status={status}
       className={cn("inline-flex items-center gap-2", TONE_TEXT[meta.tone])}
       title={meta.hint}
     >

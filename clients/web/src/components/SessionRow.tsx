@@ -55,7 +55,7 @@ export function SessionRow({
             {/* A run says which workflow it came from: the rail holds runs and
                 ordinary sessions together, so the row has to say which it is. */}
             {s.workflow ? `${s.workflow} · ` : ""}
-            {meta.label !== "—" ? `${meta.label} · ` : ""}
+            {meta.label} ·{" "}
             {relativeTime(s.createdAt)}
           </span>
         </span>

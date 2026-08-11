@@ -245,10 +245,10 @@ export function SessionView() {
     }
   };
 
-  // `null` is a real answer, not a missing one: a session the server has not
-  // loaded since it started has no status to report, and guessing `Idle` would
-  // dress that up as knowledge.
-  const status = stream.liveStatus ?? detail?.status ?? null;
+  // `undefined` only until the session document arrives. The server always has
+  // a status — it keeps a durable copy — so this is the client not knowing yet,
+  // not the server having nothing to say.
+  const status = stream.liveStatus ?? detail?.status ?? undefined;
   const terminal =
     status === SessionStatusKind.Unrecoverable
       ? (stream.statusReason ?? detail?.lastError ?? "This session cannot run again.")
@@ -371,7 +371,7 @@ export function SessionView() {
           <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
             <RailToggle />
             <SessionTitle id={id} name={detail?.name} editable={!agentId} />
-            <StatusBadge status={status} />
+            {status && <StatusBadge status={status} />}
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript
                 that quietly stops moving while the lamp still says Running. */}
@@ -466,7 +466,7 @@ export function SessionView() {
               // assertion lands while the transcript is still empty.
               <div className="flex h-full flex-col items-center justify-center gap-2.5 px-6 text-center">
                 <p className="max-w-sm text-sm leading-relaxed text-dim">
-                  {statusMeta(status).hint}
+                  {status && statusMeta(status).hint}
                 </p>
                 {(stream.statusReason ?? detail?.lastError) && (
                   <p className="max-w-md text-xs leading-relaxed text-red-ink">
