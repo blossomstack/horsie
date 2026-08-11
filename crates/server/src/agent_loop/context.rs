@@ -196,6 +196,22 @@ pub trait ContextProvider: Send + Sync {
         let _ = turn;
         Ok(TurnPreparation::default())
     }
+
+    /// Fire one of the compaction hooks and hand back what they did.
+    ///
+    /// Separate from `start_hooks` because a compaction is not a turn: it can
+    /// happen in the middle of one, and there is no prompt for a hook to
+    /// rewrite. Called on the run's task, never a mailbox.
+    ///
+    /// The default is "no hooks ran", which is also what a session with no
+    /// plugins and a workflow step both mean.
+    async fn compaction_hooks(
+        &self,
+        event: horsie_models::runtime::ServerHookEvent,
+    ) -> Vec<horsie_models::hooks::HookRecord> {
+        let _ = event;
+        Vec::new()
+    }
 }
 
 /// What the pre-run seam produced.

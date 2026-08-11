@@ -37,4 +37,6 @@ export * from './stopFailureRecord';
 export * from './notificationRecord';
 export * from './cwdChangedRecord';
 export * from './hookAction';
+export * from './preCompactRecord';
+export * from './postCompactRecord';
 export * from './hookRecord';

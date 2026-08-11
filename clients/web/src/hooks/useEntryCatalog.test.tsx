@@ -4,9 +4,11 @@ import type { CatalogEntryView, PluginView } from "../api/types";
 import { useEntryCatalog } from "./useEntryCatalog";
 
 const bundles = vi.fn<() => PluginView[] | undefined>();
+const builtins = vi.fn<() => CatalogEntryView[] | undefined>(() => []);
 
 vi.mock("./usePlugins", () => ({
   usePlugins: () => ({ data: bundles() }),
+  useBuiltins: () => ({ data: builtins() }),
 }));
 
 function entry(kind: string, name: string): CatalogEntryView {
@@ -72,5 +74,26 @@ describe("useEntryCatalog", () => {
       "command:review",
       "agent:review",
     ]);
+  });
+
+  /** A built-in is a control the product owns. Offering it only when a bundle
+   * happens to be installed would hide it in the plainest session there is. */
+  it("offers builtins even with no bundles at all", () => {
+    bundles.mockReturnValue(undefined);
+    builtins.mockReturnValue([entry("command", "compact")]);
+    const { result } = renderHook(() => useEntryCatalog([]));
+    expect(result.current.map((e) => e.name)).toEqual(["compact"]);
+  });
+
+  /** The menu has to agree with what actually runs, and the server consults
+   * its builtin table before the plugin catalogue. */
+  it("a bundle cannot shadow a builtin", () => {
+    builtins.mockReturnValue([entry("command", "compact")]);
+    bundles.mockReturnValue([
+      bundle("impostor", [entry("command", "compact")], true),
+    ]);
+    const { result } = renderHook(() => useEntryCatalog([]));
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0].description).toBe("compact does a thing");
   });
 });

@@ -1305,8 +1305,16 @@ impl AgentActor {
             message,
             subagent_results,
             results,
+            compact,
             ..
         } = turn;
+        // A turn that carries only a `/compact` has nothing to say to the
+        // model. Running it would spend a provider call answering a message
+        // nobody sent, so the compaction *is* the turn.
+        let compact_only = compact.is_some()
+            && message.is_none()
+            && subagent_results.is_empty()
+            && results.is_empty();
 
         let at_ms = now_ms();
         let mut events = Vec::new();
@@ -1375,7 +1383,14 @@ impl AgentActor {
         events.push(AgentDomainEvent::InputMessage {
             message: agent_input.to_message(now_ms()),
         });
-        self.start_run(agent_input, ctx, history, folded.context_tokens);
+        self.start_run(
+            agent_input,
+            ctx,
+            history,
+            folded.context_tokens,
+            compact.clone(),
+            compact_only,
+        );
         events
     }
 
@@ -1386,6 +1401,10 @@ impl AgentActor {
         history: Vec<Message>,
         // The prompt size the previous turn left behind, from durable state.
         context_tokens: u32,
+        // A `/compact` this turn carries, and its focus instructions.
+        compact: Option<Option<String>>,
+        // Whether the compaction is all this turn is.
+        compact_only: bool,
     ) {
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
@@ -1519,9 +1538,14 @@ impl AgentActor {
                 cancel,
                 compaction,
                 Arc::new(
-                    crate::agent_loop::carried_state::ActorCompactionPolicy::new(self_ref.clone()),
+                    crate::agent_loop::carried_state::ActorCompactionPolicy::new(
+                        self_ref.clone(),
+                        context_provider.clone(),
+                    ),
                 ),
                 context_tokens,
+                compact,
+                compact_only,
             )
             .await;
             // All coarse events were already persisted (each `emit` awaited its ack),
@@ -2446,6 +2470,8 @@ impl EventSourcedActor for AgentActor {
             ctx,
             history,
             state.context_tokens,
+            None,
+            false,
         );
     }
 }
@@ -2992,6 +3018,8 @@ async fn run_with_retries(
     compaction: Option<horsie_agentcore::CompactionBudget>,
     compaction_policy: Arc<dyn horsie_agentcore::CompactionPolicy>,
     context_tokens: u32,
+    compact: Option<Option<String>>,
+    compact_only: bool,
 ) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
@@ -3027,6 +3055,21 @@ async fn run_with_retries(
                 };
             }
         };
+
+        // A queued `/compact` runs before anything this turn says to the model,
+        // and when it is the whole turn, instead of it. Not retried: a
+        // compaction that failed leaves the history it started with, which is
+        // exactly what the turn would have run on anyway.
+        if let Some(instructions) = compact.clone() {
+            if let Err(e) = agent.compact_only(instructions, &capture).await {
+                tracing::warn!(error = %e, "a requested compaction failed");
+            }
+            if compact_only {
+                return RunOutcome::Completed {
+                    text: String::new(),
+                };
+            }
+        }
 
         let result = agent.run(input.clone(), &capture, cancel.clone()).await;
         let captured = capture.take();
@@ -5311,6 +5354,8 @@ mod retry_tests {
             None,
             Arc::new(NeverCompacts),
             0,
+            None,
+            false,
         )
         .await;
         let calls = provider.calls();
@@ -5394,6 +5439,8 @@ mod retry_tests {
             None,
             Arc::new(NeverCompacts),
             0,
+            None,
+            false,
         )
         .await;
         let calls = provider.calls();

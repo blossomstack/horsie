@@ -268,6 +268,7 @@ pub fn app(state: AppState) -> Router {
             post(marketplaces::refresh),
         )
         .route("/api/plugins", get(plugins::list).post(plugins::install))
+        .route("/api/builtins", get(plugins::builtins))
         .route(
             "/api/plugins/{name}",
             put(plugins::set_default).delete(plugins::remove),

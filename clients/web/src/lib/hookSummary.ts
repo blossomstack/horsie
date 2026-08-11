@@ -48,6 +48,9 @@ export function toolScope(
     case "TaskCompleted":
     case "Notification":
     case "CwdChanged":
+    // A compaction is not a tool call, so neither attaches to a tool card.
+    case "PreCompact":
+    case "PostCompact":
       return null;
   }
 }
@@ -63,6 +66,9 @@ export function systemMessage(r: HookRecord): string | null {
     case "StopFailure":
     case "Notification":
     case "CwdChanged":
+    // Side-effect only, like the four above: by the time it runs the boundary
+    // exists and there is nothing left to say about it.
+    case "PostCompact":
       return null;
     default:
       return a.value.systemMessage ?? null;
@@ -200,11 +206,32 @@ function outcomeSummary(r: HookRecord): HookSummary {
         case "Failed":
           return failed(a.value.outcome.value.reason);
       }
+    case "PreCompact":
+      switch (a.value.outcome.outcome) {
+        case "Ran":
+          return RAN;
+        case "Blocked":
+          return {
+            text: `stopped the compaction — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            intervened: true,
+          };
+        // A compaction has no continuation budget to exhaust: a block abandons
+        // it once and nothing loops. The arm exists because the outcome type is
+        // shared with `Stop`, which does.
+        case "CapReached":
+          return {
+            text: `stopped the compaction — ${a.value.outcome.value.reason ?? "no reason given"}`,
+            intervened: true,
+          };
+        case "Failed":
+          return failed(a.value.outcome.value.reason);
+      }
     case "TaskCreated":
     case "TaskCompleted":
     case "SessionEnd":
     case "StopFailure":
     case "Notification":
+    case "PostCompact":
     case "CwdChanged":
       switch (a.value.outcome.outcome) {
         case "Ran":

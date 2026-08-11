@@ -102,12 +102,16 @@ fn running_subagents(state: &AgentState) -> Vec<(String, String)> {
 /// sinks are: a thirty-second hook must not be able to block a cancel.
 pub struct ActorCompactionPolicy {
     actor: horsie_actor::ActorRef<super::AgentCommand>,
+    context: std::sync::Arc<dyn super::ContextProvider>,
 }
 
 impl ActorCompactionPolicy {
     #[must_use]
-    pub fn new(actor: horsie_actor::ActorRef<super::AgentCommand>) -> Self {
-        Self { actor }
+    pub fn new(
+        actor: horsie_actor::ActorRef<super::AgentCommand>,
+        context: std::sync::Arc<dyn super::ContextProvider>,
+    ) -> Self {
+        Self { actor, context }
     }
 }
 
@@ -126,14 +130,91 @@ impl horsie_agentcore::CompactionPolicy for ActorCompactionPolicy {
 
     async fn before(
         &self,
-        _plan: &horsie_agentcore::CompactionPlan,
+        plan: &horsie_agentcore::CompactionPlan,
     ) -> horsie_agentcore::PreCompactDecision {
-        // `PreCompact` is wired in the next change; until then every compaction
-        // proceeds, which is the behaviour a session with no plugins has anyway.
-        horsie_agentcore::PreCompactDecision::Proceed
+        let records = self
+            .context
+            .compaction_hooks(horsie_models::runtime::ServerHookEvent::PreCompact(
+                horsie_models::runtime::PreCompactInput {
+                    trigger: plan.trigger.to_string(),
+                    instructions: plan.instructions.clone(),
+                },
+            ))
+            .await;
+        match precompact_refusal(&records) {
+            Some(reason) => horsie_agentcore::PreCompactDecision::Abandon(reason),
+            None => horsie_agentcore::PreCompactDecision::Proceed,
+        }
     }
 
-    async fn after(&self, _result: &horsie_agentcore::CompactionResult) {}
+    async fn after(&self, result: &horsie_agentcore::CompactionResult) {
+        // Fire-and-forget: the boundary already exists, so nothing a
+        // `PostCompact` hook says could change it, and the records reach the
+        // transcript through the sink either way.
+        let _ = self
+            .context
+            .compaction_hooks(horsie_models::runtime::ServerHookEvent::PostCompact(
+                horsie_models::runtime::PostCompactInput {
+                    trigger: result.trigger.to_string(),
+                    tokens_before: result.tokens_before,
+                    tokens_after: result.tokens_after,
+                },
+            ))
+            .await;
+    }
+}
+
+/// Why a `PreCompact` hook refused, if one did.
+///
+/// A block *or* a halt: `{"decision":"block"}` says "not this compaction" and
+/// `continue: false` says "stop entirely", and from here the answer is the same
+/// — do not rewrite the history. The turn then runs uncompacted, which is worse
+/// than compacting but better than compacting past a hook that was about to
+/// save something.
+#[must_use]
+fn precompact_refusal(records: &[horsie_models::hooks::HookRecord]) -> Option<String> {
+    use horsie_models::hooks::{HookAction, StopOutcome};
+    records.iter().find_map(|r| {
+        if let Some(halt) = &r.halt {
+            return Some(
+                halt.reason
+                    .clone()
+                    .unwrap_or_else(|| "a PreCompact hook set continue: false".to_string()),
+            );
+        }
+        match &r.action {
+            HookAction::PreCompact(p) => match &p.outcome {
+                StopOutcome::Blocked(b) => Some(
+                    b.reason
+                        .clone()
+                        .unwrap_or_else(|| "a PreCompact hook blocked this compaction".to_string()),
+                ),
+                // A hook that could not run cannot refuse: only `PreToolUse`
+                // fails closed, and losing a compaction to a broken guard would
+                // silently fill the context instead.
+                StopOutcome::Ran(_) | StopOutcome::Failed(_) | StopOutcome::CapReached(_) => None,
+            },
+            // Only `PreCompact` decides a compaction. Every other record in the
+            // batch is something else that happened to run.
+            HookAction::PreToolUse(_)
+            | HookAction::PostToolUse(_)
+            | HookAction::PostToolUseFailure(_)
+            | HookAction::PostToolBatch(_)
+            | HookAction::PostCompact(_)
+            | HookAction::SessionStart(_)
+            | HookAction::SessionEnd(_)
+            | HookAction::UserPromptSubmit(_)
+            | HookAction::UserPromptExpansion(_)
+            | HookAction::Stop(_)
+            | HookAction::StopFailure(_)
+            | HookAction::SubagentStart(_)
+            | HookAction::SubagentStop(_)
+            | HookAction::TaskCreated(_)
+            | HookAction::TaskCompleted(_)
+            | HookAction::Notification(_)
+            | HookAction::CwdChanged(_) => None,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -208,6 +289,81 @@ mod tests {
         // numbers rather than as positions in prose.
         assert!(rendered.contains("1. migrate the journal"));
         assert!(rendered.contains("2. delete the importer"));
+    }
+
+    // --- PreCompact refusal ------------------------------------------------
+
+    use horsie_models::hooks::{
+        HookAction, HookBlocked, HookHalt, HookRecord, PreCompactRecord, StopOutcome,
+    };
+
+    fn precompact(outcome: StopOutcome, halt: Option<HookHalt>) -> HookRecord {
+        HookRecord {
+            plugin: "guard".into(),
+            duration_ms: 1,
+            halt,
+            action: HookAction::PreCompact(PreCompactRecord {
+                trigger: "auto".into(),
+                system_message: None,
+                outcome,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_blocking_precompact_hook_refuses_with_its_reason() {
+        let records = vec![precompact(
+            StopOutcome::Blocked(HookBlocked {
+                reason: Some("still writing notes".into()),
+            }),
+            None,
+        )];
+        assert_eq!(
+            precompact_refusal(&records),
+            Some("still writing notes".to_string())
+        );
+    }
+
+    #[test]
+    fn a_hook_that_refuses_without_a_reason_still_says_something() {
+        let records = vec![precompact(
+            StopOutcome::Blocked(HookBlocked { reason: None }),
+            None,
+        )];
+        assert!(precompact_refusal(&records).is_some());
+    }
+
+    /// A halt and a block are different statements, and from here they have the
+    /// same consequence — do not rewrite the history.
+    #[test]
+    fn a_halt_refuses_as_surely_as_a_block() {
+        let records = vec![precompact(
+            StopOutcome::Ran(horsie_models::hooks::ContextInjected {
+                additional_context: None,
+            }),
+            Some(HookHalt {
+                reason: Some("shutting down".into()),
+            }),
+        )];
+        assert_eq!(precompact_refusal(&records), Some("shutting down".into()));
+    }
+
+    /// A guard that could not run must not be able to stop compaction: the
+    /// context would silently fill instead. Only `PreToolUse` fails closed.
+    #[test]
+    fn a_failed_precompact_hook_does_not_refuse() {
+        let records = vec![precompact(
+            StopOutcome::Failed(horsie_models::hooks::HookFailed {
+                reason: "exec format error".into(),
+            }),
+            None,
+        )];
+        assert_eq!(precompact_refusal(&records), None);
+    }
+
+    #[test]
+    fn no_hooks_at_all_never_refuses() {
+        assert_eq!(precompact_refusal(&[]), None);
     }
 
     #[test]

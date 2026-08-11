@@ -58,6 +58,10 @@ pub struct CompactionPlan {
     pub retained: usize,
     pub tokens_before: u32,
     pub instructions: Option<String>,
+    /// `auto` or `manual`. Read off the trigger rather than from whether
+    /// instructions were given: a bare `/compact` carries none and is still
+    /// manual.
+    pub trigger: &'static str,
 }
 
 /// A `PreCompact` hook's verdict.
@@ -76,6 +80,9 @@ pub struct CompactionResult {
     pub summary: String,
     pub tokens_before: u32,
     pub tokens_after: u32,
+    /// `auto` or `manual` — carried so a `PostCompact` hook matches on the same
+    /// domain its `PreCompact` did.
+    pub trigger: &'static str,
 }
 
 /// The owner's half of a compaction.
@@ -179,6 +186,19 @@ pub fn choose_cut(history: &[Message], retain_budget_tokens: u32) -> usize {
     latest_safe.unwrap_or(history.len())
 }
 
+/// Where the most recent turn begins — what a manual `/compact` keeps.
+///
+/// `history.len()` when there is no safe boundary at all, and `0` when the only
+/// one is the very first message, which makes the compaction a no-op: there is
+/// nothing before the current turn to fold.
+#[must_use]
+pub fn last_safe_boundary(history: &[Message]) -> usize {
+    history
+        .iter()
+        .rposition(is_safe_boundary)
+        .unwrap_or(history.len())
+}
+
 /// Build the request that asks a model to summarise a span.
 ///
 /// A fixed structure rather than a free "summarise this": the sections are what
@@ -251,6 +271,24 @@ impl Agent {
         }
     }
 
+    /// Compact on demand, outside any turn — what `/compact` runs.
+    ///
+    /// Separate from [`Self::run`] because a `/compact` is not a turn: there is
+    /// nothing to say to the model, and starting one would spend a provider
+    /// call answering a message nobody sent.
+    pub async fn compact_only(
+        &mut self,
+        instructions: Option<String>,
+        events: &dyn EventSink,
+    ) -> Result<(), AgentError> {
+        self.compact(
+            instructions,
+            CompactionTrigger::Manual(EmptyOutcome {}),
+            events,
+        )
+        .await
+    }
+
     /// Summarise everything before the cut and rewrite the history.
     ///
     /// `Ok(())` with nothing done when there is no policy or nothing worth
@@ -273,11 +311,16 @@ impl Agent {
             return Ok(());
         }
         let tokens_before = self.last_context_tokens;
+        let trigger_name = match trigger {
+            CompactionTrigger::Auto(_) => "auto",
+            CompactionTrigger::Manual(_) => "manual",
+        };
         let plan = CompactionPlan {
             covered: cut,
             retained: self.history.len() - cut,
             tokens_before,
             instructions: instructions.clone(),
+            trigger: trigger_name,
         };
         if let PreCompactDecision::Abandon(reason) = policy.before(&plan).await {
             tracing::info!(reason, "a PreCompact hook abandoned this compaction");
@@ -329,6 +372,7 @@ impl Agent {
                 summary,
                 tokens_before,
                 tokens_after,
+                trigger: trigger_name,
             })
             .await;
         Ok(())
@@ -787,6 +831,37 @@ mod tests {
             "the run went ahead on the history it already had (plus its input)"
         );
         assert_eq!(policy.results(), 0);
+    }
+
+    #[test]
+    fn a_manual_compaction_keeps_only_the_current_turn() {
+        let history = vec![
+            user("u0", "first question"),
+            msg(Role::Assistant, "a0", "first answer"),
+            user("u1", "second question"),
+            msg(Role::Assistant, "a1", "second answer"),
+            user("u2", "third question"),
+        ];
+        assert_eq!(
+            last_safe_boundary(&history),
+            4,
+            "everything before the turn in progress is folded, whatever a token \
+             budget would have said — someone typing `/compact` wants room now"
+        );
+    }
+
+    /// The no-op that matters: nothing precedes the only turn there is, so
+    /// there is nothing to fold and `compact` returns without a provider call.
+    #[test]
+    fn a_manual_compaction_on_a_single_turn_cuts_at_zero() {
+        let history = vec![user("u0", "hello"), msg(Role::Assistant, "a0", "hi")];
+        assert_eq!(last_safe_boundary(&history), 0);
+    }
+
+    #[test]
+    fn a_manual_compaction_with_no_safe_boundary_retains_nothing() {
+        let history = vec![assistant_calling("a0", "tc1"), tool_result("tc1", "output")];
+        assert_eq!(last_safe_boundary(&history), history.len());
     }
 
     #[test]

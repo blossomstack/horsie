@@ -72,13 +72,18 @@ Both are real, which is why the guidance is narrow rather than general: point a
 `PreToolUse` webhook only at an endpoint you are willing to have gate your tool
 calls. Command hooks have an exit code and do not have this ambiguity.
 
-## Why only eight events
+## Why only ten events
 
-horsie runs eight of the thirty-one events the specification documents. Eight
-more are understood and not yet fired. The remaining fifteen have no horsie
-equivalent — permission prompts, context compaction, worktrees, file watching,
-agent teams, MCP elicitation, the display layer. Each would need a subsystem,
-not a hook.
+horsie runs ten of the thirty-one events the specification documents. Eight more
+are understood and not yet fired. The remaining thirteen have no horsie
+equivalent — permission prompts, worktrees, file watching, agent teams, MCP
+elicitation, the display layer. Each would need a subsystem, not a hook.
+
+`PreCompact` and `PostCompact` joined the first list when compaction landed.
+`PreCompact` is the last chance to write something down that the summary would
+otherwise become the only record of, and a hook that blocks abandons the
+compaction — the turn then runs uncompacted, which is worse than compacting but
+better than compacting past a guard that was about to save something.
 
 A bundle declaring an event horsie cannot fire still installs, and the events it
 cannot run are **named** rather than silently ignored. Silently ignoring them

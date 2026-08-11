@@ -247,6 +247,35 @@ impl SessionActor {
         self.title_from_first_message(&text).await;
 
         let id = Uuid::new_v4().to_string();
+        // A built-in is resolved here, before anything treats the text as a
+        // prompt: `/compact` asks the server to do something and must never
+        // reach `expand_invocation`, a template, or the model. Consulted ahead
+        // of the plugin catalogue, so an installed bundle cannot take over a
+        // control the product owns.
+        let item = match horsie_support::plugin::commands::parse_invocation(text.trim(), '/')
+            .and_then(|(name, args)| {
+                horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
+            }) {
+            Some((builtin, args)) if builtin.name == "compact" => Incoming::Compact {
+                id: id.clone(),
+                instructions: (!args.trim().is_empty()).then(|| args.trim().to_string()),
+            },
+            // Every other built-in, present and future. Reaching here means the
+            // table names something this match does not handle, which is a bug
+            // rather than a message: sending it on as a prompt would show the
+            // user's `/thing` to the model as if it were prose.
+            Some((builtin, _)) => {
+                tracing::error!(builtin = builtin.name, "unhandled builtin command");
+                Incoming::User {
+                    id: id.clone(),
+                    text: text.clone(),
+                }
+            }
+            None => Incoming::User {
+                id: id.clone(),
+                text: text.clone(),
+            },
+        };
         let (tx, rx) = oneshot::channel();
         let accepted = id.clone();
         tokio::spawn(async move {
@@ -261,7 +290,7 @@ impl SessionActor {
         });
         if agent
             .tell(AgentCommand::Enqueue {
-                item: Incoming::User { id, text },
+                item,
                 ack: Some(ReplyTo::from_sender(tx)),
             })
             .await

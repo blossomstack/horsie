@@ -301,6 +301,10 @@ fn is_tool_seam(action: &HookAction) -> bool {
         | HookAction::TaskCreated(_)
         | HookAction::TaskCompleted(_)
         | HookAction::Notification(_)
+        // Fired by the compaction, which the server owns: a run asks its
+        // policy, and the policy is the server's.
+        | HookAction::PreCompact(_)
+        | HookAction::PostCompact(_)
         | HookAction::CwdChanged(_) => false,
     }
 }
@@ -337,6 +341,10 @@ fn stop_verdict(records: &[HookRecord]) -> Option<String> {
         | HookAction::PostToolUse(_)
         | HookAction::PostToolUseFailure(_)
         | HookAction::PostToolBatch(_)
+        // A `PreCompact` block stops the compaction, not the turn; the
+        // compaction path reads its own verdict.
+        | HookAction::PreCompact(_)
+        | HookAction::PostCompact(_)
         | HookAction::SessionStart(_)
         | HookAction::SessionEnd(_)
         | HookAction::UserPromptSubmit(_)
@@ -381,6 +389,10 @@ fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
             | HookAction::TaskCreated(_)
             | HookAction::TaskCompleted(_)
             | HookAction::Notification(_)
+            // A compaction has no continuation budget to run out of: a
+            // `PreCompact` block abandons it once and nothing loops.
+            | HookAction::PreCompact(_)
+            | HookAction::PostCompact(_)
             | HookAction::CwdChanged(_) => {}
         }
     }

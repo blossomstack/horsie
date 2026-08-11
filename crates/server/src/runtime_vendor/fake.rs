@@ -67,6 +67,8 @@ fn event_name(event: &horsie_models::runtime::ServerHookEvent) -> &'static str {
         E::UserPromptExpansion(_) => "UserPromptExpansion",
         E::Stop(_) => "Stop",
         E::SubagentStop(_) => "SubagentStop",
+        E::PreCompact(_) => "PreCompact",
+        E::PostCompact(_) => "PostCompact",
     }
 }
 
@@ -90,6 +92,8 @@ fn action_name(action: &horsie_models::hooks::HookAction) -> &'static str {
         A::TaskCompleted(_) => "TaskCompleted",
         A::Notification(_) => "Notification",
         A::CwdChanged(_) => "CwdChanged",
+        A::PreCompact(_) => "PreCompact",
+        A::PostCompact(_) => "PostCompact",
     }
 }
 

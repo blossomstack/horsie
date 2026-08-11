@@ -46,6 +46,7 @@ import type {
   PluginDefaultInput,
   PluginInstallInput,
   PasswordChangeRequest,
+  CatalogEntryView,
   PluginView,
   RenameGroupRequest,
   RoutineInput,
@@ -601,6 +602,15 @@ export const api = {
   plugins: {
     /** All installed skill bundles (metadata only). */
     list: (): Promise<PluginView[]> => request("/plugins"),
+
+    /**
+     * The slash commands horsie answers itself.
+     *
+     * Not part of `list`: a built-in is offered whether or not any bundle is
+     * installed, so folding it into the bundle list would make it disappear
+     * from the plainest session there is.
+     */
+    builtins: (): Promise<CatalogEntryView[]> => request("/builtins"),
 
     /**
      * Install a bundle, or register the catalogue the URL turned out to be.

@@ -1,9 +1,11 @@
 
 import { CwdChangedRecord } from './cwdChangedRecord';
 import { NotificationRecord } from './notificationRecord';
+import { PostCompactRecord } from './postCompactRecord';
 import { PostToolBatchRecord } from './postToolBatchRecord';
 import { PostToolUseFailureRecord } from './postToolUseFailureRecord';
 import { PostToolUseRecord } from './postToolUseRecord';
+import { PreCompactRecord } from './preCompactRecord';
 import { PreToolUseRecord } from './preToolUseRecord';
 import { SessionEndRecord } from './sessionEndRecord';
 import { SessionStartRecord } from './sessionStartRecord';
@@ -38,4 +40,6 @@ export type HookAction =
   | { event: "TaskCreated"; value: TaskCreatedRecord }
   | { event: "TaskCompleted"; value: TaskCompletedRecord }
   | { event: "Notification"; value: NotificationRecord }
-  | { event: "CwdChanged"; value: CwdChangedRecord };
+  | { event: "CwdChanged"; value: CwdChangedRecord }
+  | { event: "PreCompact"; value: PreCompactRecord }
+  | { event: "PostCompact"; value: PostCompactRecord };
