@@ -536,7 +536,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
 

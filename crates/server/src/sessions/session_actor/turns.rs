@@ -483,7 +483,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps,
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
 
@@ -551,7 +551,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 deps,
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
         (session, journal)

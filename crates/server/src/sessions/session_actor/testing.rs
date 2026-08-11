@@ -147,9 +147,13 @@ impl EventSourcedActor for DeafSupervisor {
 
 /// The frame channel a supervisor would hand the actor. Owned by the test,
 /// exactly as the real one is owned by the supervisor rather than the actor.
-pub(super) fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
-    horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new()))
-        .spawn_persistent(DeafSupervisor)
+/// The account a test session belongs to.
+///
+/// A session reaches its supervisor by resolving this id, so a test that never
+/// registers a supervisor simply has none — which is what the old deaf stand-in
+/// was for, minus an actor that had to be spawned to be ignored.
+pub(super) fn test_account() -> crate::auth::UserId {
+    crate::auth::UserId::bootstrap()
 }
 
 /// Every status reported to a [`ListeningSupervisor`], in order.
@@ -207,13 +211,16 @@ pub(super) fn respawn_session(
     journal: Arc<dyn horsie_actor::Journal>,
     parent: ActorRef<SessionSupervisorCommand>,
 ) -> ActorRef<SessionCommand> {
-    horsie_actor::ActorSystem::new(journal).spawn_persistent(SessionActor::new(
-        id,
-        actor_spec_fixture(),
-        f.deps.clone(),
-        parent,
-        crate::sessions::Revisions::default(),
-    ))
+    horsie_actor::ActorSystem::new(journal).spawn_persistent(
+        SessionActor::new(
+            id,
+            actor_spec_fixture(),
+            f.deps.clone(),
+            test_account(),
+            crate::sessions::Revisions::default(),
+        )
+        .with_supervisor(parent),
+    )
 }
 
 /// Poll until the session has reported anything at all (2s cap).
@@ -324,7 +331,7 @@ pub(super) async fn spawn_session_with_provider(
         "mock".to_string(),
         crate::sessions::spec::ModelEntry::provider_only(provider),
     );
-    let parent = spawn_deaf_supervisor();
+    let parent = test_account();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
     let session =
         horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
@@ -424,7 +431,7 @@ pub(super) async fn spawn_run_with_provider(
         "mock".to_string(),
         crate::sessions::spec::ModelEntry::provider_only(provider),
     );
-    let parent = spawn_deaf_supervisor();
+    let parent = test_account();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
     let session =
         horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
@@ -532,7 +539,7 @@ pub(super) fn spawn_unprovisioned(
             id,
             actor_spec_fixture(),
             f.deps.clone(),
-            spawn_deaf_supervisor(),
+            test_account(),
             crate::sessions::Revisions::default(),
         ));
     (session, journal)
@@ -952,7 +959,7 @@ pub(super) async fn stop_harness_full(
             id,
             actor_spec_fixture(),
             f.deps.clone(),
-            spawn_deaf_supervisor(),
+            test_account(),
             crate::sessions::Revisions::default(),
         ));
     (f, session, prompts, id, journal)
@@ -1155,7 +1162,7 @@ pub(super) async fn catalog_harness_with(
         id,
         actor_spec_fixture(),
         f.deps.clone(),
-        spawn_deaf_supervisor(),
+        test_account(),
         crate::sessions::Revisions::default(),
     ));
     (f, session, id)
@@ -1260,7 +1267,7 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
         id,
         actor_spec_fixture(),
         f.deps.clone(),
-        spawn_deaf_supervisor(),
+        test_account(),
         crate::sessions::Revisions::default(),
     ));
     drop(prompts);
