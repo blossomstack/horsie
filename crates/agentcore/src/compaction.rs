@@ -11,9 +11,7 @@ use crate::agent::Agent;
 use crate::error::AgentError;
 use crate::events::{EventSink, EventSinkError};
 use crate::provider::{CompletionRequest, ToolChoice};
-use horsie_models::agent::{
-    CompactionEntry, CompactionTrigger, ContentPart, EmptyOutcome, Message, Role, TextPart,
-};
+use horsie_models::agent::{CompactionTrigger, ContentPart, EmptyOutcome, Message, Role, TextPart};
 use horsie_models::events::{AgentEvent, CompactedEvent};
 use horsie_models::now_ms;
 
@@ -289,29 +287,24 @@ impl Agent {
         let summary = self.summarise(cut, instructions.as_deref()).await?;
         let carried_state = policy.carried_state().await;
 
-        let retained: Vec<Message> = self.history[cut..].to_vec();
-        let entry = CompactionEntry {
-            summary: summary.clone(),
-            carried_state,
-            // Positions in the *prompt* the run was built from. The actor
-            // translates these to log seqs when it folds the event: only it
-            // knows the log, and only this knows the prompt.
-            covers_through_seq: (cut - 1) as u64,
-            retained_from_seq: cut as u64,
-            trigger,
-            instructions,
-            tokens_before,
-            tokens_after: 0,
-        };
+        // The name the fold will resolve. A message id, not the index `cut`:
+        // the run's history and the actor's log are numbered differently, and
+        // the id is what they share.
+        let retained_from_message_id = self.history.get(cut).map(|m| m.id.clone());
 
+        let retained: Vec<Message> = self.history[cut..].to_vec();
         let mut rewritten = Vec::with_capacity(retained.len() + 1);
-        rewritten.push(boundary_message(&entry));
+        rewritten.push(Message {
+            id: format!("compaction:{}", self.history.len()),
+            role: Role::User,
+            parts: vec![ContentPart::Text(TextPart {
+                text: boundary_text(&summary, &carried_state),
+            })],
+            created_at_ms: now_ms(),
+            started_at_ms: None,
+        });
         rewritten.extend(retained);
         let tokens_after: u32 = rewritten.iter().map(approx_tokens).sum();
-        let entry = CompactionEntry {
-            tokens_after,
-            ..entry
-        };
         self.history = rewritten;
         // The next iteration's check reads this. Left at the pre-compaction
         // size it would compact again immediately, every iteration, forever.
@@ -320,7 +313,13 @@ impl Agent {
         events
             .emit(AgentEvent::Compacted(CompactedEvent {
                 message_id: uuid::Uuid::new_v4().to_string(),
-                entry,
+                summary: summary.clone(),
+                carried_state,
+                retained_from_message_id,
+                trigger,
+                instructions,
+                tokens_before,
+                tokens_after,
                 at_ms: now_ms(),
             }))
             .await?;
@@ -393,26 +392,6 @@ impl Agent {
             }));
         }
         Ok(text)
-    }
-}
-
-/// The one message a boundary shows the model, as the agent builds it.
-///
-/// Mirrors the server's own `boundary_message`, which builds the same text from
-/// the folded entry. Both exist because the run holds a `Vec<Message>` and the
-/// actor holds a log, and neither can see the other's — but the text a provider
-/// receives must be identical either way, or a recovered agent would prompt
-/// differently from the one it replaced.
-#[must_use]
-pub fn boundary_message(entry: &CompactionEntry) -> Message {
-    Message {
-        id: format!("compaction:{}", entry.covers_through_seq),
-        role: Role::User,
-        parts: vec![ContentPart::Text(TextPart {
-            text: boundary_text(&entry.summary, &entry.carried_state),
-        })],
-        created_at_ms: now_ms(),
-        started_at_ms: None,
     }
 }
 
@@ -676,7 +655,7 @@ mod tests {
 
         let events = compactions(&sink);
         assert_eq!(events.len(), 1, "exactly one boundary, at iteration 0");
-        let entry = &events[0].entry;
+        let entry = &events[0];
         assert!(entry.summary.contains("a summary of what came before"));
         assert!(
             entry.carried_state.contains("ship it"),

@@ -522,7 +522,9 @@ mod tests {
             .expect("create");
         f.deps.provider_registry.write().unwrap().insert(
             "mock".to_string(),
-            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
         );
         let counting = Arc::new(CountingJournal::new());
         let journal: Arc<dyn horsie_actor::Journal> = counting.clone();

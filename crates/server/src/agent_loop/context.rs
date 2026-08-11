@@ -130,6 +130,15 @@ pub struct Contexts {
     /// agent's configured prompt" — workflow agents carry a static prompt in
     /// their params and return `None` here.
     pub system_prompt: Option<String>,
+    /// This run's model's context window, when its card declares one.
+    ///
+    /// Resolved here rather than by the agent because an agent does not know
+    /// which models are configured — the same reason the HTTP layer has had to
+    /// attach it to the agent document. `None` disables automatic compaction
+    /// for this run: without a window there is no share of it to trigger on,
+    /// and a guessed default would either compact a session that had room or
+    /// fail to compact one that did not.
+    pub context_window: Option<u32>,
 }
 
 /// What a run's pre-start hooks need to know about the turn about to begin.
@@ -244,6 +253,22 @@ impl std::fmt::Display for ContextError {
     }
 }
 
+/// The window a run gets, from what the session asked for and what its model's
+/// card declares.
+///
+/// One function because the two reasons a session never compacts — it was
+/// turned off, or the card names no window — must produce the same answer, and
+/// the run must not be able to tell them apart. There is nothing for a run to
+/// do differently in the two cases, and a second signal would be a second thing
+/// to keep consistent.
+#[must_use]
+pub fn compaction_window(auto_compact: Option<bool>, card_window: Option<u32>) -> Option<u32> {
+    if auto_compact == Some(false) {
+        return None;
+    }
+    card_window
+}
+
 /// A [`ContextProvider`] that hands back the same contexts every time — built
 /// once and reused, by any owner whose agent's runtime and toolbox are
 /// fixed for the agent's life, so `provide` is a trivial clone (and a recovery
@@ -260,6 +285,9 @@ impl ContextProvider for FixedContextProvider {
             provider: self.provider.clone(),
             toolbox: self.toolbox.clone(),
             system_prompt: None,
+            // A fixed-context agent is a workflow step or a test fixture; it has
+            // no model card to read a window from and never auto-compacts.
+            context_window: None,
         })
     }
 }
@@ -1031,5 +1059,38 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.as_str().unwrap().contains("horsie_shared"));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod compaction_window_tests {
+    use super::compaction_window;
+
+    /// The two ways a session ends up never compacting produce the same answer,
+    /// which is what lets the run stay ignorant of both.
+    #[test]
+    fn a_window_reaches_a_run_only_when_wanted_and_declared() {
+        assert_eq!(
+            compaction_window(None, Some(200_000)),
+            Some(200_000),
+            "on by default"
+        );
+        assert_eq!(compaction_window(Some(true), Some(200_000)), Some(200_000));
+        assert_eq!(
+            compaction_window(Some(false), Some(200_000)),
+            None,
+            "turned off"
+        );
+        assert_eq!(
+            compaction_window(None, None),
+            None,
+            "the card declares none"
+        );
+        assert_eq!(
+            compaction_window(Some(true), None),
+            None,
+            "asked for, but there is nothing to be a share of — no guessed default"
+        );
     }
 }

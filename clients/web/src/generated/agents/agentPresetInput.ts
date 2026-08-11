@@ -16,4 +16,9 @@ export interface AgentPresetInput {
   mcpServers?: string[];
   memorySpaces?: string[];
   thinkingEffort?: string;
+  /**
+   * Seeds `AgentSettings.auto_compact` for sessions created from this
+   * preset; absent → yes.
+   */
+  autoCompact?: boolean;
 }

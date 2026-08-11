@@ -108,6 +108,7 @@ impl RoutineRunner {
             thinking_effort: agent.thinking_effort.clone(),
             max_concurrent_subagents: None,
             instructions: agent.instructions.clone(),
+            auto_compact: agent.auto_compact,
         };
         let spec = build_session_spec(
             &self.config,

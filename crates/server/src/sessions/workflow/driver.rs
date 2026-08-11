@@ -202,6 +202,7 @@ mod tests {
             memory_spaces: Vec::new(),
             thinking_effort: None,
             max_concurrent_subagents: None,
+            auto_compact: None,
         }
     }
 

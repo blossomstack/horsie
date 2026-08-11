@@ -34,4 +34,16 @@ export interface AgentSettings {
    * here; absent → none.
    */
   instructions?: string;
+  /**
+   * Whether this session summarises older history into a compaction
+   * boundary once its context fills; absent → yes.
+   *
+   * A flag rather than a threshold: the share of the window at which
+   * compacting is worthwhile is a property of the model, not of the
+   * session, so it stays a server constant that can be retuned centrally
+   * instead of a number frozen into everyone's saved settings. Has no
+   * effect when the model's card declares no context window — there is
+   * then nothing to be a share of.
+   */
+  autoCompact?: boolean;
 }

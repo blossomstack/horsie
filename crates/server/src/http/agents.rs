@@ -129,6 +129,7 @@ pub async fn invoke_agent(
         max_concurrent_subagents: None,
         // What the preset says about *behaviour*, as opposed to what it gates.
         instructions: agent.instructions.clone(),
+        auto_compact: agent.auto_compact,
     };
     let spec = build_session_spec(
         &state.config_store,

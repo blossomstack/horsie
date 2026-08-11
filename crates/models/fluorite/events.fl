@@ -2,7 +2,7 @@
 package events;
 
 use agent.AgentInput;
-use agent.CompactionEntry;
+use agent.CompactionTrigger;
 use agent.Message;
 use agent.Usage;
 use agent.Role;
@@ -64,7 +64,27 @@ struct RunAbortedEvent { message_id: String, usage: Usage, context_tokens: u32, 
 /// Emitted from the top of the tool loop, which is the only point in a run
 /// where every `tool_use` already has its `tool_result` — a boundary taken
 /// anywhere else could split a call from its answer.
-struct CompactedEvent { message_id: String, entry: CompactionEntry, at_ms: u64 }
+///
+/// Carries a message *id* rather than the `CompactionEntry`'s sequence numbers
+/// because the two live in different numbering. A run holds a `Vec<Message>`
+/// built by `prompt_messages`, which drops lifecycle entries and translates
+/// hooks, so the nth message is not the nth log entry. The id is the one name
+/// both sides share, and the fold — which is the only thing holding the log —
+/// resolves it to a seq. Resolution is a search of an append-only log, so
+/// replay reproduces it exactly.
+struct CompactedEvent {
+    message_id: String,
+    summary: String,
+    carried_state: String,
+    /// Id of the first message still shown to the model raw. Absent when
+    /// nothing was retained and the compaction is summary-only.
+    retained_from_message_id: Option<String>,
+    trigger: CompactionTrigger,
+    instructions: Option<String>,
+    tokens_before: u32,
+    tokens_after: u32,
+    at_ms: u64,
+}
 
 /// All events emitted during agent execution.
 ///

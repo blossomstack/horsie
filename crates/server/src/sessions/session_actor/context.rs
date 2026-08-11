@@ -253,7 +253,11 @@ impl SessionContextProvider {
     /// different things: the session's own model is a failure, while a
     /// plugin agent's is a declaration horsie cannot honour and inherits past.
     fn provider_for(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
-        self.registry.read().ok()?.get(model).cloned()
+        self.registry
+            .read()
+            .ok()?
+            .get(model)
+            .map(|e| e.provider.clone())
     }
 
     fn llm_provider(&self) -> Result<Arc<dyn LlmProvider>, String> {
@@ -262,8 +266,21 @@ impl SessionContextProvider {
             .read()
             .map_err(|_| "provider registry lock poisoned".to_string())?;
         reg.get(&self.settings.model)
-            .cloned()
+            .map(|e| e.provider.clone())
             .ok_or_else(|| format!("no provider registered for model '{}'", self.settings.model))
+    }
+
+    /// This session's model's context window, when its card declares one.
+    ///
+    /// Absent for a model horsie has no provider for at all, which is a failure
+    /// `llm_provider` reports first — so a `None` here always means "the card
+    /// says nothing", never "the model is missing".
+    fn context_window(&self) -> Option<u32> {
+        self.registry
+            .read()
+            .ok()?
+            .get(&self.settings.model)?
+            .context_window
     }
 
     /// The client the run currently in flight already acquired, if any.
@@ -787,6 +804,10 @@ impl ContextProvider for SessionContextProvider {
             provider,
             toolbox,
             system_prompt,
+            context_window: crate::agent_loop::compaction_window(
+                self.settings.auto_compact,
+                self.context_window(),
+            ),
         })
     }
 }

@@ -191,6 +191,7 @@ mod tests {
                 mcp_servers: None,
                 memory_spaces: None,
                 thinking_effort: None,
+                auto_compact: None,
             })
             .await
             .unwrap();

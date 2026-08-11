@@ -13,6 +13,7 @@
 
 mod agent_actor;
 mod agent_log;
+pub mod carried_state;
 mod context;
 mod hook_translation;
 mod inbox;
@@ -27,6 +28,7 @@ pub use agent_actor::{
     hook_entry_id,
 };
 pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};
+pub use context::compaction_window;
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
     ContextError, ContextProvider, Contexts, DefaultToolboxFactory, FixedContextProvider,

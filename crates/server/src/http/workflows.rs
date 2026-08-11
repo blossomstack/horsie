@@ -175,6 +175,7 @@ pub async fn start_run(
                 thinking_effort: preset.thinking_effort.clone(),
                 max_concurrent_subagents: None,
                 instructions: preset.instructions.clone(),
+                auto_compact: preset.auto_compact,
             },
         });
     }
@@ -205,6 +206,7 @@ pub async fn start_run(
         thinking_effort: first.settings.thinking_effort.clone(),
         max_concurrent_subagents: None,
         instructions: first.settings.instructions.clone(),
+        auto_compact: first.settings.auto_compact,
     };
     let mut spec = build_session_spec(
         &state.config_store,

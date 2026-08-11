@@ -212,6 +212,13 @@ pub enum AgentCommand {
     /// document. Distinct from `GetHistory`, which returns transcript appends:
     /// these are values a client re-reads rather than accumulates.
     GetState { reply: ReplyTo<AgentStateView> },
+    /// The exact facts a compaction must carry across verbatim.
+    ///
+    /// Answered from state on the mailbox, and asked from a *running* agent's
+    /// own task: a compaction can happen mid-turn, and the task list it must
+    /// preserve may have been changed by a tool call earlier in that same turn.
+    /// Reading a copy taken at run start would carry a stale one.
+    CarriedState { reply: ReplyTo<String> },
 }
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
@@ -402,8 +409,19 @@ pub enum AgentDomainEvent {
     /// this only records where the prompt now starts. Folding it is therefore
     /// deterministic under replay, and a recovered agent prompts from exactly
     /// the boundary the live one did.
+    ///
+    /// Carries the *message id* the retained window starts at, not a seq. The
+    /// run that produced it was holding a `Vec<Message>` in prompt order, which
+    /// is not log order; resolving the two is the fold's job because the fold is
+    /// the only thing holding the log.
     Compacted {
-        entry: CompactionEntry,
+        summary: String,
+        carried_state: String,
+        retained_from_message_id: Option<String>,
+        trigger: horsie_agentcore::CompactionTrigger,
+        instructions: Option<String>,
+        tokens_before: u32,
+        tokens_after: u32,
         at_ms: u64,
     },
     /// Something was accepted into this agent's queue.
@@ -771,6 +789,46 @@ impl AgentState {
             AgentLogBody::Compaction(c) => Some((e.at_ms, c)),
             AgentLogBody::Llm(_) | AgentLogBody::Hook(_) | AgentLogBody::Lifecycle(_) => None,
         })
+    }
+
+    /// Turn "the retained window starts at this message" into log sequence
+    /// numbers: `(covers_through_seq, retained_from_seq)`.
+    ///
+    /// Deterministic under replay because it is a search of an append-only log
+    /// from a fold that has already applied everything before this event — the
+    /// same log, the same id, the same answer.
+    ///
+    /// Two cases collapse to "retain nothing": no id at all (a summary-only
+    /// compaction), and an id the log does not hold. The second should not
+    /// happen — the run built its history from this log — but the honest
+    /// failure is to show the model the summary alone rather than to guess a
+    /// seq and silently resurrect or drop messages around it.
+    #[must_use]
+    fn resolve_boundary(&self, retained_from_message_id: Option<&str>) -> (u64, u64) {
+        let retain_nothing = (self.tail_seq().unwrap_or(0), self.next_seq);
+        let Some(id) = retained_from_message_id else {
+            return retain_nothing;
+        };
+        let Some(idx) = self
+            .log
+            .iter()
+            .position(|e| e.body.id().is_some_and(|got| got == id))
+        else {
+            tracing::warn!(
+                message_id = id,
+                "a compaction named a message this log does not hold; \
+                 retaining nothing"
+            );
+            return retain_nothing;
+        };
+        let retained_from_seq = self.log[idx].seq;
+        // The entry immediately before it in the log, read by position rather
+        // than as `seq - 1`: the log is contiguous today, and this stays right
+        // if it is ever front-trimmed.
+        let covers_through_seq = idx
+            .checked_sub(1)
+            .map_or(retained_from_seq, |prev| self.log[prev].seq);
+        (covers_through_seq, retained_from_seq)
     }
 
     /// The seq of every compaction boundary, oldest first.
@@ -1317,7 +1375,7 @@ impl AgentActor {
         events.push(AgentDomainEvent::InputMessage {
             message: agent_input.to_message(now_ms()),
         });
-        self.start_run(agent_input, ctx, history);
+        self.start_run(agent_input, ctx, history, folded.context_tokens);
         events
     }
 
@@ -1326,6 +1384,8 @@ impl AgentActor {
         input: AgentInput,
         ctx: &ActorContext<AgentCommand>,
         history: Vec<Message>,
+        // The prompt size the previous turn left behind, from durable state.
+        context_tokens: u32,
     ) {
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
@@ -1432,6 +1492,17 @@ impl AgentActor {
             let sink: Arc<dyn EventSink> = Arc::new(PersistSink {
                 actor: self_ref.clone(),
             });
+            // Auto-compaction is on unless the context layer withheld a
+            // window — which it does both when the session turned it off and
+            // when the model's card declares none.
+            let compaction =
+                contexts
+                    .context_window
+                    .map(|context_window| horsie_agentcore::CompactionBudget {
+                        context_window,
+                        trigger_at_percent: COMPACT_AT_PERCENT,
+                        retain_percent: COMPACT_RETAIN_PERCENT,
+                    });
             let outcome = run_with_retries(
                 contexts.provider,
                 toolbox,
@@ -1446,6 +1517,11 @@ impl AgentActor {
                 history,
                 input,
                 cancel,
+                compaction,
+                Arc::new(
+                    crate::agent_loop::carried_state::ActorCompactionPolicy::new(self_ref.clone()),
+                ),
+                context_tokens,
             )
             .await;
             // All coarse events were already persisted (each `emit` awaited its ack),
@@ -1917,12 +1993,33 @@ impl EventSourcedActor for AgentActor {
             AgentDomainEvent::LifecycleRecorded { event, at_ms } => {
                 state.push(at_ms, AgentLogBody::Lifecycle(event));
             }
-            AgentDomainEvent::Compacted { entry, at_ms } => {
+            AgentDomainEvent::Compacted {
+                summary,
+                carried_state,
+                retained_from_message_id,
+                trigger,
+                instructions,
+                tokens_before,
+                tokens_after,
+                at_ms,
+            } => {
+                let (covers_through_seq, retained_from_seq) =
+                    state.resolve_boundary(retained_from_message_id.as_deref());
+                let entry = CompactionEntry {
+                    summary,
+                    carried_state,
+                    covers_through_seq,
+                    retained_from_seq,
+                    trigger,
+                    instructions,
+                    tokens_before,
+                    tokens_after,
+                };
                 // `context_tokens` is what the next auto-compaction check
                 // reads, and the whole point of a compaction is that this
                 // number just dropped. Leaving it at the pre-compaction size
                 // would make the very next turn compact again immediately.
-                state.context_tokens = entry.tokens_after;
+                state.context_tokens = tokens_after;
                 state.push(at_ms, AgentLogBody::Compaction(entry));
             }
             AgentDomainEvent::Received { item, at_ms } => {
@@ -2234,6 +2331,12 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.state_view());
                 CommandEffect::none()
             }
+            AgentCommand::CarriedState { reply } => {
+                let _ = reply.send(crate::agent_loop::carried_state::render_carried_state(
+                    state,
+                ));
+                CommandEffect::none()
+            }
             AgentCommand::Shutdown => CommandEffect::stop(),
         }
     }
@@ -2342,6 +2445,7 @@ impl EventSourcedActor for AgentActor {
             AgentInput::user_message(new_message_id(), "continue the interrupted task"),
             ctx,
             history,
+            state.context_tokens,
         );
     }
 }
@@ -2642,7 +2746,13 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             at_ms: ev.at_ms,
         }),
         AgentEvent::Compacted(ev) => Some(AgentDomainEvent::Compacted {
-            entry: ev.entry.clone(),
+            summary: ev.summary.clone(),
+            carried_state: ev.carried_state.clone(),
+            retained_from_message_id: ev.retained_from_message_id.clone(),
+            trigger: ev.trigger.clone(),
+            instructions: ev.instructions.clone(),
+            tokens_before: ev.tokens_before,
+            tokens_after: ev.tokens_after,
             at_ms: ev.at_ms,
         }),
         AgentEvent::InputMessage(_)
@@ -2827,6 +2937,44 @@ fn synthetic_results(ids: Vec<String>) -> impl Iterator<Item = Message> {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// A [`CompactionPolicy`](horsie_agentcore::CompactionPolicy) for agents that
+/// have no budget, so it is never consulted. Tests that exercise the retry loop
+/// need one to pass and nothing to happen.
+#[cfg(test)]
+struct NeverCompacts;
+
+#[cfg(test)]
+#[async_trait]
+impl horsie_agentcore::CompactionPolicy for NeverCompacts {
+    async fn carried_state(&self) -> String {
+        String::new()
+    }
+    async fn before(
+        &self,
+        _: &horsie_agentcore::CompactionPlan,
+    ) -> horsie_agentcore::PreCompactDecision {
+        horsie_agentcore::PreCompactDecision::Proceed
+    }
+    async fn after(&self, _: &horsie_agentcore::CompactionResult) {}
+}
+
+/// The share of a model's context window at which an agent compacts.
+///
+/// A server constant rather than a session setting: the right value is a
+/// property of the model, not of the session, so it stays retunable centrally
+/// instead of frozen into everyone's saved presets. The headroom above it is
+/// also what absorbs this check's one-iteration lag — `context_tokens` is the
+/// last provider call's prompt size and does not count tool results appended
+/// since.
+const COMPACT_AT_PERCENT: u32 = 80;
+
+/// Roughly how much of the window a compaction leaves as raw recent messages.
+///
+/// Not zero, because a summary alone loses the file path or error the agent was
+/// part-way through, and those live in the last few messages.
+const COMPACT_RETAIN_PERCENT: u32 = 20;
+
+#[allow(clippy::too_many_arguments)]
 async fn run_with_retries(
     provider: Arc<dyn LlmProvider>,
     toolbox: Arc<dyn Toolbox>,
@@ -2841,6 +2989,9 @@ async fn run_with_retries(
     history: Vec<Message>,
     input: AgentInput,
     cancel: CancellationToken,
+    compaction: Option<horsie_agentcore::CompactionBudget>,
+    compaction_policy: Arc<dyn horsie_agentcore::CompactionPolicy>,
+    context_tokens: u32,
 ) -> RunOutcome {
     let mut attempt: u32 = 0;
     loop {
@@ -2850,12 +3001,15 @@ async fn run_with_retries(
         let config = AgentConfig {
             max_iterations: max_iterations.unwrap_or_else(|| AgentConfig::default().max_iterations),
             thinking_effort,
+            compaction,
             ..AgentConfig::default()
         };
         let mut builder = Agent::builder(provider.clone(), toolbox.clone(), &conversation_id)
             .with_system_prompt(system_prompt.clone())
             .with_config(config)
-            .with_history(history.clone());
+            .with_history(history.clone())
+            .with_compaction(compaction_policy.clone())
+            .with_context_tokens(context_tokens);
         if let Some(name) = &handoff_tool {
             builder = if force_handoff_choice {
                 builder.with_handoff_tool(name.clone())
@@ -3158,6 +3312,7 @@ mod tests {
                     provider: self.0.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
+                    context_window: None,
                 })
             }
         }
@@ -3296,6 +3451,7 @@ mod tests {
                     provider: self.llm.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
+                    context_window: None,
                 })
             }
 
@@ -3605,16 +3761,18 @@ mod tests {
     // The whole of the compaction contract as seen from state: where a prompt
     // starts, and what a boundary that is no longer the newest one means.
 
-    fn boundary(covers_through: u64, retained_from: u64, summary: &str) -> CompactionEntry {
-        CompactionEntry {
+    /// A `Compacted` event whose retained window starts at `retained_from`
+    /// (a message id), or which retains nothing when that is `None`.
+    fn compacted(retained_from: Option<&str>, summary: &str) -> AgentDomainEvent {
+        AgentDomainEvent::Compacted {
             summary: summary.into(),
             carried_state: "No tasks.".into(),
-            covers_through_seq: covers_through,
-            retained_from_seq: retained_from,
+            retained_from_message_id: retained_from.map(Into::into),
             trigger: horsie_agentcore::CompactionTrigger::Auto(horsie_agentcore::EmptyOutcome {}),
             instructions: None,
             tokens_before: 1_000,
             tokens_after: 100,
+            at_ms: 500,
         }
     }
 
@@ -3664,13 +3822,10 @@ mod tests {
     #[test]
     fn a_boundary_replaces_everything_it_covers_with_one_message() {
         let mut state = state_with_messages(4);
-        // Covers seqs 0..=2, retains from 3.
+        // Retains from message 3, so seqs 0..=2 are covered.
         state = AgentActor::apply_event(
             state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(2, 3, "they discussed the first three things"),
-                at_ms: 500,
-            },
+            compacted(Some("m3"), "they discussed the first three things"),
         );
 
         let prompt = texts(&state.prompt_messages());
@@ -3694,14 +3849,9 @@ mod tests {
     #[test]
     fn entries_retained_across_a_boundary_are_sent_raw() {
         let mut state = state_with_messages(4);
-        // Covers 0..=2 but retains from 2 — the overlap a recency window creates.
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(2, 2, "summary"),
-                at_ms: 500,
-            },
-        );
+        // Retains from message 2 — the summary also covered it, which is the
+        // overlap a recency window creates.
+        state = AgentActor::apply_event(state, compacted(Some("m2"), "summary"));
 
         let prompt = texts(&state.prompt_messages());
         assert_eq!(
@@ -3714,13 +3864,7 @@ mod tests {
     #[test]
     fn only_the_newest_of_two_boundaries_is_honoured() {
         let mut state = state_with_messages(3);
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(1, 2, "the first summary"),
-                at_ms: 500,
-            },
-        );
+        state = AgentActor::apply_event(state, compacted(Some("m2"), "the first summary"));
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::InputMessage {
@@ -3730,13 +3874,8 @@ mod tests {
                 },
             },
         );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(4, 5, "the second summary"),
-                at_ms: 600,
-            },
-        );
+        // Retains nothing at all, so not even `m9` survives.
+        state = AgentActor::apply_event(state, compacted(None, "the second summary"));
 
         let prompt = texts(&state.prompt_messages());
         assert_eq!(prompt.len(), 1, "nothing survives past the newest boundary");
@@ -3752,24 +3891,13 @@ mod tests {
     #[test]
     fn a_superseded_boundary_translates_to_nothing() {
         let mut state = state_with_messages(2);
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(0, 1, "old"),
-                at_ms: 500,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(2, 0, "new"),
-                at_ms: 600,
-            },
-        );
+        state = AgentActor::apply_event(state, compacted(Some("m1"), "old"));
+        // Retains from message 0, pulling the whole log — including the older
+        // boundary at seq 2 — back inside the window. That is the case which
+        // proves the older boundary is skipped on its own merits rather than by
+        // falling outside the range.
+        state = AgentActor::apply_event(state, compacted(Some("m0"), "new"));
 
-        // `retained_from_seq: 0` pulls the whole log back into the window, which
-        // is the case that proves the older boundary is skipped on its own
-        // merits rather than by falling outside the range.
         let prompt = texts(&state.prompt_messages());
         assert!(
             !prompt.iter().any(|t| t.contains("old")),
@@ -3778,23 +3906,81 @@ mod tests {
         );
     }
 
+    /// The reason the event carries a message id rather than the index the run
+    /// computed. A lifecycle entry occupies a log seq but produces no prompt
+    /// message, so after even one of them the nth message is not the nth entry.
+    /// Sending the index would silently cut the prompt in the wrong place, and
+    /// nothing downstream could tell.
+    #[test]
+    fn a_boundary_resolves_against_log_seqs_not_prompt_positions() {
+        let mut state = AgentActor::initial_state();
+        // seq 0: a lifecycle entry — invisible to the prompt.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::LifecycleRecorded {
+                event: LifecycleEvent::Preparing(horsie_agentcore::PreparingLifecycle {
+                    stage: "scanning_workspace".into(),
+                    detail: None,
+                }),
+                at_ms: 1,
+            },
+        );
+        // seqs 1, 2: two messages. `m1` is prompt position 1, log seq 2.
+        for i in 0..2u64 {
+            state = AgentActor::apply_event(
+                state,
+                AgentDomainEvent::InputMessage {
+                    message: Message {
+                        id: format!("m{i}"),
+                        ..user_msg(&format!("message {i}"))
+                    },
+                },
+            );
+        }
+
+        state = AgentActor::apply_event(state, compacted(Some("m1"), "summary"));
+
+        let (covers, retained) = match &state.log.last().unwrap().body {
+            AgentLogBody::Compaction(c) => (c.covers_through_seq, c.retained_from_seq),
+            other => panic!("expected a boundary, got {other:?}"),
+        };
+        assert_eq!(
+            retained, 2,
+            "`m1` sits at log seq 2, not at its prompt position of 1"
+        );
+        assert_eq!(covers, 1);
+        assert_eq!(
+            texts(&state.prompt_messages())[1],
+            "message 1",
+            "and the prompt therefore retains exactly the message that was named"
+        );
+    }
+
+    /// Without this the boundary that just shrank the context leaves the old
+    /// size in state, and the next iteration compacts again — every iteration,
+    /// forever, each one costing a provider call.
+    #[test]
+    fn a_boundary_resets_the_context_size_it_reports() {
+        let mut state = state_with_messages(2);
+        state.context_tokens = 9_000;
+        state = AgentActor::apply_event(state, compacted(Some("m1"), "summary"));
+        assert_eq!(state.context_tokens, 100);
+    }
+
+    #[test]
+    fn a_compaction_that_retains_nothing_shows_only_the_summary() {
+        let mut state = state_with_messages(3);
+        state = AgentActor::apply_event(state, compacted(None, "everything, summarised"));
+        let prompt = texts(&state.prompt_messages());
+        assert_eq!(prompt.len(), 1);
+        assert!(prompt[0].contains("everything, summarised"));
+    }
+
     #[test]
     fn boundary_seqs_name_every_conversation() {
         let mut state = state_with_messages(2);
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(1, 2, "first"),
-                at_ms: 500,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Compacted {
-                entry: boundary(2, 3, "second"),
-                at_ms: 600,
-            },
-        );
+        state = AgentActor::apply_event(state, compacted(Some("m1"), "first"));
+        state = AgentActor::apply_event(state, compacted(Some("m1"), "second"));
         assert_eq!(
             state.boundary_seqs(),
             vec![2, 3],
@@ -5076,6 +5262,11 @@ mod retry_tests {
             vec![],
             AgentInput::user_message("m1", "go"),
             CancellationToken::new(),
+            // Retry behaviour is what these exercise; compaction is off so a
+            // budget can never change how many calls a retry makes.
+            None,
+            Arc::new(NeverCompacts),
+            0,
         )
         .await;
         let calls = provider.calls();
@@ -5154,6 +5345,11 @@ mod retry_tests {
             vec![],
             AgentInput::user_message("m1", "go"),
             CancellationToken::new(),
+            // Retry behaviour is what these exercise; compaction is off so a
+            // budget can never change how many calls a retry makes.
+            None,
+            Arc::new(NeverCompacts),
+            0,
         )
         .await;
         let calls = provider.calls();
@@ -5522,6 +5718,7 @@ mod queue_tests {
                 provider: self.0.clone(),
                 toolbox: Arc::new(horsie_agentcore::ToolboxImpl::new()),
                 system_prompt: None,
+                context_window: None,
             })
         }
     }

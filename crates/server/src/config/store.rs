@@ -40,7 +40,7 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-type Registry = HashMap<String, Arc<dyn LlmProvider>>;
+type Registry = HashMap<String, crate::sessions::spec::ModelEntry>;
 
 /// Deployment inputs the host supplies when opening the store.
 pub struct StoreDeps {
@@ -616,7 +616,13 @@ fn build_registry(
                 ));
             }
         };
-        reg.insert(m.alias.clone(), built);
+        reg.insert(
+            m.alias.clone(),
+            crate::sessions::spec::ModelEntry {
+                provider: built,
+                context_window: m.context_window.and_then(|v| u32::try_from(v).ok()),
+            },
+        );
     }
     Ok(reg)
 }

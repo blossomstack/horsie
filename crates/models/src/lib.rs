@@ -1135,6 +1135,7 @@ mod agents_tests {
             thinking_effort: Some("high".into()),
             created_at: "1".into(),
             updated_at: "2".into(),
+            auto_compact: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"mcpServers\""), "{json}");
