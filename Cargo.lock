@@ -1682,9 +1682,9 @@ dependencies = [
 
 [[package]]
 name = "horsie-actor"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eeb3f3b27a7f9238e270e10dec1ba8706d1b9d69b1980f5b764c77b8afd10c2"
+checksum = "55630f5d9ddceaa17b1fa4a9e89a56c9f6a20e47b5efa7533724e59a22c9a571"
 dependencies = [
  "async-trait",
  "futures-util",

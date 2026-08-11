@@ -5,6 +5,8 @@
 //! session hosts a reused `AgentActor` (journal `agent/<id>`). Recovery is lazy:
 //! journals replay at startup, runtimes respawn only on user action.
 
+use serde::{Deserialize, Serialize};
+
 pub mod ask_tool;
 pub mod builder;
 pub mod clock;
@@ -113,7 +115,7 @@ impl std::fmt::Debug for Revisions {
 
 /// Why a message could not be accepted. There is no "busy" here by design: a
 /// turn in flight queues the message rather than rejecting it.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum UserMessageError {
     #[error("session not found")]
     NotFound,
