@@ -17,7 +17,7 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
-    spec::SessionStatus,
+    spec::{SessionSpec, SessionStatus},
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
 };
@@ -225,11 +225,22 @@ pub enum CoreCommand {
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },
-    /// A rename that happened elsewhere. The supervisor owns the durable write,
-    /// so this only keeps the actor's own copy of the spec true — which one
-    /// thing reads: the fallback that titles an as-yet-unnamed session from its
-    /// first message, and which would otherwise overwrite the chosen name.
+    /// A rename that happened elsewhere — a person renaming from the list, or
+    /// the supervisor telling a resident session what it just recorded.
+    ///
+    /// Journals it here too. The supervisor's copy is what the session list
+    /// shows; this one is what the running session reads, and a session's own
+    /// journal is the truth about that session.
     TitleSet { name: String },
+    /// Internal: write this session's spec into its own log.
+    ///
+    /// Self-sent by recovery when the log has no spec, which is true exactly
+    /// twice — for a session being created, and for one whose process died
+    /// between the supervisor recording it and this write. Both take the same
+    /// path, so the crash case is not a special case.
+    RecordSpec {
+        spec: Box<crate::sessions::spec::SessionSpec>,
+    },
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.
     Progress {
@@ -246,6 +257,23 @@ pub enum CoreCommand {
 /// order. Stamped where the event is built, immediately before it is persisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionDomainEvent {
+    /// What this session is. The first thing a session journals, and the only
+    /// thing a host needs besides the id to run it.
+    ///
+    /// Boxed because a spec is much larger than any other variant here, and an
+    /// enum is as big as its widest arm.
+    SpecRecorded {
+        spec: Box<SessionSpec>,
+    },
+    /// This session was given a name — by a person, by the title tool, or
+    /// derived from the first message.
+    ///
+    /// Journaled here as well as in the supervisor's list because this is the
+    /// copy the running session reads. The supervisor's is what the session
+    /// list shows, and it is told separately.
+    Renamed {
+        name: String,
+    },
     /// This session's runtime is being built. Journaled *before* the vendor is
     /// called, which is the whole of the fix for a first turn outrunning its
     /// own create: the status it produces starts nothing, so a message that
@@ -490,6 +518,20 @@ pub(super) enum NotAnEnd {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
+    /// What this session *is* — vendor, agent settings, workflow, name.
+    ///
+    /// In the session's own journal, not just the supervisor's, because a host
+    /// that never saw the request creating this session has no parent to take
+    /// it from: it recovers the log and the spec is in it. The supervisor keeps
+    /// its own copy for the session list, which is a seed and an index rather
+    /// than the truth — a session's journal is the truth about that session.
+    ///
+    /// `None` means the spec has not been recorded yet, which happens for
+    /// exactly as long as it takes a newly created session to journal it, and
+    /// after a process died in that window. Such a session refuses work and
+    /// asks its supervisor for the seed rather than guessing.
+    #[serde(default)]
+    pub spec: Option<SessionSpec>,
     pub status: SessionStatus,
     pub last_error: Option<String>,
     #[serde(default)]

@@ -474,6 +474,26 @@ mod tests {
                 crate::sessions::Revisions::default(),
             ));
 
+        let refuse = async || {
+            session
+                .ask(|reply| {
+                    SessionCommand::Turn(TurnCommand::UserMessage {
+                        agent_id: None,
+                        text: "please".into(),
+                        reply,
+                    })
+                })
+                .await
+                .unwrap()
+                .unwrap_err()
+        };
+
+        // Refuse once to settle the log — loading writes to it, because a
+        // session records its spec the first time it is loaded — then refuse
+        // again and assert that second one added nothing.
+        let _ = refuse().await;
+        let settled = session_journal_len(&journal, id).await;
+
         let err = session
             .ask(|reply| {
                 SessionCommand::Turn(TurnCommand::UserMessage {
@@ -488,7 +508,7 @@ mod tests {
         assert!(matches!(err, UserMessageError::Unrecoverable(_)), "{err:?}");
         assert_eq!(
             session_journal_len(&journal, id).await,
-            1,
+            settled,
             "a refused message journals nothing, here or on the agent"
         );
     }

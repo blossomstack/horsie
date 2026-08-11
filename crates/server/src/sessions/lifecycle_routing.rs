@@ -161,9 +161,14 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         // the agent document; `SubAgentRunning` and `SubAgentNotified` are the
         // session reconciling its own tree, and a viewer already sees the
         // spawn and the result.
-        E::UsageRecorded { .. } | E::SubAgentRunning { .. } | E::SubAgentNotified { .. } => {
-            Vec::new()
-        }
+        // Nothing a reader sees. A spec and a name are what the session *is*,
+        // not something that happened in it — the client reads them from the
+        // session document, and a transcript entry would only repeat it.
+        E::UsageRecorded { .. }
+        | E::SubAgentRunning { .. }
+        | E::SubAgentNotified { .. }
+        | E::SpecRecorded { .. }
+        | E::Renamed { .. } => Vec::new(),
         // Recorded by the agent itself, in its own log, because the agent is
         // what decided them. Routing them from here as well would render the
         // same fact twice. The session keeps its own copy only to move

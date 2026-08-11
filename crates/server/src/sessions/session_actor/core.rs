@@ -37,7 +37,7 @@ pub(super) struct SessionCore;
 impl SessionCore {
     pub(super) async fn handle(
         actor: &mut SessionActor,
-        _state: &SessionState,
+        state: &SessionState,
         cmd: CoreCommand,
         _ctx: &ActorContext<SessionCommand>,
     ) -> CommandEffect<SessionDomainEvent> {
@@ -47,12 +47,29 @@ impl SessionCore {
                     Ok(title) => actor.rename_session(title).await,
                     Err(error) => Err(error.to_string()),
                 };
+                // Journal the name this session now answers to, but only if it
+                // actually took: a rejected title must not be recorded as one.
+                let effect = match result.as_ref() {
+                    Ok(name) => CommandEffect::persist(vec![SessionDomainEvent::Renamed {
+                        name: name.clone(),
+                    }]),
+                    Err(_) => CommandEffect::none(),
+                };
                 let _ = reply.send(result);
-                CommandEffect::none()
+                effect
             }
             CoreCommand::TitleSet { name } => {
-                actor.spec.name = Some(name);
-                CommandEffect::none()
+                actor.spec.name = Some(name.clone());
+                CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
+            }
+            CoreCommand::RecordSpec { spec } => {
+                // Idempotent, because the supervisor sends this every time it
+                // loads a session and only the first one is the truth. A later
+                // one would overwrite a name the session has since been given.
+                if state.spec.is_some() {
+                    return CommandEffect::none();
+                }
+                CommandEffect::persist(vec![SessionDomainEvent::SpecRecorded { spec }])
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
@@ -200,6 +217,17 @@ impl Component for SessionCore {
             } => {
                 state.agent_usage.insert(agent_id, usage_total);
             }
+            SessionDomainEvent::SpecRecorded { spec } => {
+                state.spec = Some(*spec);
+            }
+            SessionDomainEvent::Renamed { name } => {
+                // Only the name moves. A rename must not resurrect a spec that
+                // was never recorded, or a session would start believing in a
+                // default it was never created with.
+                if let Some(spec) = state.spec.as_mut() {
+                    spec.name = Some(name);
+                }
+            }
             other => unreachable!("SessionCore was handed {other:?}"),
         }
     }
@@ -208,7 +236,154 @@ impl Component for SessionCore {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::super::testing::*;
     use super::*;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// Fold a session's own journal back into state, so a test can assert on
+    /// what was recorded rather than on what the actor happens to hold.
+    async fn journaled_spec(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        id: Uuid,
+    ) -> Option<crate::sessions::spec::SessionSpec> {
+        use futures_util::StreamExt;
+        let pid = SessionActor::persistence_id_for(id);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a test reads the journal directly to check what was written"
+        )]
+        let mut events = journal.replay(&pid, 0).await;
+        let mut state = SessionState::default();
+        while let Some(raw) = events.next().await {
+            let (_, payload) = raw.unwrap();
+            let event: SessionDomainEvent = serde_json::from_slice(&payload).unwrap();
+            state = <SessionActor as horsie_actor::EventSourcedActor>::apply_event(state, event);
+        }
+        state.spec
+    }
+
+    /// Standing in for the supervisor, which sends this the moment it spawns a
+    /// session and before anything else can reach it.
+    async fn seed(to: &horsie_actor::ActorRef<SessionCommand>) {
+        let _ = to
+            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+                spec: Box::new(actor_spec_fixture()),
+            }))
+            .await;
+    }
+
+    /// Wait until the session's log says what the test is waiting for. `tell`
+    /// is fire-and-forget, so there is nothing to await on the send itself.
+    async fn until_named(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid, name: &str) {
+        for _ in 0..100 {
+            if journaled_spec(journal, id)
+                .await
+                .and_then(|s| s.name)
+                .as_deref()
+                == Some(name)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the rename never reached the session's own log");
+    }
+
+    /// A session writes what it is into its own log, so a host that never saw
+    /// the request creating it can still run it.
+    #[tokio::test]
+    async fn a_session_records_its_spec_in_its_own_log() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let session =
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Revisions::default(),
+            ));
+        seed(&session).await;
+
+        // A rename the session did not initiate — the path that does not have
+        // to ask the supervisor first.
+        let _ = session
+            .tell(SessionCommand::Core(CoreCommand::TitleSet {
+                name: "named".into(),
+            }))
+            .await;
+        until_named(&journal, id, "named").await;
+
+        let spec = journaled_spec(&journal, id)
+            .await
+            .expect("the spec is recorded");
+        assert_eq!(spec.vendor, actor_spec_fixture().vendor);
+        assert_eq!(
+            spec.name.as_deref(),
+            Some("named"),
+            "a rename is durable in the session's own log, not only the supervisor's"
+        );
+    }
+
+    /// The log is the truth, so loading again must adopt what is there rather
+    /// than writing the seed over it. If it did not, every load would append
+    /// and a session's journal would grow without anything happening in it.
+    #[tokio::test]
+    async fn a_reload_adopts_the_journaled_spec_instead_of_recording_again() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal: Arc<dyn horsie_actor::Journal> =
+            Arc::new(horsie_actor::InMemoryJournal::new());
+        let spawn = || {
+            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                spawn_deaf_supervisor(),
+                crate::sessions::Revisions::default(),
+            ))
+        };
+
+        let first = spawn();
+        seed(&first).await;
+        let _ = first
+            .tell(SessionCommand::Core(CoreCommand::TitleSet {
+                name: "named".into(),
+            }))
+            .await;
+        until_named(&journal, id, "named").await;
+        let settled = session_journal_len(&journal, id).await;
+        drop(first);
+
+        let second = spawn();
+        seed(&second).await;
+        let _ = second
+            .tell(SessionCommand::Core(CoreCommand::TitleSet {
+                name: "named".into(),
+            }))
+            .await;
+        // Two renames to the same name, so waiting on the name cannot tell them
+        // apart — wait on the log growing instead.
+        for _ in 0..100 {
+            if session_journal_len(&journal, id).await > settled {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            session_journal_len(&journal, id).await,
+            settled + 1,
+            "loading again must add only the rename, never a second spec"
+        );
+        assert_eq!(
+            journaled_spec(&journal, id).await.and_then(|s| s.name),
+            Some("named".to_string())
+        );
+    }
 
     /// The fallback title: the first line, elided to fit. It exists so a
     /// session is never nameless in the list while the agent is still working
