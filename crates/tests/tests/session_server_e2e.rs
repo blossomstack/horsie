@@ -3005,3 +3005,86 @@ async fn a_compacted_session_keeps_every_message_readable() {
 
     server.shutdown().await;
 }
+
+/// `/compact` typed in the composer, end to end.
+///
+/// The session's model declares no context window, so nothing compacts on its
+/// own — which is what makes the boundary that appears attributable to the
+/// command and to nothing else.
+#[tokio::test]
+async fn a_typed_compact_command_compacts_without_prompting_the_model() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("an answer to the first thing");
+    mock.queue_response("an answer to the second thing");
+    mock.queue_response("a summary written on request");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server_on(
+        tmp.path(),
+        Some(agent.link()),
+        provider_at(&mock.url()),
+        None,
+        None,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    // Two turns, so there is a completed one to fold: a manual compaction keeps
+    // the current turn, and a session holding only that has nothing to do.
+    assert!(
+        send_message(&client, &server.addr, &id, "the second thing I asked")
+            .await
+            .is_success()
+    );
+    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
+    let before = messages_page(&client, &server.addr, &id, "main").await;
+    assert!(page_boundaries(&before).is_empty());
+    let messages_before = page_messages(&before).len();
+
+    assert!(
+        send_message(&client, &server.addr, &id, "/compact keep the paths")
+            .await
+            .is_success()
+    );
+
+    // The boundary is the signal, not a turn count: `/compact` is not a turn.
+    let mut boundaries = Vec::new();
+    for _ in 0..200 {
+        let page = messages_page(&client, &server.addr, &id, "main").await;
+        boundaries = page_boundaries(&page);
+        if !boundaries.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(boundaries.len(), 1, "the command produced one boundary");
+    assert_eq!(
+        boundaries[0]["trigger"]["kind"],
+        serde_json::json!("Manual"),
+        "a typed command is a manual compaction: {:?}",
+        boundaries[0]
+    );
+    assert_eq!(
+        boundaries[0]["instructions"],
+        serde_json::json!("keep the paths"),
+        "the words after the command steer the summariser"
+    );
+
+    let after = messages_page(&client, &server.addr, &id, "main").await;
+    let whole = serde_json::to_string(&page_messages(&after)).unwrap();
+    assert!(
+        !whole.contains("/compact keep the paths"),
+        "a builtin is never sent to the model as a prompt: {whole}"
+    );
+    assert!(
+        page_messages(&after).len() >= messages_before,
+        "and nothing already said was removed"
+    );
+
+    server.shutdown().await;
+}

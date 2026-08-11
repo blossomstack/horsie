@@ -1,4 +1,6 @@
 
+import { PostCompactInput } from './postCompactInput';
+import { PreCompactInput } from './preCompactInput';
 import { SessionStartInput } from './sessionStartInput';
 import { StopInput } from './stopInput';
 import { SubagentStartInput } from './subagentStartInput';
@@ -19,4 +21,6 @@ export type ServerHookEvent =
   | { event: "UserPromptSubmit"; value: UserPromptSubmitInput }
   | { event: "UserPromptExpansion"; value: UserPromptExpansionInput }
   | { event: "Stop"; value: StopInput }
-  | { event: "SubagentStop"; value: SubagentStopInput };
+  | { event: "SubagentStop"; value: SubagentStopInput }
+  | { event: "PreCompact"; value: PreCompactInput }
+  | { event: "PostCompact"; value: PostCompactInput };

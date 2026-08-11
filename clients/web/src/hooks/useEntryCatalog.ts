@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { CatalogEntryView } from "../api/types";
-import { usePlugins } from "./usePlugins";
+import { useBuiltins, usePlugins } from "./usePlugins";
 
 /**
  * Everything the selected bundles offer, for the composer's typeahead.
@@ -16,11 +16,16 @@ import { usePlugins } from "./usePlugins";
  * A name two bundles both declare goes to the first, matching the server's
  * rule — otherwise the menu would offer an entry that expands to something
  * else.
+ *
+ * Built-ins lead the list for the same reason the server consults them first:
+ * a bundle that declares `/compact` must not be able to take over a control the
+ * product owns, and the menu has to agree with what actually runs.
  */
 export function useEntryCatalog(
   selected: Iterable<string> | undefined,
 ): CatalogEntryView[] {
   const { data: bundles } = usePlugins();
+  const { data: builtins } = useBuiltins();
   // The draft hands out a fresh `Set` every render, so the memo keys on the
   // names themselves rather than the container's identity.
   const names = selected ? [...selected] : [];
@@ -28,13 +33,16 @@ export function useEntryCatalog(
   // compared for equality.
   const key = [...names].sort().join("\u0000");
   return useMemo(() => {
-    if (!bundles) return [];
+    // Built-ins do not wait on the bundle list: they are offered in a session
+    // that has none, which is the case the plugin catalogue cannot express.
+    const seeded = builtins ?? [];
+    if (!bundles) return seeded;
     const active =
       names.length > 0
         ? bundles.filter((b) => names.includes(b.name))
         : bundles.filter((b) => b.enabledDefault);
-    const seen = new Set<string>();
-    const out: CatalogEntryView[] = [];
+    const seen = new Set<string>(seeded.map((e) => `/${e.name}`));
+    const out: CatalogEntryView[] = [...seeded];
     for (const bundle of [...active].sort((a, b) =>
       a.name.localeCompare(b.name),
     )) {
@@ -48,5 +56,5 @@ export function useEntryCatalog(
       }
     }
     return out;
-  }, [bundles, key]);
+  }, [bundles, builtins, key]);
 }

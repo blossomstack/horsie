@@ -167,10 +167,14 @@ struct McpInvokeResponse { call_id: String, result: ToolResult }
 /// How the session that is starting came to start.
 ///
 /// The spec's whole vocabulary, not the subset horsie produces. `Clear`,
-/// `Compact` and `Fork` have no call site — horsie has no context compaction,
-/// no fork and no clear — and are arms nothing constructs rather than values
-/// that silently never appear, which is the same honesty `is_wired()` gives an
-/// event horsie cannot fire. A matcher on one of them selects nothing.
+/// `Compact` and `Fork` have no call site — horsie has no fork and no clear,
+/// and although it does compact, it deliberately does not re-fire
+/// `SessionStart` afterwards: `PostCompact` already covers reacting to one, and
+/// re-running every session-start hook for something that is not a session
+/// start would be a second, worse way to say the same thing. They are arms
+/// nothing constructs rather than values that silently never appear, which is
+/// the same honesty `is_wired()` gives an event horsie cannot fire. A matcher
+/// on one of them selects nothing.
 #[type_tag = "source"]
 union SessionStartSource {
     Startup,
@@ -204,6 +208,19 @@ struct SubagentStopInput {
     stop_hook_active: bool,
 }
 
+/// A compaction about to happen. `trigger` is the matcher domain — `auto` or
+/// `manual` — so a hook can guard the automatic case without also firing on
+/// every `/compact` someone types. `instructions` is what `/compact` was given.
+///
+/// Fired before any history is rewritten, which is what makes it the last
+/// chance to write something down that the summary would otherwise be the only
+/// record of. A hook that blocks abandons the compaction.
+struct PreCompactInput { trigger: String, instructions: Option<String> }
+
+/// A compaction that happened. Same matcher domain as `PreCompact`; the token
+/// counts are what it bought.
+struct PostCompactInput { trigger: String, tokens_before: u32, tokens_after: u32 }
+
 /// An event the server initiates, carrying that event's input.
 ///
 /// Tool events are absent by construction: they run inline in the runtime with
@@ -218,6 +235,8 @@ union ServerHookEvent {
     UserPromptExpansion(UserPromptExpansionInput),
     Stop(StopInput),
     SubagentStop(SubagentStopInput),
+    PreCompact(PreCompactInput),
+    PostCompact(PostCompactInput),
 }
 
 /// Run every matching hook for one server-initiated event inside the sandbox.

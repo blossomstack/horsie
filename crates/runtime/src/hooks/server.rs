@@ -42,6 +42,15 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
             last_assistant_message: i.last_assistant_message.as_deref(),
             stop_hook_active: i.stop_hook_active,
         },
+        ServerHookEvent::PreCompact(i) => HookInvocation::PreCompact {
+            trigger: &i.trigger,
+            instructions: i.instructions.as_deref(),
+        },
+        ServerHookEvent::PostCompact(i) => HookInvocation::PostCompact {
+            trigger: &i.trigger,
+            tokens_before: i.tokens_before,
+            tokens_after: i.tokens_after,
+        },
         ServerHookEvent::SubagentStop(i) => HookInvocation::SubagentStop {
             agent_id: &i.agent_id,
             agent_type: &i.agent_type,

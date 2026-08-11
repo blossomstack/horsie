@@ -31,6 +31,8 @@ export * from './userPromptSubmitInput';
 export * from './userPromptExpansionInput';
 export * from './stopInput';
 export * from './subagentStopInput';
+export * from './preCompactInput';
+export * from './postCompactInput';
 export * from './serverHookEvent';
 export * from './runHooksRequest';
 export * from './runHooksResponse';

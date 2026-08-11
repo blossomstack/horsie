@@ -23,6 +23,21 @@ export function usePlugins() {
   return useQuery({ queryKey: pluginsKey, queryFn: () => api.plugins.list() });
 }
 
+/**
+ * The slash commands horsie answers itself.
+ *
+ * A fixed table on the server, so this never goes stale within a release and
+ * is fetched once. Deliberately not gated on the session's bundles: a built-in
+ * works whether or not any are installed.
+ */
+export function useBuiltins() {
+  return useQuery({
+    queryKey: ["builtins"],
+    queryFn: () => api.plugins.builtins(),
+    staleTime: Infinity,
+  });
+}
+
 /** Install a bundle from a git repo, then refresh the list. */
 export function useInstallPlugin() {
   const client = useQueryClient();

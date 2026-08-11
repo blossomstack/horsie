@@ -71,6 +71,21 @@ pub enum HookInvocation<'a> {
         last_assistant_message: Option<&'a str>,
         stop_hook_active: bool,
     },
+    /// A compaction about to happen. The last chance to write down anything the
+    /// summary would otherwise become the only record of; a hook that blocks
+    /// abandons it.
+    PreCompact {
+        /// `auto` or `manual` — the matcher domain, so a hook can guard the
+        /// automatic case without firing on every `/compact` someone types.
+        trigger: &'a str,
+        instructions: Option<&'a str>,
+    },
+    /// A compaction that happened. Nothing can be decided from here.
+    PostCompact {
+        trigger: &'a str,
+        tokens_before: u32,
+        tokens_after: u32,
+    },
 }
 
 impl HookInvocation<'_> {
@@ -84,6 +99,8 @@ impl HookInvocation<'_> {
             HookInvocation::UserPromptExpansion { .. } => HookEvent::UserPromptExpansion,
             HookInvocation::Stop { .. } => HookEvent::Stop,
             HookInvocation::SubagentStop { .. } => HookEvent::SubagentStop,
+            HookInvocation::PreCompact { .. } => HookEvent::PreCompact,
+            HookInvocation::PostCompact { .. } => HookEvent::PostCompact,
         }
     }
 
@@ -105,6 +122,11 @@ impl HookInvocation<'_> {
             HookInvocation::SubagentStart { agent_type, .. }
             | HookInvocation::SubagentStop { agent_type, .. } => vec![*agent_type],
             HookInvocation::UserPromptExpansion { command, .. } => vec![*command],
+            // `auto` vs `manual`: a hook that saves state before an automatic
+            // compaction usually has no business firing when a person asked for
+            // one explicitly, and the reverse.
+            HookInvocation::PreCompact { trigger, .. }
+            | HookInvocation::PostCompact { trigger, .. } => vec![*trigger],
             HookInvocation::UserPromptSubmit { .. } | HookInvocation::Stop { .. } => Vec::new(),
         }
     }
@@ -167,6 +189,26 @@ impl HookInvocation<'_> {
                 "prompt": prompt,
                 "command": command,
                 "kind": kind,
+            }),
+            HookInvocation::PreCompact {
+                trigger,
+                instructions,
+            } => json!({
+                "hook_event_name": "PreCompact",
+                "trigger": trigger,
+                // The spec's name for it. `/compact keep the migration details`
+                // arrives here as the words after the command.
+                "custom_instructions": instructions,
+            }),
+            HookInvocation::PostCompact {
+                trigger,
+                tokens_before,
+                tokens_after,
+            } => json!({
+                "hook_event_name": "PostCompact",
+                "trigger": trigger,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
             }),
             HookInvocation::Stop {
                 last_assistant_message,
@@ -368,6 +410,35 @@ impl HookInvocation<'_> {
                     command: (*command).to_string(),
                     system_message: sys,
                     outcome,
+                })
+            }
+            HookInvocation::PreCompact { trigger, .. } => {
+                // Reuses `StopOutcome` because the shape is identical — ran,
+                // blocked with a reason, or failed — and a fourth near-copy of
+                // three arms would be three more places to keep in step.
+                let outcome = match &out.verdict {
+                    Verdict::Proceed => rec::StopOutcome::Ran(ctx()),
+                    Verdict::Block { reason } => rec::StopOutcome::Blocked(rec::HookBlocked {
+                        reason: reason.clone(),
+                    }),
+                    Verdict::Failed { reason } => rec::StopOutcome::Failed(failed(reason)),
+                };
+                rec::HookAction::PreCompact(rec::PreCompactRecord {
+                    trigger: (*trigger).to_string(),
+                    system_message: sys,
+                    outcome,
+                })
+            }
+            HookInvocation::PostCompact { trigger, .. } => {
+                rec::HookAction::PostCompact(rec::PostCompactRecord {
+                    trigger: (*trigger).to_string(),
+                    outcome: match &out.verdict {
+                        Verdict::Failed { reason } => {
+                            rec::SideEffectOutcome::Failed(failed(reason))
+                        }
+                        // Nothing to decide: the boundary already exists.
+                        Verdict::Proceed | Verdict::Block { .. } => rec::SideEffectOutcome::Ran,
+                    },
                 })
             }
             HookInvocation::Stop { .. } => {

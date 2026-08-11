@@ -28,6 +28,8 @@ pub enum HookEvent {
     TaskCompleted,
     Notification,
     CwdChanged,
+    PreCompact,
+    PostCompact,
 }
 
 /// Why a declared hook cannot run, which decides what the error tells the user.
@@ -95,14 +97,18 @@ impl HookEvent {
             "Notification" => Ok(HookEvent::Notification),
             "CwdChanged" => Ok(HookEvent::CwdChanged),
 
+            "PreCompact" => Ok(HookEvent::PreCompact),
+            "PostCompact" => Ok(HookEvent::PostCompact),
+
             // No horsie concept: no permission model (horsie runs unattended by
-            // design), no context compaction, no worktrees, no file watcher, no
-            // agent teams, no MCP elicitation, no display layer. Each would need
-            // a subsystem, not a call site.
-            "PermissionRequest" | "PermissionDenied" | "PreCompact" | "PostCompact"
-            | "FileChanged" | "ConfigChange" | "DirectoryAdded" | "Setup" | "MessageDisplay"
-            | "TeammateIdle" | "WorktreeCreate" | "WorktreeRemove" | "Elicitation"
-            | "ElicitationResult" | "InstructionsLoaded" => Err(Unsupported::NoConcept),
+            // design), no worktrees, no file watcher, no agent teams, no MCP
+            // elicitation, no display layer. Each would need a subsystem, not a
+            // call site.
+            "PermissionRequest" | "PermissionDenied" | "FileChanged" | "ConfigChange"
+            | "DirectoryAdded" | "Setup" | "MessageDisplay" | "TeammateIdle" | "WorktreeCreate"
+            | "WorktreeRemove" | "Elicitation" | "ElicitationResult" | "InstructionsLoaded" => {
+                Err(Unsupported::NoConcept)
+            }
 
             _ => Err(Unsupported::Unknown),
         }
@@ -127,6 +133,8 @@ impl HookEvent {
             HookEvent::TaskCompleted => "TaskCompleted",
             HookEvent::Notification => "Notification",
             HookEvent::CwdChanged => "CwdChanged",
+            HookEvent::PreCompact => "PreCompact",
+            HookEvent::PostCompact => "PostCompact",
         }
     }
 
@@ -154,7 +162,11 @@ impl HookEvent {
             // A subagent's turn end used to fire `Stop`, because the sink that
             // fires it was not gated on the agent's kind — the same conflation
             // the start seam had before `SubagentStart` split off.
-            | HookEvent::SubagentStop => true,
+            | HookEvent::SubagentStop
+            // Both fire from the compaction itself, which is the only place
+            // that knows a boundary is being taken.
+            | HookEvent::PreCompact
+            | HookEvent::PostCompact => true,
             HookEvent::PostToolUseFailure
             | HookEvent::PostToolBatch
             | HookEvent::SessionEnd
@@ -201,11 +213,18 @@ impl HookEvent {
                 &[SystemMessage, AdditionalContext, Halt]
             }
             HookEvent::TaskCreated | HookEvent::TaskCompleted => &[SystemMessage, Halt],
+            // `PreCompact` can refuse: it runs before any history is rewritten,
+            // so there is still something to refuse. It injects no context —
+            // the compaction is not a turn, and there is no prompt to add to.
+            HookEvent::PreCompact => &[SystemMessage, Decision, Halt],
             // Side-effect only: the docs give these no JSON output at all, not
             // even `systemMessage`, and exit 2 has no special meaning for them.
             HookEvent::SessionEnd
             | HookEvent::StopFailure
             | HookEvent::Notification
+            // `PostCompact` reports; by the time it runs the boundary exists
+            // and nothing it says could change it.
+            | HookEvent::PostCompact
             | HookEvent::CwdChanged => &[],
         }
     }
@@ -375,7 +394,7 @@ mod tests {
     /// widening what the library knows must not silently widen what horsie
     /// claims to run.
     #[test]
-    fn all_sixteen_seam_events_are_described_and_the_other_fifteen_are_not() {
+    fn all_eighteen_seam_events_are_described_and_the_other_thirteen_are_not() {
         let mut described = 0;
         let mut no_concept = 0;
         for name in ALL_31 {
@@ -388,13 +407,13 @@ mod tests {
                 Err(Unsupported::Unknown) => panic!("{name} is documented but classified Unknown"),
             }
         }
-        assert_eq!(described, 16, "described set changed");
-        assert_eq!(no_concept, 15, "absent set changed");
+        assert_eq!(described, 18, "described set changed");
+        assert_eq!(no_concept, 13, "absent set changed");
     }
 
     /// Wiring an event is a deliberate act. This is the list this change moves.
     #[test]
-    fn exactly_eight_events_are_wired() {
+    fn exactly_ten_events_are_wired() {
         let wired: Vec<&str> = ALL_31
             .iter()
             .filter_map(|n| HookEvent::parse(n).ok())
@@ -412,6 +431,8 @@ mod tests {
                 "SubagentStart",
                 "SubagentStop",
                 "Stop",
+                "PreCompact",
+                "PostCompact",
             ],
             "wired set changed"
         );

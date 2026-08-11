@@ -14,6 +14,17 @@ pub async fn list(Scope(state): Scope) -> Result<Json<Vec<PluginView>>, Api> {
     state.plugins.list().await.map(Json).map_err(Api::internal)
 }
 
+/// GET /api/builtins — the slash commands horsie answers itself.
+///
+/// Its own endpoint rather than a field on the plugin list, and deliberately
+/// not scoped to a session: a built-in is offered whether or not any bundle is
+/// installed and whether or not `use_plugins` is on. Folded into the plugin
+/// list it would inherit that gating and vanish from exactly the plainest
+/// session.
+pub async fn builtins() -> Json<Vec<horsie_models::plugins::CatalogEntryView>> {
+    Json(horsie_support::plugin::builtins::catalogue_entries())
+}
+
 /// POST /api/plugins — install a bundle, or register the catalogue a URL turned
 /// out to be. One box: the caller does not have to know which it pasted, and
 /// both outcomes create a row, so both are 201.

@@ -68,6 +68,15 @@ test("U2: an installed bundle lists what it offers, and `/` completes it", async
   await page.getByTestId("composer-input").fill("/");
   await expect(page.getByTestId("entry-menu")).toBeVisible();
   await expect(page.getByTestId("entry-menu")).toContainText("/e2e-beta-skill");
+  // A bare `/` also offers what horsie answers itself, whatever bundles are
+  // installed.
+  await expect(page.getByTestId("entry-menu")).toContainText("/compact");
+
+  // Narrowed to one entry before pressing Enter: with builtins listed first, a
+  // bare `/` would pick `/compact`, and this test is about Enter *picking*
+  // rather than about which entry happens to lead the menu.
+  await page.getByTestId("composer-input").fill("/e2e");
+  await expect(page.getByTestId("entry-menu")).toContainText("/e2e-beta-skill");
 
   // Enter picks rather than sends — the hazard the whole key ordering exists
   // to prevent.

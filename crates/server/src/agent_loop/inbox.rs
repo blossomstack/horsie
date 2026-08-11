@@ -41,6 +41,16 @@ pub enum Incoming {
     /// A `Stop` hook blocked the end of a turn, so the turn continues with the
     /// hook's reason as its input.
     Continue { id: String, reason: String },
+    /// Someone typed `/compact`.
+    ///
+    /// Queued rather than acted on directly so it happens *in order*: a turn in
+    /// flight finishes first, and the compaction is journaled between the same
+    /// two messages a reader sees it between. It is not a prompt and never
+    /// reaches the model — `instructions` only steers the summariser.
+    Compact {
+        id: String,
+        instructions: Option<String>,
+    },
 }
 
 impl Incoming {
@@ -51,7 +61,8 @@ impl Incoming {
             Self::User { id, .. }
             | Self::SubAgent { id, .. }
             | Self::Timer { id, .. }
-            | Self::Continue { id, .. } => id,
+            | Self::Continue { id, .. }
+            | Self::Compact { id, .. } => id,
         }
     }
 
@@ -78,6 +89,10 @@ impl Incoming {
             // joined in, a reader could not tell a subagent's words from the
             // person's, and both would render as one user bubble.
             Self::SubAgent { .. } => None,
+            // `/compact` is an instruction to the *server*. Merging it into the
+            // turn's text would send the model the word "compact" and compact
+            // nothing.
+            Self::Compact { .. } => None,
         }
     }
 }
@@ -90,6 +105,12 @@ impl Incoming {
 pub struct Turn {
     /// Ids of the queue items this turn carries.
     pub consumed: Vec<String>,
+    /// A `/compact` this turn carries, and the focus instructions it was given.
+    ///
+    /// `Some(None)` is a bare `/compact`; `None` is no compaction at all. It
+    /// rides on the turn rather than being acted on at enqueue so it happens in
+    /// order — a turn in flight finishes first.
+    pub compact: Option<Option<String>>,
     /// Tool-call ids of the questions this turn *answered*. Empty when the turn
     /// abandoned them instead — the two are deliberately not the same thing.
     pub answered: Vec<String>,
@@ -227,10 +248,23 @@ fn drain(inbox: &[Incoming]) -> Turn {
             .iter()
             .filter_map(|i| match i {
                 Incoming::SubAgent { part, .. } => Some((**part).clone()),
-                Incoming::User { .. } | Incoming::Timer { .. } | Incoming::Continue { .. } => None,
+                Incoming::User { .. }
+                | Incoming::Timer { .. }
+                | Incoming::Continue { .. }
+                | Incoming::Compact { .. } => None,
             })
             .collect(),
         results: Vec::new(),
+        // The newest `/compact` wins when several were queued together: they
+        // ask for the same thing, and running two compactions back to back
+        // would summarise a summary.
+        compact: inbox.iter().rev().find_map(|i| match i {
+            Incoming::Compact { instructions, .. } => Some(instructions.clone()),
+            Incoming::User { .. }
+            | Incoming::SubAgent { .. }
+            | Incoming::Timer { .. }
+            | Incoming::Continue { .. } => None,
+        }),
     }
 }
 
@@ -247,6 +281,68 @@ mod tests {
             id: id.to_string(),
             text: text.to_string(),
         }
+    }
+
+    fn compact(id: &str, instructions: Option<&str>) -> Incoming {
+        Incoming::Compact {
+            id: id.to_string(),
+            instructions: instructions.map(ToString::to_string),
+        }
+    }
+
+    /// The word "compact" must never reach the model. Merged into the turn's
+    /// text it would compact nothing and read as the user saying it.
+    #[test]
+    fn a_compact_contributes_no_text_to_the_turn() {
+        let turn = drain(&[compact("c1", Some("keep the migration details"))]);
+        assert_eq!(turn.message, None);
+        assert_eq!(
+            turn.compact,
+            Some(Some("keep the migration details".to_string()))
+        );
+        assert_eq!(turn.consumed, vec!["c1".to_string()]);
+    }
+
+    #[test]
+    fn a_bare_compact_is_some_none_not_none() {
+        let turn = drain(&[compact("c1", None)]);
+        assert_eq!(
+            turn.compact,
+            Some(None),
+            "`Some(None)` is a compaction with no focus; `None` is no \
+             compaction at all, and the two decide different things"
+        );
+    }
+
+    /// A compaction rides *with* the message that followed it rather than
+    /// displacing it, so nothing a person typed is dropped to make room.
+    #[test]
+    fn a_compact_queued_beside_a_message_keeps_both() {
+        let turn = drain(&[compact("c1", None), user("u1", "and now do this")]);
+        assert_eq!(turn.message.as_deref(), Some("and now do this"));
+        assert_eq!(turn.compact, Some(None));
+        assert_eq!(turn.consumed, vec!["c1".to_string(), "u1".to_string()]);
+    }
+
+    /// Two compactions in one turn would summarise a summary, which loses
+    /// detail for nothing.
+    #[test]
+    fn several_queued_compactions_collapse_to_the_newest() {
+        let turn = drain(&[
+            compact("c1", Some("first ask")),
+            compact("c2", Some("second ask")),
+        ]);
+        assert_eq!(turn.compact, Some(Some("second ask".to_string())));
+        assert_eq!(
+            turn.consumed,
+            vec!["c1".to_string(), "c2".to_string()],
+            "both are still consumed — neither is owed an answer twice"
+        );
+    }
+
+    #[test]
+    fn a_turn_with_no_compact_says_so() {
+        assert_eq!(drain(&[user("u1", "hello")]).compact, None);
     }
 
     fn report(id: &str, label: &str, text: &str) -> Incoming {

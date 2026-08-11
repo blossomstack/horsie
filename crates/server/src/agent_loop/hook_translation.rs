@@ -102,7 +102,12 @@ pub fn translate(entry: &HookEntry) -> Option<Message> {
         | HookAction::Notification(_)
         | HookAction::CwdChanged(_)
         | HookAction::TaskCreated(_)
-        | HookAction::TaskCompleted(_) => return None,
+        | HookAction::TaskCompleted(_)
+        // A compaction is not a turn and has no prompt to add to — which is
+        // also why neither event may set `additionalContext`. Their records
+        // still reach the transcript; they just show the model nothing.
+        | HookAction::PreCompact(_)
+        | HookAction::PostCompact(_) => return None,
     };
     // `system_message` is deliberately never read here, on any arm: it is
     // addressed to the user, and pinned as such by
@@ -171,6 +176,10 @@ pub fn start_blocked(records: &[HookRecord]) -> Option<String> {
         | HookAction::StopFailure(_)
         | HookAction::SubagentStart(_)
         | HookAction::SubagentStop(_)
+        // A `PreCompact` block abandons the compaction, never the turn: the
+        // turn then runs uncompacted, which is worse but not a refusal of it.
+        | HookAction::PreCompact(_)
+        | HookAction::PostCompact(_)
         | HookAction::TaskCreated(_)
         | HookAction::TaskCompleted(_)
         | HookAction::Notification(_)
