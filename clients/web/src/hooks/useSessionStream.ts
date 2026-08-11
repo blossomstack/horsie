@@ -66,8 +66,9 @@ export interface RenderedCompaction {
   seq: number;
   summary: string;
   carriedState: string;
-  /** How many entries the summary covers. */
-  covered: number;
+  /** How many entries this boundary's summary covers, or `null` when the
+   * conversation before it has not been paged in and the count is unknown. */
+  covered: number | null;
   tokensBefore: number;
   tokensAfter: number;
   manual: boolean;
@@ -605,6 +606,9 @@ export function useSessionStream(
     });
 
     const items: TranscriptItem[] = [];
+    // Where the previous conversation ended, so a boundary can say how much
+    // *it* closed rather than how far the log stretches behind it.
+    let previousBoundarySeq: number | null = null;
     for (const entry of state.entries) {
       if (entry.body.type === "Llm") {
         if (entry.body.value.role === Role.Tool) continue;
@@ -624,15 +628,26 @@ export function useSessionStream(
             seq: entry.seq,
             summary: c.summary,
             carriedState: c.carriedState,
-            // The span it closed, in log entries. `retainedFromSeq` is where
-            // the model resumed reading, which is not the same number.
-            covered: c.coversThroughSeq + 1,
+            // The span *this* boundary closed, in log entries — measured from
+            // the previous boundary, not from the start of the log, or every
+            // compaction after the first would claim the whole history.
+            //
+            // `null` when the previous boundary has not been paged in yet: the
+            // honest answer is that the count is unknown, and inventing one by
+            // measuring from seq 0 is exactly the bug this replaced.
+            covered:
+              previousBoundarySeq === null
+                ? state.hasMoreBefore
+                  ? null
+                  : c.coversThroughSeq + 1
+                : c.coversThroughSeq - previousBoundarySeq,
             tokensBefore: c.tokensBefore,
             tokensAfter: c.tokensAfter,
             manual: c.trigger.kind === "Manual",
             atMs: entry.atMs,
           },
         });
+        previousBoundarySeq = entry.seq;
       }
       // Lifecycle entries drive the fold above; they are not transcript rows.
     }

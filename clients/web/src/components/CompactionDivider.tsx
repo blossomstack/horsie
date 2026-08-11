@@ -35,11 +35,13 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
           <FoldVertical size={11} aria-hidden />
           <span>
             Compacted
-            {value.manual ? " by hand" : ""} ·{" "}
+            {value.manual ? " by hand" : ""}
             {/* Entries, not messages: a tool result is an entry too, and
                 counting only what the reader would call a message would
-                undercount what the boundary actually covers. */}
-            {value.covered} entries
+                undercount what the boundary actually covers. Omitted entirely
+                when the conversation before this one has not been paged in —
+                no count beats a wrong one. */}
+            {value.covered !== null && <> · {value.covered} entries</>}
             {saved > 0 && <> · {compactNumber(saved)} tokens freed</>}
           </span>
           {open ? (

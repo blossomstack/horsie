@@ -52,7 +52,11 @@ export function TranscriptSpine({
               // blocks settle is worse than one that never moves.
               style={{ top: `${((i + 1) / (boundaries.length + 1)) * 100}%` }}
               className="absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[var(--rule-strong)] bg-[var(--surface)] transition-colors hover:border-amber hover:bg-amber"
-              title={`Conversation ${i + 1} ended here — ${b.covered} entries summarised`}
+              title={
+                b.covered === null
+                  ? `Conversation ${i + 1} ended here`
+                  : `Conversation ${i + 1} ended here — ${b.covered} entries summarised`
+              }
               aria-label={`Jump to compaction ${i + 1} of ${boundaries.length}`}
             />
           ))}

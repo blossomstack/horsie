@@ -39,6 +39,16 @@ describe("CompactionDivider", () => {
     expect(detail.textContent).toContain("finish the migration");
   });
 
+  /** The count is of what *this* boundary closed. Measured from the start of
+   * the log instead, every compaction after the first would claim the whole
+   * history — and the label would still look perfectly plausible. */
+  it("omits the entry count when the span before it is unknown", () => {
+    render(<CompactionDivider value={{ ...value, covered: null }} />);
+    const label = screen.getByTestId("compaction-toggle").textContent ?? "";
+    expect(label).not.toContain("entries");
+    expect(label).toContain("Compacted");
+  });
+
   it("says when a compaction was asked for rather than automatic", () => {
     render(<CompactionDivider value={{ ...value, manual: true }} />);
     expect(screen.getByTestId("compaction-toggle").textContent).toContain(
