@@ -12,7 +12,32 @@ use std::sync::{Arc, RwLock};
 /// can swap the whole set live. Read once per turn in
 /// [`crate::sessions::session_actor::SessionActor::ensure_agent`]; the guard is
 /// never held across an `.await`.
-pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, Arc<dyn LlmProvider>>>>;
+pub type SharedProviderRegistry = Arc<RwLock<HashMap<String, ModelEntry>>>;
+
+/// One configured model: how to talk to it, and how much room it has.
+///
+/// The window rides here rather than in a second map because the two are
+/// rebuilt from the same settings at the same instant, and a parallel map is a
+/// thing that can disagree with this one. `None` means the card declares no
+/// window, which is what disables automatic compaction for a session on it.
+#[derive(Clone)]
+pub struct ModelEntry {
+    pub provider: Arc<dyn LlmProvider>,
+    pub context_window: Option<u32>,
+}
+
+impl ModelEntry {
+    /// A model with no declared window, so sessions on it never compact
+    /// automatically. What a test wants unless it is testing compaction — a
+    /// budget would otherwise change how many provider calls a run makes.
+    #[must_use]
+    pub fn provider_only(provider: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            provider,
+            context_window: None,
+        }
+    }
+}
 
 /// Runtime vendors keyed by name, behind a shared lock so a settings edit can
 /// activate, reconfigure or retire one without a restart. Read once per
@@ -63,6 +88,11 @@ pub struct AgentSettings {
     /// deserialize.
     #[serde(default)]
     pub instructions: Option<String>,
+    /// Whether this session compacts automatically once its context fills.
+    /// `#[serde(default)]` so pre-compaction journal rows deserialize; `None`
+    /// means yes, so every existing session gains the behaviour.
+    #[serde(default)]
+    pub auto_compact: Option<bool>,
 }
 
 impl AgentSettings {
@@ -170,6 +200,7 @@ impl SessionSpec {
                 memory_spaces: vec![],
                 thinking_effort: None,
                 max_concurrent_subagents: None,
+                auto_compact: None,
             },
             workspaces: vec![],
             provision: vec![],
@@ -357,6 +388,7 @@ mod tests {
                 memory_spaces: vec![],
                 thinking_effort: None,
                 max_concurrent_subagents: None,
+                auto_compact: None,
             },
             workspaces: vec![],
             provision: vec![],
@@ -407,6 +439,7 @@ mod tests {
                 memory_spaces: vec![],
                 thinking_effort: None,
                 max_concurrent_subagents: None,
+                auto_compact: None,
             },
             workspaces: vec![],
             provision: vec![],

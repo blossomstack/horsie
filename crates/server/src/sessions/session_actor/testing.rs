@@ -52,6 +52,7 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
             memory_spaces: vec![],
             thinking_effort: None,
             max_concurrent_subagents: None,
+            auto_compact: None,
         },
         workspaces: vec![WorkspaceDef {
             name: "main".into(),
@@ -319,11 +320,10 @@ pub(super) async fn spawn_session_with_provider(
         .create(&id.to_string(), "mock", &actor_spec_fixture())
         .await
         .expect("create");
-    f.deps
-        .provider_registry
-        .write()
-        .unwrap()
-        .insert("mock".to_string(), provider);
+    f.deps.provider_registry.write().unwrap().insert(
+        "mock".to_string(),
+        crate::sessions::spec::ModelEntry::provider_only(provider),
+    );
     let parent = spawn_deaf_supervisor();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
     let session =
@@ -351,6 +351,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
         memory_spaces: vec![],
         thinking_effort: None,
         max_concurrent_subagents: None,
+        auto_compact: None,
     };
     WorkflowRunSpec {
         workflow: "fix-bug".into(),
@@ -419,11 +420,10 @@ pub(super) async fn spawn_run_with_provider(
         .create(&id.to_string(), "mock", &spec)
         .await
         .expect("create");
-    f.deps
-        .provider_registry
-        .write()
-        .unwrap()
-        .insert("mock".to_string(), provider);
+    f.deps.provider_registry.write().unwrap().insert(
+        "mock".to_string(),
+        crate::sessions::spec::ModelEntry::provider_only(provider),
+    );
     let parent = spawn_deaf_supervisor();
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
     let session =
@@ -797,7 +797,8 @@ pub(super) fn hook_ids(page: &crate::agent_loop::LogPage) -> Vec<String> {
         .filter_map(|e| match &e.body {
             horsie_agentcore::AgentLogBody::Hook(h) => Some(h.id.clone()),
             horsie_agentcore::AgentLogBody::Llm(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }
@@ -941,7 +942,9 @@ pub(super) async fn stop_harness_full(
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
     f.deps.provider_registry.write().unwrap().insert(
         "mock".to_string(),
-        Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
+        crate::sessions::spec::ModelEntry::provider_only(
+            Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>
+        ),
     );
     let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
     let session =
@@ -973,7 +976,8 @@ pub(super) async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<Strin
             }
             horsie_agentcore::AgentLogBody::Llm(_)
             | horsie_agentcore::AgentLogBody::Hook(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }
@@ -990,7 +994,8 @@ pub(super) async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<Sto
                 other => panic!("only Stop hooks run in these tests, got {other:?}"),
             },
             horsie_agentcore::AgentLogBody::Llm(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
         .collect()
 }
@@ -1139,7 +1144,9 @@ pub(super) async fn catalog_harness_with(
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
         "mock".to_string(),
-        Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>,
+        crate::sessions::spec::ModelEntry::provider_only(
+            Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>
+        ),
     );
     let session = horsie_actor::ActorSystem::new(
         Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>
@@ -1242,7 +1249,9 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
     f.deps.provider_registry.write().unwrap().insert(
         "mock".to_string(),
-        Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>,
+        crate::sessions::spec::ModelEntry::provider_only(
+            Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>
+        ),
     );
     let session = horsie_actor::ActorSystem::new(
         Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>

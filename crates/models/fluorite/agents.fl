@@ -33,6 +33,9 @@ struct AgentView {
     memory_spaces: Vec<String>,
     /// Canonical thinking effort; absent → the model's configured default.
     thinking_effort: Option<String>,
+    /// Whether sessions from this preset compact automatically once their
+    /// context fills; absent → yes.
+    auto_compact: Option<bool>,
     /// Unix epoch seconds.
     created_at: String,
     updated_at: String,
@@ -53,6 +56,9 @@ struct AgentPresetInput {
     mcp_servers: Option<Vec<String>>,
     memory_spaces: Option<Vec<String>>,
     thinking_effort: Option<String>,
+    /// Seeds `AgentSettings.auto_compact` for sessions created from this
+    /// preset; absent → yes.
+    auto_compact: Option<bool>,
 }
 
 /// Invoke a preset: create a session from it and queue a first message.

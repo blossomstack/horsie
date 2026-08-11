@@ -511,6 +511,7 @@ mod tests {
                 memory_spaces: vec![],
                 thinking_effort: None,
                 max_concurrent_subagents: None,
+                auto_compact: None,
             },
             workspaces: vec![WorkspaceDef {
                 name: "main".into(),

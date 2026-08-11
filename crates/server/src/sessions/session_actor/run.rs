@@ -631,7 +631,9 @@ mod tests {
         let f = actor_fixture_blocking_creates().await;
         f.deps.provider_registry.write().unwrap().insert(
             "mock".to_string(),
-            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
         );
         let id = Uuid::new_v4();
         let mut spec = actor_spec_fixture();

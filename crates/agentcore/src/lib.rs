@@ -1,4 +1,5 @@
 mod agent;
+pub mod compaction;
 mod error;
 mod events;
 mod provider;
@@ -9,6 +10,9 @@ mod thinking;
 mod tool;
 
 pub use agent::{Agent, AgentBuilder, AgentConfig};
+pub use compaction::{
+    CompactionBudget, CompactionPlan, CompactionPolicy, CompactionResult, PreCompactDecision,
+};
 pub use error::{AgentBuildError, AgentError, LlmError, ToolCallError};
 pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
@@ -18,11 +22,12 @@ pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 
 pub use horsie_models::agent::{
     AgentInput, AgentLogBody, AgentLogEntry, AgentOutput, AgentResult, AskLifecycle,
-    CompletedOutput, ContentPart, EmptyOutcome, FailedOutcome, HandoffCall, HandoffOutput,
-    HistoryEntry, HookEntry, LifecycleEvent, Message, PreparingLifecycle, QueuedLifecycle, Role,
-    RuntimeLifecycle, RuntimeStatus, SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle,
-    TaskItem, TaskListLifecycle, TaskStatus, TextPart, ThinkingPart, ToolCallPart, ToolResultInput,
-    ToolResultPart, TurnBeganLifecycle, TurnEndedLifecycle, TurnOutcome, Usage, UserMessageInput,
+    CompactionEntry, CompactionTrigger, CompletedOutput, ContentPart, EmptyOutcome, FailedOutcome,
+    HandoffCall, HandoffOutput, HistoryEntry, HookEntry, LifecycleEvent, Message,
+    PreparingLifecycle, QueuedLifecycle, Role, RuntimeLifecycle, RuntimeStatus,
+    SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TaskItem, TaskListLifecycle,
+    TaskStatus, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart,
+    TurnBeganLifecycle, TurnEndedLifecycle, TurnOutcome, Usage, UserMessageInput,
 };
 pub use horsie_models::events::{
     AgentEvent, ContentBlockStopEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent,

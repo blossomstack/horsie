@@ -31,6 +31,9 @@ pub struct AgentConfig {
     /// (called alongside other tools, or with input that fails schema validation)
     /// before the run fails.
     pub handoff_max_retries: u32,
+    /// How much context this agent has, and when to compact it. `None` means it
+    /// never compacts on its own — see [`crate::CompactionBudget`].
+    pub compaction: Option<crate::compaction::CompactionBudget>,
 }
 
 impl Default for AgentConfig {
@@ -42,6 +45,7 @@ impl Default for AgentConfig {
             max_tokens: None,
             thinking_effort: None,
             handoff_max_retries: 2,
+            compaction: None,
         }
     }
 }
@@ -74,6 +78,15 @@ pub struct Agent {
     pub(crate) handoff_validator: Option<Arc<jsonschema::Validator>>,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
+    /// Supplies what compaction needs and the agent cannot know. `None` means
+    /// this agent never compacts.
+    pub(crate) compaction: Option<std::sync::Arc<dyn crate::compaction::CompactionPolicy>>,
+    /// The last prompt size this agent knows about — the provider's own figure
+    /// once a call has answered, and before that whatever the caller seeded from
+    /// durable state. Seeding it is what makes iteration 0 of a fresh turn test
+    /// the size the *previous* turn left behind, so a turn boundary needs no
+    /// separate compaction check.
+    pub(crate) last_context_tokens: u32,
 }
 
 pub struct AgentBuilder {
@@ -86,6 +99,8 @@ pub struct AgentBuilder {
     force_handoff_choice: bool,
     config: AgentConfig,
     history: Vec<Message>,
+    compaction: Option<std::sync::Arc<dyn crate::compaction::CompactionPolicy>>,
+    last_context_tokens: u32,
 }
 
 impl AgentBuilder {
@@ -103,7 +118,27 @@ impl AgentBuilder {
             force_handoff_choice: true,
             config: AgentConfig::default(),
             history: Vec::new(),
+            compaction: None,
+            last_context_tokens: 0,
         }
+    }
+
+    /// Supply the owner's half of compaction. Without this an agent never
+    /// compacts, whatever its config says.
+    pub fn with_compaction(
+        mut self,
+        policy: std::sync::Arc<dyn crate::compaction::CompactionPolicy>,
+    ) -> Self {
+        self.compaction = Some(policy);
+        self
+    }
+
+    /// Seed the prompt size this agent starts believing it has, from durable
+    /// state. Without it every turn begins thinking its context is empty and a
+    /// session only ever compacts mid-turn.
+    pub fn with_context_tokens(mut self, tokens: u32) -> Self {
+        self.last_context_tokens = tokens;
+        self
     }
 
     pub fn with_system_prompt(mut self, p: impl Into<String>) -> Self {
@@ -186,6 +221,8 @@ impl AgentBuilder {
             handoff_validator,
             config: self.config,
             history: self.history,
+            compaction: self.compaction,
+            last_context_tokens: self.last_context_tokens,
         })
     }
 }
@@ -317,6 +354,16 @@ impl Agent {
         None
     }
 
+    /// The messages this agent would send a provider right now.
+    ///
+    /// Test-only: the run owns its history and nothing outside it has any
+    /// business reading one mid-flight.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn history_for_test(&self) -> &[Message] {
+        &self.history
+    }
+
     /// Drive one turn to a conclusion, emitting the run's events as it goes.
     ///
     /// A thin shell around [`Agent::run_inner`], which owns the whole loop. Its
@@ -399,6 +446,12 @@ impl Agent {
             }
             iteration += 1;
 
+            // The one compaction check. It sits here because this is the only
+            // point in a run where every `tool_use` already has its
+            // `tool_result` — and because iteration 0 of a fresh turn is the
+            // turn boundary, so "compact between turns" needs no second seam.
+            self.maybe_compact(self.last_context_tokens, events).await;
+
             let tools = self.toolbox.specs();
             let request = CompletionRequest {
                 messages: &self.history,
@@ -461,6 +514,7 @@ impl Agent {
                 response.usage.cache_read_tokens,
             );
             spent.context_tokens = response.usage.input_tokens;
+            self.last_context_tokens = response.usage.input_tokens;
 
             let assistant_msg = Message {
                 id: msg_id.clone(),

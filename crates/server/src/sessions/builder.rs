@@ -46,6 +46,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         thinking_effort: w.thinking_effort,
         max_concurrent_subagents: w.max_concurrent_subagents,
         instructions: w.instructions,
+        auto_compact: w.auto_compact,
     }
 }
 
@@ -246,6 +247,7 @@ mod tests {
             memory_spaces: None,
             thinking_effort: None,
             max_concurrent_subagents: None,
+            auto_compact: None,
         }
     }
 

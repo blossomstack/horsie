@@ -68,17 +68,37 @@ impl TestState {
     }
 
     /// Register an LLM provider under `name` for [`Self::account`].
+    ///
+    /// No context window, so sessions on it never compact automatically —
+    /// which is what almost every test wants. Use
+    /// [`Self::insert_provider_with_window`] to exercise compaction.
     pub async fn insert_provider(
         &self,
         name: &str,
         provider: Arc<dyn horsie_agentcore::LlmProvider>,
+    ) {
+        self.insert_provider_with_window(name, provider, None).await;
+    }
+
+    /// Register an LLM provider whose card declares `context_window`.
+    pub async fn insert_provider_with_window(
+        &self,
+        name: &str,
+        provider: Arc<dyn horsie_agentcore::LlmProvider>,
+        context_window: Option<u32>,
     ) {
         self.services()
             .await
             .provider_registry
             .write()
             .unwrap()
-            .insert(name.to_string(), provider);
+            .insert(
+                name.to_string(),
+                crate::sessions::spec::ModelEntry {
+                    provider,
+                    context_window,
+                },
+            );
     }
 
     /// Serve this state on an ephemeral port.

@@ -110,7 +110,7 @@ async fn start_server_with(
     mock_url: &str,
     clock: Option<Arc<TestClock>>,
 ) -> Server {
-    start_server_on(journal_dir, vendor, provider_at(mock_url), clock).await
+    start_server_on(journal_dir, vendor, provider_at(mock_url), clock, None).await
 }
 
 /// As [`start_server_with`], but with the LLM provider chosen by the caller —
@@ -120,6 +120,10 @@ async fn start_server_on(
     vendor: Option<Arc<WebsocketRuntimeVendor>>,
     provider: Arc<dyn LlmProvider>,
     clock: Option<Arc<TestClock>>,
+    // The model card's context window. `None` — what almost every test wants —
+    // means the session never compacts, so a budget can never change how many
+    // provider calls a test observes.
+    context_window: Option<u32>,
 ) -> Server {
     // `db_at` rather than a fresh database: a restart test is only a restart if
     // the second incarnation comes up on the journal the first one wrote. It
@@ -143,7 +147,9 @@ async fn start_server_on(
 
     // The doubles go into the account's own registry and vendor map — the same
     // handles its supervisor and runtime manager read.
-    built.insert_provider("mock", provider).await;
+    built
+        .insert_provider_with_window("mock", provider, context_window)
+        .await;
     if let Some(vendor) = vendor {
         built.publish_vendor("mock", vendor).await;
     }
@@ -2514,7 +2520,7 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
             .with_model("mock")
             .with_base_url(mock.url()),
     );
-    let server = start_server_on(tmp.path(), Some(agent.link()), provider, None).await;
+    let server = start_server_on(tmp.path(), Some(agent.link()), provider, None, None).await;
     let client = reqwest::Client::new();
     mock.queue_reasoning("weighing it up", "done");
     let id = create_session(&client, &server.addr, &agent, "first").await;
@@ -2909,4 +2915,93 @@ async fn wait_for_run_status(
         .json()
         .await
         .unwrap()
+}
+
+// ── compaction ───────────────────────────────────────────────────────────────
+
+/// The compaction boundaries on a page, in order.
+fn page_boundaries(page: &serde_json::Value) -> Vec<serde_json::Value> {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a messages page must carry entries: {page}"))
+        .iter()
+        .filter(|e| e["body"]["type"] == serde_json::json!("Compaction"))
+        .map(|e| e["body"]["value"].clone())
+        .collect()
+}
+
+/// The requirement the whole feature exists for: what the model is handed may
+/// shrink, but what a person can read must not.
+///
+/// The mock reports a 10-token prompt on every call, so a card declaring a
+/// 10-token window puts every session over the 80% trigger after its first
+/// turn — which makes the *second* turn compact at iteration 0, the turn
+/// boundary case.
+#[tokio::test]
+async fn a_compacted_session_keeps_every_message_readable() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("an answer to the first thing");
+    mock.queue_response("a summary of the earlier conversation");
+    mock.queue_response("an answer to the second thing");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server_on(
+        tmp.path(),
+        Some(agent.link()),
+        provider_at(&mock.url()),
+        None,
+        Some(10),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    let before = messages_page(&client, &server.addr, &id, "main").await;
+    let count_before = page_messages(&before).len();
+    assert!(
+        page_boundaries(&before).is_empty(),
+        "nothing has compacted yet"
+    );
+
+    assert!(
+        send_message(&client, &server.addr, &id, "the second thing I asked")
+            .await
+            .is_success()
+    );
+    wait_turns(&client, &server.addr, &id, turns_ended(&before) + 1).await;
+
+    let after = messages_page(&client, &server.addr, &id, "main").await;
+    let boundaries = page_boundaries(&after);
+    assert_eq!(
+        boundaries.len(),
+        1,
+        "the second turn crossed the budget and compacted once: {after}"
+    );
+    assert!(
+        !boundaries[0]["summary"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty(),
+        "a boundary carries the summary that replaced the span: {:?}",
+        boundaries[0]
+    );
+
+    // The point of the whole design: the log kept everything.
+    let messages_after = page_messages(&after);
+    assert!(
+        messages_after.len() > count_before,
+        "compaction must append, never remove: {count_before} before, {} after",
+        messages_after.len()
+    );
+    let whole = serde_json::to_string(&messages_after).unwrap();
+    assert!(
+        whole.contains("the first thing I asked"),
+        "the pre-compaction message is still served: {whole}"
+    );
+
+    server.shutdown().await;
 }

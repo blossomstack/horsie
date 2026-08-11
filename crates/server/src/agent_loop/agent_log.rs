@@ -80,8 +80,14 @@ impl LogPage {
     pub fn messages(&self) -> impl Iterator<Item = &horsie_agentcore::Message> {
         self.entries.iter().filter_map(|e| match &e.body {
             horsie_agentcore::AgentLogBody::Llm(m) => Some(m),
+            // A compaction boundary is not a message and never becomes one
+            // here: this is a window over what was *said*, and callers
+            // reasoning about the prompt go through
+            // `AgentState::prompt_messages`, which is the only thing that knows
+            // where a boundary moves the start.
             horsie_agentcore::AgentLogBody::Hook(_)
-            | horsie_agentcore::AgentLogBody::Lifecycle(_) => None,
+            | horsie_agentcore::AgentLogBody::Lifecycle(_)
+            | horsie_agentcore::AgentLogBody::Compaction(_) => None,
         })
     }
 }

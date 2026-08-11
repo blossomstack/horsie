@@ -62,13 +62,15 @@ pub mod agent {
         /// two is what let ordering stop depending on a scan. This is the id a
         /// tool result joins its call on, and the id a client dedupes an
         /// optimistic echo against. A lifecycle entry has neither need and so
-        /// has no id.
+        /// has no id, and neither does a compaction boundary: nothing joins to
+        /// one, and a client that wants to name it uses the entry's `seq`,
+        /// which is also what makes it a conversation's identity.
         #[must_use]
         pub fn id(&self) -> Option<&str> {
             match self {
                 Self::Llm(m) => Some(&m.id),
                 Self::Hook(h) => Some(&h.id),
-                Self::Lifecycle(_) => None,
+                Self::Lifecycle(_) | Self::Compaction(_) => None,
             }
         }
     }
@@ -1133,6 +1135,7 @@ mod agents_tests {
             thinking_effort: Some("high".into()),
             created_at: "1".into(),
             updated_at: "2".into(),
+            auto_compact: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"mcpServers\""), "{json}");

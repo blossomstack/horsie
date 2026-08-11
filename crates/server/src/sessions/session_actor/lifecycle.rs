@@ -362,7 +362,9 @@ mod tests {
         let f = actor_fixture_blocking_creates().await;
         f.deps.provider_registry.write().unwrap().insert(
             "mock".to_string(),
-            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
         );
         let id = Uuid::new_v4();
         let (session, journal) = spawn_unprovisioned(&f, id);
@@ -467,7 +469,9 @@ mod tests {
         let f = actor_fixture().await;
         f.deps.provider_registry.write().unwrap().insert(
             "mock".to_string(),
-            Arc::new(EchoProvider) as Arc<dyn LlmProvider>,
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
         );
         let link = f
             .deps
@@ -719,11 +723,12 @@ mod tests {
             .await
             .expect("create");
         let provider = BlockingProvider::new();
-        f.deps
-            .provider_registry
-            .write()
-            .unwrap()
-            .insert("mock".to_string(), provider.clone() as Arc<dyn LlmProvider>);
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(
+                provider.clone() as Arc<dyn LlmProvider>
+            ),
+        );
 
         let parent = spawn_deaf_supervisor();
         let journal: Arc<dyn horsie_actor::Journal> =

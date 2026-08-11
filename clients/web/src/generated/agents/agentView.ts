@@ -39,6 +39,11 @@ export interface AgentView {
    */
   thinkingEffort?: string;
   /**
+   * Whether sessions from this preset compact automatically once their
+   * context fills; absent → yes.
+   */
+  autoCompact?: boolean;
+  /**
    * Unix epoch seconds.
    */
   createdAt: string;
