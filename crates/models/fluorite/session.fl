@@ -21,6 +21,9 @@ enum SessionStatusKind {
     Idle,
     Running,
     AwaitingInput,
+    /// A workflow run completed with no error. Not terminal: a retry or a new
+    /// message moves it back to `Running`.
+    Finished,
     Failed,
     Unrecoverable,
 }

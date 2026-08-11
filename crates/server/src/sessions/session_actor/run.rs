@@ -420,7 +420,10 @@ impl Component for WorkflowRun {
                 if let Some(run) = state.run.as_mut() {
                     run.apply_finished(output);
                 }
-                state.status = SessionStatus::Idle;
+                // Not `Idle`: a run that ran to completion and one that stopped
+                // part-way both rest, and telling them apart is the whole
+                // reason to look at a list of past runs.
+                state.status = SessionStatus::Finished;
             }
             SessionDomainEvent::RunFailed { error, .. } => {
                 if let Some(run) = state.run.as_mut() {
@@ -454,6 +457,41 @@ mod tests {
 
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// A run that reached a terminal step with no error says so, and keeps
+    /// saying so once it is cold. `Idle` could not tell it apart from a run
+    /// that stopped part-way and is waiting for someone to retry a step.
+    #[tokio::test]
+    async fn a_completed_run_reports_finished() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let state = wait_for_state(&journal, id, "the run to finish", |s| {
+            s.run
+                .as_ref()
+                .is_some_and(|r| r.status == crate::sessions::workflow::WorkflowRunStatus::Finished)
+        })
+        .await;
+        assert_eq!(
+            state.status,
+            SessionStatus::Finished,
+            "a run that completed is not merely idle"
+        );
+    }
 
     /// The whole point: a run starts itself, its first step's output picks the
     /// branch, and the branch's step ends the run.

@@ -114,7 +114,10 @@ fn main_entry(status: &SessionStatus) -> AgentEntry {
             SessionStatus::Failed { .. }
             | SessionStatus::ProvisioningFailed { .. }
             | SessionStatus::Unrecoverable { .. } => AgentStatus::Failed,
-            SessionStatus::Idle => AgentStatus::Idle,
+            // `Finished` is a run's, and a run has no main agent — but the
+            // match is over the session's whole vocabulary, and an agent that
+            // is not working is idle whichever way the session got there.
+            SessionStatus::Idle | SessionStatus::Finished => AgentStatus::Idle,
         },
         error: crate::sessions::spec::status_reason(status),
         started_at_ms: 0,

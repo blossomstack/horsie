@@ -64,6 +64,13 @@ const META: Record<SessionStatusKind, StatusMeta> = {
     canSend: true,
     hint: "The agent asked you a question.",
   },
+  [SessionStatusKind.Finished]: {
+    label: "Finished",
+    tone: "ready",
+    busy: false,
+    canSend: true,
+    hint: "This run completed. Retry a step to take it further.",
+  },
   [SessionStatusKind.Failed]: {
     label: "Failed",
     tone: "fault",

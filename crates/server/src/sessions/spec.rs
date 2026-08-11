@@ -222,6 +222,12 @@ pub enum SessionStatus {
     #[default]
     Idle,
     Running,
+    /// A workflow run reached a terminal step with no error.
+    ///
+    /// Not terminal for the session: a retry, a fork or a new message moves it
+    /// back to `Running`. `Unrecoverable` is the only status a session cannot
+    /// leave. Unreachable for a conversation, which is never over.
+    Finished,
     /// Parked on one or more questions.
     ///
     /// Carries none of them: the questions belong to the agent that asked, are
@@ -259,6 +265,7 @@ pub fn status_kind(s: &SessionStatus) -> SessionStatusKind {
         SessionStatus::Idle => SessionStatusKind::Idle,
         SessionStatus::Running => SessionStatusKind::Running,
         SessionStatus::AwaitingInput => SessionStatusKind::AwaitingInput,
+        SessionStatus::Finished => SessionStatusKind::Finished,
         // Deliberately the same wire discriminant as a failed turn: to a
         // reader both are "it did not work, the reason is in `last_error`, send
         // again". What differs is what *sending again* does, and that is the
@@ -279,6 +286,7 @@ pub fn status_reason(s: &SessionStatus) -> Option<String> {
         SessionStatus::Provisioning
         | SessionStatus::Idle
         | SessionStatus::Running
+        | SessionStatus::Finished
         | SessionStatus::AwaitingInput => None,
     }
 }
