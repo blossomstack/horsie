@@ -122,9 +122,13 @@ so a step may ask. The run's page says which step is waiting; **Answer it**
 opens that step. Answering resumes it and the run carries on.
 
 **You interrupted it, or the server restarted mid-run.** The step that was
-running is marked cancelled and the run goes **suspended** rather than resuming
-by itself — nobody knows how far that step got, so continuing is your decision.
-The run's page says which step stopped and offers to retry it.
+running is marked cancelled and the run goes back to **idle** rather than
+resuming by itself — nobody knows how far that step got, so continuing is your
+decision. The run's page says which step stopped and offers to retry it.
+
+A run that ran to completion says **finished** instead, which is how a list of
+past runs tells the two apart. Nothing but **unrecoverable** is a dead end: a
+finished or failed run can still be moved by retrying a step.
 
 ### Retrying is not a rollback
 
