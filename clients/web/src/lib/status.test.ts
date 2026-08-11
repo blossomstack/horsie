@@ -8,6 +8,18 @@ import {
 } from "./status";
 
 describe("status presentation metadata", () => {
+  // A run that ran to completion and one that stopped part-way both rest, and
+  // the list exists to tell them apart — so `Finished` has to read settled and
+  // successful, not merely unlit.
+  it("gives a finished run its own settled lamp", () => {
+    const meta = statusMeta(SessionStatusKind.Finished);
+
+    expect(meta.label).toBe("Finished");
+    expect(meta.busy).toBe(false);
+    expect(meta.tone).not.toBe("off");
+    expect(meta.tone).not.toBe(statusMeta(SessionStatusKind.Idle).tone);
+  });
+
   it("keeps Running prominent, amber, and animated", () => {
     const meta = statusMeta(SessionStatusKind.Running);
 
@@ -24,9 +36,15 @@ describe("status presentation metadata", () => {
     expect(TONE_TEXT[meta.tone]).toBe("text-dim");
   });
 
-  it("keeps an unknown status separate from Idle", () => {
-    expect(statusMeta(undefined).tone).toBe("off");
-    expect(statusMeta(null).tone).toBe("off");
+  // There is no unknown state left to keep separate: the registry keeps a
+  // durable status for every session, so every kind the server can send has a
+  // lamp and none of them is unlit.
+  it("has a lit lamp for every status the server can send", () => {
+    for (const kind of Object.values(SessionStatusKind)) {
+      const meta = statusMeta(kind);
+      expect(meta.label).not.toBe("—");
+      expect(meta.tone).not.toBe("off");
+    }
   });
 });
 

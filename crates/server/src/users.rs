@@ -241,7 +241,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
                 tracing::warn!(user = %user, "orphan sweep skipped: the session list is unreadable");
                 return;
             };
-            let live = sessions.into_iter().map(|(id, _, _)| id).collect();
+            let live = sessions.into_iter().map(|(id, _)| id).collect();
             runtime_vendors.sweep_orphans(&live).await;
         });
     }

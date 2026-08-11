@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionDetail } from "../api/types";
+import { SessionStatusKind } from "../api/types";
 import { settingsKey } from "../hooks/useSettings";
 import { SessionConfigBar } from "./SessionConfigBar";
 
@@ -14,6 +15,7 @@ function detail(overrides: Partial<SessionDetail> = {}): SessionDetail {
   return {
     id: "s1",
     name: "Test",
+    status: SessionStatusKind.Idle,
     createdAt: 0,
     annotations: [],
     model: "sonnet",

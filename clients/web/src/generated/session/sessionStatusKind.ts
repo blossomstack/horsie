@@ -13,6 +13,11 @@ export enum SessionStatusKind {
   Idle = "Idle",
   Running = "Running",
   AwaitingInput = "AwaitingInput",
+  /**
+   * A workflow run completed with no error. Not terminal: a retry or a new
+   * message moves it back to `Running`.
+   */
+  Finished = "Finished",
   Failed = "Failed",
   Unrecoverable = "Unrecoverable",
 }

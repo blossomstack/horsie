@@ -50,7 +50,6 @@ impl WorkflowRun {
                 let Some(index) = state.run.as_ref().and_then(WorkflowRunState::current) else {
                     return CommandEffect::none();
                 };
-                actor.report(SessionStatus::Idle).await;
                 CommandEffect::persist(vec![SessionDomainEvent::StepCancelled {
                     at_ms: now_ms(),
                     index,
@@ -108,7 +107,6 @@ impl SessionActor {
                 error: format!("step '{step}' could not be started"),
             }];
         }
-        self.report(SessionStatus::Running).await;
         vec![SessionDomainEvent::StepStarted {
             at_ms: now_ms(),
             index,
@@ -123,7 +121,6 @@ impl SessionActor {
 
     /// The run reached a terminal step and succeeded.
     pub(super) async fn finish_run(&mut self, output: Value) -> Vec<SessionDomainEvent> {
-        self.report(SessionStatus::Idle).await;
         vec![SessionDomainEvent::RunFinished {
             at_ms: now_ms(),
             output,
@@ -132,10 +129,6 @@ impl SessionActor {
 
     /// The run cannot continue — no transition matched, or a step failed.
     pub(super) async fn fail_run(&mut self, error: String) -> Vec<SessionDomainEvent> {
-        self.report(SessionStatus::Failed {
-            reason: error.clone(),
-        })
-        .await;
         vec![SessionDomainEvent::RunFailed {
             at_ms: now_ms(),
             error,
@@ -235,7 +228,6 @@ impl SessionActor {
                 true,
             ),
             TurnEnd::Asked => {
-                self.report(SessionStatus::AwaitingInput).await;
                 (
                     vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }],
                     // The step is still running, parked on its question. The
@@ -248,26 +240,16 @@ impl SessionActor {
             // decision for a person: the shared workspace holds whatever the
             // failed attempt left behind, so re-running blind would redo
             // half-finished work.
-            TurnEnd::Failed { error, .. } => {
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
-                (
-                    vec![SessionDomainEvent::StepFailed {
-                        at_ms: now_ms(),
-                        index,
-                        error,
-                    }],
-                    false,
-                )
-            }
+            TurnEnd::Failed { error, .. } => (
+                vec![SessionDomainEvent::StepFailed {
+                    at_ms: now_ms(),
+                    index,
+                    error,
+                }],
+                false,
+            ),
             TurnEnd::Parked => {
                 let error = "step parked; timers are not supported in workflows".to_string();
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
                 (
                     vec![SessionDomainEvent::StepFailed {
                         at_ms: now_ms(),
@@ -438,7 +420,10 @@ impl Component for WorkflowRun {
                 if let Some(run) = state.run.as_mut() {
                     run.apply_finished(output);
                 }
-                state.status = SessionStatus::Idle;
+                // Not `Idle`: a run that ran to completion and one that stopped
+                // part-way both rest, and telling them apart is the whole
+                // reason to look at a list of past runs.
+                state.status = SessionStatus::Finished;
             }
             SessionDomainEvent::RunFailed { error, .. } => {
                 if let Some(run) = state.run.as_mut() {
@@ -472,6 +457,41 @@ mod tests {
 
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// A run that reached a terminal step with no error says so, and keeps
+    /// saying so once it is cold. `Idle` could not tell it apart from a run
+    /// that stopped part-way and is waiting for someone to retry a step.
+    #[tokio::test]
+    async fn a_completed_run_reports_finished() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+                || {
+                    Ok(horsie_agentcore::CompletionResponse {
+                        parts: vec![horsie_agentcore::ContentPart::Text(
+                            horsie_agentcore::TextPart {
+                                text: "fixed".to_string(),
+                            },
+                        )],
+                        stop_reason: horsie_agentcore::StopReason::EndTurn,
+                        usage: horsie_agentcore::Usage::without_cache(1, 1),
+                    })
+                },
+            ),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let state = wait_for_state(&journal, id, "the run to finish", |s| {
+            s.run
+                .as_ref()
+                .is_some_and(|r| r.status == crate::sessions::workflow::WorkflowRunStatus::Finished)
+        })
+        .await;
+        assert_eq!(
+            state.status,
+            SessionStatus::Finished,
+            "a run that completed is not merely idle"
+        );
+    }
 
     /// The whole point: a run starts itself, its first step's output picks the
     /// branch, and the branch's step ends the run.

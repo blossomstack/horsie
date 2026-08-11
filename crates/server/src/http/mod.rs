@@ -337,10 +337,6 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/routines/{name}/run", post(routines::run_routine))
         .route(
-            "/api/routines/{name}/sessions",
-            get(routines::get_routine_sessions),
-        )
-        .route(
             "/api/workflows",
             get(workflows::list_workflows).post(workflows::create_workflow),
         )
@@ -351,8 +347,11 @@ pub fn app(state: AppState) -> Router {
                 .delete(workflows::delete_workflow),
         )
         .route(
+            // A run's *list* is `GET /api/sessions?workflow=<name>`: a run is
+            // an ordinary session, and a second endpoint would re-derive the
+            // same row from the same registry read.
             "/api/workflows/{name}/runs",
-            get(workflows::list_runs).post(workflows::start_run),
+            post(workflows::start_run),
         )
         .route("/api/sessions/{id}/workflow", get(workflows::get_run_graph))
         .route(
@@ -3096,7 +3095,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_is_listed_under_its_routine_and_nowhere_else() {
-        use horsie_models::routines::{RoutineRunResponse, RoutineSessionsResponse};
+        use horsie_models::routines::RoutineRunResponse;
         let tmp = tempfile::tempdir().unwrap();
         let app = routine_app(&tmp).await;
         app.clone()
@@ -3116,13 +3115,14 @@ mod tests {
         let run: RoutineRunResponse = read_json(res).await;
         let id = run.session.id;
 
-        // The run is on the routine's page...
+        // The run is on the routine's page, which is the session list scoped
+        // to it — a run is an ordinary session, so it is read like one.
         let res = app
             .clone()
-            .oneshot(get("/api/routines/nightly/sessions"))
+            .oneshot(get("/api/sessions?routine=nightly"))
             .await
             .unwrap();
-        let runs: RoutineSessionsResponse = read_json(res).await;
+        let runs: ListSessionsResponse = read_json(res).await;
         assert_eq!(runs.sessions.len(), 1);
         assert_eq!(runs.sessions[0].id, id);
 

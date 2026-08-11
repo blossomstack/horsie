@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import type { SessionSummary } from "../api/types";
+import { SessionStatusKind } from "../api/types";
 import { Sidebar } from "./Sidebar";
 
 // jsdom has no window.matchMedia, which useTheme reads at module scope via
@@ -49,6 +50,7 @@ function session(id: string, group?: string): SessionSummary {
   return {
     id,
     name: `session ${id}`,
+    status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: group ? [{ key: "group", value: group }] : [],
   };

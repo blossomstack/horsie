@@ -10,6 +10,7 @@ use crate::agent::truncate;
 use crate::error::CliError;
 use crate::server_client::ServerClient;
 use horsie_models::environments::EnvironmentSpec;
+use horsie_models::session::SessionStatusKind;
 use horsie_models::workflow::{
     StepRunView, WorkflowInput, WorkflowRunGraph, WorkflowRunRequest, WorkflowView,
 };
@@ -130,12 +131,15 @@ pub async fn run(
 }
 
 /// Where a run got to, as a table of its executions.
+///
+/// Two reads: the graph says where the run got to, the session says what state
+/// it is in. A run's status is its session's — one vocabulary for every session
+/// — so there is nothing on the graph to print here.
 pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let graph = ServerClient::new(server)
-        .await?
-        .workflow_run(session_id)
-        .await?;
-    print!("{}", render_run(&graph));
+    let client = ServerClient::new(server).await?;
+    let graph = client.workflow_run(session_id).await?;
+    let session = client.get_session(session_id).await?;
+    print!("{}", render_run(&graph, session.status));
     Ok(())
 }
 
@@ -197,11 +201,11 @@ fn render_started(base: &str, session_id: &str) -> String {
     )
 }
 
-fn render_run(graph: &WorkflowRunGraph) -> String {
+fn render_run(graph: &WorkflowRunGraph, status: SessionStatusKind) -> String {
     let mut out = format!(
         "{}  {}  {} tokens\n\n",
         graph.workflow,
-        status_word(graph),
+        status_word(status),
         graph.input_tokens + graph.output_tokens,
     );
     let runs: Vec<&StepRunView> = graph.nodes.iter().flat_map(|n| n.runs.iter()).collect();
@@ -264,15 +268,17 @@ fn indent(body: &str) -> String {
         .join("\n")
 }
 
-fn status_word(graph: &WorkflowRunGraph) -> &'static str {
-    use horsie_models::workflow::WorkflowStatus;
-    match graph.status {
-        WorkflowStatus::Pending(_) => "pending",
-        WorkflowStatus::Running(_) => "running",
-        WorkflowStatus::Suspended(_) => "suspended",
-        WorkflowStatus::AwaitingInput(_) => "awaiting input",
-        WorkflowStatus::Finished(_) => "finished",
-        WorkflowStatus::Failed(_) => "failed",
+fn status_word(status: SessionStatusKind) -> &'static str {
+    match status {
+        SessionStatusKind::Provisioning => "provisioning",
+        // A run that is merely idle is one that stopped part-way: a step was
+        // interrupted and nothing moves until someone retries it.
+        SessionStatusKind::Idle => "suspended",
+        SessionStatusKind::Running => "running",
+        SessionStatusKind::AwaitingInput => "awaiting input",
+        SessionStatusKind::Finished => "finished",
+        SessionStatusKind::Failed => "failed",
+        SessionStatusKind::Unrecoverable => "unrecoverable",
     }
 }
 
@@ -291,8 +297,7 @@ fn step_word(r: &StepRunView) -> &'static str {
 mod tests {
     use super::*;
     use horsie_models::workflow::{
-        FinishedStatus, RunNode, StepConcluded, StepRunStatus, WorkflowStatus, WorkflowStepDef,
-        WorkflowTransition,
+        RunNode, StepConcluded, StepRunStatus, WorkflowStepDef, WorkflowTransition,
     };
 
     fn step(name: &str, to: Option<(&str, Option<&str>)>) -> WorkflowStepDef {
@@ -363,7 +368,6 @@ mod tests {
         };
         WorkflowRunGraph {
             workflow: "fix-bug".into(),
-            status: WorkflowStatus::Finished(FinishedStatus {}),
             current: None,
             start: "triage".into(),
             nodes: vec![
@@ -391,7 +395,7 @@ mod tests {
     #[test]
     fn a_run_lists_its_executions_in_order_and_names_what_it_missed() {
         let graph = finished_graph();
-        let out = render_run(&graph);
+        let out = render_run(&graph, SessionStatusKind::Finished);
         assert!(out.contains("finished"), "{out}");
         assert!(out.contains("150 tokens"), "{out}");
         assert!(out.contains("agent-0"), "{out}");
@@ -406,7 +410,7 @@ mod tests {
     fn a_finished_run_prints_what_it_produced() {
         let mut graph = finished_graph();
         graph.output = Some(serde_json::json!({"filed": 12}));
-        let out = render_run(&graph);
+        let out = render_run(&graph, SessionStatusKind::Finished);
         assert!(out.contains("Output:"), "{out}");
         assert!(out.contains("\"filed\": 12"), "{out}");
     }
@@ -417,7 +421,7 @@ mod tests {
     fn a_string_output_is_printed_unquoted() {
         let mut graph = finished_graph();
         graph.output = Some(serde_json::json!("all clear"));
-        let out = render_run(&graph);
+        let out = render_run(&graph, SessionStatusKind::Finished);
         assert!(out.contains("all clear"), "{out}");
         assert!(!out.contains("\"all clear\""), "{out}");
     }
@@ -479,7 +483,6 @@ mod tests {
     fn a_run_with_no_steps_yet_says_so() {
         let graph = WorkflowRunGraph {
             workflow: "w".into(),
-            status: WorkflowStatus::Finished(FinishedStatus {}),
             current: None,
             start: "a".into(),
             nodes: vec![],
@@ -489,6 +492,6 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
         };
-        assert!(render_run(&graph).contains("No step has run yet."));
+        assert!(render_run(&graph, SessionStatusKind::Running).contains("No step has run yet."));
     }
 }

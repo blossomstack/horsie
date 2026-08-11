@@ -5,10 +5,10 @@ export interface SessionSummary {
   id: string;
   name?: string;
   /**
-   * Absent when the session is not loaded: the server does not guess, and
-   * a restart leaves every row unknown until one is opened.
+   * What the session last reported. Always known: the registry keeps a
+   * durable copy, so a cold session answers without being loaded.
    */
-  status?: SessionStatusKind;
+  status: SessionStatusKind;
   createdAt: number;
   lastError?: string;
   /**

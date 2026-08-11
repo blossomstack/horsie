@@ -1,7 +1,10 @@
-//! HTTP surface for routines: CRUD, `POST /api/routines/:name/run` (the manual
-//! and API trigger, sharing the runner with the scheduler's timer), and
-//! `GET /api/routines/:name/sessions` — the run list, which is the only place a
-//! routine's sessions appear.
+//! HTTP surface for routines: CRUD, and `POST /api/routines/:name/run` — the
+//! manual and API trigger, sharing the runner with the scheduler's timer.
+//!
+//! A routine's runs are not listed here. A run is an ordinary session, so it is
+//! read from `GET /api/sessions?routine=<name>`, which is also the only place
+//! they appear: the unfiltered session list leaves them out, or a routine on a
+//! timer would bury the sessions somebody is actually having.
 
 use super::Scope;
 use super::error::Api;
@@ -12,9 +15,7 @@ use axum::Json;
 use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::now_ms;
-use horsie_models::routines::{
-    RoutineInput, RoutineRunResponse, RoutineSessionsResponse, RoutineView,
-};
+use horsie_models::routines::{RoutineInput, RoutineRunResponse, RoutineView};
 use horsie_models::session::SessionSummary;
 
 /// Map the typed service error onto the envelope without string matching.
@@ -113,22 +114,10 @@ pub async fn run_routine(
         .map_err(api_err)
 }
 
-/// GET /api/routines/:name/sessions — the routine's runs, newest first.
-pub async fn get_routine_sessions(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<RoutineSessionsResponse>, Api> {
-    state.routines.get(&name).await.map_err(api_err)?;
-    let mut sessions: Vec<SessionSummary> = routine_sessions(&state, &name)
-        .await?
-        .into_iter()
-        .map(|(_, summary)| summary)
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(RoutineSessionsResponse { sessions }))
-}
-
 /// Every session created by `name`, as (id, summary).
+///
+/// Not a route: `GET /api/sessions?routine=<name>` is the list. This is what
+/// deleting a routine uses to find the sessions to delete with it.
 async fn routine_sessions(
     state: &crate::users::UserServices,
     name: &str,
@@ -136,7 +125,7 @@ async fn routine_sessions(
     let sessions = handlers::ask(state, |reply| SessionSupervisorCommand::List { reply }).await?;
     Ok(sessions
         .iter()
-        .filter(|(_, rec, _)| rec.spec.routine() == Some(name))
-        .map(|(id, rec, status)| (id.clone(), handlers::summary(id, rec, status.as_ref())))
+        .filter(|(_, rec)| rec.spec.routine() == Some(name))
+        .map(|(id, rec)| (id.clone(), handlers::summary(id, rec)))
         .collect())
 }

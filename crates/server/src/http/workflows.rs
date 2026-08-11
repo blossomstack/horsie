@@ -12,7 +12,7 @@ use crate::sessions::spec::{AgentSettings, SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use crate::sessions::workflow::{
     DEFAULT_MAX_STEPS, StepRun, StepStatus, TransitionSpec, WorkflowRunSpec, WorkflowRunState,
-    WorkflowRunStatus, WorkflowStepSpec,
+    WorkflowStepSpec,
 };
 use crate::workflows::WorkflowError;
 use axum::Json;
@@ -21,10 +21,9 @@ use axum::http::StatusCode;
 use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
 use horsie_models::workflow::{
-    AwaitingInputStatus, FailedStatus, FinishedStatus, PendingStatus, RunEdge, RunNode,
-    RunningStatus, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
-    StepRunning, SuspendedStatus, WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph,
-    WorkflowRunRequest, WorkflowRunResponse, WorkflowRunsResponse, WorkflowStatus, WorkflowView,
+    RunEdge, RunNode, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
+    StepRunning, WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph, WorkflowRunRequest,
+    WorkflowRunResponse, WorkflowView,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -247,31 +246,14 @@ pub async fn start_run(
         spec,
         created_at,
         annotations: Default::default(),
+        status: SessionStatus::Idle,
     };
     Ok((
         StatusCode::CREATED,
         Json(WorkflowRunResponse {
-            session: handlers::summary(&id, &rec, Some(&SessionStatus::Idle)),
+            session: handlers::summary(&id, &rec),
         }),
     ))
-}
-
-/// GET /api/workflows/:name/runs — this workflow's runs, newest first.
-pub async fn list_runs(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<WorkflowRunsResponse>, Api> {
-    // Confirms the workflow exists, so an unknown name is a 404 rather than an
-    // empty list that reads like "no runs yet".
-    state.workflows.get(&name).await.map_err(api_err)?;
-    let all = handlers::ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let mut sessions: Vec<_> = all
-        .iter()
-        .filter(|(_, rec, _)| rec.spec.workflow_name() == Some(name.as_str()))
-        .map(|(id, rec, status)| handlers::summary(id, rec, status.as_ref()))
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(WorkflowRunsResponse { sessions }))
 }
 
 /// GET /api/sessions/:id/workflow — the run, projected onto its graph.
@@ -378,7 +360,6 @@ fn project_run(
         .collect();
     WorkflowRunGraph {
         workflow: spec.workflow.clone(),
-        status: wire_status(run.status),
         current: run.current(),
         start: spec.start.clone(),
         nodes,
@@ -419,16 +400,5 @@ fn step_run_view(
         ended_at_ms: r.ended_at_ms,
         input_tokens: usage.input_tokens.try_into().unwrap_or(u32::MAX),
         output_tokens: usage.output_tokens.try_into().unwrap_or(u32::MAX),
-    }
-}
-
-fn wire_status(status: WorkflowRunStatus) -> WorkflowStatus {
-    match status {
-        WorkflowRunStatus::Pending => WorkflowStatus::Pending(PendingStatus {}),
-        WorkflowRunStatus::Running => WorkflowStatus::Running(RunningStatus {}),
-        WorkflowRunStatus::Suspended => WorkflowStatus::Suspended(SuspendedStatus {}),
-        WorkflowRunStatus::AwaitingInput => WorkflowStatus::AwaitingInput(AwaitingInputStatus {}),
-        WorkflowRunStatus::Finished => WorkflowStatus::Finished(FinishedStatus {}),
-        WorkflowRunStatus::Failed => WorkflowStatus::Failed(FailedStatus {}),
     }
 }

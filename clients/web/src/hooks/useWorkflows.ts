@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { SessionStatusKind } from "../api/types";
 import type { WorkflowInput, WorkflowRunRequest } from "../api/types";
 import { qk } from "./useSessions";
 
@@ -31,7 +32,7 @@ export function useWorkflow(name: string | undefined) {
 export function useWorkflowRuns(name: string | undefined) {
   return useQuery({
     queryKey: name ? workflowKeys.runs(name) : ["workflows", "none", "runs"],
-    queryFn: () => api.workflows.runs(name as string),
+    queryFn: () => api.sessions.list({ workflow: name as string }),
     enabled: !!name,
     refetchInterval: 5_000,
     select: (r) => r.sessions,
@@ -42,18 +43,34 @@ export function useWorkflowRuns(name: string | undefined) {
  *
  * Polled rather than streamed. The session's SSE stream says *that* something
  * changed but not which step, and the projection is one small request — so a
- * poll is both simpler and honest about being a snapshot. It stops once the
- * run reaches a terminal state, because nothing can change after that without
- * a retry, which invalidates this query itself. */
-export function useWorkflowRun(sessionId: string | undefined) {
+ * poll is both simpler and honest about being a snapshot.
+ *
+ * The stop condition is the caller's `status`, not anything in the graph: the
+ * graph is a snapshot of the log, and only the session knows whether anything
+ * can still change. It stops once the session has settled, because nothing
+ * moves after that without a retry, which invalidates this query itself. */
+export function useWorkflowRun(
+  sessionId: string | undefined,
+  status: SessionStatusKind | undefined,
+) {
+  const settled =
+    status === SessionStatusKind.Finished ||
+    status === SessionStatusKind.Failed ||
+    status === SessionStatusKind.Unrecoverable;
   return useQuery({
-    queryKey: sessionId ? workflowKeys.graph(sessionId) : ["workflows", "graph", "none"],
+    // Keyed by the status too, so the graph is re-read once more when the run
+    // settles. Without it a graph fetched while the run was still going would
+    // be the last one ever taken — the poll stops on the status, and the run's
+    // output only exists in the snapshot after it finished.
+    queryKey: sessionId
+      ? [...workflowKeys.graph(sessionId), status ?? "unknown"]
+      : ["workflows", "graph", "none"],
     queryFn: () => api.workflows.graph(sessionId as string),
     enabled: !!sessionId,
-    refetchInterval: (query) => {
-      const status = query.state.data?.status.type;
-      return status === "Finished" || status === "Failed" ? false : 2_000;
-    },
+    // Kept while the previous key's data is still the best answer, so the page
+    // does not flash back to "Loading run…" on every transition.
+    placeholderData: (prev) => prev,
+    refetchInterval: settled ? false : 2_000,
   });
 }
 

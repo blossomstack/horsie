@@ -6,7 +6,7 @@ import { UsageView } from './usageView';
 export interface SessionDetail {
   id: string;
   name?: string;
-  status?: SessionStatusKind;
+  status: SessionStatusKind;
   createdAt: number;
   lastError?: string;
   /**

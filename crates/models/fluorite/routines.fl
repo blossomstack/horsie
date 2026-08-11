@@ -109,6 +109,3 @@ struct RoutineInput {
 /// The session a trigger created. It is running in the background by the time
 /// this is returned.
 struct RoutineRunResponse { session: SessionSummary }
-
-/// A routine's runs, newest first.
-struct RoutineSessionsResponse { sessions: Vec<SessionSummary> }

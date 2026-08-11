@@ -7,9 +7,12 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { SessionStatusKind } from "../../api/types";
 import type { StepRunView, WorkflowRunGraph } from "../../api/types";
 import { WorkflowGraph, type NodeState } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
+import { TONE_TEXT, statusMeta } from "../../lib/status";
+import { useSession } from "../../hooks/useSessions";
 import { useRetryStep, useWorkflowRun } from "../../hooks/useWorkflows";
 
 /**
@@ -36,8 +39,9 @@ import { useRetryStep, useWorkflowRun } from "../../hooks/useWorkflows";
  */
 export function parkedStep(
   graph: WorkflowRunGraph,
+  status: SessionStatusKind,
 ): { step: string; agentId: string } | undefined {
-  if (graph.status.type !== "AwaitingInput" || graph.current === undefined) {
+  if (status !== SessionStatusKind.AwaitingInput || graph.current === undefined) {
     return undefined;
   }
   for (const node of graph.nodes) {
@@ -48,32 +52,37 @@ export function parkedStep(
 }
 
 /**
- * Where a suspended run stopped, so the page can offer to resume it.
+ * Where a run stopped part-way, so the page can offer to resume it.
  *
- * A run is suspended when a step was interrupted — by Interrupt, or by the server
- * restarting under it — and it is deliberately not resumed on its own, because
- * how far that step got is unknowable. A retry is the only thing that moves it,
- * so the page has to say so: this state became reachable at all only once
- * interruption stopped leaving runs wedged as `Running`, and "Suspended" with no
- * explanation is a dead end.
+ * A run stops part-way when a step was interrupted — by Interrupt, or by the
+ * server restarting under it — and it is deliberately not resumed on its own,
+ * because how far that step got is unknowable. A retry is the only thing that
+ * moves it, so the page has to say so: an interrupted run with no explanation
+ * is a dead end.
  *
- * The cancelled execution is the last one in the log, and the retry names it by
- * index.
+ * Read off the log rather than a status word. `Suspended` was a second status
+ * vocabulary for a fact the log already carries, and the log carries it more
+ * precisely: a retry appends rather than truncating, so a later execution over
+ * a cancelled one is what says the run moved on.
  */
 export function resumePoint(
   graph: WorkflowRunGraph,
 ): { step: string; index: number } | undefined {
-  if (graph.status.type !== "Suspended") return undefined;
-  let best: { step: string; index: number } | undefined;
+  let newest: { step: string; index: number; cancelled: boolean } | undefined;
   for (const node of graph.nodes) {
     for (const run of node.runs) {
-      if (run.status.type !== "Cancelled") continue;
-      if (best === undefined || run.index > best.index) {
-        best = { step: node.step, index: run.index };
+      if (newest === undefined || run.index > newest.index) {
+        newest = {
+          step: node.step,
+          index: run.index,
+          cancelled: run.status.type === "Cancelled",
+        };
       }
     }
   }
-  return best;
+  return newest?.cancelled
+    ? { step: newest.step, index: newest.index }
+    : undefined;
 }
 
 /** The step's lamp: the latest execution decides how the node reads. */
@@ -94,24 +103,6 @@ function nodeState(runs: StepRunView[]): NodeState {
   }
 }
 
-const STATUS_TEXT: Record<string, string> = {
-  Pending: "Pending",
-  Running: "Running",
-  Suspended: "Suspended",
-  AwaitingInput: "Awaiting input",
-  Finished: "Finished",
-  Failed: "Failed",
-};
-
-const STATUS_TONE: Record<string, string> = {
-  Pending: "text-faint",
-  Running: "text-amber-ink",
-  Suspended: "text-orange-ink",
-  AwaitingInput: "text-orange-ink",
-  Finished: "text-lamp-ok",
-  Failed: "text-red-ink",
-};
-
 interface Props {
   sessionId: string;
   onStop: () => void;
@@ -119,12 +110,17 @@ interface Props {
 }
 
 export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
-  const { data: graph, isLoading } = useWorkflowRun(sessionId);
+  // A run's status is its session's — one vocabulary for every session, run or
+  // conversation — so the graph says where it got to and the session says what
+  // state it is in.
+  const { data: detail } = useSession(sessionId);
+  const status = detail?.status;
+  const { data: graph, isLoading } = useWorkflowRun(sessionId, status);
   const retry = useRetryStep(sessionId);
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string | undefined>();
 
-  if (isLoading || !graph) {
+  if (isLoading || !graph || status === undefined) {
     return <p className="p-6 text-sm text-faint">Loading run…</p>;
   }
 
@@ -142,8 +138,9 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   }));
 
   const selectedNode = graph.nodes.find((n) => n.step === selected);
-  const live = !isTerminal(graph);
-  const parked = parkedStep(graph);
+  const meta = statusMeta(status);
+  const live = !settled(status);
+  const parked = parkedStep(graph, status);
   const resume = resumePoint(graph);
 
   return (
@@ -152,11 +149,11 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
         <div className="min-w-0">
           <h1 className="page-title truncate">{graph.workflow}</h1>
           <span
-            className={`text-xs ${STATUS_TONE[graph.status.type] ?? "text-faint"}`}
+            className={`text-xs ${TONE_TEXT[meta.tone]}`}
             data-testid="run-status"
-            data-status={graph.status.type}
+            data-status={status}
           >
-            {STATUS_TEXT[graph.status.type] ?? graph.status.type}
+            {meta.label}
           </span>
         </div>
         <span className="ml-auto text-xs text-faint" data-testid="run-usage">
@@ -337,8 +334,18 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   );
 }
 
-function isTerminal(graph: WorkflowRunGraph): boolean {
-  return graph.status.type === "Finished" || graph.status.type === "Failed";
+/** Whether nothing can change without someone asking for it.
+ *
+ * `Finished` and `Failed` are a run's two resting places; `Unrecoverable` is
+ * every session's. None of them is terminal — a retry moves all three — but
+ * none of them moves on its own, which is what Interrupt and the poll care
+ * about. */
+function settled(status: SessionStatusKind): boolean {
+  return (
+    status === SessionStatusKind.Finished ||
+    status === SessionStatusKind.Failed ||
+    status === SessionStatusKind.Unrecoverable
+  );
 }
 
 /** A run's output as text: a string is its own answer, anything else is JSON.

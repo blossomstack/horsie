@@ -309,10 +309,8 @@ pub(crate) fn relative(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
-fn status_label(s: &Option<horsie_models::session::SessionStatusKind>) -> String {
-    s.as_ref()
-        .map(|k| format!("{k:?}"))
-        .unwrap_or_else(|| "-".to_string())
+fn status_label(s: &horsie_models::session::SessionStatusKind) -> String {
+    format!("{s:?}")
 }
 
 fn render_session_table(sessions: &[SessionSummary], now: u64) -> String {

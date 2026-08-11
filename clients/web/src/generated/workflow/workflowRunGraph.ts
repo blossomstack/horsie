@@ -1,7 +1,6 @@
 
 import { RunEdge } from './runEdge';
 import { RunNode } from './runNode';
-import { WorkflowStatus } from './workflowStatus';
 /**
  * A run, projected onto the definition's graph.
  */
@@ -11,7 +10,6 @@ export interface WorkflowRunGraph {
    * at run creation, so editing or deleting it does not change this run.
    */
   workflow: string;
-  status: WorkflowStatus;
   /**
    * Index into the run log of the execution in flight.
    */

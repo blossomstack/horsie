@@ -12,7 +12,7 @@ export type StatusTone =
   | "fault"
   | "off";
 
-interface StatusMeta {
+export interface StatusMeta {
   label: string;
   tone: StatusTone;
   /** The agent is actively doing work — used to animate the status dot. */
@@ -24,15 +24,17 @@ interface StatusMeta {
   hint: string;
 }
 
-/** A session the server has no status for: nothing is loaded at boot, so a
- * session reports nothing until it is opened. Shown as an em dash rather than
- * a guess — and still sendable, since sending is what loads it. */
-export const UNKNOWN_STATUS: StatusMeta = {
-  label: "—",
-  tone: "off",
+/** What the composer reads while the session document is still in flight.
+ *
+ * Not a status: the server always has one. This is the client not knowing yet,
+ * and sending stays enabled because sending is queued behind whatever the
+ * session turns out to be doing. */
+export const UNLOADED: StatusMeta = {
+  label: "",
+  tone: "idle",
   busy: false,
   canSend: true,
-  hint: "Not loaded — send a message to open it.",
+  hint: "",
 };
 
 const META: Record<SessionStatusKind, StatusMeta> = {
@@ -64,6 +66,13 @@ const META: Record<SessionStatusKind, StatusMeta> = {
     canSend: true,
     hint: "The agent asked you a question.",
   },
+  [SessionStatusKind.Finished]: {
+    label: "Finished",
+    tone: "ready",
+    busy: false,
+    canSend: true,
+    hint: "This run completed. Retry a step to take it further.",
+  },
   [SessionStatusKind.Failed]: {
     label: "Failed",
     tone: "fault",
@@ -80,11 +89,14 @@ const META: Record<SessionStatusKind, StatusMeta> = {
   },
 };
 
-export function statusMeta(
-  status: SessionStatusKind | null | undefined,
-): StatusMeta {
-  if (!status) return UNKNOWN_STATUS;
-  return META[status] ?? UNKNOWN_STATUS;
+/** How a status reads on the panel.
+ *
+ * Total, and takes no absent value: the registry keeps a durable copy of every
+ * session's status, so there is no session the server has nothing to say about.
+ * There used to be — every row rendered an em dash until someone opened it —
+ * and that "unknown" was never a state, only an empty cache. */
+export function statusMeta(status: SessionStatusKind): StatusMeta {
+  return META[status];
 }
 
 /** Friendly label for a progression stage.

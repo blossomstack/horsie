@@ -92,30 +92,6 @@ struct WorkflowRunRequest {
 /// The session a run created. It is running by the time this is returned.
 struct WorkflowRunResponse { session: SessionSummary }
 
-/// A workflow's runs, newest first.
-struct WorkflowRunsResponse { sessions: Vec<SessionSummary> }
-
-/// Lifecycle of one run. `Suspended` means stopped part-way and resumable by
-/// retrying a step — cancelled, or a step interrupted by a restart. `Finished`
-/// carries the last step's output; `Failed` ended on an error no retry clears
-/// by itself.
-#[type_tag = "type"]
-union WorkflowStatus {
-    Pending(PendingStatus),
-    Running(RunningStatus),
-    Suspended(SuspendedStatus),
-    AwaitingInput(AwaitingInputStatus),
-    Finished(FinishedStatus),
-    Failed(FailedStatus),
-}
-
-struct PendingStatus {}
-struct RunningStatus {}
-struct SuspendedStatus {}
-struct AwaitingInputStatus {}
-struct FinishedStatus {}
-struct FailedStatus {}
-
 /// What became of one step execution.
 #[type_tag = "type"]
 union StepRunStatus {
@@ -174,7 +150,6 @@ struct WorkflowRunGraph {
     /// The workflow this run was started from. The definition is snapshotted
     /// at run creation, so editing or deleting it does not change this run.
     workflow: String,
-    status: WorkflowStatus,
     /// Index into the run log of the execution in flight.
     current: Option<u32>,
     start: String,

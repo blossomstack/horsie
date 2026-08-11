@@ -21,6 +21,9 @@ enum SessionStatusKind {
     Idle,
     Running,
     AwaitingInput,
+    /// A workflow run completed with no error. Not terminal: a retry or a new
+    /// message moves it back to `Running`.
+    Finished,
     Failed,
     Unrecoverable,
 }
@@ -60,9 +63,9 @@ struct AgentSettings {
 struct SessionSummary {
     id: String,
     name: Option<String>,
-    /// Absent when the session is not loaded: the server does not guess, and
-    /// a restart leaves every row unknown until one is opened.
-    status: Option<SessionStatusKind>,
+    /// What the session last reported. Always known: the registry keeps a
+    /// durable copy, so a cold session answers without being loaded.
+    status: SessionStatusKind,
     created_at: u64,
     last_error: Option<String>,
     /// The workflow this session is a run of. Present only for a run, which is
@@ -86,7 +89,7 @@ struct AskAnswerInput {
 struct SessionDetail {
     id: String,
     name: Option<String>,
-    status: Option<SessionStatusKind>,
+    status: SessionStatusKind,
     created_at: u64,
     last_error: Option<String>,
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.

@@ -55,17 +55,13 @@ where
         .map_err(|_| Api::internal("session supervisor unavailable"))
 }
 
-pub(crate) fn summary(
-    id: &str,
-    rec: &SessionRecord,
-    status: Option<&SessionStatus>,
-) -> SessionSummary {
+pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
-        status: status.map(status_kind),
+        status: status_kind(&rec.status),
         created_at: rec.created_at,
-        last_error: status.and_then(status_reason),
+        last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
     }
@@ -124,27 +120,51 @@ pub async fn create_session(
         spec,
         created_at,
         annotations: BTreeMap::new(),
+        status: SessionStatus::Provisioning,
     };
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             // A freshly created session is loaded and building its runtime,
             // with the message above already queued behind it.
-            session: summary(&id, &rec, Some(&SessionStatus::Provisioning)),
+            session: summary(&id, &rec),
         }),
     ))
 }
 
-/// Every session a person started. A routine's runs are deliberately absent:
-/// they are listed on the routine's own page, and a routine on a timer would
-/// otherwise bury the sessions somebody is actually having.
-pub async fn list_sessions(Scope(state): Scope) -> Result<impl IntoResponse, Api> {
-    let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let sessions = sessions
+/// Which sessions to list.
+///
+/// A run of a workflow or a routine is an ordinary session, so it is listed here
+/// rather than from a second endpoint that would re-derive the same row from the
+/// same registry read. Naming one is what scopes the list to it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListSessionsQuery {
+    workflow: Option<String>,
+    routine: Option<String>,
+}
+
+/// Every session a person started, newest first.
+///
+/// With neither filter a routine's runs are deliberately absent: they are listed
+/// from `?routine=`, and a routine on a timer would otherwise bury the sessions
+/// somebody is actually having. Workflow runs are present — they are started by
+/// hand, and the row says which workflow it came from.
+pub async fn list_sessions(
+    Scope(state): Scope,
+    Query(q): Query<ListSessionsQuery>,
+) -> Result<impl IntoResponse, Api> {
+    let all = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
+    let mut sessions: Vec<_> = all
         .iter()
-        .filter(|(_, rec, _)| rec.spec.routine().is_none())
-        .map(|(id, rec, status)| summary(id, rec, status.as_ref()))
+        .filter(|(_, rec)| match (&q.workflow, &q.routine) {
+            (Some(w), _) => rec.spec.workflow_name() == Some(w.as_str()),
+            (_, Some(r)) => rec.spec.routine() == Some(r.as_str()),
+            _ => rec.spec.routine().is_none(),
+        })
+        .map(|(id, rec)| summary(id, rec))
         .collect();
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
     Ok(Json(ListSessionsResponse { sessions }))
 }
 
@@ -158,13 +178,19 @@ pub async fn get_session(
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    let status = snapshot.as_ref().map(|s| s.status.clone());
+    // The actor's own status when it answered, the registry's copy otherwise —
+    // and the registry always has one, so this document never has to say it
+    // does not know. They agree except in the window where the actor has folded
+    // a transition it has not reported yet, and there the actor is right.
+    let status = snapshot
+        .as_ref()
+        .map_or_else(|| rec.status.clone(), |s| s.status.clone());
     let detail = SessionDetail {
         id: id.clone(),
         name: rec.spec.name.clone(),
-        status: status.as_ref().map(status_kind),
+        status: status_kind(&status),
         created_at: rec.created_at,
-        last_error: status.as_ref().and_then(status_reason),
+        last_error: status_reason(&status),
         annotations: wire_annotations(&rec.annotations),
         model: rec.spec.agent.model.clone(),
         environment: rec.spec.environment.clone(),

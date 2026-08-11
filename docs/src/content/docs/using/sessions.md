@@ -53,8 +53,10 @@ Beside the composer:
 - **Send** — the orange key, or Enter.
 - **Stop** — the red key. Interrupts the current run mid-turn; the session
   stays, and you can send another message to carry on.
-- **Status** — a lamp and the word for it: idle, running, awaiting input,
-  failed, or unrecoverable.
+- **Status** — a lamp and the word for it: provisioning, idle, running,
+  awaiting input, finished, failed, or unrecoverable. A workflow run is a
+  session, so it uses these same words; **finished** is the one only a run
+  reaches, since a conversation is never over.
 - **Tokens** — a running total for the session. This is cumulative usage, not
   how full the context window is; open it for the context meter and the
   per-turn breakdown.
