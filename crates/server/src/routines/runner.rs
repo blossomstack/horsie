@@ -267,7 +267,7 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|(id, rec, _)| (id, rec.spec))
+            .map(|(id, rec)| (id, rec.spec))
             .collect()
     }
 

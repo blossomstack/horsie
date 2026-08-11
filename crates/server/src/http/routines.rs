@@ -136,7 +136,7 @@ async fn routine_sessions(
     let sessions = handlers::ask(state, |reply| SessionSupervisorCommand::List { reply }).await?;
     Ok(sessions
         .iter()
-        .filter(|(_, rec, _)| rec.spec.routine() == Some(name))
-        .map(|(id, rec, status)| (id.clone(), handlers::summary(id, rec, status.as_ref())))
+        .filter(|(_, rec)| rec.spec.routine() == Some(name))
+        .map(|(id, rec)| (id.clone(), handlers::summary(id, rec)))
         .collect())
 }

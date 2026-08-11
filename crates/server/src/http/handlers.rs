@@ -55,17 +55,15 @@ where
         .map_err(|_| Api::internal("session supervisor unavailable"))
 }
 
-pub(crate) fn summary(
-    id: &str,
-    rec: &SessionRecord,
-    status: Option<&SessionStatus>,
-) -> SessionSummary {
+pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
         name: rec.spec.name.clone(),
-        status: status.map(status_kind),
+        // Still `Some(..)`: the wire field stays optional until the option is
+        // removed along with the em-dash path it fed.
+        status: Some(status_kind(&rec.status)),
         created_at: rec.created_at,
-        last_error: status.and_then(status_reason),
+        last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
     }
@@ -124,13 +122,14 @@ pub async fn create_session(
         spec,
         created_at,
         annotations: BTreeMap::new(),
+        status: SessionStatus::Provisioning,
     };
     Ok((
         StatusCode::CREATED,
         Json(CreateSessionResponse {
             // A freshly created session is loaded and building its runtime,
             // with the message above already queued behind it.
-            session: summary(&id, &rec, Some(&SessionStatus::Provisioning)),
+            session: summary(&id, &rec),
         }),
     ))
 }
@@ -142,8 +141,8 @@ pub async fn list_sessions(Scope(state): Scope) -> Result<impl IntoResponse, Api
     let sessions = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
     let sessions = sessions
         .iter()
-        .filter(|(_, rec, _)| rec.spec.routine().is_none())
-        .map(|(id, rec, status)| summary(id, rec, status.as_ref()))
+        .filter(|(_, rec)| rec.spec.routine().is_none())
+        .map(|(id, rec)| summary(id, rec))
         .collect();
     Ok(Json(ListSessionsResponse { sessions }))
 }

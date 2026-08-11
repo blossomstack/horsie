@@ -1,11 +1,17 @@
 //! The session registry: which sessions exist, which are loaded, and when a
 //! loaded one goes cold.
 //!
-//! What is persisted here is **existence only** — created, named, deleted.
-//! Status is not: the session's own journal is the truth for that, and this
-//! actor keeps a cache filled in when a session loads and reports in. So after
-//! a restart the list renders with every status unknown until someone opens a
-//! session, which is the honest thing to show.
+//! What is persisted here is a session's **existence and what it last said
+//! about itself** — created, named, deleted, and its status. The session's own
+//! journal is still the truth: the session folds a transition and then reports
+//! it here, so this copy is a projection, never a source.
+//!
+//! It is persisted rather than cached for the reason the title is: a list has
+//! to render it without loading the session, and loading is not free — it
+//! re-attempts an interrupted provision, so a page of thirty cold runs must not
+//! be thirty wake-ups. A cache made every row unknown after a restart, which
+//! read as honest and was merely empty: the session's own journal is no more
+//! current than this copy, because both only learn better when it loads.
 //!
 //! Nothing is loaded at boot. A session actor is spawned the first time a
 //! command is addressed to it, and dropped again once it has been idle for
@@ -89,9 +95,12 @@ pub enum SessionSupervisorCommand {
         created_at: u64,
         reply: ReplyTo<SessionId>,
     },
-    /// List every known session. `status` is `None` for one that is not loaded.
+    /// List every known session, each with the status it last reported.
+    ///
+    /// Loads nothing: the record is durable, so a cold session answers here as
+    /// well as a live one. That is the whole reason the status is persisted.
     List {
-        reply: ReplyTo<Vec<(SessionId, SessionRecord, Option<SessionStatus>)>>,
+        reply: ReplyTo<Vec<(SessionId, SessionRecord)>>,
     },
     /// Fetch one session's row and the state its actor recovered — its status,
     /// its usage and its agents. Loads the session: its journal is the truth,
@@ -279,6 +288,13 @@ pub enum SessionSupervisorEvent {
         id: SessionId,
         name: String,
     },
+    /// A session reached a new status. Journaled only when it differs from what
+    /// is already recorded, so a session that loads and reports the status it
+    /// recovered writes nothing.
+    SessionStatusChanged {
+        id: SessionId,
+        status: SessionStatus,
+    },
     GroupCreated {
         name: String,
         created_at: u64,
@@ -373,6 +389,14 @@ pub struct SessionRecord {
     /// default so pre-annotations journal rows load with an empty map.
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+    /// What this session last reported it was doing.
+    ///
+    /// Durable, not a cache. `Running` and `Provisioning` can go stale under a
+    /// crash — they go stale identically in the session's own journal, which
+    /// also only learns better when the session loads and repairs, so this copy
+    /// is never less accurate than the truth it projects.
+    #[serde(default)]
+    pub status: SessionStatus,
 }
 
 /// One registered group. Registration is optional metadata: a group can exist
@@ -404,9 +428,6 @@ pub struct SessionSupervisor {
     global_tx: broadcast::Sender<GlobalSessionEvent>,
     config: SupervisorConfig,
     children: BTreeMap<SessionId, ActorRef<SessionCommand>>,
-    /// Last known status of each *loaded* session. Absent means "not loaded",
-    /// which the API reports as unknown rather than guessing.
-    status: BTreeMap<SessionId, SessionStatus>,
     last_activity: BTreeMap<SessionId, Instant>,
     /// One per-agent position registry per session, owned here rather than by
     /// the session actor so that unloading an idle session does not disconnect
@@ -441,7 +462,6 @@ impl SessionSupervisor {
             global_tx,
             config,
             children: BTreeMap::new(),
-            status: BTreeMap::new(),
             last_activity: BTreeMap::new(),
             revisions: BTreeMap::new(),
         }
@@ -518,7 +538,6 @@ impl SessionSupervisor {
 
     fn forget(&mut self, id: &SessionId) {
         self.children.remove(id);
-        self.status.remove(id);
         self.last_activity.remove(id);
         // The registry outlives the actor while anyone is still reading: an
         // unloaded session has nothing to say until something reloads it, and
@@ -538,7 +557,7 @@ impl SessionSupervisor {
     /// Runs inline on this mailbox, which is what makes it race-free: every
     /// command to a child goes through here, so nothing can reach a session
     /// between it agreeing to unload and its reference being dropped.
-    async fn offload_idle(&mut self) {
+    async fn offload_idle(&mut self, state: &SessionSupervisorState) {
         let now = self.config.clock.now();
         let timeout = self.config.idle_timeout;
         let candidates: Vec<SessionId> = self
@@ -550,7 +569,7 @@ impl SessionSupervisor {
                 // provisioning — unloading would strand the create's reply and
                 // cost the next load a whole second attempt.
                 if matches!(
-                    self.status.get(*id),
+                    state.sessions.get(*id).map(|rec| &rec.status),
                     Some(&SessionStatus::Running | &SessionStatus::Provisioning)
                 ) {
                     return false;
@@ -655,6 +674,10 @@ impl EventSourcedActor for SessionSupervisor {
                         spec,
                         created_at,
                         annotations: BTreeMap::new(),
+                        // Not a guess: a session's runtime is built before it
+                        // can run anything, and creating one is the first thing
+                        // it is asked to do.
+                        status: SessionStatus::Provisioning,
                     },
                 );
             }
@@ -664,6 +687,11 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorEvent::SessionNamed { id, name } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
                     rec.spec.name = Some(name);
+                }
+            }
+            SessionSupervisorEvent::SessionStatusChanged { id, status } => {
+                if let Some(rec) = state.sessions.get_mut(&id) {
+                    rec.status = status;
                 }
             }
             SessionSupervisorEvent::GroupCreated { name, created_at } => {
@@ -730,8 +758,8 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 let _ = reply.send(id.clone());
                 // Not a guess: a fresh session is provisioning, and says so
-                // until its vendor confirms the runtime.
-                self.status.insert(id.clone(), SessionStatus::Provisioning);
+                // until its vendor confirms the runtime. Recorded by the fold
+                // of `SessionCreated`, which is why nothing is inserted here.
                 self.publish(&id, &SessionStatus::Provisioning);
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
@@ -743,7 +771,7 @@ impl EventSourcedActor for SessionSupervisor {
                 let sessions = state
                     .sessions
                     .iter()
-                    .map(|(id, rec)| (id.clone(), rec.clone(), self.status.get(id).cloned()))
+                    .map(|(id, rec)| (id.clone(), rec.clone()))
                     .collect();
                 let _ = reply.send(sessions);
                 CommandEffect::none()
@@ -1039,7 +1067,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Tick => {
-                self.offload_idle().await;
+                self.offload_idle(state).await;
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Shutdown { reply } => {
@@ -1061,8 +1089,19 @@ impl EventSourcedActor for SessionSupervisor {
             }
             SessionSupervisorCommand::SessionStatusChanged { id, status } => {
                 self.publish(&id, &status);
-                self.status.insert(id, status);
-                CommandEffect::none()
+                // Idempotent on purpose: a session reports after every persisted
+                // batch and once more at load, so only a real transition is
+                // worth a write. Without this a busy session would journal a row
+                // here per batch, and every page-open would journal one more.
+                match state.sessions.get(&id) {
+                    Some(rec) if rec.status != status => {
+                        CommandEffect::persist(vec![SessionSupervisorEvent::SessionStatusChanged {
+                            id,
+                            status,
+                        }])
+                    }
+                    _ => CommandEffect::none(),
+                }
             }
             SessionSupervisorCommand::RenameSession { id, name, reply } => {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed { id, name }])
@@ -1485,6 +1524,9 @@ mod tests {
             ));
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        // Wait for the session to have finished provisioning and said so, so
+        // the restart below has a status to lose.
+        wait_for_status(&sup, &id, &SessionStatus::Idle).await;
         sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
             .await
             .unwrap();
@@ -1502,19 +1544,160 @@ mod tests {
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
-        let (_, _, status) = rows
+        let (_, rec) = rows
             .into_iter()
-            .find(|(row_id, _, _)| row_id == &id)
+            .find(|(row_id, _)| row_id == &id)
             .expect("the session still exists");
-        assert!(
-            status.is_none(),
-            "listing sessions must not load one to find its status"
+        assert_eq!(
+            rec.status,
+            SessionStatus::Idle,
+            "the row answers from the registry, without loading the session"
         );
         assert_eq!(
             f.agent.signals(),
             before,
             "recovery must not call the vendor"
         );
+    }
+
+    /// A session's status outlives the process that produced it.
+    ///
+    /// It used to be a cache of loaded sessions, so every row rendered unknown
+    /// after a restart — and a workflow's list of past runs is a list of
+    /// sessions that are by definition cold, so every one of them was a dash.
+    #[tokio::test]
+    async fn a_status_survives_a_restart_without_loading_the_session() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let sup = spawn_supervisor_on(&f, journal.clone()).await;
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        let _ = sup
+            .tell(SessionSupervisorCommand::SessionStatusChanged {
+                id: id.clone(),
+                status: SessionStatus::Failed {
+                    reason: "the provider said no".into(),
+                },
+            })
+            .await;
+        sup.ask(|reply| SessionSupervisorCommand::Shutdown { reply })
+            .await
+            .unwrap();
+        let before = f.agent.signals();
+
+        let sup2 = spawn_supervisor_on(&f, journal).await;
+        let rows = sup2
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let (_, rec) = rows
+            .into_iter()
+            .find(|(row_id, _)| row_id == &id)
+            .expect("the session still exists");
+        assert_eq!(
+            rec.status,
+            SessionStatus::Failed {
+                reason: "the provider said no".into()
+            },
+            "the last status the session reported is the one the registry keeps"
+        );
+        assert_eq!(
+            f.agent.signals(),
+            before,
+            "listing must not wake a session, which would re-attempt its provision"
+        );
+    }
+
+    /// Re-reporting an unchanged status journals nothing: a session reports
+    /// after every persisted batch and once more at load, so without this a
+    /// busy session would write a registry row per batch.
+    #[tokio::test]
+    async fn re_reporting_the_same_status_journals_nothing() {
+        let f = fixture().await;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let sup = spawn_supervisor_on(&f, journal.clone()).await;
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        let _ = sup
+            .tell(SessionSupervisorCommand::SessionStatusChanged {
+                id: id.clone(),
+                status: SessionStatus::Idle,
+            })
+            .await;
+        // Round-trip so the write above is folded before the count is taken.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let pid = PersistenceId::new(
+            "session-supervisor",
+            crate::auth::UserId::bootstrap().as_str(),
+        );
+        let before = journal_len(&journal, &pid).await;
+
+        for _ in 0..3 {
+            let _ = sup
+                .tell(SessionSupervisorCommand::SessionStatusChanged {
+                    id: id.clone(),
+                    status: SessionStatus::Idle,
+                })
+                .await;
+        }
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal_len(&journal, &pid).await,
+            before,
+            "a status that has not changed is not news"
+        );
+    }
+
+    /// Poll the registry until `id` reads `want` (2s cap).
+    async fn wait_for_status(
+        sup: &ActorRef<SessionSupervisorCommand>,
+        id: &SessionId,
+        want: &SessionStatus,
+    ) {
+        for _ in 0..200 {
+            let rows = sup
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+                .unwrap();
+            if rows
+                .iter()
+                .any(|(row_id, rec)| row_id == id && &rec.status == want)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("session {id} never reached {want:?}");
+    }
+
+    async fn spawn_supervisor_on(
+        f: &Fixture,
+        journal: Arc<dyn Journal>,
+    ) -> ActorRef<SessionSupervisorCommand> {
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let (gtx, _) = broadcast::channel(16);
+        ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
+            crate::auth::UserId::bootstrap(),
+            f.deps.clone(),
+            gtx,
+            manual_config(&clock),
+        ))
+    }
+
+    async fn journal_len(journal: &Arc<dyn Journal>, pid: &PersistenceId) -> usize {
+        use futures_util::StreamExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only inspection of a journal whose actor is running"
+        )]
+        let stream = journal.replay(pid, 0).await;
+        stream.count().await
     }
 
     #[tokio::test]
@@ -2023,7 +2206,7 @@ mod tests {
             listed
                 .iter()
                 .find(|(sid, ..)| *sid == id)
-                .and_then(|(_, rec, _)| rec.spec.name.as_deref()),
+                .and_then(|(_, rec)| rec.spec.name.as_deref()),
             Some("Investigate login failure"),
             "the rename is durable, not just broadcast"
         );

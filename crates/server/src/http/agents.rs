@@ -175,11 +175,12 @@ pub async fn invoke_agent(
         spec,
         created_at,
         annotations: BTreeMap::new(),
+        status: SessionStatus::Idle,
     };
     Ok((
         StatusCode::CREATED,
         Json(AgentInvokeResponse {
-            session: handlers::summary(&id, &rec, Some(&SessionStatus::Idle)),
+            session: handlers::summary(&id, &rec),
         }),
     ))
 }

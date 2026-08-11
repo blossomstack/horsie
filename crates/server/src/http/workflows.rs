@@ -247,11 +247,12 @@ pub async fn start_run(
         spec,
         created_at,
         annotations: Default::default(),
+        status: SessionStatus::Idle,
     };
     Ok((
         StatusCode::CREATED,
         Json(WorkflowRunResponse {
-            session: handlers::summary(&id, &rec, Some(&SessionStatus::Idle)),
+            session: handlers::summary(&id, &rec),
         }),
     ))
 }
@@ -267,8 +268,8 @@ pub async fn list_runs(
     let all = handlers::ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
     let mut sessions: Vec<_> = all
         .iter()
-        .filter(|(_, rec, _)| rec.spec.workflow_name() == Some(name.as_str()))
-        .map(|(id, rec, status)| handlers::summary(id, rec, status.as_ref()))
+        .filter(|(_, rec)| rec.spec.workflow_name() == Some(name.as_str()))
+        .map(|(id, rec)| handlers::summary(id, rec))
         .collect();
     sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
     Ok(Json(WorkflowRunsResponse { sessions }))
