@@ -218,6 +218,32 @@ mod tests {
         assert_eq!(got.created_at, "1", "replace must not touch created_at");
     }
 
+    /// A flag stored one bind out of order writes a neighbouring column and
+    /// still round-trips *something*, so this pins the value rather than just
+    /// the absence of an error. Both writers, because they bind separately.
+    #[tokio::test]
+    async fn auto_compact_round_trips_through_insert_and_replace() {
+        let (s, _t) = store().await;
+        let mut r = row("a");
+        r.auto_compact = Some(false);
+        s.insert(&r).await.unwrap();
+        let got = s.get("a").await.unwrap().unwrap();
+        assert_eq!(got.auto_compact, Some(false));
+        // The neighbours a mis-ordered bind would have landed in.
+        assert_eq!(got.thinking_effort, r.thinking_effort);
+        assert_eq!(got.updated_at, r.updated_at);
+
+        r.auto_compact = Some(true);
+        assert!(s.replace(&r).await.unwrap());
+        assert_eq!(s.get("a").await.unwrap().unwrap().auto_compact, Some(true));
+
+        // Absent stays absent, which is what "the server decides" looks like on
+        // the way back out.
+        r.auto_compact = None;
+        assert!(s.replace(&r).await.unwrap());
+        assert_eq!(s.get("a").await.unwrap().unwrap().auto_compact, None);
+    }
+
     #[tokio::test]
     async fn delete_reports_misses() {
         let (s, _t) = store().await;
