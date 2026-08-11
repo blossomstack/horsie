@@ -7,7 +7,15 @@
 //! agent cannot know — the exact state to carry, the hooks to fire — is
 //! supplied by whoever owns it.
 
-use horsie_models::agent::{ContentPart, Message, Role};
+use crate::agent::Agent;
+use crate::error::AgentError;
+use crate::events::{EventSink, EventSinkError};
+use crate::provider::{CompletionRequest, ToolChoice};
+use horsie_models::agent::{
+    CompactionEntry, CompactionTrigger, ContentPart, EmptyOutcome, Message, Role, TextPart,
+};
+use horsie_models::events::{AgentEvent, CompactedEvent};
+use horsie_models::now_ms;
 
 /// How much room a compaction is working with.
 ///
@@ -205,8 +213,229 @@ pub fn summary_prompt(instructions: Option<&str>) -> String {
     prompt
 }
 
+/// Swallows everything. The summarising call is not a turn, and its streaming
+/// deltas must never reach a transcript — a viewer would watch the summary being
+/// typed as though the agent had started answering.
+struct NullSink;
+
+#[async_trait::async_trait]
+impl EventSink for NullSink {
+    async fn emit(&self, _event: AgentEvent) -> Result<(), EventSinkError> {
+        Ok(())
+    }
+}
+
+impl Agent {
+    /// Compact if the last prompt crossed this agent's budget.
+    ///
+    /// Called at the top of the tool loop, which is the only point in a run
+    /// where every `tool_use` already has its `tool_result` — and, because a
+    /// fresh turn is iteration 0, is also the turn boundary. There is no second
+    /// mechanism for "compact between turns".
+    ///
+    /// Silent when there is no policy, no budget, or room left.
+    pub(crate) async fn maybe_compact(&mut self, current_tokens: u32, events: &dyn EventSink) {
+        let Some(budget) = self.config.compaction else {
+            return;
+        };
+        if self.compaction.is_none() || current_tokens < budget.trigger_tokens() {
+            return;
+        }
+        // A failure here is not a failure of the turn. The run continues on the
+        // history it already had, which may then overflow and say so — an
+        // honest error beats silently proceeding degraded, and retrying belongs
+        // to the turn's own budget, not to this.
+        if let Err(e) = self
+            .compact(None, CompactionTrigger::Auto(EmptyOutcome {}), events)
+            .await
+        {
+            tracing::warn!(error = %e, "a compaction failed; the turn continues uncompacted");
+        }
+    }
+
+    /// Summarise everything before the cut and rewrite the history.
+    ///
+    /// `Ok(())` with nothing done when there is no policy or nothing worth
+    /// compacting — a `/compact` on a session with two messages in it is a
+    /// no-op, not an error.
+    pub async fn compact(
+        &mut self,
+        instructions: Option<String>,
+        trigger: CompactionTrigger,
+        events: &dyn EventSink,
+    ) -> Result<(), AgentError> {
+        let Some(policy) = self.compaction.clone() else {
+            return Ok(());
+        };
+        let retain = self.config.compaction.map_or(0, |b| b.retain_tokens());
+        let cut = choose_cut(&self.history, retain);
+        if cut == 0 {
+            // Nothing would be folded away. Compacting here would spend a
+            // provider call to replace the history with a summary of itself.
+            return Ok(());
+        }
+        let tokens_before = self.last_context_tokens;
+        let plan = CompactionPlan {
+            covered: cut,
+            retained: self.history.len() - cut,
+            tokens_before,
+            instructions: instructions.clone(),
+        };
+        if let PreCompactDecision::Abandon(reason) = policy.before(&plan).await {
+            tracing::info!(reason, "a PreCompact hook abandoned this compaction");
+            return Ok(());
+        }
+
+        let summary = self.summarise(cut, instructions.as_deref()).await?;
+        let carried_state = policy.carried_state().await;
+
+        let retained: Vec<Message> = self.history[cut..].to_vec();
+        let entry = CompactionEntry {
+            summary: summary.clone(),
+            carried_state,
+            // Positions in the *prompt* the run was built from. The actor
+            // translates these to log seqs when it folds the event: only it
+            // knows the log, and only this knows the prompt.
+            covers_through_seq: (cut - 1) as u64,
+            retained_from_seq: cut as u64,
+            trigger,
+            instructions,
+            tokens_before,
+            tokens_after: 0,
+        };
+
+        let mut rewritten = Vec::with_capacity(retained.len() + 1);
+        rewritten.push(boundary_message(&entry));
+        rewritten.extend(retained);
+        let tokens_after: u32 = rewritten.iter().map(approx_tokens).sum();
+        let entry = CompactionEntry {
+            tokens_after,
+            ..entry
+        };
+        self.history = rewritten;
+        // The next iteration's check reads this. Left at the pre-compaction
+        // size it would compact again immediately, every iteration, forever.
+        self.last_context_tokens = tokens_after;
+
+        events
+            .emit(AgentEvent::Compacted(CompactedEvent {
+                message_id: uuid::Uuid::new_v4().to_string(),
+                entry,
+                at_ms: now_ms(),
+            }))
+            .await?;
+
+        policy
+            .after(&CompactionResult {
+                summary,
+                tokens_before,
+                tokens_after,
+            })
+            .await;
+        Ok(())
+    }
+
+    /// Ask the model to summarise `history[..cut]`.
+    async fn summarise(
+        &self,
+        cut: usize,
+        instructions: Option<&str>,
+    ) -> Result<String, AgentError> {
+        let mut messages = self.history[..cut].to_vec();
+        messages.push(Message {
+            id: format!("compaction-request:{cut}"),
+            role: Role::User,
+            parts: vec![ContentPart::Text(TextPart {
+                text: summary_prompt(instructions),
+            })],
+            created_at_ms: now_ms(),
+            started_at_ms: None,
+        });
+        let response = self
+            .provider
+            .complete(
+                CompletionRequest {
+                    messages: &messages,
+                    // No system prompt: the workspace and tool guidance are
+                    // instructions for doing the work, and this call is not
+                    // doing the work. They would only bias the summary.
+                    system: None,
+                    // No tools, which is also what makes `tool_choice`
+                    // irrelevant — every provider omits it when tools are empty.
+                    tools: Vec::new(),
+                    tool_choice: ToolChoice::Auto,
+                    max_tokens: self.config.max_tokens,
+                    thinking_effort: None,
+                    conversation_id: &self.conversation_id,
+                },
+                "compaction",
+                &NullSink,
+            )
+            .await
+            .map_err(AgentError::Provider)?;
+
+        let text: String = response
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text(t) => Some(t.text.as_str()),
+                ContentPart::ToolCall(_)
+                | ContentPart::ToolResult(_)
+                | ContentPart::Thinking(_)
+                | ContentPart::SubAgentResult(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if text.trim().is_empty() {
+            return Err(AgentError::Provider(crate::error::LlmError::ApiError {
+                status: 502,
+                message: "the summariser returned no text".into(),
+            }));
+        }
+        Ok(text)
+    }
+}
+
+/// The one message a boundary shows the model, as the agent builds it.
+///
+/// Mirrors the server's own `boundary_message`, which builds the same text from
+/// the folded entry. Both exist because the run holds a `Vec<Message>` and the
+/// actor holds a log, and neither can see the other's — but the text a provider
+/// receives must be identical either way, or a recovered agent would prompt
+/// differently from the one it replaced.
+#[must_use]
+pub fn boundary_message(entry: &CompactionEntry) -> Message {
+    Message {
+        id: format!("compaction:{}", entry.covers_through_seq),
+        role: Role::User,
+        parts: vec![ContentPart::Text(TextPart {
+            text: boundary_text(&entry.summary, &entry.carried_state),
+        })],
+        created_at_ms: now_ms(),
+        started_at_ms: None,
+    }
+}
+
+/// The exact text of a boundary message. One function so the run and the
+/// recovered log cannot drift apart.
+#[must_use]
+pub fn boundary_text(summary: &str, carried_state: &str) -> String {
+    format!(
+        "This conversation was compacted: earlier history is summarised below \
+         rather than shown in full. The messages after this one are verbatim.\n\n\
+         ## Summary of earlier work\n{}\n\n## Current state\n{}",
+        summary.trim(),
+        carried_state.trim(),
+    )
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::*;
     use horsie_models::agent::{TextPart, ToolCallPart, ToolResultPart};
@@ -251,6 +480,334 @@ mod tests {
             created_at_ms: 0,
             started_at_ms: None,
         }
+    }
+
+    // --- The loop's own behaviour ------------------------------------------
+
+    use crate::testkit::{CollectingEventSink, MockProvider};
+    use crate::tool::EmptyToolbox;
+    use horsie_models::agent::{AgentInput, Usage};
+    use std::sync::{Arc, Mutex};
+
+    /// Records what it was asked and answers with a fixed block of state.
+    struct RecordingPolicy {
+        carried: String,
+        decision: PreCompactDecision,
+        plans: Mutex<Vec<CompactionPlan>>,
+        results: Mutex<Vec<CompactionResult>>,
+    }
+
+    impl RecordingPolicy {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                carried: "TASKS: 1. ship it (in_progress)".into(),
+                decision: PreCompactDecision::Proceed,
+                plans: Mutex::new(Vec::new()),
+                results: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn refusing() -> Arc<Self> {
+            Arc::new(Self {
+                carried: String::new(),
+                decision: PreCompactDecision::Abandon("a hook said no".into()),
+                plans: Mutex::new(Vec::new()),
+                results: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn results(&self) -> usize {
+            self.results.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CompactionPolicy for RecordingPolicy {
+        async fn carried_state(&self) -> String {
+            self.carried.clone()
+        }
+        async fn before(&self, plan: &CompactionPlan) -> PreCompactDecision {
+            self.plans.lock().unwrap().push(plan.clone());
+            self.decision.clone()
+        }
+        async fn after(&self, result: &CompactionResult) {
+            self.results.lock().unwrap().push(result.clone());
+        }
+    }
+
+    fn budget(window: u32) -> CompactionBudget {
+        CompactionBudget {
+            context_window: window,
+            trigger_at_percent: 80,
+            retain_percent: 20,
+        }
+    }
+
+    /// A provider that reports a large prompt on its first answer — enough to
+    /// cross the budget — then a small one.
+    fn provider_reporting(input_tokens: &[u32]) -> Arc<MockProvider> {
+        let steps: Vec<_> = input_tokens
+            .iter()
+            .map(|t| {
+                Ok(crate::provider::CompletionResponse {
+                    parts: vec![ContentPart::Text(TextPart {
+                        text: "an answer".into(),
+                    })],
+                    stop_reason: crate::provider::StopReason::EndTurn,
+                    usage: Usage::without_cache(*t, 5),
+                })
+            })
+            .collect();
+        MockProvider::scripted(crate::testkit::Script::of(steps).then_repeating_with(|| {
+            Ok(crate::provider::CompletionResponse {
+                parts: vec![ContentPart::Text(TextPart {
+                    text: "a summary of what came before".into(),
+                })],
+                stop_reason: crate::provider::StopReason::EndTurn,
+                usage: Usage::without_cache(10, 5),
+            })
+        }))
+    }
+
+    fn long_history(turns: usize) -> Vec<Message> {
+        let mut history = Vec::new();
+        for i in 0..turns {
+            history.push(user(&format!("u{i}"), &"question ".repeat(200)));
+            history.push(msg(
+                Role::Assistant,
+                &format!("a{i}"),
+                &"answer ".repeat(200),
+            ));
+        }
+        history
+    }
+
+    async fn run_once(agent: &mut crate::agent::Agent, sink: &CollectingEventSink) {
+        let _ = agent
+            .run(
+                AgentInput::user_message("in-1", "carry on"),
+                sink,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await;
+    }
+
+    fn compactions(sink: &CollectingEventSink) -> Vec<CompactedEvent> {
+        sink.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::Compacted(c) => Some(c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_run_under_the_threshold_never_compacts() {
+        let policy = RecordingPolicy::new();
+        let mut agent =
+            crate::agent::Agent::builder(provider_reporting(&[10]), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    compaction: Some(budget(100_000)),
+                    ..Default::default()
+                })
+                .with_history(long_history(3))
+                .with_compaction(policy.clone())
+                .with_context_tokens(10)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        assert!(compactions(&sink).is_empty(), "there was room to spare");
+        assert_eq!(policy.results(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_agent_with_no_policy_never_compacts() {
+        let mut agent =
+            crate::agent::Agent::builder(provider_reporting(&[10]), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    // A budget that is certainly crossed…
+                    compaction: Some(budget(100)),
+                    ..Default::default()
+                })
+                .with_history(long_history(3))
+                // …and no policy to carry state or fire hooks.
+                .with_context_tokens(10_000)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        assert!(
+            compactions(&sink).is_empty(),
+            "without a policy there is nobody to ask for carried state, so \
+             compacting would silently drop it"
+        );
+    }
+
+    #[tokio::test]
+    async fn crossing_the_threshold_compacts_before_the_next_call() {
+        let policy = RecordingPolicy::new();
+        // Every call answers the same way, so the assertion below does not
+        // depend on whether the summarising call or the turn's own call came
+        // first — it is the summarising one, but that is what the *next* test
+        // pins down.
+        let provider = MockProvider::text("a summary of what came before");
+        let mut agent =
+            crate::agent::Agent::builder(provider.clone(), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    compaction: Some(budget(1_000)),
+                    ..Default::default()
+                })
+                .with_history(long_history(4))
+                .with_compaction(policy.clone())
+                // Seeded above 80% of 1000 — the previous turn left the context full,
+                // so iteration 0 of this fresh turn must compact.
+                .with_context_tokens(900)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        let events = compactions(&sink);
+        assert_eq!(events.len(), 1, "exactly one boundary, at iteration 0");
+        let entry = &events[0].entry;
+        assert!(entry.summary.contains("a summary of what came before"));
+        assert!(
+            entry.carried_state.contains("ship it"),
+            "the policy's exact state rides on the boundary, got {:?}",
+            entry.carried_state
+        );
+        assert!(entry.tokens_after < entry.tokens_before);
+        assert_eq!(policy.results(), 1, "PostCompact saw it");
+        assert!(
+            provider.calls() >= 2,
+            "one call to summarise, then the turn's own — the summary is not \
+             free and must not be confused with the answer"
+        );
+        // The summarising call is the first one, and it carries no tools: it is
+        // not a turn and must not be able to start one.
+        assert_eq!(
+            provider.requests()[0].message_count,
+            8 + 1,
+            "the covered span plus the ask"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_history_after_a_compaction_is_balanced_and_starts_with_the_summary() {
+        let policy = RecordingPolicy::new();
+        let mut agent =
+            crate::agent::Agent::builder(provider_reporting(&[10]), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    compaction: Some(budget(1_000)),
+                    ..Default::default()
+                })
+                .with_history(long_history(4))
+                .with_compaction(policy.clone())
+                .with_context_tokens(900)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        let history = agent.history_for_test();
+        assert_eq!(history[0].role, Role::User);
+        assert!(
+            history[0]
+                .parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Text(t) if t.text.contains("was compacted"))),
+            "the rewritten history opens with the boundary message"
+        );
+        // Every tool result in what survives must have its call above it.
+        let calls: Vec<&str> = history
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter_map(|p| match p {
+                ContentPart::ToolCall(c) => Some(c.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        for part in history.iter().flat_map(|m| m.parts.iter()) {
+            if let ContentPart::ToolResult(r) = part {
+                assert!(
+                    calls.contains(&r.tool_call_id.as_str()),
+                    "a retained tool result lost its call: {}",
+                    r.tool_call_id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_precompact_hook_that_refuses_abandons_the_compaction() {
+        let policy = RecordingPolicy::refusing();
+        let mut agent =
+            crate::agent::Agent::builder(provider_reporting(&[10]), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    compaction: Some(budget(1_000)),
+                    ..Default::default()
+                })
+                .with_history(long_history(4))
+                .with_context_tokens(900)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        assert!(
+            compactions(&sink).is_empty(),
+            "a refused compaction leaves no boundary"
+        );
+        assert_eq!(policy.results(), 0, "and never reaches PostCompact");
+    }
+
+    /// The turn must survive a summariser that will not answer. Losing the
+    /// compaction is a degraded turn; failing the turn is a lost one.
+    #[tokio::test]
+    async fn a_failing_summariser_leaves_the_run_untouched() {
+        let policy = RecordingPolicy::new();
+        // Every call fails, including the summarising one.
+        let provider = MockProvider::scripted(
+            crate::testkit::Script::of([Err(crate::error::LlmError::Overloaded)])
+                .then_repeating_with(|| {
+                    Ok(crate::provider::CompletionResponse {
+                        parts: vec![ContentPart::Text(TextPart { text: "ok".into() })],
+                        stop_reason: crate::provider::StopReason::EndTurn,
+                        usage: Usage::without_cache(10, 5),
+                    })
+                }),
+        );
+        let before = long_history(4);
+        let mut agent = crate::agent::Agent::builder(provider, Arc::new(EmptyToolbox), "conv")
+            .with_config(crate::AgentConfig {
+                compaction: Some(budget(1_000)),
+                ..Default::default()
+            })
+            .with_history(before.clone())
+            .with_compaction(policy.clone())
+            .with_context_tokens(900)
+            .build()
+            .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        assert!(compactions(&sink).is_empty(), "no boundary was written");
+        let history = agent.history_for_test();
+        assert!(
+            history.len() > before.len(),
+            "the run went ahead on the history it already had (plus its input)"
+        );
+        assert_eq!(policy.results(), 0);
     }
 
     #[test]

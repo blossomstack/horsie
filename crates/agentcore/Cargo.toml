@@ -22,6 +22,7 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { workspace = true }
 jsonschema  = { workspace = true }
+tracing     = { workspace = true }
 
 [lints]
 workspace = true
