@@ -91,6 +91,13 @@ everything after the name, `$1`, `$2` … the individual words. A command's name
 is its filename. A `/name` horsie does not recognise is sent as you wrote it —
 `/etc/hosts` has to survive being typed.
 
+A few slash commands are horsie's own and need no bundle. Today that is
+`/compact`, which summarises earlier history to free up context and takes
+optional instructions — `/compact keep the migration details`. Built-ins are
+offered whether or not any bundle is installed, and a bundle cannot take one
+over by declaring the same name. See
+[Context & memory](/internals/context-and-memory/#keep-less-compaction).
+
 **MCP servers** (`.mcp.json`) run in the runtime, next to the workspace. Both
 a local server (`"command": "npx", …`) and a remote one (`"type": "http"`)
 work. They authenticate with whatever the declaration carries; one needing an
