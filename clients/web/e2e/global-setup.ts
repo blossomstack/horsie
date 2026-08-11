@@ -240,6 +240,16 @@ export default async function globalSetup(): Promise<void> {
         // New Session modal's default (models[0]) stays the Anthropic wire —
         // the OpenAI wire is opt-in per test via createSession({ model }).
         { alias: "openai-mock", provider: "mock-openai", modelId: "mock-model", maxTokens: 4096 },
+        // A window small enough that the mock's own 10-token prompt is already
+        // over the 80% trigger, so the *second* turn of any session on it
+        // compacts. Alias sorts last, so it never becomes the default.
+        {
+          alias: "tiny-window",
+          provider: "mock",
+          modelId: "mock-model",
+          maxTokens: 4096,
+          contextWindow: 10,
+        },
       ],
     });
 

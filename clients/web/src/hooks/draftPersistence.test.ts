@@ -20,6 +20,7 @@ const sample: DraftPayload = {
   skills: ["bundle-a"],
   mcp: ["mcp-x"],
   memorySpaces: ["horsie"],
+  autoCompact: true,
   thinkingEffort: "high",
 };
 
@@ -241,6 +242,9 @@ describe("emptyDraft", () => {
       mcp: [],
       memorySpaces: [],
       thinkingEffort: "",
+      // On, matching the server's reading of an absent flag: the setting
+      // exists to turn compaction off, never to opt into it.
+      autoCompact: true,
     });
   });
 });

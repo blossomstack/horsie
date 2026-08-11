@@ -64,6 +64,13 @@ function band(pct: number): { color: string; word: string } {
 }
 
 const R = 7.5;
+/** The share of the window at which the agent compacts.
+ *
+ * Mirrors the server's own constant. Duplicated rather than fetched: it is one
+ * number that changes with a release, and a round-trip to draw a tick mark
+ * would make the gauge wait on the network to render. */
+const COMPACT_AT_PERCENT = 80;
+
 const CIRC = 2 * Math.PI * R;
 
 /** The context dial on the header strip.
@@ -191,7 +198,7 @@ export function ContextGauge({
             {pct != null && (
               <>
                 <div
-                  className="screen mt-1.5 h-1.5 w-full overflow-hidden !rounded-[2px]"
+                  className="screen relative mt-1.5 h-1.5 w-full overflow-hidden !rounded-[2px]"
                   role="meter"
                   aria-valuenow={pct}
                   aria-valuemin={0}
@@ -201,6 +208,18 @@ export function ContextGauge({
                   <div
                     className="h-full transition-[width] duration-500"
                     style={{ width: `${pct}%`, background: tone!.color }}
+                  />
+                  {/* Where compaction happens. On the bar rather than the dial:
+                      a 20px dial has no room for a mark that reads as anything,
+                      and this is the surface someone opens *because* they are
+                      wondering. No number beside it — the position is the
+                      statement. */}
+                  <div
+                    data-testid="compaction-threshold"
+                    className="absolute inset-y-0 w-px bg-[var(--legend-faint)]"
+                    style={{ left: `${COMPACT_AT_PERCENT}%` }}
+                    title={`Compacts automatically around ${COMPACT_AT_PERCENT}% full`}
+                    aria-hidden
                   />
                 </div>
                 <p

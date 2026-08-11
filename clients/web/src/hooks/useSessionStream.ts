@@ -60,9 +60,25 @@ export interface RenderedHookNotice {
   atMs: number;
 }
 
+/** A compaction boundary, as the transcript shows it. */
+export interface RenderedCompaction {
+  /** The log seq of the boundary entry — the conversation's own id. */
+  seq: number;
+  summary: string;
+  carriedState: string;
+  /** How many entries this boundary's summary covers, or `null` when the
+   * conversation before it has not been paged in and the count is unknown. */
+  covered: number | null;
+  tokensBefore: number;
+  tokensAfter: number;
+  manual: boolean;
+  atMs: number;
+}
+
 export type TranscriptItem =
   | { kind: "message"; value: RenderedMessage }
-  | { kind: "notice"; value: RenderedHookNotice };
+  | { kind: "notice"; value: RenderedHookNotice }
+  | { kind: "compaction"; value: RenderedCompaction };
 
 export interface SessionStream {
   items: TranscriptItem[];
@@ -590,6 +606,9 @@ export function useSessionStream(
     });
 
     const items: TranscriptItem[] = [];
+    // Where the previous conversation ended, so a boundary can say how much
+    // *it* closed rather than how far the log stretches behind it.
+    let previousBoundarySeq: number | null = null;
     for (const entry of state.entries) {
       if (entry.body.type === "Llm") {
         if (entry.body.value.role === Role.Tool) continue;
@@ -601,6 +620,34 @@ export function useSessionStream(
           kind: "notice",
           value: { id: entry.body.value.id, record, atMs: entry.body.value.createdAtMs },
         });
+      } else if (entry.body.type === "Compaction") {
+        const c = entry.body.value;
+        items.push({
+          kind: "compaction",
+          value: {
+            seq: entry.seq,
+            summary: c.summary,
+            carriedState: c.carriedState,
+            // The span *this* boundary closed, in log entries — measured from
+            // the previous boundary, not from the start of the log, or every
+            // compaction after the first would claim the whole history.
+            //
+            // `null` when the previous boundary has not been paged in yet: the
+            // honest answer is that the count is unknown, and inventing one by
+            // measuring from seq 0 is exactly the bug this replaced.
+            covered:
+              previousBoundarySeq === null
+                ? state.hasMoreBefore
+                  ? null
+                  : c.coversThroughSeq + 1
+                : c.coversThroughSeq - previousBoundarySeq,
+            tokensBefore: c.tokensBefore,
+            tokensAfter: c.tokensAfter,
+            manual: c.trigger.kind === "Manual",
+            atMs: entry.atMs,
+          },
+        });
+        previousBoundarySeq = entry.seq;
       }
       // Lifecycle entries drive the fold above; they are not transcript rows.
     }

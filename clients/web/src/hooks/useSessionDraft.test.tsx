@@ -142,6 +142,7 @@ function storeDraft(draft: Partial<DraftPayload>) {
     skills: [],
     mcp: [],
     memorySpaces: [],
+    autoCompact: true,
     ...draft,
       thinkingEffort: "",
 };

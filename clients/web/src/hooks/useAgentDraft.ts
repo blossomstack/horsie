@@ -34,6 +34,9 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
   const [thinkingEffort, setThinkingEffort] = useState(
     initial?.thinkingEffort ?? "",
   );
+  // Absent means on, so an existing preset that never said anything keeps
+  // compacting — the flag exists to turn it off.
+  const [autoCompact, setAutoCompact] = useState(initial?.autoCompact ?? true);
 
   // The effort menu belongs to the model, so a preset can name an effort the
   // currently-selected model no longer offers. Treat that as "use the model's
@@ -60,8 +63,11 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
         mcpServers: mcp.size ? [...mcp] : undefined,
         memorySpaces: memorySpaces.size ? [...memorySpaces] : undefined,
         thinkingEffort: effectiveThinkingEffort || undefined,
+        // Only ever sent as `false`: absent means on, and writing today's
+        // default into every saved preset would freeze it there.
+        autoCompact: autoCompact ? undefined : false,
       }),
-    [model, skills, mcp, memorySpaces, effectiveThinkingEffort],
+    [model, skills, mcp, memorySpaces, effectiveThinkingEffort, autoCompact],
   );
 
   return {
@@ -77,6 +83,9 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
     setThinkingEffort,
     thinkingEfforts,
     modelDefaultThinkingEffort: selectedModel?.thinkingEffort ?? "",
+    autoCompact,
+    setAutoCompact,
+    autoCompactAvailable: (selectedModel?.contextWindow ?? 0) > 0,
     buildAgentInput,
   };
 }
