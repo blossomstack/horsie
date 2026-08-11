@@ -50,7 +50,6 @@ impl WorkflowRun {
                 let Some(index) = state.run.as_ref().and_then(WorkflowRunState::current) else {
                     return CommandEffect::none();
                 };
-                actor.report(SessionStatus::Idle).await;
                 CommandEffect::persist(vec![SessionDomainEvent::StepCancelled {
                     at_ms: now_ms(),
                     index,
@@ -108,7 +107,6 @@ impl SessionActor {
                 error: format!("step '{step}' could not be started"),
             }];
         }
-        self.report(SessionStatus::Running).await;
         vec![SessionDomainEvent::StepStarted {
             at_ms: now_ms(),
             index,
@@ -123,7 +121,6 @@ impl SessionActor {
 
     /// The run reached a terminal step and succeeded.
     pub(super) async fn finish_run(&mut self, output: Value) -> Vec<SessionDomainEvent> {
-        self.report(SessionStatus::Idle).await;
         vec![SessionDomainEvent::RunFinished {
             at_ms: now_ms(),
             output,
@@ -132,10 +129,6 @@ impl SessionActor {
 
     /// The run cannot continue — no transition matched, or a step failed.
     pub(super) async fn fail_run(&mut self, error: String) -> Vec<SessionDomainEvent> {
-        self.report(SessionStatus::Failed {
-            reason: error.clone(),
-        })
-        .await;
         vec![SessionDomainEvent::RunFailed {
             at_ms: now_ms(),
             error,
@@ -235,7 +228,6 @@ impl SessionActor {
                 true,
             ),
             TurnEnd::Asked => {
-                self.report(SessionStatus::AwaitingInput).await;
                 (
                     vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }],
                     // The step is still running, parked on its question. The
@@ -248,26 +240,16 @@ impl SessionActor {
             // decision for a person: the shared workspace holds whatever the
             // failed attempt left behind, so re-running blind would redo
             // half-finished work.
-            TurnEnd::Failed { error, .. } => {
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
-                (
-                    vec![SessionDomainEvent::StepFailed {
-                        at_ms: now_ms(),
-                        index,
-                        error,
-                    }],
-                    false,
-                )
-            }
+            TurnEnd::Failed { error, .. } => (
+                vec![SessionDomainEvent::StepFailed {
+                    at_ms: now_ms(),
+                    index,
+                    error,
+                }],
+                false,
+            ),
             TurnEnd::Parked => {
                 let error = "step parked; timers are not supported in workflows".to_string();
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
                 (
                     vec![SessionDomainEvent::StepFailed {
                         at_ms: now_ms(),

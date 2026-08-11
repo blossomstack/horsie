@@ -63,7 +63,6 @@ impl Turns {
                 }
                 actor.cancel_in_flight(state).await;
                 let _ = reply.send(());
-                actor.report(SessionStatus::Idle).await;
                 let stopped = match step {
                     // Cancelling the agent is not enough on a run: without this
                     // the step's log entry stays `Running` for ever, so
@@ -142,11 +141,9 @@ impl SessionActor {
     ) -> CommandEffect<SessionDomainEvent> {
         let events = match end {
             TurnEnd::Concluded { .. } => {
-                self.report(SessionStatus::Idle).await;
                 vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }]
             }
             TurnEnd::Asked => {
-                self.report(SessionStatus::AwaitingInput).await;
                 vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }]
             }
             // Only from a session that still believes the turn is running. The
@@ -158,7 +155,6 @@ impl SessionActor {
             // merged status, so the session decides; a report about anything but
             // a live turn is history that is already written.
             TurnEnd::Interrupted if state.status == SessionStatus::Running => {
-                self.report(SessionStatus::Idle).await;
                 vec![SessionDomainEvent::TurnInterrupted { at_ms: now_ms() }]
             }
             TurnEnd::Interrupted => return CommandEffect::none(),
@@ -171,10 +167,6 @@ impl SessionActor {
                 error,
                 terminal: true,
             } => {
-                self.report(SessionStatus::Unrecoverable {
-                    reason: error.clone(),
-                })
-                .await;
                 vec![SessionDomainEvent::SessionFailed {
                     at_ms: now_ms(),
                     reason: error,
@@ -184,10 +176,6 @@ impl SessionActor {
                 error,
                 terminal: false,
             } => {
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
                 vec![SessionDomainEvent::TurnFailed {
                     at_ms: now_ms(),
                     error,
@@ -195,10 +183,6 @@ impl SessionActor {
             }
             TurnEnd::Parked => {
                 let error = "agent parked; timers are not supported in sessions".to_string();
-                self.report(SessionStatus::Failed {
-                    reason: error.clone(),
-                })
-                .await;
                 vec![SessionDomainEvent::TurnFailed {
                     at_ms: now_ms(),
                     error,

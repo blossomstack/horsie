@@ -104,7 +104,6 @@ impl RuntimeLifecycle {
                         ))
                         .await;
                 });
-                actor.report(SessionStatus::Provisioning).await;
                 CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted {
                     at_ms: now_ms(),
                 }])
@@ -131,7 +130,6 @@ impl RuntimeLifecycle {
                     },
                 };
                 let next = SessionActor::apply_event(state.clone(), event.clone());
-                actor.report(next.status.clone()).await;
                 let mut events = vec![event];
                 // The runtime landed, so whatever queued behind it starts now.
                 // A failure drains nothing: the messages stay owed, and the

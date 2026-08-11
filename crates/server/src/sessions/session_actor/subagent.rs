@@ -359,6 +359,36 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// A session whose only repair is an interrupted subagent still tells its
+    /// supervisor what it recovered as.
+    ///
+    /// Recovery skips its own report whenever a repair is queued, on the
+    /// grounds that the repair reports the status it lands on. `Reconcile` is
+    /// the repair that does not: it persists `SubAgentFailed` and nothing
+    /// reports. So this session used to load and say nothing at all, leaving
+    /// its row blank until something unrelated moved it.
+    #[tokio::test]
+    async fn a_subagent_only_repair_still_reports_a_status() {
+        // The provider hangs, so the subagent is genuinely still `Running` when
+        // the session goes away — which is what a fold reads as interrupted,
+        // and what `SubAgents::on_load` queues a `Reconcile` for.
+        let gate = BlockingProvider::new();
+        let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
+        let sub = spawn_sub(&session, "worker", "dig").await;
+        wait_for_state(&journal, id, "the subagent to be running", |s| {
+            s.subagents.interrupted().contains(&sub)
+        })
+        .await;
+        drop(session);
+
+        let (parent, seen) = spawn_listening_supervisor();
+        let _revived = respawn_session(&f, id, journal, parent);
+        assert!(
+            !wait_for_report(&seen).await.is_empty(),
+            "a loaded session must report a status, repairs or not"
+        );
+    }
+
     #[test]
     fn subagent_events_fold_into_the_tree() {
         use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};

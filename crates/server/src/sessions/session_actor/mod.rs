@@ -226,13 +226,22 @@ impl SessionActor {
         PersistenceId::new("session", session_id.to_string())
     }
 
-    /// Report a status transition to the supervisor's cache and the live stream.
-    async fn report(&self, status: SessionStatus) {
+    /// Tell the supervisor the status this session's journal just folded.
+    ///
+    /// Read off the folded state rather than announced at each transition, and
+    /// called only where the state has settled — after a persisted batch, and
+    /// once at load. So what the supervisor records is by construction what the
+    /// session journaled, and the two cannot drift apart by a missed call site.
+    ///
+    /// That drift was the shape of the old code: thirteen `report(LITERAL)`
+    /// calls, each one duplicating the status the event on the very next line
+    /// was about to fold.
+    async fn report_status(&self, state: &SessionState) {
         let _ = self
             .parent
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
-                status,
+                status: state.status.clone(),
             })
             .await;
     }
@@ -707,7 +716,6 @@ impl SessionActor {
         who: Uuid,
     ) -> CommandEffect<SessionDomainEvent> {
         if who == self.id {
-            self.report(SessionStatus::Running).await;
             return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
         }
         if state.subagents.node(who).is_some() {
@@ -789,8 +797,13 @@ impl EventSourcedActor for SessionActor {
     /// Write what just became durable into the agents' own transcripts, so a
     /// reader sees a lifecycle entry where it happened rather than having to
     /// infer it from the session's status.
+    ///
+    /// And report the status the batch left behind. Here rather than at each
+    /// transition because here the write is already durable: the supervisor's
+    /// copy can lag the journal, never lead it.
     async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
         self.record_lifecycle(events, state).await;
+        self.report_status(state).await;
     }
 
     async fn handle_command(
@@ -849,20 +862,20 @@ impl EventSourcedActor for SessionActor {
         .into_iter()
         .flatten()
         .collect();
-        let repairing = !repairs.is_empty();
         for cmd in repairs {
             let _ = ctx.self_ref().tell(cmd).await;
         }
         // Loading is not a transition, but it is the first moment anyone can
-        // learn this status: the supervisor's cache is empty until a session
-        // reports, and a page already watching hears nothing otherwise.
+        // learn this status: a page already watching hears nothing otherwise.
         //
-        // Skipped when something is being repaired — that command reports the
-        // status it lands on, and announcing the pre-repair one first would
-        // show a state the session is already leaving.
-        if !repairing {
-            self.report(state.status.clone()).await;
-        }
+        // Unconditional, repairs or not. This used to be skipped whenever a
+        // repair was queued, on the grounds that the repair reports the status
+        // it lands on — but `SubAgentCommand::Reconcile` persists an event and
+        // reports nothing, so a session whose only repair was an interrupted
+        // subagent loaded and said nothing at all. A repair that does persist
+        // reports again from `on_events_persisted`, with the state it landed
+        // on, and a report that changes nothing is dropped by the supervisor.
+        self.report_status(state).await;
     }
 }
 

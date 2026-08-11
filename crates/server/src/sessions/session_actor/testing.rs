@@ -151,6 +151,82 @@ pub(super) fn spawn_deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
         .spawn_persistent(DeafSupervisor)
 }
 
+/// Every status reported to a [`ListeningSupervisor`], in order.
+pub(super) type ReportedStatuses = Arc<std::sync::Mutex<Vec<SessionStatus>>>;
+
+/// A supervisor stand-in that records what a session reports about itself.
+///
+/// `DeafSupervisor` exists so a report has somewhere to land; this one exists
+/// so a test can assert that the report happened at all.
+pub(super) struct ListeningSupervisor(ReportedStatuses);
+
+#[async_trait]
+impl EventSourcedActor for ListeningSupervisor {
+    type Command = SessionSupervisorCommand;
+    type Event = ();
+    type State = ();
+
+    fn persistence_id(&self) -> PersistenceId {
+        PersistenceId::new("test", "listening-supervisor")
+    }
+
+    fn initial_state() {}
+
+    fn apply_event((): (), (): ()) {}
+
+    async fn handle_command(
+        &mut self,
+        (): &(),
+        cmd: SessionSupervisorCommand,
+        _ctx: &mut ActorContext<SessionSupervisorCommand>,
+    ) -> CommandEffect<()> {
+        if let SessionSupervisorCommand::SessionStatusChanged { status, .. } = cmd {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(status);
+        }
+        CommandEffect::none()
+    }
+}
+
+pub(super) fn spawn_listening_supervisor() -> (ActorRef<SessionSupervisorCommand>, ReportedStatuses)
+{
+    let seen: ReportedStatuses = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let actor = horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new()))
+        .spawn_persistent(ListeningSupervisor(seen.clone()));
+    (actor, seen)
+}
+
+/// Re-spawn a session actor over an existing journal — a restart, from the
+/// session's point of view, and the only way to reach the recovery path.
+pub(super) fn respawn_session(
+    f: &ActorFixture,
+    id: Uuid,
+    journal: Arc<dyn horsie_actor::Journal>,
+    parent: ActorRef<SessionSupervisorCommand>,
+) -> ActorRef<SessionCommand> {
+    horsie_actor::ActorSystem::new(journal).spawn_persistent(SessionActor::new(
+        id,
+        actor_spec_fixture(),
+        f.deps.clone(),
+        parent,
+        crate::sessions::Positions::default(),
+    ))
+}
+
+/// Poll until the session has reported anything at all (2s cap).
+pub(super) async fn wait_for_report(seen: &ReportedStatuses) -> Vec<SessionStatus> {
+    for _ in 0..200 {
+        let got = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if !got.is_empty() {
+            return got;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Vec::new()
+}
+
 pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
     AskAnswer {
         tool_call_id: id.to_string(),
