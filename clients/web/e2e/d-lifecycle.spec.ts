@@ -150,6 +150,38 @@ test("D7: messages sent from inside an idle session leave no duplicate bubble", 
   await expect(userMessages.last()).toContainText("second question");
 });
 
+test("D8: a session id the server will not serve says so instead of offering a composer", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  // A dead id used to render the whole session chrome: the title fell back to
+  // "New session", the status was unknown-and-therefore-sendable, and the feed
+  // lamp sat on "Reconnecting" because a 404 fails an EventSource for good. It
+  // invited you to type into a session that cannot exist.
+  await page.goto(`${appBase}/sessions/00000000-0000-4000-8000-000000000000`);
+  const gone = page.getByTestId("session-unavailable");
+  await expect(gone).toBeVisible();
+  await expect(gone).toContainText("00000000-0000-4000-8000-000000000000");
+  await expect(page.getByTestId("composer-input")).toHaveCount(0);
+  await expect(page.getByTestId("session-reconnecting")).toHaveCount(0);
+  // The sidebar is the thing that makes it not a dead end.
+  await expect(page.getByTestId("new-session-button")).toBeVisible();
+
+  // A deep link to a session that *was* real is the way this is actually met —
+  // a bookmark, or a link shared before someone deleted it.
+  await mock.queueText("ok");
+  await createSession(page, appBase);
+  const id = await sendMessage(page, "about to vanish");
+  await expect(page.getByTestId("assistant-text")).toContainText("ok");
+  const res = await page.request.delete(`${appBase}/api/sessions/${id}`);
+  expect(res.ok()).toBe(true);
+
+  await page.goto(`${appBase}/sessions/${id}`);
+  await expect(page.getByTestId("session-unavailable")).toContainText(id);
+  await expect(page.getByTestId("composer-input")).toHaveCount(0);
+});
+
 test("D5: transcript is restored from the journal after a reload", async ({
   page,
   appBase,
