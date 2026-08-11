@@ -71,7 +71,7 @@ jobs:
       # production.
       - name: Deploy
         if: steps.creds.outputs.present == 'true'
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: b2fe9a8f417529fe6c6a247a70bc1a65
