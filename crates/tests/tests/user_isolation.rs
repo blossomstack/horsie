@@ -147,6 +147,7 @@ async fn agents_are_isolated() {
         thinking_effort: None,
         created_at: T.into(),
         updated_at: T.into(),
+        auto_compact: None,
     };
     mine.insert(&agent("mine")).await.unwrap();
 

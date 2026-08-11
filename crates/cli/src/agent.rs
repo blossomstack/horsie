@@ -123,6 +123,7 @@ mod tests {
             thinking_effort: None,
             created_at: "1".into(),
             updated_at: "1".into(),
+            auto_compact: None,
         }
     }
 

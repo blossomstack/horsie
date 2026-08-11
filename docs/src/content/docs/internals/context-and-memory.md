@@ -24,19 +24,41 @@ once, and write things down outside the window.
 
 ## Keep less: compaction
 
-A session's journal grows forever; the context does not.
+A session's log grows forever; the context does not.
 
-The journal is periodically snapshotted and compacted — a snapshot is a
-serialized state, and replay starts from the newest one rather than from the
-first message. That keeps recovery cheap no matter how long a session has run.
-It is also why the state a session serializes is a contract rather than an
-implementation detail: a change to it has to be able to read what older
-snapshots wrote.
+When the last prompt reaches 80% of the model's context window, the agent
+summarises everything before a recent-history cut into a **compaction
+boundary** and prompts from there instead. What the model is then handed is the
+summary, the exact state it must not forget, and the most recent messages
+verbatim. The summary is written with the previous summary already in the
+prompt, so summarising is a fold rather than a re-derivation: no span is ever
+summarised twice, and the tenth compaction costs what the first one did.
 
-For the reader this is invisible except in one place. The full transcript stays
-readable in the UI — history paginates, so opening a long session loads recent
-messages and fetches older ones as you scroll — while what the model is handed
-is the compacted state. The record is complete; the working set is not.
+**Nothing is deleted.** A boundary is appended to the log like any other entry;
+it only moves where the prompt starts. The whole transcript stays readable, on
+both sides of every boundary. The record is complete; the working set is not.
+
+Two things are carried across verbatim rather than summarised: the task list
+and armed timers, pending questions, and which subagents are still running.
+These are durable state either way, but the model only knows about them through
+the tool calls in the history — so a compaction that summarised them would
+leave an agent holding three open tasks with no idea it had any.
+
+A model whose card declares no context window never compacts automatically:
+there is no share of an unknown number to trigger on, and guessing would either
+compact a session that had room or fail to compact one that did not. Sessions
+can opt out entirely at creation, or from an agent preset.
+
+Type `/compact` to do it by hand, optionally with instructions —
+`/compact keep the migration details` adds a focus without discarding the rest.
+It runs at the next turn boundary, so a turn in flight finishes first.
+
+Separately and confusingly similarly named, the *journal* is periodically
+snapshotted and compacted: a snapshot is a serialized state, and replay starts
+from the newest one rather than from the first event. That keeps recovery
+cheap, and is why the state a session serializes is a contract rather than an
+implementation detail — a change to it has to be able to read what older
+snapshots wrote. It has nothing to do with what the model sees.
 
 ## Look at less: progressive disclosure
 
@@ -104,10 +126,12 @@ difference is worth more than it sounds. See
 
 ## What horsie does not do
 
-There is no automatic mid-run summarisation of the conversation you can tune,
-no tool-output clearing policy, and no retrieval layer that decides which files
-belong in context. Context is assembled from the session, the selected memory
-spaces, and what the agent chose to read.
+There is no tool-output clearing policy, and no retrieval layer that decides
+which files belong in context. Compaction is on or off, with no threshold to
+tune: the right share of a window is a property of the model rather than of a
+session, so it stays a server constant that can be retuned centrally instead of
+a number frozen into saved presets. Otherwise context is assembled from the
+session, the selected memory spaces, and what the agent chose to read.
 
 The lever you have is the outer harness: fewer tools per session, skills instead
 of instructions, subagents for anything wide, and memory kept short.
