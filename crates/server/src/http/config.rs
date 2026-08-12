@@ -121,8 +121,9 @@ pub async fn put_provider(
 
 /// `DELETE /api/config/model-providers/{name}`.
 ///
-/// A provider still referenced by a model is a `409`, not a cascade: deleting
-/// it would take a session's model with it.
+/// A cascade: the provider's models go with it. They route nowhere without it,
+/// so refusing until each one was deleted by hand only made the caller do the
+/// cascade itself.
 pub async fn delete_provider(
     Scope(state): Scope,
     Path(name): Path<String>,
@@ -130,7 +131,6 @@ pub async fn delete_provider(
     match state.config_store.delete_provider(&name).await {
         Ok(()) => Ok(StatusCode::NO_CONTENT),
         Err(e) if e.starts_with("no such provider") => Err(Api::not_found(e)),
-        Err(e) if e.contains("is still used by model") => Err(Api::conflict("provider_in_use", e)),
         Err(e) => Err(Api::unprocessable(e)),
     }
 }

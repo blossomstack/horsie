@@ -385,22 +385,20 @@ impl ConfigStore for DbConfigStore {
         let name = name.trim();
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
 
-        // Checked explicitly rather than left to the registry rebuild, so the
-        // error names the models holding the provider open instead of saying
-        // only that some model references something missing.
-        let referencing: Vec<String> = read_models(&self.db, &mut *tx, &self.user)
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|m| m.provider == name)
-            .map(|m| m.alias)
-            .collect();
-        if !referencing.is_empty() {
-            return Err(format!(
-                "provider '{name}' is still used by model(s): {}",
-                referencing.join(", ")
-            ));
-        }
+        // A model routed through this provider has no meaning without it, so
+        // the delete takes them rather than refusing until they are cleared by
+        // hand. The registry rebuild in `validate_and_commit` is still the
+        // backstop: a model left pointing at a missing provider cannot commit.
+        sqlx::query(
+            &self
+                .db
+                .q("DELETE FROM models WHERE user_id = ? AND provider = ?"),
+        )
+        .bind(self.user.as_str())
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         let affected = sqlx::query(
             &self
@@ -1900,25 +1898,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_provider_is_blocked_while_a_model_references_it() {
+    async fn delete_provider_takes_its_models_with_it() {
         let o = open().await;
-        o.store
-            .upsert_provider(provider("p", Some("sk")))
-            .await
-            .unwrap();
+        for p in ["p", "other"] {
+            o.store
+                .upsert_provider(provider(p, Some("sk")))
+                .await
+                .unwrap();
+        }
         o.store.upsert_model(model("m", "p")).await.unwrap();
+        o.store.upsert_model(model("n", "p")).await.unwrap();
+        o.store.upsert_model(model("keep", "other")).await.unwrap();
 
-        let err = o
-            .store
-            .delete_provider("p")
-            .await
-            .expect_err("referenced provider is held open");
-        assert!(err.contains("still used by model"), "{err}");
-        assert!(err.contains('m'), "the error names the model: {err}");
+        o.store.delete_provider("p").await.expect("deletable");
 
-        o.store.delete_model("m").await.expect("model deleted");
-        o.store.delete_provider("p").await.expect("now deletable");
-        assert!(o.store.view().await.unwrap().providers.is_empty());
+        let view = o.store.view().await.unwrap();
+        assert_eq!(
+            view.providers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            ["other"],
+        );
+        assert_eq!(
+            view.models
+                .iter()
+                .map(|m| m.alias.as_str())
+                .collect::<Vec<_>>(),
+            ["keep"],
+            "only the deleted provider's models go",
+        );
     }
 
     #[tokio::test]

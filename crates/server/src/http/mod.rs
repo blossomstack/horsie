@@ -3847,27 +3847,21 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-        // A provider held open by a model is a conflict, not a cascade.
+        // Deleting a provider cascades to the models routed through it, so the
+        // model is gone without ever being named.
         let res = app
             .clone()
             .oneshot(delete_req("/api/config/model-providers/p"))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
         let res = app
             .clone()
             .oneshot(delete_req("/api/config/models/m"))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-
-        let res = app
-            .clone()
-            .oneshot(delete_req("/api/config/model-providers/p"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let res = app
             .clone()

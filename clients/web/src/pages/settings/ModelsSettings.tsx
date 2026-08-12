@@ -278,18 +278,13 @@ export function ModelsSettings() {
 
   const deleteProvider = async (name: string) => {
     setLocalError(null);
-    // The server would accept this and leave the models dangling, so the guard
-    // lives here rather than nowhere.
-    const orphans = models.filter((m) => m.provider === name);
-    if (orphans.length > 0) {
-      const many = orphans.length !== 1;
-      return setLocalError(
-        `“${name}” still has ${many ? "models" : "a model"} routed through it: ${orphans
-          .map((m) => m.alias)
-          .join(", ")}. Delete or move ${many ? "them" : "it"} first.`,
-      );
-    }
-    if (!(await askConfirm(`Delete provider “${name}”?`))) return;
+    // The delete cascades on the server, so the confirm has to say so — and say
+    // which aliases stop existing, since those are what a session names.
+    const doomed = models.filter((m) => m.provider === name).map((m) => m.alias);
+    const message = doomed.length
+      ? `Delete provider “${name}” and ${doomed.length === 1 ? "its model" : `its ${doomed.length} models`} (${doomed.join(", ")})?`
+      : `Delete provider “${name}”?`;
+    if (!(await askConfirm(message))) return;
     try {
       await removeProvider.mutateAsync(name);
     } catch (e) {
