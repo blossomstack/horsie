@@ -135,6 +135,7 @@ mod tests {
 
     fn registry(db: Db, tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
         Arc::new(UserRegistry::new(Arc::new(Shared {
+            system: crate::users::node_system(&db),
             db,
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("artifacts"),

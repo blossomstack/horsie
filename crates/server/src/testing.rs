@@ -194,6 +194,7 @@ impl TestStateBuilder {
             .expect("bootstrap leaves exactly one account");
 
         let shared = Arc::new(Shared {
+            system: crate::users::node_system(&db),
             db,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
             info: info(),

@@ -129,6 +129,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
     seed.extend(opts.extra_model_cards);
 
     let shared = Arc::new(Shared {
+        system: crate::users::node_system(&db),
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
         info,
