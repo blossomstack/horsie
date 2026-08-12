@@ -1307,15 +1307,6 @@ dependencies = [
 
 [[package]]
 name = "fluorite"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fa1a708aa357ab6988d028a36fcd254f16eed5a79e3363b49a2999fdce7c8bc"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "fluorite"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37e8a1b51daf33b2fce84627d3093718c265843f2fcdf6ff77c3a621b3a74fb4"
@@ -1335,7 +1326,7 @@ dependencies = [
  "chumsky",
  "clap",
  "derive-new",
- "fluorite 0.8.0",
+ "fluorite",
  "logos",
  "serde",
 ]
@@ -1741,7 +1732,7 @@ name = "horsie-models"
 version = "0.2.0"
 dependencies = [
  "derive-new",
- "fluorite 0.7.0",
+ "fluorite",
  "fluorite_codegen",
  "schemars 1.2.2",
  "serde",
