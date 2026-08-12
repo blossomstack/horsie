@@ -111,10 +111,7 @@ impl SessionActor {
     /// Persist a session title through the supervisor, then publish it.
     pub(super) async fn rename_session(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
-        let supervisor = self
-            .supervisor
-            .clone()
-            .ok_or_else(|| "session supervisor unavailable".to_string())?;
+        let supervisor = self.supervisor.clone();
         let persisted = supervisor
             .ask(|reply| SessionSupervisorCommand::RenameSession {
                 id: id.clone(),
@@ -300,14 +297,16 @@ mod tests {
         let id = Uuid::new_v4();
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
-        let session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         seed(&session).await;
 
         // A rename the session did not initiate — the path that does not have
@@ -340,13 +339,16 @@ mod tests {
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let spawn = || {
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                test_account(),
-                crate::sessions::Revisions::default(),
-            ))
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(journal.clone()),
+                SessionActor::new(
+                    id,
+                    actor_spec_fixture(),
+                    f.deps.clone(),
+                    deaf_supervisor(),
+                    crate::sessions::Revisions::default(),
+                ),
+            )
         };
 
         let first = spawn();

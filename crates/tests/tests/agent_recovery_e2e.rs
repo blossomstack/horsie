@@ -238,7 +238,10 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
     // message rather than self-continuing.
     params.interactive = true;
 
-    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
+    let agent = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(journal.clone()),
+        AgentActor::new(ctx, params),
+    );
     agent
         .tell(AgentCommand::Enqueue {
             item: horsie_server::agent_loop::Incoming::User {
@@ -358,7 +361,10 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // `SessionActor` configures its agent.
     params.optional_handoff_tool = Some("ask_user".into());
 
-    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
+    let agent = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(journal.clone()),
+        AgentActor::new(ctx, params),
+    );
     agent
         .tell(AgentCommand::Answer {
             answers: vec![horsie_server::agent_loop::AskAnswer {
@@ -458,7 +464,10 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         });
         params.interactive = true;
 
-        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        let agent = horsie_server::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
         agent
             .tell(AgentCommand::Enqueue {
                 item: horsie_server::agent_loop::Incoming::User {
@@ -538,7 +547,10 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     params.interactive = true;
 
     // Recovering alone must repair it — no turn is taken here at all.
-    let agent = ActorSystem::new(journal.clone()).spawn_persistent(AgentActor::new(ctx, params));
+    let agent = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(journal.clone()),
+        AgentActor::new(ctx, params),
+    );
     let page = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
@@ -593,7 +605,10 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         allowed_tools: None,
     });
     params2.interactive = true;
-    let agent2 = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx2, params2));
+    let agent2 = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(journal),
+        AgentActor::new(ctx2, params2),
+    );
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2

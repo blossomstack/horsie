@@ -478,14 +478,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps,
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
 
         let refuse = async || {
             session
@@ -546,14 +548,16 @@ mod tests {
             .persist(&SessionActor::persistence_id_for(id), &encoded, 0)
             .await
             .unwrap();
-        let session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 deps,
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         (session, journal)
     }
 

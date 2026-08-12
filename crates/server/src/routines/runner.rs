@@ -240,7 +240,8 @@ pub(crate) mod tests {
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let (gtx, _) = tokio::sync::broadcast::channel(64);
-        let supervisor = ActorSystem::new(journal.clone()).spawn_persistent(
+        let supervisor = crate::testing::spawn_detached(
+            &ActorSystem::new(journal.clone()),
             SessionSupervisor::new(crate::auth::UserId::bootstrap(), deps, gtx),
         );
         let runner = Arc::new(RoutineRunner::new(

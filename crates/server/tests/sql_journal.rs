@@ -342,7 +342,10 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
     let pid = PersistenceId::new("sum", "s1");
 
     // Four events, a snapshot (which compacts), then one more.
-    let a = ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>).spawn_persistent(Sum);
+    let a = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>),
+        Sum,
+    );
     for n in [1, 2, 3, 4] {
         a.tell(Cmd::Add(n)).await.unwrap();
     }
@@ -369,7 +372,10 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
     );
 
     // A second incarnation recovers the same total from snapshot + tail.
-    let b = ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>).spawn_persistent(Sum);
+    let b = horsie_server::testing::spawn_detached(
+        &ActorSystem::new(j.clone() as std::sync::Arc<dyn Journal>),
+        Sum,
+    );
     let (tx, rx) = tokio::sync::oneshot::channel();
     b.tell(Cmd::Get(tx)).await.unwrap();
     assert_eq!(

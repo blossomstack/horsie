@@ -286,27 +286,25 @@ impl SessionActor {
     ) -> Option<ActorRef<AgentCommand>> {
         let run_spec = self.spec.workflow.clone()?;
         let step = run_spec.step(step_name)?.clone();
-        Some(
-            self.spawn_agent(
-                ctx,
-                state,
-                AgentPlan {
-                    kind: SessionAgentKind::Step(agent_id),
-                    // A step runs under its own preset, not the session's.
-                    settings: step.settings.clone(),
-                    step_output_schema: step.output_schema.clone(),
-                    agent_type: None,
-                    // Deliberately none. A step's terminal tool is `conclude`,
-                    // synthesized from its output schema; naming `ask_user`
-                    // beside it would stop the loop treating `conclude` as
-                    // terminal, so it would try to *execute* it, get "the
-                    // conclude tool is terminal and is not executed" back, and
-                    // keep going. A step asks through `conclude(kind=ask)`.
-                    handoff_tool: None,
-                },
-            )
-            .actor,
+        self.spawn_agent(
+            ctx,
+            state,
+            AgentPlan {
+                kind: SessionAgentKind::Step(agent_id),
+                // A step runs under its own preset, not the session's.
+                settings: step.settings.clone(),
+                step_output_schema: step.output_schema.clone(),
+                agent_type: None,
+                // Deliberately none. A step's terminal tool is `conclude`,
+                // synthesized from its output schema; naming `ask_user`
+                // beside it would stop the loop treating `conclude` as
+                // terminal, so it would try to *execute* it, get "the
+                // conclude tool is terminal and is not executed" back, and
+                // keep going. A step asks through `conclude(kind=ask)`.
+                handoff_tool: None,
+            },
         )
+        .map(|resident| resident.actor)
     }
 }
 
@@ -643,14 +641,16 @@ mod tests {
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
-        let session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -806,14 +806,16 @@ mod tests {
         .collect();
         journal.persist(&pid, &events, 0).await.unwrap();
 
-        let _session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let _session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
 
         let run = wait_for_run(&journal, id, |r| {
             r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended
@@ -863,14 +865,16 @@ mod tests {
             workflow: "fix-bug".into(),
         };
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
-        let reloaded =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let reloaded = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 spec,
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
 
         let log = reloaded
             .ask(|reply| {

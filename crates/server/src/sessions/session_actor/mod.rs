@@ -52,7 +52,7 @@ use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
-    supervisor::{SessionSupervisor, SessionSupervisorCommand},
+    supervisor::SessionSupervisorCommand,
     workflow::WorkflowRunState,
 };
 use async_trait::async_trait;
@@ -189,15 +189,15 @@ pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
     deps: ServerDeps,
-    /// The account this session belongs to — the id its supervisor is
-    /// registered under, and so the only thing needed to reach one.
-    account: crate::auth::UserId,
-    /// This session's supervisor, resolved once at recovery.
+    /// This session's supervisor, given at construction.
     ///
-    /// Not handed in, because a host that builds this session from its id has
-    /// no parent to be handed one by. `None` only before recovery has run, and
-    /// recovery runs before any command is handled.
-    supervisor: Option<ActorRef<SessionSupervisorCommand>>,
+    /// A *name* with a warm cache rather than a handle to one mailbox, so a
+    /// supervisor that stops and comes back is reached through the same
+    /// reference and this session is told nothing. That is what makes handing it
+    /// down cost nothing — and a session built on a host that never saw its
+    /// parent is still handed one, because a shard recipe closes over the
+    /// reference for the whole type rather than for an instance.
+    supervisor: ActorRef<SessionSupervisorCommand>,
     /// The agent actors this session hosts, resident for as long as this actor
     /// is loaded. `None` means exactly one thing — recovery has not finished —
     /// which is why the topology inside is a value rather than a second
@@ -220,34 +220,18 @@ impl SessionActor {
         id: Uuid,
         spec: SessionSpec,
         deps: ServerDeps,
-        account: crate::auth::UserId,
+        supervisor: ActorRef<SessionSupervisorCommand>,
         revisions: crate::sessions::Revisions,
     ) -> Self {
         Self {
             id,
             spec,
             deps,
-            account,
-            supervisor: None,
+            supervisor,
             agents: None,
             last_reported: None,
             revisions,
         }
-    }
-
-    /// Hand this session a supervisor instead of letting it resolve one.
-    ///
-    /// Tests only, and it is the observation seam: a test that wants to watch
-    /// what a session reports substitutes its own listener, which resolution by
-    /// account cannot do because the account names the real type. Recovery only
-    /// resolves when nothing is set, so this simply wins.
-    #[cfg(test)]
-    pub(super) fn with_supervisor(
-        mut self,
-        supervisor: ActorRef<SessionSupervisorCommand>,
-    ) -> Self {
-        self.supervisor = Some(supervisor);
-        self
     }
 
     /// The journal identity of a session: kind `"session"`, id = the uuid.
@@ -276,13 +260,9 @@ impl SessionActor {
         if self.last_reported.as_ref() == Some(&state.status) {
             return;
         }
-        let Some(supervisor) = self.supervisor.clone() else {
-            // Before recovery there is nobody to report to, and nothing has
-            // happened yet worth reporting.
-            return;
-        };
         self.last_reported = Some(state.status.clone());
-        let _ = supervisor
+        let _ = self
+            .supervisor
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
                 status: state.status.clone(),
@@ -303,7 +283,7 @@ impl SessionActor {
         ctx: &ActorContext<SessionCommand>,
         state: &SessionState,
         plan: AgentPlan,
-    ) -> ResidentAgent {
+    ) -> Option<ResidentAgent> {
         // A subagent and a step journal under their own id; the main agent
         // journals under the session's, because its transcript *is* the
         // session's. The revision channel follows the same split.
@@ -312,6 +292,11 @@ impl SessionActor {
             SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
                 (id, self.revisions.for_agent(&id.to_string()))
             }
+        };
+        // Its name under this session, and the id it is addressed by.
+        let name = match plan.kind {
+            SessionAgentKind::Main => MAIN_AGENT_ID.to_string(),
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => id.to_string(),
         };
         let key = plan.kind.agent_key();
         let provider = Arc::new(SessionContextProvider {
@@ -372,10 +357,19 @@ impl SessionActor {
             // `Runtime` records it is sent anyway.
             ready: Self::runnable(state),
         };
-        let resident = ResidentAgent {
-            actor: ctx.spawn_persistent(AgentActor::new(agent_ctx, params)),
-            provider,
+        // A child of this session, named by the id it journals under — `main`
+        // for the primary agent, the node id for a subagent or a step. Created
+        // rather than spawned anonymously so it has a path: an agent that
+        // reaches upwards uses `ctx.parent()`, which is a reference to this
+        // session's path rather than to this instance of it.
+        let actor = match ctx.actor_of(&name, ctx.persistent(AgentActor::new(agent_ctx, params))) {
+            Ok(actor) => actor,
+            Err(e) => {
+                tracing::error!(session = %self.id, agent = %name, error = %e, "could not start the agent");
+                return None;
+            }
         };
+        let resident = ResidentAgent { actor, provider };
         match plan.kind {
             SessionAgentKind::Main => {
                 self.agents = Some(SessionAgents::interactive(resident.clone()));
@@ -386,7 +380,7 @@ impl SessionActor {
                 }
             }
         }
-        resident
+        Some(resident)
     }
 
     /// The session's primary agent, spawned once at load.
@@ -445,7 +439,7 @@ impl SessionActor {
                 let agent_type = state.subagents.node(id)?.agent_type.clone();
                 Some((
                     AgentKey::Sub(id),
-                    self.spawn_sub_agent_actor(ctx, state, id, agent_type),
+                    self.spawn_sub_agent_actor(ctx, state, id, agent_type)?,
                 ))
             }
         }
@@ -607,7 +601,7 @@ impl SessionActor {
             // result must run as what it was spawned as.
             AgentKey::Sub(id) => {
                 let agent_type = state.subagents.node(id)?.agent_type.clone();
-                Some(self.spawn_sub_agent_actor(ctx, state, id, agent_type))
+                self.spawn_sub_agent_actor(ctx, state, id, agent_type)
             }
             // A step's actor spawns on demand from the run log, the same way a
             // cold subagent's does: a boundary can owe a result to a step whose
@@ -883,23 +877,6 @@ impl EventSourcedActor for SessionActor {
         state: &SessionState,
         ctx: &mut ActorContext<SessionCommand>,
     ) {
-        // Reach the supervisor by the account it is registered under rather
-        // than by a reference handed down at construction, which is what could
-        // not survive this session being built on a host that never saw its
-        // parent.
-        if self.supervisor.is_none() {
-            match ctx
-                .actor_of::<SessionSupervisor>(self.account.as_str())
-                .await
-            {
-                Ok(supervisor) => self.supervisor = Some(supervisor),
-                Err(error) => tracing::error!(
-                    session = %self.id, account = %self.account, %error,
-                    "a session could not reach its supervisor; status will not be reported"
-                ),
-            }
-        }
-
         // The journal is the truth about this session; the spec handed in at
         // construction is only a seed. Adopt what was recorded — and if nothing
         // was, keep the seed and wait, because the `RecordSpec` the supervisor

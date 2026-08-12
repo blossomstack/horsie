@@ -113,7 +113,10 @@ impl SubAgents {
                     let _ = reply.send(Err(format!("persist subagent: {e}")));
                     return CommandEffect::none();
                 }
-                let agent = actor.spawn_sub_agent_actor(ctx, state, id, agent_type);
+                let Some(agent) = actor.spawn_sub_agent_actor(ctx, state, id, agent_type) else {
+                    let _ = reply.send(Err("could not start the subagent".to_string()));
+                    return CommandEffect::none();
+                };
                 // The task is the first thing in this agent's queue, which it
                 // drains at once — there is nothing else in it and nothing in
                 // flight. Queued rather than run directly so a subagent has one
@@ -239,7 +242,7 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
         agent_type: Option<String>,
-    ) -> ActorRef<AgentCommand> {
+    ) -> Option<ActorRef<AgentCommand>> {
         self.spawn_agent(
             ctx,
             state,
@@ -253,7 +256,7 @@ impl SessionActor {
                 handoff_tool: None,
             },
         )
-        .actor
+        .map(|resident| resident.actor)
     }
 }
 
@@ -644,15 +647,16 @@ mod tests {
         journal.persist(&pid, &events, 0).await.unwrap();
 
         // Loading must start no runs: C stays owed until someone acts.
-        let parent = test_account();
-        let session2 =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session2 = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 _f.deps.clone(),
-                parent,
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(!&state.subagents.node(c).unwrap().notified);
@@ -723,15 +727,16 @@ mod tests {
         drop(session);
 
         // Second incarnation on the same journal.
-        let parent = test_account();
-        let session2 =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session2 = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                parent,
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         wait_for_tree(&journal, id, |t| {
             t.node(sub)
                 .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)

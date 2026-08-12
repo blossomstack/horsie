@@ -531,14 +531,16 @@ mod tests {
         );
         let counting = Arc::new(CountingJournal::new());
         let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
-        let session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
 
         // Drive one turn so both actors are loaded and have history.
         session
