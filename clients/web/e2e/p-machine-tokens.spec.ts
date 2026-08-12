@@ -88,6 +88,7 @@ test("a machine token is shown once, works as a credential, and can be revoked",
 
   // Revoking kills it.
   await page.getByTestId("token-revoke-ci-box").click();
+  await page.getByTestId("confirm-accept").click();
   await expect(page.getByTestId("token-row-ci-box")).toHaveCount(0);
   const dead = await fetch(`${baseURL}/api/sessions`, {
     headers: { authorization: `Bearer ${secret}` },

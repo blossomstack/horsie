@@ -50,8 +50,11 @@ export function Section({
       {/* Wraps rather than overlapping: at 768px the Add key drew on top of
           the heading it was meant to sit beside. */}
       <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+        {/* Both strings can carry a name someone chose, and a provider named
+            without spaces has nowhere to wrap: `break-words` is what keeps
+            `Models · <long-name>` inside the panel. */}
         <div className="min-w-0">
-          <h2 className="section-title">{title}</h2>
+          <h2 className="section-title break-words">{title}</h2>
           <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
             {desc}
           </p>
@@ -70,7 +73,7 @@ export function Section({
       </div>
       <div className="space-y-2.5">
         {empty && (
-          <p className="screen px-3 py-5 text-center text-sm text-faint">
+          <p className="screen break-words px-3 py-5 text-center text-sm text-faint">
             {empty}
           </p>
         )}

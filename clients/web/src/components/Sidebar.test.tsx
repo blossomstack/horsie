@@ -9,6 +9,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
+import { answerConfirm, confirmSnapshot, resetConfirm } from "../lib/confirm";
 import type { SessionSummary } from "../api/types";
 import { SessionStatusKind } from "../api/types";
 import { Sidebar } from "./Sidebar";
@@ -22,6 +23,7 @@ vi.mock("../api/client", () => ({
     sessions: {
       list: vi.fn(),
       setAnnotations: vi.fn(),
+      remove: vi.fn(),
     },
     sessionGroups: {
       list: vi.fn(),
@@ -60,6 +62,8 @@ afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   localStorage.clear();
+  // The confirm store is module-level, so it outlives the component.
+  resetConfirm();
 });
 
 describe("Sidebar groups", () => {
@@ -81,7 +85,7 @@ describe("Sidebar groups", () => {
     );
   });
 
-  it("stays flat until a group exists: no Ungrouped header, no row menu", async () => {
+  it("stays flat until a group exists, but the row menu still deletes", async () => {
     vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: [session("1")],
@@ -89,7 +93,46 @@ describe("Sidebar groups", () => {
     renderSidebar();
     await screen.findByTestId("session-row");
     expect(screen.queryByLabelText("Collapse Ungrouped")).toBeNull();
-    expect(screen.queryByTestId("session-row-menu-1")).toBeNull();
+
+    // No group means nowhere to move to, so the menu is Delete and nothing
+    // else — but it is still there, which it was not before.
+    fireEvent.click(screen.getByTestId("session-row-menu-1"));
+    expect(screen.queryByTestId("move-to-group-ungrouped")).toBeNull();
+    expect(screen.getByTestId("delete-session-1")).toBeTruthy();
+  });
+
+  it("deletes a session from the row menu, once confirmed", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1")],
+    });
+    vi.mocked(api.sessions.remove).mockResolvedValue({ ok: true });
+    renderSidebar();
+    await screen.findByTestId("session-row");
+
+    fireEvent.click(screen.getByTestId("session-row-menu-1"));
+    fireEvent.click(screen.getByTestId("delete-session-1"));
+    // The confirm is what stands between a stray click and a lost session.
+    expect(api.sessions.remove).not.toHaveBeenCalled();
+    expect(confirmSnapshot()?.message).toContain("session 1");
+
+    answerConfirm(true);
+    await waitFor(() => expect(api.sessions.remove).toHaveBeenCalledWith("1"));
+  });
+
+  it("cancelling the confirm leaves the session alone", async () => {
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1")],
+    });
+    renderSidebar();
+    await screen.findByTestId("session-row");
+
+    fireEvent.click(screen.getByTestId("session-row-menu-1"));
+    fireEvent.click(screen.getByTestId("delete-session-1"));
+    answerConfirm(false);
+    await waitFor(() => expect(confirmSnapshot()).toBeNull());
+    expect(api.sessions.remove).not.toHaveBeenCalled();
   });
 
   it("creates a group from the header button", async () => {

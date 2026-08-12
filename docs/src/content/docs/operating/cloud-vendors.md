@@ -22,7 +22,7 @@ bundles.
 
 ## Add one
 
-**Settings → Runtimes → Cloud vendors → Add.** Pick a kind and give the vendor
+**Settings → Runtimes → Add Fly / Add velos.** Pick a kind and give the vendor
 a name — that name is what sessions pick it by, and it cannot collide with a
 `horsie connect` vendor's name.
 
@@ -122,9 +122,10 @@ Your transcript is safe either way: it lives on the server, not in the sandbox.
 
 ## Choosing a vendor per session
 
-**Settings → Runtimes → Default vendor** names which vendor new sessions use.
-It may name a `horsie connect` vendor that has not connected yet — the
-preference takes effect once it dials in.
+**Settings → Runtimes**, then the star on a row, names which vendor new
+sessions use. It may name a `horsie connect` vendor that has not connected yet
+— the preference takes effect once it dials in, and until then it keeps a row
+of its own saying so.
 
 Per session, the environment control offers whatever is available: connected
 vendors, configured cloud vendors, and your saved

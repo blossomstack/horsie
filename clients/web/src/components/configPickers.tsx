@@ -2,7 +2,6 @@ import {
   Boxes,
   Brain,
   Cpu,
-  FoldVertical,
   Lightbulb,
   Plug,
   Server,
@@ -645,63 +644,11 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     });
   }
 
-  // Only where the selected model's card declares a context window: without
-  // one there is no share of it to trigger on, so the control would be a switch
-  // that does nothing.
-  if (draft.autoCompactAvailable) {
-    pickers.push({
-      key: "compaction",
-      legend: "Context",
-      icon: <FoldVertical size={15} />,
-      label: draft.autoCompact ? "Auto-compact" : "No compaction",
-      // Marked when it differs from the default, like every other picker here:
-      // the mark means "someone chose this", not "this is on".
-      marked: !draft.autoCompact,
-      width: "w-64",
-      testId: "config-compaction",
-      body: () => (
-        <div className="space-y-0.5">
-          <label
-            className={cn(optionClass(draft.autoCompact), "cursor-pointer")}
-            data-selected={draft.autoCompact}
-          >
-            <input
-              type="radio"
-              name="auto-compact"
-              checked={draft.autoCompact}
-              onChange={() => draft.setAutoCompact(true)}
-            />
-            <span className="min-w-0 flex-1">
-              Compact automatically
-              <span className="mt-0.5 block text-xs leading-snug text-dim">
-                Summarise earlier history when the context fills. The full
-                transcript stays readable.
-              </span>
-            </span>
-            {draft.autoCompact && <SelectedMark />}
-          </label>
-          <label
-            className={cn(optionClass(!draft.autoCompact), "cursor-pointer")}
-            data-selected={!draft.autoCompact}
-          >
-            <input
-              type="radio"
-              name="auto-compact"
-              checked={!draft.autoCompact}
-              onChange={() => draft.setAutoCompact(false)}
-            />
-            <span className="min-w-0 flex-1">
-              Never compact
-              <span className="mt-0.5 block text-xs leading-snug text-dim">
-                Turns start failing once the context window is full.
-              </span>
-            </span>
-            {!draft.autoCompact && <SelectedMark />}
-          </label>
-        </div>
-      ),
-    });
-  }
+  // Auto-compaction had a key here and no longer does. It is the one setting
+  // on this row with a single sensible answer — the alternative is a session
+  // that stops working once its context fills — so it sat beside the model and
+  // the skills asking for a decision that nobody wants to make. It stays a real
+  // field on the wire for an API caller that means it; the UI just assumes it.
 
   return pickers;
 }

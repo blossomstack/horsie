@@ -57,12 +57,6 @@ export interface ConfigDraft {
   thinkingEfforts: string[];
   /** The selected model's default effort, for labelling the fallback option. */
   modelDefaultThinkingEffort: string;
-  /** Whether the session summarises older history once its context fills. */
-  autoCompact: boolean;
-  setAutoCompact: (v: boolean) => void;
-  /** False when the selected model's card declares no context window, so
-   * there is no share of it to trigger on and the control means nothing. */
-  autoCompactAvailable: boolean;
 }
 
 /**
@@ -266,9 +260,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       // vendor, including ones that can't provision.
       memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
       thinkingEffort: effectiveThinkingEffort || undefined,
-      // Only ever sent as `false`: absent means on, so saying so explicitly
-      // would freeze today's default into every session ever created.
-      autoCompact: draft.autoCompact ? undefined : false,
+      // `autoCompact` is left absent, which the server reads as on. The UI
+      // stopped offering the choice; sending today's default explicitly would
+      // freeze it into every session ever created.
     },
     environment: environmentSpec(),
     // Bundles are not a workspace: the runtime fetches them over its own
@@ -307,9 +301,6 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     setThinkingEffort: (thinkingEffort) => setDraft({ ...draft, thinkingEffort }),
     thinkingEfforts,
     modelDefaultThinkingEffort: selectedModel?.thinkingEffort ?? "",
-    autoCompact: draft.autoCompact,
-    setAutoCompact: (autoCompact) => setDraft({ ...draft, autoCompact }),
-    autoCompactAvailable: (selectedModel?.contextWindow ?? 0) > 0,
     provisions,
     githubConnected,
     canSend: blockedReason === null,

@@ -112,7 +112,11 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   For the roster. The agent never sees it.
                 </p>
               </label>
-              <label className="block">
+              {/* The full width of the grid: it is a textarea sharing a row
+                  with two single-line inputs, and at one column it rendered the
+                  width of the Name box — the smallest control on the form for
+                  the longest thing anyone types into it. */}
+              <label className="block sm:col-span-2">
                 <RowLabel>Instructions</RowLabel>
                 {/* A textarea, and its own field: the description sat directly
                     above the configuration and read like the place to say how
