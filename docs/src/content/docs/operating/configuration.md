@@ -106,9 +106,7 @@ from the UI.
 | --- | --- | --- |
 | **Models** | Providers | Name, kind, optional base URL, inline API key. See [Models & providers](/operating/models-and-providers/). |
 | | Models | Alias, provider, model id, optional max tokens. |
-| **Runtimes** | Default vendor | Which vendor new sessions use. Falls back to `local`. |
-| | Cloud vendors | Fly Machines and velos vendors. See [Cloud runtime vendors](/operating/cloud-vendors/). |
-| | Connected vendors | Read-only: the `horsie connect` processes attached right now, and what each announced it can do. |
+| **Runtimes** | Vendors | One list. A `horsie connect` process appears here while it is attached and is configured where it runs, so its row only sets the default. A cloud vendor is configured here — see [Cloud runtime vendors](/operating/cloud-vendors/). |
 | **Skills** | — | Skill and plugin bundles, and marketplaces. See [Skills & plugins](/using/skills-and-plugins/). |
 | **Memory** | — | Memory spaces and the notes the agent has saved in them. |
 | **Integrations** | GitHub | App configuration, the connection, and the GitHub tools toggle. See [GitHub repositories](/using/github-repositories/). |
@@ -117,8 +115,9 @@ from the UI.
 | **Appearance** | — | Theme, light/dark/system, text size, transcript switches. Stored in the browser, not the database, so each browser can differ. |
 | **Account** | — | Password, machine tokens, sign out. |
 
-**Models** and **Runtimes** batch their edits behind **Save changes**, and
-leaving either with unsaved edits asks first. Every other page saves as you go.
+Every settings page saves as you go: a provider, a model and a cloud vendor
+each save on their own, from the row you opened. Anything destructive asks
+first.
 
 Operator settings live under **Admin**, whose only page today is **Model
 cards**: the catalogue the Models page autocompletes from.
@@ -130,7 +129,7 @@ cards**: the catalogue the Models page autocompletes from.
 | Providers and models | The next turn. No restart. |
 | Cloud vendors | The next session. Nothing to deploy or restart. |
 | Default vendor | The next session created. It may name a vendor that has not connected yet. |
-| Connected vendors | Not editable here. Each is configured where it runs, and appears or disappears as it connects. |
+| Connected agents | Not editable here. Each is configured where it runs, and appears or disappears as it connects. |
 | GitHub, MCP servers, skill bundles | As you save them. |
 
 ## On-disk layout
