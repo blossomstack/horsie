@@ -59,9 +59,6 @@ function draft(overrides: Partial<ConfigDraft> = {}): ConfigDraft {
   return {
     model: "sonnet",
     setModel: () => {},
-    autoCompact: true,
-    setAutoCompact: () => {},
-    autoCompactAvailable: true,
     skills: new Set(),
     setSkills: () => {},
     mcp: new Set(),
@@ -255,7 +252,6 @@ describe("useConfigPickers", () => {
       "mcp",
       "memory",
       "model",
-      "compaction",
     ]);
   });
 

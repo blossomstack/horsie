@@ -142,10 +142,9 @@ function storeDraft(draft: Partial<DraftPayload>) {
     skills: [],
     mcp: [],
     memorySpaces: [],
-    autoCompact: true,
+    thinkingEffort: "",
     ...draft,
-      thinkingEffort: "",
-};
+  };
   localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(full));
 }
 
