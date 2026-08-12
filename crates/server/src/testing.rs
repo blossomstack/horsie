@@ -229,3 +229,27 @@ fn info() -> horsie_models::settings::ServerInfo {
         version: "test".into(),
     }
 }
+
+/// Start an event-sourced actor at a throwaway path, reachable only by the
+/// reference returned.
+///
+/// What `ActorSystem::spawn_persistent` used to do before horsie-actor 0.10
+/// made creation go through a name. Production code creates children by name —
+/// that is what gives them a path, a parent and a place in the tree — but a test
+/// that wants one actor over one journal has no tree to put it in, and naming it
+/// would only invite a second test to collide with it.
+///
+/// The `n`th call in a process gets its own path, so two actors in one test do
+/// not land on top of each other.
+pub fn spawn_detached<A: horsie_actor::EventSourcedActor>(
+    system: &horsie_actor::ActorSystem,
+    actor: A,
+) -> horsie_actor::ActorRef<A::Command> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = format!("detached-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+    system.spawn_at(
+        horsie_actor::ActorPath::root().child(&name),
+        system.persistent(actor),
+    )
+}

@@ -437,14 +437,16 @@ mod tests {
             .await
             .unwrap();
 
-        let _session2 =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let _session2 = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
             s.status != SessionStatus::Provisioning
         })
@@ -573,14 +575,16 @@ mod tests {
             .await
             .unwrap();
 
-        let _session =
-            horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
+        let _session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal.clone()),
+            SessionActor::new(
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                test_account(),
+                deaf_supervisor(),
                 crate::sessions::Revisions::default(),
-            ));
+            ),
+        );
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
             !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
         })
@@ -730,16 +734,18 @@ mod tests {
             ),
         );
 
-        let parent = test_account();
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = horsie_actor::ActorSystem::new(journal).spawn_persistent(SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            parent,
-            crate::sessions::Revisions::default(),
-        ));
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(journal),
+            SessionActor::new(
+                id,
+                actor_spec_fixture(),
+                f.deps.clone(),
+                deaf_supervisor(),
+                crate::sessions::Revisions::default(),
+            ),
+        );
 
         session
             .ask(|reply| {

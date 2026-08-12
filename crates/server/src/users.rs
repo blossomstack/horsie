@@ -17,7 +17,7 @@ use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
 use crate::sessions::spec::ServerDeps;
 use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
-use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
+use crate::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
 use horsie_actor::{ActorRef, ActorSystem, Journal};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::session::GlobalSessionEvent;
@@ -214,19 +214,22 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 
     let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
-    // Registered and then resolved, rather than spawned directly, so the system
-    // holds it under its account id. A session reaches its supervisor by
-    // resolving that id, and a supervisor the system does not know about would
-    // be resolved into a *second* one over the same journal.
+    // Created *at* its account id rather than spawned anonymously, so the system
+    // holds it at a path. That is what makes it reachable as a parent: a session
+    // is its child, and `ctx.parent()` is a reference to this path rather than
+    // to this instance — so a session outlives, and survives, any particular
+    // supervisor at it.
     let system = ActorSystem::new(journal);
-    system.register::<SessionSupervisor>(crate::sessions::supervisor::SupervisorDeps {
+    let supervisor_deps = crate::sessions::supervisor::SupervisorDeps {
         server: deps,
         global_tx: global_events.clone(),
         config: shared.supervisor.clone(),
-    });
+    };
     let supervisor = system
-        .actor_of::<SessionSupervisor>(user.as_str())
-        .await
+        .actor_of(
+            user.as_str(),
+            system.persistent(supervisor_deps.build(user.as_str())),
+        )
         .map_err(|e| format!("could not start the session supervisor: {e}"))?;
 
     // Destroy substrate left over from sessions that no longer exist. Deleting a

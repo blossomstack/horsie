@@ -3298,11 +3298,10 @@ mod tests {
             journal_id: session_id,
             ready: true,
         };
-        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::with_observer(
-            ctx,
-            AgentParams::from_def(&def_fixture()),
-            recorder.clone(),
-        ));
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::with_observer(ctx, AgentParams::from_def(&def_fixture()), recorder.clone()),
+        );
 
         let one = user_msg("one");
         let two = user_msg("two");
@@ -3383,8 +3382,10 @@ mod tests {
             ready: true,
         };
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let agent = ActorSystem::new(journal)
-            .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+        );
 
         agent
             .tell(AgentCommand::Enqueue {
@@ -3535,8 +3536,10 @@ mod tests {
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-            let agent = ActorSystem::new(journal)
-                .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
+            let agent = crate::testing::spawn_detached(
+                &ActorSystem::new(journal),
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            );
             (agent, rx)
         }
 
@@ -3761,8 +3764,10 @@ mod tests {
                 ready: true,
             };
             let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-            let agent = ActorSystem::new(journal)
-                .spawn_persistent(AgentActor::new(ctx, AgentParams::from_def(&def_fixture())));
+            let agent = crate::testing::spawn_detached(
+                &ActorSystem::new(journal),
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            );
             agent
                 .tell(AgentCommand::Enqueue {
                     item: crate::agent_loop::Incoming::User {
@@ -5594,7 +5599,10 @@ mod fence_tests {
         });
         params.interactive = true;
         let journal = Arc::new(InMemoryJournal::new());
-        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
 
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
@@ -5703,7 +5711,10 @@ mod fence_tests {
         });
         params.interactive = true;
         let journal = Arc::new(InMemoryJournal::new());
-        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
 
         agent
             .tell(AgentCommand::Enqueue {
@@ -5840,7 +5851,10 @@ mod queue_tests {
         let mut params = AgentParams::from_def(&AgentRunDef::default());
         params.interactive = true;
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
         (agent, rx)
     }
 
@@ -6100,7 +6114,10 @@ mod interruption_tests {
         // configuration that matters — and it is the one that returns from
         // `on_recovery_complete` early, so the report has to precede that.
         params.interactive = true;
-        let _agent = ActorSystem::new(journal).spawn_persistent(AgentActor::new(ctx, params));
+        let _agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
         // Recovery runs before the first command, so anything reported is
         // already on its way by the time the spawn returns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

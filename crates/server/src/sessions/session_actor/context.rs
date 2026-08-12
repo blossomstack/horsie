@@ -1446,9 +1446,10 @@ mod tests {
         );
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let id = Uuid::new_v4();
-        let session =
-            horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new()))
-                .spawn_persistent(RecordingSession(seen.clone()));
+        let session = crate::testing::spawn_detached(
+            &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
+            RecordingSession(seen.clone()),
+        );
         SessionContextProvider {
             agent_type: None,
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
