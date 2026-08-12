@@ -212,7 +212,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         memory: Some(memory.clone()),
     };
 
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
+    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
     // Created *at* its account id rather than spawned anonymously, so the system
     // holds it at a path. That is what makes it reachable as a parent: a session

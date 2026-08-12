@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod addressing;
 pub mod ask_tool;
 pub mod builder;
 pub mod clock;
