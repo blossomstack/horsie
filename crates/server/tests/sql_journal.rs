@@ -28,7 +28,7 @@ use horsie_server::db::journal::SqlJournal;
 use horsie_server::db::testing;
 
 async fn journal() -> SqlJournal {
-    SqlJournal::new(testing::db().await, horsie_server::auth::UserId::new("1"))
+    SqlJournal::new(testing::db().await)
 }
 
 fn pid(id: &str) -> PersistenceId {
@@ -131,7 +131,7 @@ async fn compaction_never_renumbers_the_survivors() {
 #[tokio::test]
 async fn numbering_survives_a_restart_after_full_compaction() {
     let db = testing::db().await;
-    let first = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
+    let first = SqlJournal::new(db.clone());
     first
         .persist(&pid("compacted"), &[vec![1], vec![2]], 0)
         .await
@@ -146,7 +146,7 @@ async fn numbering_survives_a_restart_after_full_compaction() {
         .unwrap();
 
     // A new instance over the same database stands in for a restart.
-    let second = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
+    let second = SqlJournal::new(db);
     second
         .persist(&pid("compacted"), &[vec![3]], 2)
         .await
@@ -234,7 +234,7 @@ async fn a_fork_continues_numbering_from_the_copied_snapshot() {
 #[tokio::test]
 async fn reading_an_unknown_log_creates_nothing() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
+    let j = SqlJournal::new(db.clone());
     assert!(drain(&j, "ghost", 0).await.is_empty());
     assert_eq!(j.latest_snapshot(&pid("ghost")).await.unwrap(), None);
     // A read must not have inserted a log row as a side effect.
@@ -258,7 +258,7 @@ async fn payloads_survive_arbitrary_bytes() {
 #[tokio::test]
 async fn clear_removes_events_and_snapshot_together() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
+    let j = SqlJournal::new(db.clone());
     j.persist(&pid("c"), &[vec![1]], 0).await.unwrap();
     j.save_snapshot(&pid("c"), vec![7], 1).await.unwrap();
     j.clear(&pid("c")).await.unwrap();
@@ -385,27 +385,43 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
     );
 }
 
-/// Two accounts may run actors with identical persistence ids without seeing
-/// each other's events.
+/// One persistence id is one log, however many handles are open on it.
 ///
-/// The `(kind, id)` lookup is what binds the scope: with no `log_id` there is
-/// no way to reach the events at all, which is why `journal_events` carries no
-/// `user_id` of its own.
+/// `SqlJournal` holds nothing but a pool, so two of them over one database are
+/// not two namespaces — they are two views of the same row, and what orders
+/// their writes is that row's own `last_seq`. Conformance asks this of a single
+/// handle; asking it of two is what shows the state lives in the database rather
+/// than in the type, which is why one node can hand the same journal to every
+/// actor it hosts.
 #[tokio::test]
-async fn identical_persistence_ids_do_not_collide_across_accounts() {
+async fn two_handles_on_one_database_are_the_same_log() {
     let db = testing::db().await;
-    let mine = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
-    let theirs = SqlJournal::new(db, horsie_server::auth::UserId::new("k3m9x0abc7qr"));
+    let first = SqlJournal::new(db.clone());
+    let second = SqlJournal::new(db);
     let pid = PersistenceId::new("session", "same-id");
 
-    mine.persist(&pid, &[b"mine".to_vec()], 0).await.unwrap();
-    theirs
-        .persist(&pid, &[b"theirs".to_vec()], 0)
+    first.persist(&pid, &[b"first".to_vec()], 0).await.unwrap();
+
+    // The second handle inherits where the log ends rather than starting a
+    // count of its own, so its next write is admitted only from there.
+    assert_eq!(second.last_seq(&pid).await.unwrap(), 1);
+    assert!(
+        second
+            .persist(&pid, &[b"racing".to_vec()], 0)
+            .await
+            .is_err(),
+        "a second handle was allowed to start a log that already exists"
+    );
+
+    second
+        .persist(&pid, &[b"second".to_vec()], 1)
         .await
         .unwrap();
-
-    assert_eq!(read(&mine, &pid).await, vec![b"mine".to_vec()]);
-    assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
+    assert_eq!(
+        read(&first, &pid).await,
+        vec![b"first".to_vec(), b"second".to_vec()],
+        "both handles append to one history"
+    );
 }
 
 /// A stale writer's append is rejected by the database, not merged.
@@ -416,7 +432,7 @@ async fn identical_persistence_ids_do_not_collide_across_accounts() {
 #[tokio::test]
 async fn a_stale_writers_append_is_rejected() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
+    let j = SqlJournal::new(db);
     let pid = PersistenceId::new("session", "conflict");
 
     // Two writers recovered at the same point; one of them writes.
@@ -456,7 +472,7 @@ async fn a_stale_writers_append_is_rejected() {
 #[tokio::test]
 async fn a_rejected_batch_leaves_no_partial_write() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
+    let j = SqlJournal::new(db);
     let pid = PersistenceId::new("session", "batch");
 
     j.persist(&pid, &[b"a".to_vec()], 0).await.unwrap();
@@ -479,7 +495,7 @@ async fn a_rejected_batch_leaves_no_partial_write() {
 #[tokio::test]
 async fn a_stale_writers_snapshot_is_rejected() {
     let db = testing::db().await;
-    let j = SqlJournal::new(db, horsie_server::auth::UserId::new("1"));
+    let j = SqlJournal::new(db);
     let pid = PersistenceId::new("session", "stale-snapshot");
 
     j.persist(&pid, &[b"a".to_vec(), b"b".to_vec()], 0)
@@ -496,32 +512,31 @@ async fn a_stale_writers_snapshot_is_rejected() {
     j.save_snapshot(&pid, b"current".to_vec(), 2).await.unwrap();
 }
 
-/// Sequence numbers are scoped per account like everything else here: one
-/// account's writes must not make another account's identically-named log look
-/// stale to its own writer.
+/// The allocator is one row per log, so a quiet id starts at zero however busy
+/// its neighbours in the table are.
+///
+/// Now that one journal serves the whole node this is the separation that is
+/// left — every session in the database shares these tables, and the only thing
+/// keeping one writer's fence off another's is which `log_id` the `(kind, id)`
+/// lookup resolved to.
 #[tokio::test]
-async fn sequence_numbers_do_not_leak_across_accounts() {
+async fn numbering_belongs_to_a_log_and_not_to_the_table() {
     let db = testing::db().await;
-    let mine = SqlJournal::new(db.clone(), horsie_server::auth::UserId::new("1"));
-    let theirs = SqlJournal::new(db, horsie_server::auth::UserId::new("k3m9x0abc7qr"));
-    let pid = PersistenceId::new("session", "same-id");
+    let j = SqlJournal::new(db);
+    let busy = PersistenceId::new("session", "busy");
+    let quiet = PersistenceId::new("session", "quiet");
 
-    // Several writes on one account must not move the other account's log.
-    mine.persist(&pid, &[b"a".to_vec()], 0).await.unwrap();
-    mine.persist(&pid, &[b"b".to_vec()], 1).await.unwrap();
-    mine.persist(&pid, &[b"c".to_vec()], 2).await.unwrap();
+    for expected in 0..3 {
+        j.persist(&busy, &[b"x".to_vec()], expected).await.unwrap();
+    }
 
     assert_eq!(
-        theirs.last_seq(&pid).await.unwrap(),
+        j.last_seq(&quiet).await.unwrap(),
         0,
-        "one account's writes advanced another account's log"
+        "a neighbour's writes advanced this log"
     );
-
-    // So the other account's first writer still expects an empty log, and is
-    // admitted.
-    theirs
-        .persist(&pid, &[b"theirs".to_vec()], 0)
-        .await
-        .unwrap();
-    assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
+    // So its first writer still expects an empty log, and is admitted.
+    j.persist(&quiet, &[b"first".to_vec()], 0).await.unwrap();
+    assert_eq!(read(&j, &quiet).await, vec![b"first".to_vec()]);
+    assert_eq!(read(&j, &busy).await.len(), 3);
 }

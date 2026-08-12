@@ -250,9 +250,8 @@ mod tests {
     /// account.
     #[test]
     fn sessions_do_not_share_a_bucket() {
-        let spread: std::collections::HashSet<String> = (0..64)
-            .map(|i| bucket(&format!("sess-{i}")))
-            .collect();
+        let spread: std::collections::HashSet<String> =
+            (0..64).map(|i| bucket(&format!("sess-{i}"))).collect();
         assert!(
             spread.len() > 32,
             "64 sessions landed in only {} buckets",

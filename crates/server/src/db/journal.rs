@@ -103,17 +103,15 @@ impl SqlJournal {
     ) -> JournalResult<i64> {
         // `DO NOTHING` then `SELECT` rather than `RETURNING`: on the conflict
         // path there is no returned row, and the select is an index hit anyway.
-        let insert = db.q(
-            "INSERT INTO journal_logs (kind, id) VALUES (?, ?) ON CONFLICT DO NOTHING",
-        );
+        let insert =
+            db.q("INSERT INTO journal_logs (kind, id) VALUES (?, ?) ON CONFLICT DO NOTHING");
         sqlx::query(&insert)
             .bind(&pid.kind)
             .bind(&pid.id)
             .execute(&mut **tx)
             .await
             .map_err(backend)?;
-        let select =
-            db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
+        let select = db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
         sqlx::query_scalar(&select)
             .bind(&pid.kind)
             .bind(&pid.id)
@@ -454,11 +452,7 @@ impl Journal for SqlJournal {
                 .await
                 .map_err(backend)?;
         }
-        // `log_id` already came from a scoped lookup; binding the account
-        // again costs nothing and keeps this statement readable on its own.
-        let sql = self
-            .db
-            .q("DELETE FROM journal_logs WHERE log_id = ?");
+        let sql = self.db.q("DELETE FROM journal_logs WHERE log_id = ?");
         sqlx::query(&sql)
             .bind(log_id)
             .execute(&mut *tx)
