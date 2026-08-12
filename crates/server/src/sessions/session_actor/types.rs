@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Commands accepted by a [`SessionActor`].
+#[derive(Serialize, Deserialize)]
 pub enum SessionCommand {
     /// Getting and releasing this session's sandbox.
     Lifecycle(LifecycleCommand),
@@ -51,6 +52,7 @@ pub enum SessionCommand {
 }
 
 /// Getting and releasing this session's sandbox.
+#[derive(Serialize, Deserialize)]
 pub enum LifecycleCommand {
     /// Build this session's runtime.
     ///
@@ -80,6 +82,7 @@ pub enum LifecycleCommand {
 }
 
 /// The conversation.
+#[derive(Serialize, Deserialize)]
 pub enum TurnCommand {
     /// A message for one of this session's agents. Always accepted: the agent
     /// queues it durably and answers it at its next turn, so there is no
@@ -107,6 +110,7 @@ pub enum TurnCommand {
 }
 
 /// The workflow graph.
+#[derive(Serialize, Deserialize)]
 pub enum RunCommand {
     /// Let the orchestrator start whatever it wants started. Sent to a run at
     /// load so a pending one begins, and after a retry.
@@ -126,6 +130,7 @@ pub enum RunCommand {
 }
 
 /// The tree of delegated work.
+#[derive(Serialize, Deserialize)]
 pub enum SubAgentCommand {
     /// The `spawn_agent` tool: start a subagent under `caller`.
     Spawn {
@@ -164,6 +169,7 @@ pub enum SubAgentCommand {
 
 /// Questions answered from the resident actor's memory. None of these touches
 /// the journal, so opening a session to look at it costs no sandbox.
+#[derive(Serialize, Deserialize)]
 pub enum ReadCommand {
     /// Read forward from a cursor in one of the session's agents: `agent_id`
     /// absent or `"main"` for the primary agent, otherwise a subagent id.
@@ -195,6 +201,7 @@ pub enum ReadCommand {
 
 /// What plugin hooks did. Pure routing: nothing here is persisted by the
 /// session, and nothing here changes state.
+#[derive(Serialize, Deserialize)]
 pub enum HookCommand {
     /// Plugin hooks ran against one agent's tool call. The session forwards to
     /// the agent whose transcript the records belong in. Carries no reply
@@ -219,6 +226,7 @@ pub enum HookCommand {
 }
 
 /// The session's own bookkeeping.
+#[derive(Serialize, Deserialize)]
 pub enum CoreCommand {
     /// Set the session title from the built-in title tool.
     SetTitle {
@@ -689,7 +697,7 @@ pub struct SessionUsageStats {
 /// Which agent of a session a broadcast belongs to. `Main` is not a `Uuid`
 /// variant because the main agent's journal is keyed by the *session* id — the
 /// two namespaces are deliberately distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentKey {
     Main,
     Sub(Uuid),

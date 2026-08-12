@@ -57,7 +57,7 @@ pub struct AskedQuestion {
 /// and from every workflow step, and routing is the first thing it does. The
 /// id is the agent's *journal* id — the session's own for a main agent, since
 /// its transcript is the session's, and the agent's own for anything else.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentOutcome {
     /// The agent started a turn off its own queue.
     ///
