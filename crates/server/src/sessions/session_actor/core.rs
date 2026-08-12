@@ -111,8 +111,11 @@ impl SessionActor {
     /// Persist a session title through the supervisor, then publish it.
     pub(super) async fn rename_session(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
-        let persisted = self
-            .parent
+        let supervisor = self
+            .supervisor
+            .clone()
+            .ok_or_else(|| "session supervisor unavailable".to_string())?;
+        let persisted = supervisor
             .ask(|reply| SessionSupervisorCommand::RenameSession {
                 id: id.clone(),
                 name: title.clone(),
@@ -123,8 +126,7 @@ impl SessionActor {
         persisted.map_err(|e| format!("persist session title: {e}"))?;
 
         self.spec.name = Some(title.clone());
-        let _ = self
-            .parent
+        let _ = supervisor
             .tell(SessionSupervisorCommand::PublishSessionTitle {
                 id,
                 name: title.clone(),
@@ -303,7 +305,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
         seed(&session).await;
@@ -342,7 +344,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ))
         };

@@ -648,7 +648,7 @@ mod tests {
                 id,
                 spec,
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
         session
@@ -811,7 +811,7 @@ mod tests {
                 id,
                 spec,
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
 
@@ -868,7 +868,7 @@ mod tests {
                 id,
                 spec,
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
 

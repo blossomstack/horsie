@@ -52,7 +52,7 @@ use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
-    supervisor::SessionSupervisorCommand,
+    supervisor::{SessionSupervisor, SessionSupervisorCommand},
     workflow::WorkflowRunState,
 };
 use async_trait::async_trait;
@@ -189,7 +189,15 @@ pub struct SessionActor {
     id: Uuid,
     spec: SessionSpec,
     deps: ServerDeps,
-    parent: ActorRef<SessionSupervisorCommand>,
+    /// The account this session belongs to — the id its supervisor is
+    /// registered under, and so the only thing needed to reach one.
+    account: crate::auth::UserId,
+    /// This session's supervisor, resolved once at recovery.
+    ///
+    /// Not handed in, because a host that builds this session from its id has
+    /// no parent to be handed one by. `None` only before recovery has run, and
+    /// recovery runs before any command is handled.
+    supervisor: Option<ActorRef<SessionSupervisorCommand>>,
     /// The agent actors this session hosts, resident for as long as this actor
     /// is loaded. `None` means exactly one thing — recovery has not finished —
     /// which is why the topology inside is a value rather than a second
@@ -212,18 +220,34 @@ impl SessionActor {
         id: Uuid,
         spec: SessionSpec,
         deps: ServerDeps,
-        parent: ActorRef<SessionSupervisorCommand>,
+        account: crate::auth::UserId,
         revisions: crate::sessions::Revisions,
     ) -> Self {
         Self {
             id,
             spec,
             deps,
-            parent,
+            account,
+            supervisor: None,
             agents: None,
             last_reported: None,
             revisions,
         }
+    }
+
+    /// Hand this session a supervisor instead of letting it resolve one.
+    ///
+    /// Tests only, and it is the observation seam: a test that wants to watch
+    /// what a session reports substitutes its own listener, which resolution by
+    /// account cannot do because the account names the real type. Recovery only
+    /// resolves when nothing is set, so this simply wins.
+    #[cfg(test)]
+    pub(super) fn with_supervisor(
+        mut self,
+        supervisor: ActorRef<SessionSupervisorCommand>,
+    ) -> Self {
+        self.supervisor = Some(supervisor);
+        self
     }
 
     /// The journal identity of a session: kind `"session"`, id = the uuid.
@@ -252,9 +276,13 @@ impl SessionActor {
         if self.last_reported.as_ref() == Some(&state.status) {
             return;
         }
+        let Some(supervisor) = self.supervisor.clone() else {
+            // Before recovery there is nobody to report to, and nothing has
+            // happened yet worth reporting.
+            return;
+        };
         self.last_reported = Some(state.status.clone());
-        let _ = self
-            .parent
+        let _ = supervisor
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
                 status: state.status.clone(),
@@ -855,6 +883,23 @@ impl EventSourcedActor for SessionActor {
         state: &SessionState,
         ctx: &mut ActorContext<SessionCommand>,
     ) {
+        // Reach the supervisor by the account it is registered under rather
+        // than by a reference handed down at construction, which is what could
+        // not survive this session being built on a host that never saw its
+        // parent.
+        if self.supervisor.is_none() {
+            match ctx
+                .actor_of::<SessionSupervisor>(self.account.as_str())
+                .await
+            {
+                Ok(supervisor) => self.supervisor = Some(supervisor),
+                Err(error) => tracing::error!(
+                    session = %self.id, account = %self.account, %error,
+                    "a session could not reach its supervisor; status will not be reported"
+                ),
+            }
+        }
+
         // The journal is the truth about this session; the spec handed in at
         // construction is only a seed. Adopt what was recorded — and if nothing
         // was, keep the seed and wait, because the `RecordSpec` the supervisor

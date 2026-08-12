@@ -644,7 +644,7 @@ mod tests {
         journal.persist(&pid, &events, 0).await.unwrap();
 
         // Loading must start no runs: C stays owed until someone acts.
-        let parent = spawn_deaf_supervisor();
+        let parent = test_account();
         let session2 =
             horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,
@@ -723,7 +723,7 @@ mod tests {
         drop(session);
 
         // Second incarnation on the same journal.
-        let parent = spawn_deaf_supervisor();
+        let parent = test_account();
         let session2 =
             horsie_actor::ActorSystem::new(journal.clone()).spawn_persistent(SessionActor::new(
                 id,

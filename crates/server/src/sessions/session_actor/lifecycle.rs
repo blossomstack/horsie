@@ -442,7 +442,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
@@ -578,7 +578,7 @@ mod tests {
                 id,
                 actor_spec_fixture(),
                 f.deps.clone(),
-                spawn_deaf_supervisor(),
+                test_account(),
                 crate::sessions::Revisions::default(),
             ));
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
@@ -730,7 +730,7 @@ mod tests {
             ),
         );
 
-        let parent = spawn_deaf_supervisor();
+        let parent = test_account();
         let journal: Arc<dyn horsie_actor::Journal> =
             Arc::new(horsie_actor::InMemoryJournal::new());
         let session = horsie_actor::ActorSystem::new(journal).spawn_persistent(SessionActor::new(

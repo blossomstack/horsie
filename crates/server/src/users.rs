@@ -214,12 +214,20 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 
     let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
-    let supervisor = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-        user.clone(),
-        deps,
-        global_events.clone(),
-        shared.supervisor.clone(),
-    ));
+    // Registered and then resolved, rather than spawned directly, so the system
+    // holds it under its account id. A session reaches its supervisor by
+    // resolving that id, and a supervisor the system does not know about would
+    // be resolved into a *second* one over the same journal.
+    let system = ActorSystem::new(journal);
+    system.register::<SessionSupervisor>(crate::sessions::supervisor::SupervisorDeps {
+        server: deps,
+        global_tx: global_events.clone(),
+        config: shared.supervisor.clone(),
+    });
+    let supervisor = system
+        .actor_of::<SessionSupervisor>(user.as_str())
+        .await
+        .map_err(|e| format!("could not start the session supervisor: {e}"))?;
 
     // Destroy substrate left over from sessions that no longer exist. Deleting a
     // session already tells its vendor; this covers the case where the vendor

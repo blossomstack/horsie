@@ -510,7 +510,7 @@ impl SessionSupervisor {
             uuid,
             spec.clone(),
             self.deps.clone(),
-            ctx.self_ref(),
+            self.user.clone(),
             self.revisions_for(id),
         ));
         self.children.insert(id.clone(), child.clone());
@@ -1343,6 +1343,26 @@ mod tests {
         }
     }
 
+    /// A supervisor the system knows by its account id, the way a real one is
+    /// started — a session reaches its supervisor by resolving that id, so one
+    /// spawned outside the registry cannot be found.
+    async fn supervisor_in(
+        system: &ActorSystem,
+        f: &Fixture,
+        gtx: broadcast::Sender<GlobalSessionEvent>,
+        config: SupervisorConfig,
+    ) -> ActorRef<SessionSupervisorCommand> {
+        system.register::<SessionSupervisor>(SupervisorDeps {
+            server: f.deps.clone(),
+            global_tx: gtx,
+            config,
+        });
+        system
+            .actor_of::<SessionSupervisor>(crate::auth::UserId::bootstrap().as_str())
+            .await
+            .expect("the factory builds one")
+    }
+
     async fn create(sup: &ActorRef<SessionSupervisorCommand>) -> SessionId {
         sup.ask(|reply| SessionSupervisorCommand::Create {
             spec: spec_fixture(),
@@ -1357,12 +1377,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ))
+        supervisor_in(&ActorSystem::new(journal), f, gtx, manual_config(&clock)).await
     }
 
     async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
@@ -1525,13 +1540,13 @@ mod tests {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
 
-        let sup =
-            ActorSystem::new(journal.clone()).spawn_persistent(SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx.clone(),
-                manual_config(&clock),
-            ));
+        let sup = supervisor_in(
+            &ActorSystem::new(journal.clone()),
+            &f,
+            gtx.clone(),
+            manual_config(&clock),
+        )
+        .await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
         // Wait for the session to have finished provisioning and said so, so
@@ -1544,12 +1559,7 @@ mod tests {
 
         // Second incarnation on the same journal: the registry comes back, but
         // nothing is loaded and no vendor is touched.
-        let sup2 = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup2 = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let rows = sup2
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
@@ -1692,12 +1702,7 @@ mod tests {
     ) -> ActorRef<SessionSupervisorCommand> {
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ))
+        supervisor_in(&ActorSystem::new(journal), f, gtx, manual_config(&clock)).await
     }
 
     async fn journal_len(journal: &Arc<dyn Journal>, pid: &PersistenceId) -> usize {
@@ -1716,12 +1721,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -1751,13 +1751,13 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup =
-            ActorSystem::new(journal.clone()).spawn_persistent(SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps.clone(),
-                gtx,
-                manual_config(&clock),
-            ));
+        let sup = supervisor_in(
+            &ActorSystem::new(journal.clone()),
+            &f,
+            gtx,
+            manual_config(&clock),
+        )
+        .await;
         let id = create(&sup).await;
         // Creating a session loads it — it has a runtime to build — so unload it
         // first. Seeding the journal behind a live actor would prove nothing
@@ -1837,12 +1837,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = create(&sup).await;
         let start = poll(&sup, &id, None)
             .await
@@ -1965,12 +1960,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = create(&sup).await;
 
         // A first ask carries no revision, so there is nothing it could be
@@ -2008,12 +1998,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = create(&sup).await;
         sup.ask(|reply| SessionSupervisorCommand::UsageStats {
             id: id.clone(),
@@ -2052,12 +2037,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, _) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -2176,12 +2156,7 @@ mod tests {
         let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
         let clock: Arc<TestClock> = Arc::new(TestClock::new());
         let (gtx, mut grx) = broadcast::channel(16);
-        let sup = ActorSystem::new(journal).spawn_persistent(SessionSupervisor::with_config(
-            crate::auth::UserId::bootstrap(),
-            f.deps.clone(),
-            gtx,
-            manual_config(&clock),
-        ));
+        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock)).await;
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
