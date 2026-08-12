@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ApiRequestError, api } from "../../api/client";
 import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
 import { ReadError } from "../../components/ReadError";
+import { askConfirm } from "../../lib/confirm";
 import { SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
 
@@ -33,6 +34,14 @@ function MachineTokens() {
     onSuccess: () =>
       void qc.invalidateQueries({ queryKey: ["auth", "tokens"] }),
   });
+
+  const revoke = async (id: string, label: string) => {
+    const ok = await askConfirm(
+      `Revoke machine token “${label}”? Anything still using it stops connecting.`,
+      "Revoke",
+    );
+    if (ok) remove.mutate(id);
+  };
 
   const error =
     create.error instanceof ApiRequestError ? create.error.message : null;
@@ -123,7 +132,10 @@ function MachineTokens() {
             <button
               className="key shrink-0 text-xs"
               data-testid={`token-revoke-${t.label}`}
-              onClick={() => remove.mutate(t.id)}
+              // Nothing here says which machine holds a token, so a revoke is
+              // both irreversible and hard to undo by hand: the confirm names
+              // the label and what stops working.
+              onClick={() => void revoke(t.id, t.label)}
               disabled={remove.isPending}
             >
               Revoke

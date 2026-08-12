@@ -16,6 +16,7 @@ import {
   useUpsertMcpServer,
 } from "../../hooks/useMcp";
 import { useSettings } from "../../hooks/useSettings";
+import { askConfirm } from "../../lib/confirm";
 import { ReadError } from "../../components/ReadError";
 import { RowLabel, RowShell, TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
@@ -440,13 +441,17 @@ function McpServerRow({
     }
   };
 
-  const remove = () => {
+  // Discarding an unsaved draft needs no confirm — there is nothing to lose
+  // that is not still on screen. Deleting a saved server takes its URL, its
+  // auth and any OAuth grant with it, so that one asks.
+  const remove = async () => {
     if (isNew) return onDone?.();
+    if (!(await askConfirm(`Delete MCP server “${server.name}”?`))) return;
     del.mutate(server.name);
   };
 
   return (
-    <RowShell onRemove={remove} removeLabel="Remove MCP server">
+    <RowShell onRemove={() => void remove()} removeLabel="Remove MCP server">
       <div className="space-y-3">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {isNew ? (
