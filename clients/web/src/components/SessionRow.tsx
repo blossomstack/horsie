@@ -1,9 +1,11 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useMatch, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
 import { relativeTime, sessionTitle } from "../lib/format";
+import { askConfirm } from "../lib/confirm";
 import { cn } from "../lib/cn";
 import { statusMeta } from "../lib/status";
 import { useSetSessionAnnotations } from "../hooks/useGroups";
+import { useDeleteSession } from "../hooks/useSessions";
 import { Menu, MenuItem } from "./Menu";
 import { StatusDot } from "./StatusBadge";
 
@@ -21,6 +23,24 @@ export function SessionRow({
   const title = sessionTitle(s.name);
   const meta = statusMeta(s.status);
   const setAnnotations = useSetSessionAnnotations();
+  const del = useDeleteSession();
+  const navigate = useNavigate();
+  // Whether this row is the session on screen. `useMatch` rather than
+  // `useParams`, because the rail is mounted outside the route that names one.
+  const open = useMatch("/sessions/:id")?.params.id === s.id;
+
+  const remove = async () => {
+    if (!(await askConfirm(`Delete “${title}”? This cannot be undone.`))) return;
+    try {
+      await del.mutateAsync(s.id);
+      // Deleting the session on screen leaves a view of something that no
+      // longer exists, so it steps back to the new-session page.
+      if (open) navigate("/");
+    } catch {
+      /* reported by the global failure notice */
+    }
+  };
+
   return (
     // The menu is a sibling of the link, not a child: a button inside an
     // anchor is invalid, and assistive tech can't reliably reach it there.
@@ -37,9 +57,9 @@ export function SessionRow({
         }}
         className={({ isActive }) =>
           cn(
-            "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 transition-colors",
-            // Room for the menu so a long title never runs under it.
-            groups.length ? "pr-9" : "pr-2.5",
+            // Room for the menu so a long title never runs under it. Always,
+            // now that the menu is always there.
+            "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 pr-9 transition-colors",
             isActive
               ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
               : "text-dim hover:bg-raised hover:text-legend",
@@ -60,38 +80,50 @@ export function SessionRow({
           </span>
         </span>
       </NavLink>
-      {/* Nothing to move a session to until a group exists, so the control
-          stays out of the way until then. Revealed on row hover; focus-within
-          keeps it visible while its menu is open and the pointer has left. */}
-      {groups.length > 0 && (
-        <span className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-          <Menu label="Move session" testId={`session-row-menu-${s.id}`}>
-            {groups.map((g) => (
-              <MenuItem
-                key={g}
-                testId={`move-to-group-${g}`}
-                onSelect={() =>
-                  setAnnotations.mutate({
-                    id: s.id,
-                    set: [{ key: "group", value: g }],
-                    remove: [],
-                  })
-                }
-              >
-                {g}
-              </MenuItem>
-            ))}
+      {/* Revealed on row hover; focus-within keeps it visible while its menu is
+          open and the pointer has left. The moves only appear once there is
+          somewhere to move to, but Delete always does — it used to live only
+          inside the session, so a session you did not want to open was one you
+          could not get rid of. */}
+      <span className="absolute right-1.5 top-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        <Menu label="Session actions" testId={`session-row-menu-${s.id}`}>
+          {groups.map((g) => (
             <MenuItem
-              testId="move-to-group-ungrouped"
+              key={g}
+              testId={`move-to-group-${g}`}
               onSelect={() =>
-                setAnnotations.mutate({ id: s.id, set: [], remove: ["group"] })
+                setAnnotations.mutate({
+                  id: s.id,
+                  set: [{ key: "group", value: g }],
+                  remove: [],
+                })
               }
             >
-              Ungrouped
+              {g}
             </MenuItem>
-          </Menu>
-        </span>
-      )}
+          ))}
+          {groups.length > 0 && (
+            <>
+              <MenuItem
+                testId="move-to-group-ungrouped"
+                onSelect={() =>
+                  setAnnotations.mutate({ id: s.id, set: [], remove: ["group"] })
+                }
+              >
+                Ungrouped
+              </MenuItem>
+              <div className="my-1 border-t" role="separator" />
+            </>
+          )}
+          <MenuItem
+            danger
+            testId={`delete-session-${s.id}`}
+            onSelect={() => void remove()}
+          >
+            Delete session
+          </MenuItem>
+        </Menu>
+      </span>
     </div>
   );
 }
