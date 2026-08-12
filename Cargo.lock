@@ -586,12 +586,16 @@ dependencies = [
 
 [[package]]
 name = "chumsky"
-version = "0.9.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eebd66744a15ded14960ab4ccdbfb51ad3b81f51f3f04a80adac98c985396c9"
+checksum = "e0d2bfadce76f963d776feff99db6dc33783829539258314776383b33e2a00f8"
 dependencies = [
- "hashbrown 0.14.5",
+ "hashbrown 0.15.5",
+ "regex-automata",
+ "serde",
  "stacker",
+ "unicode-ident",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -1311,10 +1315,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluorite_codegen"
-version = "0.7.0"
+name = "fluorite"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba8c71a72f55aab3c3bfdf09eaf448af91ce075d9f707f386cc5c307ec5add95"
+checksum = "37e8a1b51daf33b2fce84627d3093718c265843f2fcdf6ff77c3a621b3a74fb4"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "fluorite_codegen"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2449d4e2e685bf872b882468849cbedb4aaad4c61422a6eaf2e5f9357a9b4ccf"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -1322,7 +1335,7 @@ dependencies = [
  "chumsky",
  "clap",
  "derive-new",
- "fluorite",
+ "fluorite 0.8.0",
  "logos",
  "serde",
 ]
@@ -1581,20 +1594,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
- "allocator-api2",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1736,7 +1741,7 @@ name = "horsie-models"
 version = "0.2.0"
 dependencies = [
  "derive-new",
- "fluorite",
+ "fluorite 0.7.0",
  "fluorite_codegen",
  "schemars 1.2.2",
  "serde",
