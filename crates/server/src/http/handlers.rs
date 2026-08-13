@@ -452,6 +452,28 @@ pub async fn delete_session(
     }
 }
 
+/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one fork.
+///
+/// Only a fork. A subagent and a workflow step are part of what their session
+/// did, and deleting one would leave a transcript referring to work with no
+/// record. A fork is a conversation somebody started and can be done with.
+pub async fn delete_fork(
+    Scope(state): Scope,
+    Path((id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, Api> {
+    let fork = uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such fork"))?;
+    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteFork {
+        id,
+        fork,
+        reply,
+    })
+    .await?;
+    match result {
+        Ok(()) => Ok(Json(Ack {})),
+        Err(msg) => Err(Api::not_found(msg)),
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

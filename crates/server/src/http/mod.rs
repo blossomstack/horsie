@@ -189,7 +189,7 @@ pub fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
             "/api/sessions/{id}/agents/{agent_id}",
-            get(handlers::get_agent),
+            get(handlers::get_agent).delete(handlers::delete_fork),
         )
         .route(
             "/api/sessions/{id}/messages",
@@ -783,6 +783,61 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        // A fork answers with the conversation to open. camelCase on the wire —
+        // a snake_case key here would read as absent and the assert would pass
+        // for the wrong reason, so this reads the raw JSON.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/sessions/{id}/messages"),
+                &serde_json::json!({"text": "/fork try the other way"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
+        let ack: serde_json::Value = read_json(res).await;
+        let fork = ack["forkedAgent"]
+            .as_str()
+            .expect("a fork command answers with the agent to open")
+            .to_string();
+        assert!(uuid::Uuid::parse_str(&fork).is_ok(), "{fork} is an agent id");
+
+        // An ordinary message carries no fork, so a client never redirects.
+        let res = app
+            .clone()
+            .oneshot(post_json(
+                &format!("/api/sessions/{id}/messages"),
+                &serde_json::json!({"text": "just talking"}),
+            ))
+            .await
+            .unwrap();
+        let ack: serde_json::Value = read_json(res).await;
+        assert!(ack["forkedAgent"].is_null(), "{ack}");
+
+        // The fork lists under its session, from the registry.
+        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let list: ListSessionsResponse = read_json(res).await;
+        let row = list.sessions.iter().find(|s| s.id == id).expect("the session");
+        assert!(
+            row.forks.iter().any(|f| f.id == fork),
+            "the fork is listed under its session: {:?}",
+            row.forks
+        );
+
+        // And can be removed, but only because somebody asked.
+        let res = app
+            .clone()
+            .oneshot(delete(&format!("/api/sessions/{id}/agents/{fork}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = app
+            .clone()
+            .oneshot(delete(&format!("/api/sessions/{id}/agents/{fork}")))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "a fork goes once");
+
         // A message is always accepted: an unregistered model is a *turn*
         // failure the session reports later, not a rejection at the door.
         let res = app

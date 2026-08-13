@@ -23,7 +23,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus, status_kind, status_reason};
 use crate::sessions::{SessionRevisions, UserMessageError};
@@ -130,6 +130,13 @@ pub enum SessionSupervisorCommand {
     /// Cancel the session's turn in flight.
     Stop {
         id: SessionId,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// Delete one fork of a session. Never automatic — nothing prunes a fork,
+    /// so this is the only way one goes.
+    DeleteFork {
+        id: SessionId,
+        fork: Uuid,
         reply: ReplyTo<Result<(), String>>,
     },
     /// Delete a session; the vendor decides its runtime's fate.
@@ -857,6 +864,21 @@ impl EventSourcedActor for SessionSupervisor {
                                 text,
                                 reply,
                             }))
+                            .await;
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::DeleteFork { id, fork, reply } => {
+                match self.session(ctx, state, &id) {
+                    None => {
+                        let _ = reply.send(Err(format!("no such session: {id}")));
+                    }
+                    // Routed, not decided: which forks exist is the session's
+                    // own state, and the supervisor's copy is a projection.
+                    Some(session) => {
+                        let _ = session
+                            .tell(SessionCommand::Fork(ForkCommand::Delete { id: fork, reply }))
                             .await;
                     }
                 }
