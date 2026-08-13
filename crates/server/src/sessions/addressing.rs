@@ -1,80 +1,90 @@
 //! How a session command finds the actor it is for, on whichever node that is.
 //!
-//! A clustered actor is reached through one reference for its whole type, so the
-//! command has to carry its own address: [`Addressed`] is a command plus the
-//! entity id it is for. The [`Shard`] impls below are the only things that read
-//! it, and the only place that knows how an address is built.
+//! A clustered actor is reached through one reference for its whole type, so a
+//! command has to say which actor it is for: [`Addressed`] is a command plus
+//! that id. The [`Shard`] impls below are the only things that read it.
 //!
-//! **An entity id is a bare id, and that is deliberate.** A shard address is
-//! `/system/shard/<type>/<shard>/<entity>` with no third slot, so anything else
-//! packed into it — an account, a tenant — would have to be decoded again by
-//! whoever builds the actor. Nothing here needs that: an actor's persistence id
-//! is `(type, entity)`, exactly as Akka builds
-//! `PersistenceId(TypeKey.name, entityId)`, and everything else a session needs
-//! it reads out of its own journal once it has recovered.
+//! **A session's id names its account as well.** A node that has never hosted a
+//! session still has to build one, and building one needs that account's
+//! services — its runtime manager, its provider registry, its plugin library.
+//! None of that is derivable from a session uuid. The account therefore travels
+//! *with* the id rather than being looked up from it, which is what lets a
+//! recipe stay an ordinary synchronous function.
 //!
-//! **A shard id is a bucket, not a name.** `shard_id` is what placement is
-//! decided over. Naming a session's shard after the session would put the same
-//! id in the address twice; a hash bucket keeps it out and still spreads an
-//! account's sessions across the cluster, so no account is confined to one
-//! machine. What it costs is that a topology change moves a bucket of entities
-//! rather than one, which nothing here cares about.
+//! **The shard id is the session alone.** Placement is decided over it, so one
+//! session is one unit and an account's sessions spread across the cluster
+//! rather than piling onto whichever node its supervisor is on. No hash and no
+//! bucket count: `horsie-actor` places by a pure function over the live set with
+//! no per-shard state to bound, so bucketing would buy a shorter address segment
+//! and cost a number two nodes could disagree about.
 
+use crate::auth::UserId;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use horsie_actor::{ActorRef, ReplyTo, Shard, TellError};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use uuid::Uuid;
 
-/// How many buckets each shard type's entities are spread over.
+/// Between an account and what it owns, in a rendered id.
 ///
-/// Fixed for the life of a deployment: changing it re-buckets every entity, and
-/// two nodes that disagreed would each build the same one. Large enough to
-/// spread evenly over any node count worth running, small enough to stay
-/// readable in a path.
-const BUCKETS: u64 = 256;
+/// Only ever written. Nothing reads one of these back apart, because every node
+/// that needs the halves gets them off the command — it exists so an address
+/// stays legible in a log.
+const SEP: char = '|';
 
-/// The bucket `entity` belongs to.
+/// Which session, and whose.
 ///
-/// FNV-1a rather than [`DefaultHasher`], which is explicitly not stable across
-/// Rust releases. Every node has to agree on this, so it must not depend on the
-/// compiler that built it.
-///
-/// [`DefaultHasher`]: std::collections::hash_map::DefaultHasher
-fn bucket(entity: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in entity.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    (hash % BUCKETS).to_string()
+/// The account is not decoration: a recipe is handed this and nothing else, and
+/// it cannot build a session without knowing which account's services to build
+/// it against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEntityId {
+    pub account: UserId,
+    pub session: Uuid,
 }
 
-/// A command and the entity it is addressed to.
+impl fmt::Display for SessionEntityId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{SEP}{}", self.account, self.session)
+    }
+}
+
+/// A command and the actor it is for.
 ///
 /// A wrapper rather than an id on each of the ~79 command variants. The cost is
-/// that a wrong entity id is a runtime mistake rather than a type error; the
-/// reference types below are what keep that mistake in one place instead of at
-/// every send site.
+/// that a wrong id is a runtime mistake rather than a type error; the reference
+/// types below are what keep that mistake in one place instead of at every send
+/// site.
 #[derive(Serialize, Deserialize)]
-pub struct Addressed<C> {
-    /// The account id for a supervisor, the session uuid for a session.
-    pub entity: String,
+pub struct Addressed<Id, C> {
+    pub entity: Id,
     pub cmd: C,
 }
+
+/// What a supervisor's mailbox accepts: a command, and whose list it is for.
+pub type SupervisorInbox = Addressed<UserId, SessionSupervisorCommand>;
+
+/// What a session's mailbox accepts: a command, and which session it is for.
+pub type SessionInbox = Addressed<SessionEntityId, SessionCommand>;
 
 /// One account's session list.
 pub struct SupervisorShard;
 
 impl Shard for SupervisorShard {
-    type Command = Addressed<SessionSupervisorCommand>;
+    type Command = SupervisorInbox;
+    type EntityId = UserId;
+    /// The account, which is the same as the entity: an account has exactly one
+    /// supervisor, so there is nothing coarser to group it with.
+    type ShardId = UserId;
     const TYPE: &'static str = "session-supervisor";
 
-    fn entity_id(cmd: &Self::Command) -> String {
+    fn entity_id(cmd: &Self::Command) -> UserId {
         cmd.entity.clone()
     }
 
-    fn shard_id(cmd: &Self::Command) -> String {
-        bucket(&cmd.entity)
+    fn shard_id(cmd: &Self::Command) -> UserId {
+        cmd.entity.clone()
     }
 }
 
@@ -82,39 +92,42 @@ impl Shard for SupervisorShard {
 pub struct SessionShard;
 
 impl Shard for SessionShard {
-    type Command = Addressed<SessionCommand>;
+    type Command = SessionInbox;
+    type EntityId = SessionEntityId;
+    /// The session alone, so sessions are placed independently of each other and
+    /// of the supervisor that lists them.
+    type ShardId = Uuid;
     const TYPE: &'static str = "session";
 
-    fn entity_id(cmd: &Self::Command) -> String {
+    fn entity_id(cmd: &Self::Command) -> SessionEntityId {
         cmd.entity.clone()
     }
 
-    fn shard_id(cmd: &Self::Command) -> String {
-        bucket(&cmd.entity)
+    fn shard_id(cmd: &Self::Command) -> Uuid {
+        cmd.entity.session
     }
 }
 
 /// One account's supervisor, addressed rather than held.
 ///
-/// Wraps once, here, so the ~117 places that send the supervisor a command keep
+/// Wraps once, here, so the places that send the supervisor a command keep
 /// sending it a command. Each of them already had the account in hand — it is
 /// what they resolved this reference from — so repeating it at every call site
 /// would be ceremony that can be got wrong over a value that cannot.
 #[derive(Clone)]
 pub struct SupervisorRef {
-    shard: ActorRef<Addressed<SessionSupervisorCommand>>,
-    account: String,
+    shard: ActorRef<SupervisorInbox>,
+    account: UserId,
 }
 
 impl SupervisorRef {
     #[must_use]
-    pub fn new(shard: ActorRef<Addressed<SessionSupervisorCommand>>, account: String) -> Self {
+    pub fn new(shard: ActorRef<SupervisorInbox>, account: UserId) -> Self {
         Self { shard, account }
     }
 
-    /// The account this addresses.
     #[must_use]
-    pub fn account(&self) -> &str {
+    pub fn account(&self) -> &UserId {
         &self.account
     }
 
@@ -153,7 +166,7 @@ impl SupervisorRef {
             .await
     }
 
-    fn addressed(&self, cmd: SessionSupervisorCommand) -> Addressed<SessionSupervisorCommand> {
+    fn addressed(&self, cmd: SessionSupervisorCommand) -> SupervisorInbox {
         Addressed {
             entity: self.account.clone(),
             cmd,
@@ -169,14 +182,17 @@ impl SupervisorRef {
 /// there is nothing to maintain and nothing to invalidate on offload.
 #[derive(Clone)]
 pub struct SessionRef {
-    shard: ActorRef<Addressed<SessionCommand>>,
-    session: String,
+    shard: ActorRef<SessionInbox>,
+    entity: SessionEntityId,
 }
 
 impl SessionRef {
     #[must_use]
-    pub fn new(shard: ActorRef<Addressed<SessionCommand>>, session: String) -> Self {
-        Self { shard, session }
+    pub fn new(shard: ActorRef<SessionInbox>, account: UserId, session: Uuid) -> Self {
+        Self {
+            shard,
+            entity: SessionEntityId { account, session },
+        }
     }
 
     /// # Errors
@@ -214,48 +230,10 @@ impl SessionRef {
             .await
     }
 
-    fn addressed(&self, cmd: SessionCommand) -> Addressed<SessionCommand> {
+    fn addressed(&self, cmd: SessionCommand) -> SessionInbox {
         Addressed {
-            entity: self.session.clone(),
+            entity: self.entity.clone(),
             cmd,
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    /// Every command for one entity has to agree on its bucket, or that entity
-    /// has two homes — so this is a pure function of the entity id and of
-    /// nothing else.
-    #[test]
-    fn a_bucket_is_decided_by_the_entity_alone() {
-        assert_eq!(bucket("sess-3"), bucket("sess-3"));
-        assert_ne!(bucket("sess-3"), bucket("sess-4"));
-    }
-
-    /// Pinned rather than merely computed, because every node has to agree
-    /// across builds: a bucket that moved between two versions of the server
-    /// would put two live actors on one journal during a rolling restart.
-    #[test]
-    fn buckets_do_not_move_between_builds() {
-        assert_eq!(bucket("acct-7"), "150");
-        assert_eq!(bucket("sess-3"), "27");
-        assert_eq!(bucket(""), "37");
-    }
-
-    /// Sessions spread, which is the whole reason the shard id is not the
-    /// account.
-    #[test]
-    fn sessions_do_not_share_a_bucket() {
-        let spread: std::collections::HashSet<String> =
-            (0..64).map(|i| bucket(&format!("sess-{i}"))).collect();
-        assert!(
-            spread.len() > 32,
-            "64 sessions landed in only {} buckets",
-            spread.len()
-        );
     }
 }

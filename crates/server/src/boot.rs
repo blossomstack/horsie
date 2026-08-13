@@ -16,7 +16,7 @@ use crate::db::Db;
 use crate::http::AppState;
 use crate::plugins::ArtifactStore;
 use crate::routines::RoutineScheduler;
-use crate::users::{Shared, UserRegistry};
+use crate::users::{Shared, UserRegistry, register_session_shards};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::settings::ServerInfo;
 use std::path::PathBuf;
@@ -137,9 +137,15 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         model_card_seed: Arc::new(seed),
         anonymous,
         supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
+        // Only exists in a test build; see `Shared::deps`.
+        #[cfg(any(test, feature = "test-util"))]
+        deps: None,
         fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
     });
     let users = Arc::new(UserRegistry::new(shared.clone()));
+    // Once per node, and only now: a recipe resolves an account's bundle
+    // through the registry, so there has to be one for it to close over.
+    register_session_shards(&users)?;
 
     // One timer for the deployment, over every account's routines. It resolves
     // an owner's services when one of their routines comes due, which is also

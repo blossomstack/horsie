@@ -49,12 +49,14 @@ use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
 use crate::sessions::{
+    addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::SessionSupervisorCommand,
     workflow::WorkflowRunState,
 };
+use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
@@ -62,7 +64,7 @@ use horsie_models::now_ms;
 use serde_json::Value;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -187,56 +189,176 @@ struct AgentPlan {
 
 pub struct SessionActor {
     id: Uuid,
-    spec: SessionSpec,
-    deps: ServerDeps,
+    /// Whose session this is. Not in the persistence id — a session's log is
+    /// keyed by its uuid alone — but a recipe is handed it, because resolving
+    /// the account's wiring is the one thing a session cannot do from its own
+    /// id.
+    account: crate::auth::UserId,
+    /// What this session is. `None` until its own log says, or until the
+    /// `RecordSpec` that brought this actor into being is handled — which is
+    /// the first thing in the mailbox of a session that has no log yet.
+    spec: Option<SessionSpec>,
+    /// Where this account's bundle is resolved from. A shard recipe is
+    /// synchronous, so nothing below can be handed in at construction.
+    users: Weak<UserRegistry>,
+    /// This account's bundle, resolved at recovery. See [`Self::services`].
+    services: Option<Arc<UserServices>>,
     /// This session's supervisor, given at construction.
     ///
     /// A *name* with a warm cache rather than a handle to one mailbox, so a
     /// supervisor that stops and comes back is reached through the same
     /// reference and this session is told nothing. That is what makes handing it
-    /// down cost nothing — and a session built on a host that never saw its
-    /// parent is still handed one, because a shard recipe closes over the
-    /// reference for the whole type rather than for an instance.
-    supervisor: ActorRef<SessionSupervisorCommand>,
+    /// down cost nothing — and a session built on a host that never saw the
+    /// request creating it is still handed one, because the recipe resolves the
+    /// reference for the whole supervisor type rather than for an instance.
+    supervisor: SupervisorRef,
     /// The agent actors this session hosts, resident for as long as this actor
-    /// is loaded. `None` means exactly one thing — recovery has not finished —
-    /// which is why the topology inside is a value rather than a second
-    /// `Option`: a session's shape is decided at creation and never changes.
+    /// is loaded. `None` means exactly one thing — this session does not yet
+    /// know what it is — which is why the topology inside is a value rather
+    /// than a second `Option`: a session's shape is decided at creation and
+    /// never changes.
     agents: Option<SessionAgents>,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
     last_reported: Option<SessionStatus>,
-    /// The supervisor's per-agent revision channels for this session.
-    ///
-    /// Cloned in rather than created here: it has to outlive this actor, so
-    /// that unloading an idle session leaves a reader waiting rather than
-    /// disconnecting it.
-    revisions: crate::sessions::Revisions,
 }
 
 impl SessionActor {
     pub fn new(
-        id: Uuid,
-        spec: SessionSpec,
-        deps: ServerDeps,
-        supervisor: ActorRef<SessionSupervisorCommand>,
-        revisions: crate::sessions::Revisions,
+        entity: SessionEntityId,
+        supervisor: SupervisorRef,
+        users: Weak<UserRegistry>,
     ) -> Self {
         Self {
-            id,
-            spec,
-            deps,
+            id: entity.session,
+            account: entity.account,
+            spec: None,
+            users,
+            services: None,
             supervisor,
             agents: None,
             last_reported: None,
-            revisions,
         }
     }
 
     /// The journal identity of a session: kind `"session"`, id = the uuid.
+    ///
+    /// The account is deliberately absent. A session's log was found by this
+    /// key before anything was addressed by an account, and putting one in the
+    /// key now would orphan every log ever written.
     pub fn persistence_id_for(session_id: Uuid) -> PersistenceId {
         PersistenceId::new("session", session_id.to_string())
+    }
+
+    /// This account's bundle.
+    ///
+    /// Expects rather than handles: recovery resolves it, and recovery finishes
+    /// before the first command is handled, so a `None` here is a broken actor
+    /// lifecycle rather than a case with an answer.
+    #[expect(
+        clippy::expect_used,
+        reason = "recovery runs before any command, so this cannot be None"
+    )]
+    fn services(&self) -> &Arc<UserServices> {
+        self.services
+            .as_ref()
+            .expect("a session handles no command before recovery has resolved its account")
+    }
+
+    /// What this session runs on.
+    pub(super) fn deps(&self) -> &ServerDeps {
+        &self.services().deps
+    }
+
+    /// What this session is.
+    ///
+    /// Expects for the same reason [`Self::services`] does, one step further
+    /// on: nothing reads a spec before the command that records it, because
+    /// that command is what created this actor.
+    #[expect(
+        clippy::expect_used,
+        reason = "a session is told what it is before anything else can reach it"
+    )]
+    pub(super) fn spec(&self) -> &SessionSpec {
+        self.spec
+            .as_ref()
+            .expect("a session is told what it is before anything else can reach it")
+    }
+
+    /// The same, for the two renames that keep the resident copy in step with
+    /// what has just been journaled.
+    #[expect(
+        clippy::expect_used,
+        reason = "a session is told what it is before anything else can reach it"
+    )]
+    pub(super) fn spec_mut(&mut self) -> &mut SessionSpec {
+        self.spec
+            .as_mut()
+            .expect("a session is told what it is before anything else can reach it")
+    }
+
+    /// This session's own mailbox, as the thing that reaches it.
+    pub(super) fn me(&self, ctx: &ActorContext<SessionInbox>) -> SessionRef {
+        SessionRef::new(ctx.self_ref(), self.account.clone(), self.id)
+    }
+
+    /// Take up a spec, start the agents it calls for, and put right whatever
+    /// the state it is handed says was interrupted.
+    ///
+    /// Two callers, and the pair is the whole of how a session learns what it
+    /// is: recovery, from what its log already says, and `RecordSpec`, for a
+    /// session whose log is empty because it was created a moment ago. Both go
+    /// through here so that a run started for the first time and one resumed
+    /// after a restart take exactly the same path.
+    pub(super) async fn adopt(
+        &mut self,
+        spec: SessionSpec,
+        state: &SessionState,
+        ctx: &ActorContext<SessionInbox>,
+    ) {
+        self.spec = Some(spec);
+        if self.spec().workflow.is_some() {
+            // A run has no main agent. Step actors, like subagent actors, stay
+            // cold: they spawn on demand for a history read, a retry, or the
+            // next step a boundary picks.
+            self.agents = Some(SessionAgents::workflow());
+        } else {
+            self.spawn_main_agent(ctx, state);
+        }
+        // Each component repairs itself. A self-send rather than direct work,
+        // because neither caller may write here — recovery must not persist at
+        // all, and `RecordSpec` is already returning an effect of its own — so
+        // anything that needs to journal arrives as an ordinary command, down
+        // the same path a live one would take.
+        let cx = component::ActionCx {
+            id: self.id,
+            spec: self.spec(),
+        };
+        let repairs: Vec<SessionCommand> = [
+            RuntimeLifecycle::on_load(&cx, state),
+            SubAgents::on_load(&cx, state),
+            WorkflowRun::on_load(&cx, state),
+            Turns::on_load(&cx, state),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let me = self.me(ctx);
+        for cmd in repairs {
+            let _ = me.tell(cmd).await;
+        }
+        // Loading is not a transition, but it is the first moment anyone can
+        // learn this status: a page already watching hears nothing otherwise.
+        //
+        // Unconditional, repairs or not. This used to be skipped whenever a
+        // repair was queued, on the grounds that the repair reports the status
+        // it lands on — but `SubAgentCommand::Reconcile` persists an event and
+        // reports nothing, so a session whose only repair was an interrupted
+        // subagent loaded and said nothing at all. A repair that does persist
+        // reports again from `on_events_persisted`, with the state it landed
+        // on, and a report that changes nothing is dropped by the supervisor.
+        self.report_status(state).await;
     }
 
     /// Tell the supervisor the status this session's journal just folded.
@@ -280,17 +402,21 @@ impl SessionActor {
     /// register under their own id, which is also the id they journal under.
     fn spawn_agent(
         &mut self,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         plan: AgentPlan,
     ) -> Option<ResidentAgent> {
+        // Taken from the account's registry rather than owned here, because the
+        // channels have to outlive this actor: unloading an idle session must
+        // leave a reader waiting rather than disconnecting it.
+        let revisions = self.services().revisions.of(&self.id.to_string());
         // A subagent and a step journal under their own id; the main agent
         // journals under the session's, because its transcript *is* the
         // session's. The revision channel follows the same split.
         let (journal_id, revision) = match plan.kind {
-            SessionAgentKind::Main => (self.id, self.revisions.for_agent(MAIN_AGENT_ID)),
+            SessionAgentKind::Main => (self.id, revisions.for_agent(MAIN_AGENT_ID)),
             SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
-                (id, self.revisions.for_agent(&id.to_string()))
+                (id, revisions.for_agent(&id.to_string()))
             }
         };
         // Its name under this session, and the id it is addressed by.
@@ -300,22 +426,22 @@ impl SessionActor {
         };
         let key = plan.kind.agent_key();
         let provider = Arc::new(SessionContextProvider {
-            runtimes: self.deps.runtimes.provider(
+            runtimes: self.deps().runtimes.provider(
                 self.id.to_string(),
-                self.spec.vendor.clone(),
-                self.spec.clone(),
+                self.spec().vendor.clone(),
+                self.spec().clone(),
             ),
-            registry: self.deps.provider_registry.clone(),
-            mcp: self.deps.mcp.clone(),
-            memory: self.deps.memory.clone(),
+            registry: self.deps().provider_registry.clone(),
+            mcp: self.deps().mcp.clone(),
+            memory: self.deps().memory.clone(),
             step_output_schema: plan.step_output_schema.clone(),
             session_id: self.id,
             kind: plan.kind,
             agent_type: plan.agent_type,
-            unattended: self.spec.is_unattended(),
-            session: ctx.self_ref(),
-            plugins: self.spec.plugins.clone(),
-            plugin_library: self.deps.plugins.clone(),
+            unattended: self.spec().is_unattended(),
+            session: self.me(ctx),
+            plugins: self.spec().plugins.clone(),
+            plugin_library: self.deps().plugins.clone(),
             last_client: Mutex::new(None),
             settings: plan.settings.clone(),
         });
@@ -328,7 +454,7 @@ impl SessionActor {
             // can ask. A step that declares no output ends its turn with plain
             // text, and that text is its output — forcing a terminal tool on it
             // would fail the run the moment the model simply answered.
-            allow_ask_user: plan.step_output_schema.is_some() && !self.spec.is_unattended(),
+            allow_ask_user: plan.step_output_schema.is_some() && !self.spec().is_unattended(),
             allow_timers: None,
             max_iterations: plan.settings.max_iterations,
             max_retries: Some(plan.settings.max_retries),
@@ -349,7 +475,7 @@ impl SessionActor {
         let agent_ctx = AgentRuntimeContext {
             context_provider: provider.clone(),
             revision,
-            parent: StopHookParent::wrap(ctx.self_ref(), key, provider.clone()),
+            parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),
             journal_id,
             // Computed from the state this spawn was decided against, never
             // remembered: an agent built after the runtime landed starts ready,
@@ -359,9 +485,9 @@ impl SessionActor {
         };
         // A child of this session, named by the id it journals under — `main`
         // for the primary agent, the node id for a subagent or a step. Created
-        // rather than spawned anonymously so it has a path: an agent that
-        // reaches upwards uses `ctx.parent()`, which is a reference to this
-        // session's path rather than to this instance of it.
+        // rather than spawned anonymously so it has a path under this session's,
+        // which is what makes it stop with the session and makes two callers
+        // racing to reach one agent get one actor over its journal.
         let actor = match ctx.actor_of(&name, ctx.persistent(AgentActor::new(agent_ctx, params))) {
             Ok(actor) => actor,
             Err(e) => {
@@ -384,18 +510,18 @@ impl SessionActor {
     }
 
     /// The session's primary agent, spawned once at load.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionCommand>, state: &SessionState) {
+    fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState) {
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Main,
-                settings: self.spec.agent.clone(),
+                settings: self.spec().agent.clone(),
                 step_output_schema: None,
                 agent_type: None,
                 // An unattended session is not offered `ask_user`: nobody is
                 // there to answer, so a question would park the run forever.
-                handoff_tool: (!self.spec.is_unattended()).then(|| ASK_USER_TOOL.to_string()),
+                handoff_tool: (!self.spec().is_unattended()).then(|| ASK_USER_TOOL.to_string()),
             },
         );
     }
@@ -413,7 +539,7 @@ impl SessionActor {
     fn resolve_agent(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         agent_id: Option<&str>,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
@@ -456,7 +582,7 @@ impl SessionActor {
     fn resolve_step(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         id: Uuid,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         let run = state.run.as_ref()?;
@@ -534,7 +660,7 @@ impl SessionActor {
         &mut self,
         action: AgentAction,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
         match action {
             AgentAction::Deliver(delivery) => self.deliver(delivery, state, ctx).await,
@@ -559,7 +685,7 @@ impl SessionActor {
         &mut self,
         delivery: Delivery,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
         let Delivery { to, child, part } = delivery;
         let Some(agent) = self.reach(to, state, ctx) else {
@@ -590,7 +716,7 @@ impl SessionActor {
         &mut self,
         key: AgentKey,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Option<ActorRef<AgentCommand>> {
         if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
             return Some(agent.actor.clone());
@@ -644,7 +770,7 @@ impl SessionActor {
         }
         let cx = component::ActionCx {
             id: self.id,
-            spec: &self.spec,
+            spec: self.spec(),
         };
         [
             SubAgents::actions(&cx, state),
@@ -657,7 +783,7 @@ impl SessionActor {
     async fn flush_then_drain(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
         let mut events = Vec::new();
         let mut next = state.clone();
@@ -683,7 +809,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         mut events: Vec<SessionDomainEvent>,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let next = events
             .iter()
@@ -705,7 +831,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         outcome: AgentOutcome,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
@@ -789,7 +915,7 @@ impl SessionActor {
 
 #[async_trait]
 impl EventSourcedActor for SessionActor {
-    type Command = SessionCommand;
+    type Command = SessionInbox;
     type Event = SessionDomainEvent;
     type State = SessionState;
 
@@ -846,13 +972,16 @@ impl EventSourcedActor for SessionActor {
         self.report_status(state).await;
     }
 
+    /// Every command arrives addressed to a session, and this is the one place
+    /// that reads the address: the shard already routed by it, so what is left
+    /// below is the command it was wrapped around.
     async fn handle_command(
         &mut self,
         state: &SessionState,
-        cmd: SessionCommand,
-        ctx: &mut ActorContext<SessionCommand>,
+        cmd: SessionInbox,
+        ctx: &mut ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        match cmd {
+        match cmd.cmd {
             SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
             SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
             SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
@@ -868,64 +997,31 @@ impl EventSourcedActor for SessionActor {
         }
     }
 
-    /// Loading a session spawns its agent and repairs a turn the process died
-    /// in. It calls no vendor, starts no run, and drains nothing — an
-    /// interrupted assistant turn is over, and queued user messages wait for
-    /// the next turn the user starts.
+    /// Loading a session resolves its account, spawns its agent and repairs a
+    /// turn the process died in. It calls no vendor, starts no run, and drains
+    /// nothing — an interrupted assistant turn is over, and queued user
+    /// messages wait for the next turn the user starts.
+    ///
+    /// The account is resolved *here* because a shard recipe is synchronous and
+    /// building a bundle is not. This runs before the first command, so
+    /// everything else may take it for granted.
     async fn on_recovery_complete(
         &mut self,
         state: &SessionState,
-        ctx: &mut ActorContext<SessionCommand>,
+        ctx: &mut ActorContext<SessionInbox>,
     ) {
-        // The journal is the truth about this session; the spec handed in at
-        // construction is only a seed. Adopt what was recorded — and if nothing
-        // was, keep the seed and wait, because the `RecordSpec` the supervisor
-        // sends on every load is already ahead of every other command in this
-        // mailbox. Writing it from here instead would race them, and a rename
-        // that arrived first would have nothing to rename.
-        if let Some(spec) = state.spec.as_ref() {
-            self.spec = spec.clone();
-        }
+        self.services = resolve(&self.users, &self.account).await;
 
-        if self.spec.workflow.is_some() {
-            // A run has no main agent. Step actors, like subagent actors, stay
-            // cold: they spawn on demand for a history read, a retry, or the
-            // next step a boundary picks.
-            self.agents = Some(SessionAgents::workflow());
-        } else {
-            self.spawn_main_agent(ctx, state);
-        }
-        // Each component repairs itself. A self-send rather than direct work,
-        // because recovery must not persist and this runs before the first live
-        // command — so anything that needs to journal arrives as an ordinary
-        // command, down the same path a live one would take.
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: &self.spec,
+        // The journal is the truth about this session, and a session with
+        // nothing in it has not been created yet: the `RecordSpec` that brought
+        // this actor into being is next in this mailbox, and adopting it is
+        // what starts the agents below. Writing it from here instead would race
+        // that command, and a rename arriving first would have nothing to
+        // rename.
+        let Some(spec) = state.spec.clone() else {
+            return;
         };
-        let repairs: Vec<SessionCommand> = [
-            RuntimeLifecycle::on_load(&cx, state),
-            SubAgents::on_load(&cx, state),
-            WorkflowRun::on_load(&cx, state),
-            Turns::on_load(&cx, state),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        for cmd in repairs {
-            let _ = ctx.self_ref().tell(cmd).await;
-        }
-        // Loading is not a transition, but it is the first moment anyone can
-        // learn this status: a page already watching hears nothing otherwise.
-        //
-        // Unconditional, repairs or not. This used to be skipped whenever a
-        // repair was queued, on the grounds that the repair reports the status
-        // it lands on — but `SubAgentCommand::Reconcile` persists an event and
-        // reports nothing, so a session whose only repair was an interrupted
-        // subagent loaded and said nothing at all. A repair that does persist
-        // reports again from `on_events_persisted`, with the state it landed
-        // on, and a report that changes nothing is dropped by the supervisor.
-        self.report_status(state).await;
+        self.adopt(spec, state, ctx).await;
     }
 }
 
@@ -936,4 +1032,4 @@ impl EventSourcedActor for SessionActor {
     clippy::panic,
     clippy::wildcard_enum_match_arm
 )]
-mod testing;
+pub(crate) mod testing;

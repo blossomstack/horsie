@@ -12,10 +12,10 @@ use crate::routines::service::{RoutineError, RoutineService};
 use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
 use crate::sessions::UserMessageError;
+use crate::sessions::addressing::SupervisorRef;
 use crate::sessions::builder::{SpecError, build_session_spec};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::SessionSupervisorCommand;
-use horsie_actor::ActorRef;
 use horsie_models::session::{AgentSettings as WireAgentSettings, SessionSummary};
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ pub struct RoutineRunner {
     environments: Arc<EnvironmentService>,
     config: Arc<dyn ConfigStore>,
     vendors: Arc<RuntimeVendorRegistry>,
-    supervisor: ActorRef<SessionSupervisorCommand>,
+    supervisor: SupervisorRef,
 }
 
 impl RoutineRunner {
@@ -35,7 +35,7 @@ impl RoutineRunner {
         environments: Arc<EnvironmentService>,
         config: Arc<dyn ConfigStore>,
         vendors: Arc<RuntimeVendorRegistry>,
-        supervisor: ActorRef<SessionSupervisorCommand>,
+        supervisor: SupervisorRef,
     ) -> Self {
         Self {
             routines,
@@ -195,8 +195,7 @@ pub(crate) mod tests {
     use crate::routines::service::tests::{Fixture, fixture, input};
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use crate::sessions::spec::{ServerDeps, SessionSpec};
-    use crate::sessions::supervisor::SessionSupervisor;
-    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+    use crate::sessions::supervisor::SupervisorConfig;
     use horsie_models::routines::{EverySchedule, ManualSchedule, RoutineSchedule};
     use std::collections::HashMap;
     use std::time::Duration;
@@ -204,10 +203,14 @@ pub(crate) mod tests {
     pub(crate) struct RunnerFixture {
         pub runner: Arc<RoutineRunner>,
         pub routines: Arc<RoutineService>,
-        pub supervisor: ActorRef<SessionSupervisorCommand>,
+        pub supervisor: SupervisorRef,
         /// Kept alive: dropping it closes the fake vendor's transport.
         pub _vendor: FakeRuntimeVendor,
         pub _fixture: Fixture,
+        /// Kept alive: the registry the supervisor resolves its account
+        /// through is reached weakly, so letting this go would take the
+        /// account with it.
+        pub _node: crate::testing::Deployment,
     }
 
     /// A runner over a real supervisor with a fake `mock` runtime vendor.
@@ -238,12 +241,17 @@ pub(crate) mod tests {
             plugins: None,
             memory: None,
         };
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let (gtx, _) = tokio::sync::broadcast::channel(64);
-        let supervisor = crate::testing::spawn_detached(
-            &ActorSystem::new(journal.clone()),
-            SessionSupervisor::new(crate::auth::UserId::bootstrap(), deps, gtx),
-        );
+        let node = crate::testing::Deployment::new(
+            deps,
+            SupervisorConfig {
+                // No background ticker: nothing here is about going idle, and a
+                // sweep nobody asked for is a race.
+                tick_interval: None,
+                ..SupervisorConfig::default()
+            },
+        )
+        .await;
+        let supervisor = node.supervisor().await;
         let runner = Arc::new(RoutineRunner::new(
             f.routines.clone(),
             f.agents.clone(),
@@ -258,13 +266,12 @@ pub(crate) mod tests {
             supervisor,
             _vendor: vendor,
             _fixture: f,
+            _node: node,
         }
     }
 
     /// Every session the supervisor knows, with its spec.
-    pub(crate) async fn sessions(
-        sup: &ActorRef<SessionSupervisorCommand>,
-    ) -> Vec<(String, SessionSpec)> {
+    pub(crate) async fn sessions(sup: &SupervisorRef) -> Vec<(String, SessionSpec)> {
         sup.ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap()
@@ -276,11 +283,7 @@ pub(crate) mod tests {
     /// Whether the prompt reached the session's agent as a user message.
     /// Read through the supervisor (the actor owns its journal), and polled
     /// because the turn starts on its own task.
-    async fn prompt_reached_the_agent(
-        sup: &ActorRef<SessionSupervisorCommand>,
-        id: &str,
-        prompt: &str,
-    ) -> bool {
+    async fn prompt_reached_the_agent(sup: &SupervisorRef, id: &str, prompt: &str) -> bool {
         for _ in 0..100 {
             let page = sup
                 .ask(|reply| SessionSupervisorCommand::PageLog {

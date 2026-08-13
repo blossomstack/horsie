@@ -1,9 +1,12 @@
 //! Interactive sessions: event-sourced actors on the shared `horsie-actor` core.
 //!
-//! `SessionSupervisor` (journal `session-supervisor/main`) owns the registry and
-//! one `SessionActor` child per live session (journal `session/<id>`); each
-//! session hosts a reused `AgentActor` (journal `agent/<id>`). Recovery is lazy:
-//! journals replay at startup, runtimes respawn only on user action.
+//! `SessionSupervisor` (journal `session-supervisor/<account>`) owns the
+//! registry of which sessions exist; a `SessionActor` (journal `session/<id>`)
+//! is one of them, and hosts an `AgentActor` per agent (journal `agent/<id>`).
+//! The two are separate clustered types rather than parent and child, so each
+//! is placed on its own — see [`addressing`]. Recovery is lazy: a journal
+//! replays when something addresses the actor it belongs to, and runtimes
+//! respawn only on user action.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,8 +35,8 @@ pub mod workflow;
 /// the one thing a stream must never miss would have looked like no news at all.
 pub type Revision = u64;
 
-/// One agent's channel. `Arc` because the supervisor and the agent both hold
-/// it, and the supervisor's copy is what keeps it alive across an offload.
+/// One agent's channel. `Arc` because the account's registry and the agent both
+/// hold it, and the registry's copy is what keeps it alive across an offload.
 pub type RevisionSender = std::sync::Arc<tokio::sync::watch::Sender<Revision>>;
 
 type RevisionMap = std::collections::HashMap<String, RevisionSender>;
@@ -47,12 +50,12 @@ struct Registry {
 
 /// How many times each of a session's agents has moved, for readers to wait on.
 ///
-/// **Owned by the supervisor, not by the session.** An idle session unloads,
-/// and a reader waiting on one of these must not be cut off by that: the
-/// alternative is a loop, because a disconnected browser reconnects, a
-/// reconnect loads the session, and a loaded session goes idle again. The
-/// channel outliving the actor is what breaks that cycle — a reader simply
-/// waits, and hears from the session the next time something actually wakes it.
+/// **Outlives the session actor, deliberately.** An idle session unloads, and a
+/// reader waiting on one of these must not be cut off by that: the alternative
+/// is a loop, because a disconnected browser reconnects, a reconnect loads the
+/// session, and a loaded session goes idle again. The channel outliving the
+/// actor is what breaks that cycle — a reader simply waits, and hears from the
+/// session the next time something actually wakes it.
 ///
 /// This is the same shape the old session-frame channel had, and for the same
 /// reason; it is per-agent now because that is what a reader waits on.
@@ -100,6 +103,49 @@ impl Revisions {
         let reg = self.0.lock().unwrap_or_else(|e| e.into_inner());
         reg.polled.is_some_and(|at| at.elapsed() < WATCH_RETENTION)
             || reg.agents.values().any(|tx| tx.receiver_count() > 0)
+    }
+}
+
+/// Every session's revision channels, for one account.
+///
+/// On the account's bundle rather than on its supervisor, because the two
+/// actors that need these channels are placed independently: the session moves
+/// a counter, and the supervisor answers a reader's poll from it without
+/// loading anything. A map on either of them would be invisible to the other.
+///
+/// Node-local, like everything else in the bundle. A `watch` channel is a
+/// pointer into this process, so a reader served by another host polls that
+/// host's copy of the number — which is why what travels is the number and
+/// never a handle to it.
+#[derive(Default)]
+pub struct SessionRevisions(std::sync::Mutex<std::collections::HashMap<String, Revisions>>);
+
+impl SessionRevisions {
+    /// One session's channels, created on first use.
+    #[must_use]
+    pub fn of(&self, session: &str) -> Revisions {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Drop a session's channels unless a reader is still interested.
+    ///
+    /// Called when a session unloads or is deleted. Keeping a watched one is
+    /// the whole point: an unloaded session has nothing to say until something
+    /// reloads it, and ending the stream would only make the client reconnect
+    /// and reload it.
+    pub fn release(&self, session: &str) {
+        let mut map = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if map.get(session).is_none_or(|p| !p.watched()) {
+            map.remove(session);
+        }
     }
 }
 

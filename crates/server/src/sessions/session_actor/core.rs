@@ -9,7 +9,7 @@ use super::CoreCommand;
 use super::component::Component;
 use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
 use crate::agent_loop::AgentCommand;
-use crate::sessions::session_actor::SessionCommand;
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
@@ -39,7 +39,7 @@ impl SessionCore {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: CoreCommand,
-        _ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             CoreCommand::SetTitle { title, reply } => {
@@ -59,16 +59,22 @@ impl SessionCore {
                 effect
             }
             CoreCommand::TitleSet { name } => {
-                actor.spec.name = Some(name.clone());
+                actor.spec_mut().name = Some(name.clone());
                 CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
             }
             CoreCommand::RecordSpec { spec } => {
-                // Idempotent, because the supervisor sends this every time it
-                // loads a session and only the first one is the truth. A later
-                // one would overwrite a name the session has since been given.
+                // Idempotent, because a log that already says what this session
+                // is has said it: a later one would overwrite a name the
+                // session has since been given, and recovery has already
+                // adopted what was there.
                 if state.spec.is_some() {
                     return CommandEffect::none();
                 }
+                // The other half of how a session learns what it is. Recovery
+                // covers a session with a history; this covers the one case it
+                // cannot — a session created a moment ago, whose log is empty
+                // and whose agents nothing else would ever start.
+                actor.adopt((*spec).clone(), state, ctx).await;
                 CommandEffect::persist(vec![SessionDomainEvent::SpecRecorded { spec }])
             }
             CoreCommand::Progress { key, stage, detail } => {
@@ -97,7 +103,7 @@ impl SessionActor {
     /// its turn. The built-in title tool overwrites this later if the agent
     /// picks something better.
     pub(super) async fn title_from_first_message(&mut self, text: &str) {
-        if self.spec.name.is_some() {
+        if self.spec().name.is_some() {
             return;
         }
         let Some(title) = derive_title(text) else {
@@ -122,7 +128,7 @@ impl SessionActor {
             .map_err(|e| format!("session supervisor unavailable: {e}"))?;
         persisted.map_err(|e| format!("persist session title: {e}"))?;
 
-        self.spec.name = Some(title.clone());
+        self.spec_mut().name = Some(title.clone());
         let _ = supervisor
             .tell(SessionSupervisorCommand::PublishSessionTitle {
                 id,
@@ -237,6 +243,7 @@ impl Component for SessionCore {
 mod tests {
     use super::super::testing::*;
     use super::*;
+    use crate::sessions::session_actor::SessionCommand;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -262,16 +269,6 @@ mod tests {
         state.spec
     }
 
-    /// Standing in for the supervisor, which sends this the moment it spawns a
-    /// session and before anything else can reach it.
-    async fn seed(to: &horsie_actor::ActorRef<SessionCommand>) {
-        let _ = to
-            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
-                spec: Box::new(actor_spec_fixture()),
-            }))
-            .await;
-    }
-
     /// Wait until the session's log says what the test is waiting for. `tell`
     /// is fire-and-forget, so there is nothing to await on the send itself.
     async fn until_named(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid, name: &str) {
@@ -295,19 +292,8 @@ mod tests {
     async fn a_session_records_its_spec_in_its_own_log() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
-        seed(&session).await;
+        let journal = f.journal();
+        let session = f.start(id, actor_spec_fixture()).await;
 
         // A rename the session did not initiate — the path that does not have
         // to ask the supervisor first.
@@ -336,23 +322,9 @@ mod tests {
     async fn a_reload_adopts_the_journaled_spec_instead_of_recording_again() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let spawn = || {
-            crate::testing::spawn_detached(
-                &horsie_actor::ActorSystem::new(journal.clone()),
-                SessionActor::new(
-                    id,
-                    actor_spec_fixture(),
-                    f.deps.clone(),
-                    deaf_supervisor(),
-                    crate::sessions::Revisions::default(),
-                ),
-            )
-        };
+        let journal = f.journal();
 
-        let first = spawn();
-        seed(&first).await;
+        let first = f.start(id, actor_spec_fixture()).await;
         let _ = first
             .tell(SessionCommand::Core(CoreCommand::TitleSet {
                 name: "named".into(),
@@ -362,8 +334,8 @@ mod tests {
         let settled = session_journal_len(&journal, id).await;
         drop(first);
 
-        let second = spawn();
-        seed(&second).await;
+        f.node.restart().await;
+        let second = f.start(id, actor_spec_fixture()).await;
         let _ = second
             .tell(SessionCommand::Core(CoreCommand::TitleSet {
                 name: "named".into(),

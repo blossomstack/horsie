@@ -20,7 +20,7 @@ use crate::db::Db;
 use crate::http::AppState;
 use crate::plugins::ArtifactStore;
 use crate::sessions::supervisor::SupervisorConfig;
-use crate::users::{Shared, UserRegistry, UserServices};
+use crate::users::{Shared, UserRegistry, UserServices, register_session_shards};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -202,11 +202,14 @@ impl TestStateBuilder {
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
             anonymous: account.clone(),
             supervisor: self.supervisor,
+            deps: None,
             fly_api_base: UNREACHABLE_FLY_API.to_string(),
         });
+        let users = Arc::new(UserRegistry::new(shared.clone()));
+        register_session_shards(&users).expect("a fresh system has no shard types yet");
         let state = AppState {
             auth,
-            users: Arc::new(UserRegistry::new(shared.clone())),
+            users,
             shared,
             web_dir: None,
         };
@@ -228,6 +231,102 @@ fn info() -> horsie_models::settings::ServerInfo {
         data_dir: String::new(),
         plugins_dir: String::new(),
         version: "test".into(),
+    }
+}
+
+/// A throwaway deployment for a test that drives actors rather than routes.
+///
+/// Where [`TestState`] serves HTTP, this exists because a session or a
+/// supervisor is built by a shard recipe now: it is handed an id and resolves
+/// everything else from its account, so a test that wants one has to have an
+/// account for it to resolve — and an account only exists inside a registry.
+pub struct Deployment {
+    pub users: Arc<UserRegistry>,
+    /// Every actor's log. In memory, so a test can read what was persisted and
+    /// a restart is [`Self::restart`] rather than a second process.
+    pub journal: Arc<dyn horsie_actor::Journal>,
+    /// The one account everything here belongs to.
+    pub account: UserId,
+    _tmp: tempfile::TempDir,
+}
+
+impl Deployment {
+    /// A deployment whose sessions run on `deps`, under `supervisor`'s policy.
+    pub async fn new(
+        deps: crate::sessions::spec::ServerDeps,
+        supervisor: SupervisorConfig,
+    ) -> Self {
+        Self::on(
+            Arc::new(horsie_actor::InMemoryJournal::new()),
+            deps,
+            supervisor,
+        )
+        .await
+    }
+
+    /// The same, over a journal the caller is watching.
+    pub async fn on(
+        journal: Arc<dyn horsie_actor::Journal>,
+        deps: crate::sessions::spec::ServerDeps,
+        supervisor: SupervisorConfig,
+    ) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let account = UserId::bootstrap();
+        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+            system: horsie_actor::ActorSystem::new(journal.clone()),
+            db: crate::db::testing::db().await,
+            artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
+            info: info(),
+            model_card_seed: Arc::new(Vec::new()),
+            model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
+            anonymous: account.clone(),
+            supervisor,
+            deps: Some(deps),
+            fly_api_base: UNREACHABLE_FLY_API.to_string(),
+        })));
+        crate::users::register_session_shards(&users)
+            .expect("a fresh system has no shard types yet");
+        Self {
+            users,
+            journal,
+            account,
+            _tmp: tmp,
+        }
+    }
+
+    pub async fn services(&self) -> Arc<UserServices> {
+        self.users
+            .get(&self.account)
+            .await
+            .expect("an account's services build")
+    }
+
+    /// This account's supervisor, whether or not anything has loaded it.
+    pub async fn supervisor(&self) -> crate::sessions::addressing::SupervisorRef {
+        self.services().await.supervisor.clone()
+    }
+
+    /// One session of this account, whether or not it is loaded.
+    pub fn session(&self, id: uuid::Uuid) -> crate::sessions::addressing::SessionRef {
+        crate::sessions::addressing::SessionRef::new(
+            self.users
+                .shared()
+                .system
+                .shard_actor_of::<crate::sessions::addressing::SessionShard>(),
+            self.account.clone(),
+            id,
+        )
+    }
+
+    /// Every actor here, stopped — the process going away, as far as any of
+    /// them is concerned. The next command addressed to one rebuilds it from
+    /// its journal, which is the only way to reach recovery.
+    pub async fn restart(&self) {
+        self.users
+            .shared()
+            .system
+            .stop(&horsie_actor::ActorPath::root())
+            .await;
     }
 }
 

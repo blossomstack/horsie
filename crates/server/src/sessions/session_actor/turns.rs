@@ -23,6 +23,7 @@ use super::{
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
@@ -39,7 +40,7 @@ impl Turns {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: TurnCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             TurnCommand::UserMessage {
@@ -107,7 +108,7 @@ impl SessionActor {
         agent_id: Option<String>,
         answers: Vec<AskAnswer>,
         reply: ReplyTo<Result<(), AnswerError>>,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let Some((_, agent)) = self.resolve_agent(state, ctx, agent_id.as_deref()) else {
             let _ = reply.send(Err(AnswerError::NothingPending));
@@ -137,7 +138,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         end: TurnEnd,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let events = match end {
             TurnEnd::Concluded { .. } => {
@@ -204,7 +205,7 @@ impl SessionActor {
         agent_id: Option<String>,
         text: String,
         reply: ReplyTo<Result<String, UserMessageError>>,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         if let SessionStatus::Unrecoverable { reason } = &state.status {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
@@ -213,7 +214,7 @@ impl SessionActor {
         // A run works from its definition and has no main agent, so an
         // unaddressed message has nobody to reach. Naming a step is fine — that
         // agent exists and can be spoken to like any other.
-        if self.spec.workflow.is_some()
+        if self.spec().workflow.is_some()
             && agent_id.as_deref().unwrap_or(super::MAIN_AGENT_ID) == super::MAIN_AGENT_ID
         {
             let _ = reply.send(Err(UserMessageError::Rejected(
@@ -289,8 +290,8 @@ impl SessionActor {
         // agent's queue and the create's own completion releases it, exactly as
         // at session creation.
         if matches!(state.status, SessionStatus::ProvisioningFailed { .. }) {
-            let _ = ctx
-                .self_ref()
+            let _ = self
+                .me(ctx)
                 .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
                 .await;
         }
@@ -400,6 +401,7 @@ mod tests {
     use super::super::testing::*;
     use super::super::*;
     use super::*;
+    use crate::sessions::session_actor::testing::seed_session;
 
     use std::sync::Arc;
     use uuid::Uuid;
@@ -464,30 +466,17 @@ mod tests {
     async fn an_unrecoverable_session_refuses_a_message() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        journal
-            .persist(
-                &SessionActor::persistence_id_for(id),
-                &[serde_json::to_vec(&SessionDomainEvent::SessionFailed {
-                    at_ms: 0,
-                    reason: "runtime gone".into(),
-                })
-                .unwrap()],
-                0,
-            )
-            .await
-            .unwrap();
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps,
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let journal = f.journal();
+        let session = seed_session(
+            &f,
+            id,
+            actor_spec_fixture(),
+            &[SessionDomainEvent::SessionFailed {
+                at_ms: 0,
+                reason: "runtime gone".into(),
+            }],
+        )
+        .await;
 
         let refuse = async || {
             session
@@ -531,34 +520,14 @@ mod tests {
     /// Seed a session journal and load it, so the actor recovers from exactly
     /// what a killed process would have left.
     async fn load_from(
-        deps: crate::sessions::spec::ServerDeps,
+        f: &ActorFixture,
         id: Uuid,
         events: &[SessionDomainEvent],
-    ) -> (
-        horsie_actor::ActorRef<SessionCommand>,
-        Arc<dyn horsie_actor::Journal>,
-    ) {
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let encoded: Vec<Vec<u8>> = events
-            .iter()
-            .map(|e| serde_json::to_vec(e).unwrap())
-            .collect();
-        journal
-            .persist(&SessionActor::persistence_id_for(id), &encoded, 0)
-            .await
-            .unwrap();
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                deps,
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
-        (session, journal)
+    ) -> (SessionRef, Arc<dyn horsie_actor::Journal>) {
+        (
+            seed_session(f, id, actor_spec_fixture(), events).await,
+            f.journal(),
+        )
     }
 
     /// The main agent says the turn its process died inside is over, and the
@@ -570,7 +539,7 @@ mod tests {
         // A journal that ends mid-turn: exactly what a process killed during a
         // run leaves behind.
         let (session, journal) =
-            load_from(f.deps, id, &[SessionDomainEvent::TurnBegan { at_ms: 0 }]).await;
+            load_from(&f, id, &[SessionDomainEvent::TurnBegan { at_ms: 0 }]).await;
 
         session
             .tell(SessionCommand::AgentOutcome(
@@ -599,7 +568,7 @@ mod tests {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
         let (session, journal) = load_from(
-            f.deps,
+            &f,
             id,
             &[
                 SessionDomainEvent::TurnBegan { at_ms: 0 },

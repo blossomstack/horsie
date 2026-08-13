@@ -18,10 +18,10 @@ use super::{
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
+use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::spec::SessionStatus;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
-use horsie_actor::ActorRef;
 use horsie_actor::ReplyTo;
 use horsie_models::{
     hooks::{HookAction, HookRecord, StopOutcome, SubagentStopOutcome},
@@ -37,11 +37,11 @@ use tokio::sync::oneshot;
 /// to. No generation tag: the agent is resident and fences its own stale runs
 /// by `run_id`, so every outcome that arrives here is one the session asked for.
 pub(super) struct SessionParent {
-    target: ActorRef<SessionCommand>,
+    target: SessionRef,
 }
 
 impl SessionParent {
-    pub(super) fn new(target: ActorRef<SessionCommand>) -> Self {
+    pub(super) fn new(target: SessionRef) -> Self {
         Self { target }
     }
 }
@@ -61,7 +61,7 @@ impl AgentOutcomeSink for SessionParent {
 /// A `tell`, not an `ask`: nothing waits on a record, and a hook's audit trail
 /// must never be able to slow the tool call it describes.
 pub(super) struct SessionHookSink {
-    target: ActorRef<SessionCommand>,
+    target: SessionRef,
     /// Which agent's transcript these records belong in. A subagent's hooks are
     /// its own; without this they would all pile into one log with no way to
     /// tell whose call they guarded.
@@ -69,7 +69,7 @@ pub(super) struct SessionHookSink {
 }
 
 impl SessionHookSink {
-    pub(super) fn new(target: ActorRef<SessionCommand>, key: AgentKey) -> Self {
+    pub(super) fn new(target: SessionRef, key: AgentKey) -> Self {
         Self { target, key }
     }
 }
@@ -126,7 +126,7 @@ pub(super) const MAX_STOP_CONTINUATIONS: usize = 3;
 /// another agent while a 30-second `Stop` hook runs.
 pub(super) struct StopHookParent {
     inner: Arc<dyn AgentOutcomeSink>,
-    session: ActorRef<SessionCommand>,
+    session: SessionRef,
     key: AgentKey,
     /// The provider whose `provide()` cached this agent's client. `Stop` never
     /// acquires a runtime of its own: a turn that already concluded must not be
@@ -143,7 +143,7 @@ impl StopHookParent {
     /// The outcome sink one of a session's agents reports to: the session's own,
     /// wrapped so this agent's `Stop` hooks run first.
     pub(super) fn wrap(
-        session: ActorRef<SessionCommand>,
+        session: SessionRef,
         key: AgentKey,
         provider: Arc<SessionContextProvider>,
     ) -> Arc<dyn AgentOutcomeSink> {
@@ -413,7 +413,7 @@ impl HookRouting {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: HookCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             HookCommand::Ran { key, records } => {
@@ -617,7 +617,7 @@ mod tests {
     async fn halting_the_main_agent_fails_the_turn_with_the_hooks_reason() {
         let gate = BlockingProvider::new();
         let (_f, session, _id, _journal) = spawn_session_with_provider(gate.clone()).await;
-        let status = |s: ActorRef<SessionCommand>| async move {
+        let status = |s: SessionRef| async move {
             s.ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
                 .await
                 .unwrap()

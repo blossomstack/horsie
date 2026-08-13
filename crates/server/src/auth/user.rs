@@ -23,7 +23,11 @@ const LEN: usize = 12;
 ///
 /// Not a secret and not a credential — a caller still presents a token, which
 /// is what is actually verified. Unguessability here is defence in depth.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+/// `Serialize`/`Deserialize` are transparent, so an id is a bare string on any
+/// wire it crosses — including a clustered command, which names the account
+/// whose services the actor receiving it must be built against.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct UserId(String);
 
 impl UserId {

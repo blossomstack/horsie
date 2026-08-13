@@ -16,6 +16,7 @@ use super::{
     SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::orchestrator::StepStart;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
@@ -35,7 +36,7 @@ impl WorkflowRun {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: RunCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             RunCommand::State { reply } => {
@@ -68,7 +69,7 @@ impl SessionActor {
         &mut self,
         start: StepStart,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
         let StepStart {
             index,
@@ -149,7 +150,7 @@ impl SessionActor {
         state: &SessionState,
         index: u32,
         reply: ReplyTo<Result<(), String>>,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let Some(run) = state.run.as_ref() else {
             let _ = reply.send(Err("this session is not a workflow run".into()));
@@ -216,7 +217,7 @@ impl SessionActor {
         state: &SessionState,
         index: u32,
         end: TurnEnd,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let (events, advance) = match end {
             TurnEnd::Concluded { output } => (
@@ -279,12 +280,12 @@ impl SessionActor {
     /// step so it roots its own subagent tree.
     pub(super) fn spawn_step_agent(
         &mut self,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         agent_id: Uuid,
         step_name: &str,
     ) -> Option<ActorRef<AgentCommand>> {
-        let run_spec = self.spec.workflow.clone()?;
+        let run_spec = self.spec().workflow.clone()?;
         let step = run_spec.step(step_name)?.clone();
         self.spawn_agent(
             ctx,
@@ -450,6 +451,7 @@ mod tests {
     use super::super::testing::*;
     use super::super::*;
     use super::*;
+    use crate::sessions::session_actor::testing::seed_session;
 
     use horsie_agentcore::LlmProvider;
 
@@ -639,18 +641,8 @@ mod tests {
             workflow: "fix-bug".into(),
         };
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                spec,
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let journal = f.journal();
+        let session = f.start(id, spec).await;
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -788,34 +780,23 @@ mod tests {
             .expect("create");
 
         // A journal that stops mid-step, which is exactly what a crash leaves.
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let pid = SessionActor::persistence_id_for(id);
-        let events: Vec<Vec<u8>> = [SessionDomainEvent::StepStarted {
-            at_ms: 0,
-            index: 0,
-            step: "triage".into(),
-            agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0),
-            attempt: 1,
-            from: None,
-            via: None,
-            input: "Triage it.".into(),
-        }]
-        .iter()
-        .map(|e| serde_json::to_vec(e).unwrap())
-        .collect();
-        journal.persist(&pid, &events, 0).await.unwrap();
-
-        let _session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                spec,
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let journal = f.journal();
+        let _session = seed_session(
+            &f,
+            id,
+            spec,
+            &[SessionDomainEvent::StepStarted {
+                at_ms: 0,
+                index: 0,
+                step: "triage".into(),
+                agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0),
+                attempt: 1,
+                from: None,
+                via: None,
+                input: "Triage it.".into(),
+            }],
+        )
+        .await;
 
         let run = wait_for_run(&journal, id, |r| {
             r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended
@@ -860,21 +841,8 @@ mod tests {
 
         // A second actor over the same journal: nothing is resident, which is
         // every read after an idle offload or a restart.
-        let mut spec = actor_spec_fixture();
-        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
-            workflow: "fix-bug".into(),
-        };
-        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
-        let reloaded = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                spec,
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        f.node.restart().await;
+        let reloaded = f.node.session(id);
 
         let log = reloaded
             .ask(|reply| {

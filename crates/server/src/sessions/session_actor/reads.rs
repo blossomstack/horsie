@@ -14,7 +14,7 @@ use super::{
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
-use crate::sessions::session_actor::SessionCommand;
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::workflow::{StepRun, StepStatus};
@@ -29,7 +29,7 @@ impl Reads {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: ReadCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             ReadCommand::ReadLog {
@@ -187,7 +187,7 @@ impl SessionActor {
     /// [`SessionAgents::Workflow`](super::SessionAgents) records about the live
     /// actors, asked of the durable state instead.
     pub(super) fn agent_roster(&self, state: &SessionState) -> Vec<AgentEntry> {
-        let mut agents: Vec<AgentEntry> = match self.spec.workflow.is_some() {
+        let mut agents: Vec<AgentEntry> = match self.spec().workflow.is_some() {
             true => state
                 .run
                 .iter()
@@ -218,7 +218,7 @@ impl SessionActor {
     pub(super) async fn read_agent(
         &mut self,
         state: &SessionState,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         agent_id: Option<&str>,
     ) -> Option<AgentDetail> {
         let (key, agent) = self.resolve_agent(state, ctx, agent_id)?;
@@ -244,7 +244,7 @@ impl SessionActor {
             // is the *first* step's — is the wrong one for any other step.
             model: match execution.and_then(|e| self.step_spec(&e.step)) {
                 Some(step) => step.settings.model.clone(),
-                None => self.spec.agent.model.clone(),
+                None => self.spec().agent.model.clone(),
             },
             task: node.map(|node| node.task.clone()),
             output: match (node, execution) {
@@ -264,7 +264,7 @@ impl SessionActor {
 
     /// The definition of one of this run's steps.
     fn step_spec(&self, name: &str) -> Option<&crate::sessions::workflow::WorkflowStepSpec> {
-        self.spec.workflow.as_ref()?.step(name)
+        self.spec().workflow.as_ref()?.step(name)
     }
 
     /// Aggregated usage. Totals come from this session's own durable record;
@@ -286,7 +286,7 @@ impl SessionActor {
             session_total: state.session_usage_total(),
             agents: state.agent_usage.clone(),
             main_agent: AgentUsageEntry {
-                model: self.spec.agent.model.clone(),
+                model: self.spec().agent.model.clone(),
                 snapshot: AgentUsageSnapshot {
                     usage_total: main_usage_total,
                     last_turn_usage: snapshot.last_turn_usage,
@@ -450,7 +450,7 @@ mod tests {
     }
 
     /// This session's agents, read the way `GET /api/sessions/:id` reads them.
-    async fn roster(session: &ActorRef<SessionCommand>) -> Vec<AgentEntry> {
+    async fn roster(session: &SessionRef) -> Vec<AgentEntry> {
         session
             .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
             .await
@@ -516,7 +516,13 @@ mod tests {
     /// only while an actor recovers — never to answer a query.
     #[tokio::test]
     async fn serving_reads_never_touches_the_journal() {
-        let f = actor_fixture().await;
+        let counting = Arc::new(CountingJournal::new());
+        let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let f = fixture_on(journal.clone(), agent, None).await;
         let id = Uuid::new_v4();
         f.deps
             .runtimes
@@ -529,18 +535,7 @@ mod tests {
                 Arc::new(EchoProvider) as Arc<dyn LlmProvider>
             ),
         );
-        let counting = Arc::new(CountingJournal::new());
-        let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let session = f.start(id, actor_spec_fixture()).await;
 
         // Drive one turn so both actors are loaded and have history.
         session

@@ -8,11 +8,11 @@
 //! spawns are attributed to the right parent.
 
 use crate::agent_loop::AgentCatalog;
+use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::session_actor::SubAgentCommand;
 use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
-use horsie_actor::ActorRef;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -109,7 +109,7 @@ fn subagent_status_spec() -> ToolSpec {
 /// Wraps an agent's toolbox, adding `spawn_agent` and `subagent_status`.
 pub struct SubAgentToolbox {
     inner: Arc<dyn Toolbox>,
-    session: ActorRef<SessionCommand>,
+    session: SessionRef,
     /// Which agent this toolbox belongs to — the parent spawns attribute to.
     caller: SubAgentParent,
     /// The plugin-declared agents this session can spawn. Held here because
@@ -121,7 +121,7 @@ pub struct SubAgentToolbox {
 impl SubAgentToolbox {
     pub fn new(
         inner: Arc<dyn Toolbox>,
-        session: ActorRef<SessionCommand>,
+        session: SessionRef,
         caller: SubAgentParent,
         catalog: Arc<AgentCatalog>,
     ) -> Self {
@@ -239,6 +239,7 @@ impl Toolbox for SubAgentToolbox {
 )]
 mod tests {
     use super::*;
+    use crate::sessions::addressing::SessionInbox;
     use horsie_actor::{
         ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
     };
@@ -256,7 +257,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EventSourcedActor for StubSession {
-        type Command = SessionCommand;
+        type Command = SessionInbox;
         type Event = ();
         type State = Empty;
 
@@ -272,10 +273,10 @@ mod tests {
         async fn handle_command(
             &mut self,
             _state: &Empty,
-            cmd: SessionCommand,
-            _ctx: &mut ActorContext<SessionCommand>,
+            cmd: SessionInbox,
+            _ctx: &mut ActorContext<SessionInbox>,
         ) -> CommandEffect<()> {
-            match cmd {
+            match cmd.cmd {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn { reply, .. }) => {
                     let _ = reply.send(self.spawn_result.clone());
                 }
@@ -296,9 +297,13 @@ mod tests {
     }
 
     fn with_catalog(spawn_result: Result<Uuid, String>, catalog: AgentCatalog) -> SubAgentToolbox {
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-            StubSession { spawn_result },
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                StubSession { spawn_result },
+            ),
+            crate::auth::UserId::bootstrap(),
+            Uuid::new_v4(),
         );
         SubAgentToolbox::new(
             Arc::new(EmptyToolbox),
