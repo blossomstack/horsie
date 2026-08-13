@@ -18,7 +18,6 @@
 //! them on demand — and left with the `journal.backend` setting that selected
 //! it.
 
-use crate::auth::UserId;
 use crate::db::Db;
 use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream, StreamExt};
@@ -59,24 +58,27 @@ pub(crate) fn insert_statement(rows: usize) -> String {
 }
 
 /// A [`Journal`] over the server's database, on either dialect.
+///
+/// **One per node, not one per account.** A log is found by `(kind, id)` alone,
+/// which every persistence id here already satisfies uniquely — an account id is
+/// random, a session and an agent are uuids. It could not be otherwise: a
+/// [`Journal`] method receives a [`PersistenceId`] and nothing else, and a
+/// persistence id is fixed when its actor is constructed, which for a shard
+/// actor is before a single byte of its history has been read. So an account
+/// could only reach the journal by being packed into the id — and a journal is a
+/// framework thing, where not every user of it has accounts at all.
+///
+/// What the `user_id` column used to buy was that another account's log was
+/// unreachable even given its id. That protection is now that the id is a uuid
+/// nothing hands out. Deleting an account's data walks its supervisor's session
+/// list rather than filtering a column.
 pub struct SqlJournal {
     db: Db,
-    /// Whose actors this journals.
-    ///
-    /// Only the `journal_logs` statements bind it. `journal_events` and
-    /// `journal_snapshots` are reached exclusively by `log_id`, which comes
-    /// from a scoped lookup here — so there is no way to obtain another
-    /// account's `log_id`, and without one their rows are unreachable. Widening
-    /// `PRIMARY KEY (log_id, seq)` to carry `user_id` would damage the WITHOUT
-    /// ROWID key that makes replay a contiguous range scan, to duplicate a fact
-    /// the parent row already enforces. Both are on the scope audit's
-    /// allowlist for this reason.
-    user: UserId,
 }
 
 impl SqlJournal {
-    pub fn new(db: Db, user: UserId) -> Self {
-        Self { db, user }
+    pub fn new(db: Db) -> Self {
+        Self { db }
     }
 
     /// The `log_id` for `pid`, or `None` when this actor has never persisted.
@@ -84,9 +86,8 @@ impl SqlJournal {
     async fn log_id(&self, pid: &PersistenceId) -> JournalResult<Option<i64>> {
         let sql = self
             .db
-            .q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?");
+            .q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
         sqlx::query_scalar(&sql)
-            .bind(self.user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .fetch_optional(self.db.pool())
@@ -97,26 +98,21 @@ impl SqlJournal {
     /// The `log_id` for `pid`, creating the row if absent. Only writes call this.
     async fn log_id_for_write(
         db: &Db,
-        user: &UserId,
         tx: &mut Transaction<'_, Any>,
         pid: &PersistenceId,
     ) -> JournalResult<i64> {
         // `DO NOTHING` then `SELECT` rather than `RETURNING`: on the conflict
         // path there is no returned row, and the select is an index hit anyway.
-        let insert = db.q(
-            "INSERT INTO journal_logs (user_id, kind, id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-        );
+        let insert =
+            db.q("INSERT INTO journal_logs (kind, id) VALUES (?, ?) ON CONFLICT DO NOTHING");
         sqlx::query(&insert)
-            .bind(user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .execute(&mut **tx)
             .await
             .map_err(backend)?;
-        let select =
-            db.q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?");
+        let select = db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?");
         sqlx::query_scalar(&select)
-            .bind(user.as_str())
             .bind(&pid.kind)
             .bind(&pid.id)
             .fetch_one(&mut **tx)
@@ -144,10 +140,9 @@ impl SqlJournal {
         expected_last_seq: u64,
     ) -> JournalResult<()> {
         let sql = self.db.q("UPDATE journal_logs SET last_seq = ? \
-             WHERE user_id = ? AND log_id = ? AND last_seq = ?");
+             WHERE log_id = ? AND last_seq = ?");
         let affected = sqlx::query(&sql)
             .bind(to_i64(expected_last_seq))
-            .bind(self.user.as_str())
             .bind(log_id)
             .bind(to_i64(expected_last_seq))
             .execute(&mut **tx)
@@ -169,9 +164,8 @@ impl SqlJournal {
     ) -> JournalError {
         let sql = self
             .db
-            .q("SELECT last_seq FROM journal_logs WHERE user_id = ? AND log_id = ?");
+            .q("SELECT last_seq FROM journal_logs WHERE log_id = ?");
         let actual: Result<i64, _> = sqlx::query_scalar(&sql)
-            .bind(self.user.as_str())
             .bind(log_id)
             .fetch_one(&mut **tx)
             .await;
@@ -213,7 +207,7 @@ impl Journal for SqlJournal {
             return Ok(());
         }
         let mut tx = self.db.begin_write().await.map_err(backend)?;
-        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
+        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
 
         // Allocate the whole batch's numbers in one update, then read the base.
         // The batch is one transaction, so a crash mid-write leaves neither the
@@ -229,10 +223,9 @@ impl Journal for SqlJournal {
         // indivisible by construction rather than by remembering to keep them
         // together.
         let sql = self.db.q("UPDATE journal_logs SET last_seq = last_seq + ? \
-             WHERE user_id = ? AND log_id = ? AND last_seq = ? RETURNING last_seq");
+             WHERE log_id = ? AND last_seq = ? RETURNING last_seq");
         let admitted: Option<i64> = sqlx::query_scalar(&sql)
             .bind(to_i64(events.len() as u64))
-            .bind(self.user.as_str())
             .bind(log_id)
             .bind(to_i64(expected_last_seq))
             .fetch_optional(&mut *tx)
@@ -309,7 +302,7 @@ impl Journal for SqlJournal {
         seq_nr: u64,
     ) -> JournalResult<()> {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
-        let log_id = Self::log_id_for_write(&self.db, &self.user, &mut tx, pid).await?;
+        let log_id = Self::log_id_for_write(&self.db, &mut tx, pid).await?;
         // Conditional like an append, and on the same value: a snapshot claims
         // what the log contains, so a writer whose log has moved on is claiming
         // something false. It is also the more destructive of the two writes —
@@ -370,9 +363,8 @@ impl Journal for SqlJournal {
         let mut tx = self.db.begin_write().await.map_err(backend)?;
         let select = self.db.q("SELECT s.state, s.seq FROM journal_snapshots s \
              JOIN journal_logs l ON l.log_id = s.log_id \
-             WHERE l.user_id = ? AND l.kind = ? AND l.id = ?");
+             WHERE l.kind = ? AND l.id = ?");
         let src = sqlx::query(&select)
-            .bind(self.user.as_str())
             .bind(&from.kind)
             .bind(&from.id)
             .fetch_optional(&mut *tx)
@@ -384,16 +376,15 @@ impl Journal for SqlJournal {
 
         let state: Vec<u8> = src.try_get("state").map_err(backend)?;
         let seq: i64 = src.try_get("seq").map_err(backend)?;
-        let dst = Self::log_id_for_write(&self.db, &self.user, &mut tx, to).await?;
+        let dst = Self::log_id_for_write(&self.db, &mut tx, to).await?;
         // The destination starts with an empty event log at the source's
         // snapshot sequence, so a fresh actor recovers the copied state and
         // numbers its own first event from there.
         let set_seq = self
             .db
-            .q("UPDATE journal_logs SET last_seq = ? WHERE user_id = ? AND log_id = ?");
+            .q("UPDATE journal_logs SET last_seq = ? WHERE log_id = ?");
         sqlx::query(&set_seq)
             .bind(seq)
-            .bind(self.user.as_str())
             .bind(dst)
             .execute(&mut *tx)
             .await
@@ -427,9 +418,8 @@ impl Journal for SqlJournal {
         };
         let sql = self
             .db
-            .q("SELECT last_seq FROM journal_logs WHERE user_id = ? AND log_id = ?");
+            .q("SELECT last_seq FROM journal_logs WHERE log_id = ?");
         let last: Option<i64> = sqlx::query_scalar(&sql)
-            .bind(self.user.as_str())
             .bind(log_id)
             .fetch_optional(self.db.pool())
             .await
@@ -462,13 +452,8 @@ impl Journal for SqlJournal {
                 .await
                 .map_err(backend)?;
         }
-        // `log_id` already came from a scoped lookup; binding the account
-        // again costs nothing and keeps this statement readable on its own.
-        let sql = self
-            .db
-            .q("DELETE FROM journal_logs WHERE user_id = ? AND log_id = ?");
+        let sql = self.db.q("DELETE FROM journal_logs WHERE log_id = ?");
         sqlx::query(&sql)
-            .bind(self.user.as_str())
             .bind(log_id)
             .execute(&mut *tx)
             .await

@@ -29,10 +29,25 @@ use tokio::sync::{OnceCell, broadcast};
 /// How many global events a subscriber may fall behind before it is lagged.
 const GLOBAL_EVENT_CAPACITY: usize = 256;
 
+/// The actor system this process runs, over the node's journal.
+///
+/// One per node rather than one per account. A clustered node has a single
+/// inbound channel, so a process holding a system per account would have nothing
+/// to route an arriving envelope by — and the journal stopped being scoped when
+/// a log became findable by `(kind, id)` alone, so there is no second reason for
+/// the split either. Accounts stay apart because their actors sit at different
+/// paths, which is what a path was always for.
+#[must_use]
+pub fn node_system(db: &Db) -> ActorSystem {
+    ActorSystem::new(Arc::new(SqlJournal::new(db.clone())) as Arc<dyn Journal>)
+}
+
 /// Everything one deployment owns, whatever accounts it serves.
 pub struct Shared {
     /// One pool. Every account's stores bind their scope into its queries.
     pub db: Db,
+    /// Every actor this node hosts, for every account. See [`node_system`].
+    pub system: ActorSystem,
     /// Bundle bytes, addressed by content and therefore shared by construction.
     pub artifacts: Arc<ArtifactStore>,
     /// Read-only deployment paths, surfaced in every account's settings view.
@@ -212,19 +227,17 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         memory: Some(memory.clone()),
     };
 
-    let journal: Arc<dyn Journal> = Arc::new(SqlJournal::new(shared.db.clone(), user.clone()));
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
     // Created *at* its account id rather than spawned anonymously, so the system
-    // holds it at a path. That is what makes it reachable as a parent: a session
-    // is its child, and `ctx.parent()` is a reference to this path rather than
-    // to this instance — so a session outlives, and survives, any particular
-    // supervisor at it.
-    let system = ActorSystem::new(journal);
+    // holds it at a path. That is also what keeps two accounts apart now that
+    // they share one system: `/acct-7` and `/acct-9` are different actors on the
+    // node's one registry, with no filter anywhere to forget to apply.
     let supervisor_deps = crate::sessions::supervisor::SupervisorDeps {
         server: deps,
         global_tx: global_events.clone(),
         config: shared.supervisor.clone(),
     };
+    let system = &shared.system;
     let supervisor = system
         .actor_of(
             user.as_str(),
@@ -378,6 +391,7 @@ mod tests {
     async fn registry(tmp: &tempfile::TempDir) -> UserRegistry {
         let db = crate::db::testing::db().await;
         UserRegistry::new(Arc::new(Shared {
+            system: node_system(&db),
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: test_info(),
@@ -415,6 +429,30 @@ mod tests {
                 "an account's bundle must be built exactly once"
             );
         }
+    }
+
+    /// Two accounts' supervisors are two actors on the *one* system this node
+    /// runs, kept apart by their paths.
+    ///
+    /// The node has a single inbound channel when it is clustered, so a process
+    /// holding a system per account would have nothing to route an arriving
+    /// envelope by. What replaced that separation is the thing a path was always
+    /// for: `/acct-7` and `/acct-9` are different addresses on one registry.
+    #[tokio::test]
+    async fn every_account_is_hosted_on_the_one_node_system() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry(&tmp).await;
+        let before = reg.shared().system.hosted();
+
+        let (a, b) = (UserId::generate(), UserId::generate());
+        let _ = reg.get(&a).await.unwrap();
+        let _ = reg.get(&b).await.unwrap();
+
+        assert_eq!(
+            reg.shared().system.hosted(),
+            before + 2,
+            "both supervisors must land on the node's system, not on one apiece"
+        );
     }
 
     /// Two accounts share the pool and nothing above it.

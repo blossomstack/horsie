@@ -13,14 +13,19 @@
 //! Every store that binds a scope gets a case here. The shape is always the
 //! same three questions: can the other account *read* it, can it *clobber* it
 //! by reusing the name, and can it *delete* it.
+//!
+//! The journal is the one exception: it binds no scope at all any more, so its
+//! case at the end asserts the guarantee that replaced the one it lost rather
+//! than a scope it no longer has.
 
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
-    // `journals_are_isolated` reads a `Journal` directly, which is the subject
-    // there rather than a violation. Everywhere else the ban stands: only an
-    // actor reads its own journal, and only to recover.
+    // `journal_logs_are_separated_by_their_id_alone` reads a `Journal`
+    // directly, which is the subject there rather than a violation. Everywhere
+    // else the ban stands: only an actor reads its own journal, and only to
+    // recover.
     clippy::disallowed_methods
 )]
 
@@ -406,22 +411,35 @@ async fn the_deliberate_exceptions_still_cross_accounts() {
     assert_eq!(my_routines.list().await.unwrap().len(), 1);
 }
 
-/// Journal logs keyed by the same persistence id stay apart, and the events
-/// under them are unreachable without a `log_id` from a scoped lookup.
+/// The journal is the one table here that gave its `user_id` up, and what
+/// separates two accounts' logs now is the id itself.
+///
+/// A `Journal` method receives a `PersistenceId` and nothing else, and that id
+/// is fixed when its actor is constructed — before a byte of its history has
+/// been read — so an account could only reach the journal by being packed into
+/// the id. What the column bought was that another account's log stayed
+/// unreachable even given its id; that is now bought by the id being a uuid
+/// nothing hands out. Deleting an account's data walks its supervisor's session
+/// list and clears each log, so what has to hold is that clearing one log
+/// touches nothing else, not that a filter caught it.
 #[tokio::test]
-async fn journals_are_isolated() {
+async fn journal_logs_are_separated_by_their_id_alone() {
     use futures_util::StreamExt;
     use horsie_actor::{Journal, PersistenceId};
     use horsie_server::db::journal::SqlJournal;
     let db: Db = testing::db().await;
-    let (a, b) = two();
-    let mine = SqlJournal::new(db.clone(), a);
-    let theirs = SqlJournal::new(db, b);
-    let pid = PersistenceId::new("session", "same-id");
+    let journal = SqlJournal::new(db);
+    // Two sessions of two accounts: distinct because a session id is a uuid,
+    // which is the whole of the protection.
+    let mine = PersistenceId::new("session", "6f1e3f1c-0d2a-4a4e-9d1b-2f8c5a7e0001");
+    let theirs = PersistenceId::new("session", "b3d9c0a2-77f4-4f6d-8c31-19ae4b620002");
 
-    mine.persist(&pid, &[b"mine".to_vec()], 0).await.unwrap();
-    theirs
-        .persist(&pid, &[b"theirs".to_vec()], 0)
+    journal
+        .persist(&mine, &[b"mine".to_vec()], 0)
+        .await
+        .unwrap();
+    journal
+        .persist(&theirs, &[b"theirs".to_vec()], 0)
         .await
         .unwrap();
 
@@ -433,12 +451,13 @@ async fn journals_are_isolated() {
         }
         out
     }
-    assert_eq!(read(&mine, &pid).await, vec![b"mine".to_vec()]);
-    assert_eq!(read(&theirs, &pid).await, vec![b"theirs".to_vec()]);
+    assert_eq!(read(&journal, &mine).await, vec![b"mine".to_vec()]);
+    assert_eq!(read(&journal, &theirs).await, vec![b"theirs".to_vec()]);
 
-    // Clearing one leaves the other intact.
-    theirs.clear(&pid).await.unwrap();
-    assert_eq!(read(&mine, &pid).await, vec![b"mine".to_vec()]);
+    // The account-deletion path: clearing one log leaves every other one whole.
+    journal.clear(&theirs).await.unwrap();
+    assert_eq!(read(&journal, &mine).await, vec![b"mine".to_vec()]);
+    assert_eq!(journal.last_seq(&mine).await.unwrap(), 1);
 }
 
 fn plugin(name: &str, hash: &str) -> horsie_server::plugins::PluginRow {

@@ -35,7 +35,6 @@ const SCOPED: &[&str] = &[
     "model_cards",
     "memories",
     "github_credentials",
-    "journal_logs",
 ];
 
 /// Statements that touch a scoped table and must *not* be scoped, each with the

@@ -583,25 +583,20 @@ mod tests {
     #[tokio::test]
     async fn rebuilding_the_journal_log_table_keeps_its_events() {
         let db = testing::db().await;
-        sqlx::query(
-            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
-        )
-        .bind("1")
-        .bind("session")
-        .bind("abc")
-        .bind(1_i64)
-        .execute(db.pool())
-        .await
-        .unwrap();
-        let log_id: i64 = sqlx::query_scalar(
-            &db.q("SELECT log_id FROM journal_logs WHERE user_id = ? AND kind = ? AND id = ?"),
-        )
-        .bind("1")
-        .bind("session")
-        .bind("abc")
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        sqlx::query(&db.q("INSERT INTO journal_logs (kind, id, last_seq) VALUES (?, ?, ?)"))
+            .bind("session")
+            .bind("abc")
+            .bind(1_i64)
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let log_id: i64 =
+            sqlx::query_scalar(&db.q("SELECT log_id FROM journal_logs WHERE kind = ? AND id = ?"))
+                .bind("session")
+                .bind("abc")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
         sqlx::query(&db.q("INSERT INTO journal_events (log_id, seq, payload) VALUES (?, ?, ?)"))
             .bind(log_id)
             .bind(1_i64)
@@ -610,17 +605,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Two accounts, one persistence id: the widened UNIQUE is what allows it.
-        sqlx::query(
-            &db.q("INSERT INTO journal_logs (user_id, kind, id, last_seq) VALUES (?, ?, ?, ?)"),
-        )
-        .bind("k3m9x0abc7qr")
-        .bind("session")
-        .bind("abc")
-        .bind(0_i64)
-        .execute(db.pool())
-        .await
-        .unwrap();
+        // One persistence id is one log, whoever it belongs to. 0024 widened
+        // this key to carry an account and 0035 narrowed it back: every id here
+        // is a uuid or a random account id, so the pair it was defending against
+        // cannot occur, and the account has nowhere to enter the journal from.
+        let second = sqlx::query(&db.q("INSERT INTO journal_logs (kind, id) VALUES (?, ?)"))
+            .bind("session")
+            .bind("abc")
+            .execute(db.pool())
+            .await;
+        assert!(second.is_err(), "(kind, id) must name exactly one log");
     }
 
     #[tokio::test]
