@@ -110,6 +110,119 @@ impl Bus for MemoryBus {
     }
 }
 
+/// A bus that reaches every node of a deployment, over Redis pub/sub.
+///
+/// **One Redis subscription per topic, however many local subscribers there
+/// are.** An inbound message is fanned out through the same local `broadcast`
+/// [`MemoryBus`] uses, so a node with forty readers of one session holds one
+/// subscription rather than forty connections.
+///
+/// Delivery is at-most-once and carries no ordering promise across topics,
+/// which is the contract [`Bus`] already states. Redis drops a message
+/// published while nobody is subscribed, and that is the behaviour callers are
+/// written against.
+pub struct RedisBus {
+    /// Cloned per publish: a multiplexed connection is designed to be shared,
+    /// and `publish` needs `&mut`.
+    publisher: redis::aio::MultiplexedConnection,
+    /// The half of the pub/sub connection that issues `SUBSCRIBE`.
+    commands: tokio::sync::Mutex<redis::aio::PubSubSink>,
+    topics: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>>,
+}
+
+impl RedisBus {
+    /// Open both connections and start pumping inbound messages.
+    ///
+    /// Two connections rather than one, because a Redis connection in
+    /// subscriber mode accepts almost nothing else — publishing down it is not
+    /// an option.
+    pub async fn connect(url: &str) -> Result<Self, BusError> {
+        let unavailable = |e: redis::RedisError| BusError::Unavailable(e.to_string());
+        let client = redis::Client::open(url).map_err(unavailable)?;
+        let publisher = client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(unavailable)?;
+        let (commands, mut inbound) = client
+            .get_async_pubsub()
+            .await
+            .map_err(unavailable)?
+            .split();
+
+        let topics: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>> = Arc::default();
+        let dispatch = topics.clone();
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            while let Some(message) = inbound.next().await {
+                let topic = message.get_channel_name().to_string();
+                let sender = dispatch
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&topic)
+                    .cloned();
+                // No subscriber left locally is ordinary: a reader can go away
+                // between the message being sent and it arriving here.
+                if let Some(sender) = sender {
+                    let _ = sender.send(message.get_payload_bytes().to_vec());
+                }
+            }
+        });
+
+        Ok(Self {
+            publisher,
+            commands: tokio::sync::Mutex::new(commands),
+            topics,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Bus for RedisBus {
+    async fn publish(&self, topic: &str, payload: Vec<u8>) -> Result<(), BusError> {
+        let mut conn = self.publisher.clone();
+        redis::cmd("PUBLISH")
+            .arg(topic)
+            .arg(payload)
+            .exec_async(&mut conn)
+            .await
+            .map_err(|e| BusError::Unavailable(e.to_string()))
+    }
+
+    async fn subscribe(&self, topic: &str) -> Result<Subscription, BusError> {
+        // The lock is held across the `SUBSCRIBE` round trip on purpose: two
+        // callers racing the first subscription to one topic would otherwise
+        // both see "no local channel yet" and issue it twice.
+        let mut commands = self.commands.lock().await;
+        let (sender, is_new) = {
+            let mut topics = self.topics.lock().unwrap_or_else(PoisonError::into_inner);
+            match topics.get(topic) {
+                Some(sender) => (sender.clone(), false),
+                None => {
+                    let sender = broadcast::Sender::new(TOPIC_CAPACITY);
+                    topics.insert(topic.to_string(), sender.clone());
+                    (sender, true)
+                }
+            }
+        };
+        let rx = sender.subscribe();
+
+        if is_new {
+            // Awaited, not fired and forgotten. Redis discards anything
+            // published before it has registered the subscription, so a caller
+            // that subscribes and then provisions would miss the `Ready` it is
+            // waiting for. Returning early here is the whole bug.
+            if let Err(e) = commands.subscribe(topic).await {
+                self.topics
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(topic);
+                return Err(BusError::Unavailable(e.to_string()));
+            }
+        }
+        Ok(Subscription { rx })
+    }
+}
+
 /// One topic, and the single type that travels on it.
 ///
 /// This is what callers hold; [`Bus`] is the transport underneath. Nothing
@@ -275,6 +388,66 @@ mod tests {
         let mut sub = bus.subscribe("t").await.unwrap();
         bus.publish("t", b"x".to_vec()).await.unwrap();
         assert_eq!(sub.recv().await, Some(b"x".to_vec()));
+    }
+
+    /// A Redis to test against, or `None` when the run has none configured.
+    /// Mirrors `HORSIE_TEST_POSTGRES_URL`: the clustered CI job sets it, and a
+    /// local run without one skips the tests that need two nodes.
+    fn redis_url() -> Option<String> {
+        std::env::var("HORSIE_TEST_REDIS_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The one property [`MemoryBus`] cannot have, and the reason the trait
+    /// exists: two nodes, one topic, neither knowing where the other is.
+    #[tokio::test]
+    async fn a_frame_published_on_one_node_reaches_a_subscriber_on_another() {
+        let Some(url) = redis_url() else {
+            eprintln!("skipped: HORSIE_TEST_REDIS_URL is not set");
+            return;
+        };
+        let one = RedisBus::connect(&url).await.expect("connect one");
+        let other = RedisBus::connect(&url).await.expect("connect other");
+
+        let mut sub = other.subscribe("rt:s1:out").await.expect("subscribe");
+        one.publish("rt:s1:out", b"ready".to_vec())
+            .await
+            .expect("publish");
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .expect("a frame must cross between two bus instances");
+        assert_eq!(got, Some(b"ready".to_vec()));
+    }
+
+    /// Redis pub/sub drops anything published before a subscriber is registered,
+    /// so `subscribe` returning has to mean the server has acknowledged it —
+    /// not merely that the command was written. Without that, a session that
+    /// subscribes and then provisions would miss its runtime's `Ready`, and the
+    /// acquisition would hang until its window expired.
+    #[tokio::test]
+    async fn subscribe_does_not_return_before_the_server_has_registered_it() {
+        let Some(url) = redis_url() else {
+            eprintln!("skipped: HORSIE_TEST_REDIS_URL is not set");
+            return;
+        };
+        let publisher = RedisBus::connect(&url).await.expect("connect publisher");
+        let subscriber = RedisBus::connect(&url).await.expect("connect subscriber");
+
+        for attempt in 0..20 {
+            let topic = format!("race:{attempt}");
+            let mut sub = subscriber.subscribe(&topic).await.expect("subscribe");
+            // No pause: if `subscribe` returned early this publish is lost.
+            publisher
+                .publish(&topic, b"x".to_vec())
+                .await
+                .expect("publish");
+            let got = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+                .await
+                .unwrap_or_else(|_| panic!("attempt {attempt} lost its frame"));
+            assert_eq!(got, Some(b"x".to_vec()));
+        }
     }
 
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]

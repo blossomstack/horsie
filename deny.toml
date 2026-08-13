@@ -38,6 +38,12 @@ allow = [
     # webpki-roots (Mozilla CA bundle, via nono's rustls stack) ships under the
     # Community Data License Agreement – Permissive 2.0. Permissive; data, not code.
     "CDLA-Permissive-2.0",
+    # Boost Software License 1.0 — OSI-approved, permissive, no attribution
+    # requirement on binaries, and compatible with this project's Apache-2.0 OR
+    # MIT. Pulled in by xxhash-rust, which the redis client depends on
+    # unconditionally: it is not behind a feature, so there is no version of
+    # this dependency that avoids it.
+    "BSL-1.0",
 ]
 
 # Our own workspace crates are unpublished (publish = false) and carry no
