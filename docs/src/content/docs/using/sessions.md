@@ -81,6 +81,43 @@ resume on top.
 You do not need the tab open for work to continue — the run happens on the
 server. Opening an idle session to read it does not wake its runtime.
 
+## Branch a conversation
+
+A conversation reaches a point where two directions are worth trying, or where
+the context is full of settled work and the next thing is different. Type
+`/fork` with what you want done next, and horsie starts a second conversation
+inside the same session:
+
+```
+/fork try the same migration with a materialised view instead
+```
+
+You land in it straight away. It carries everything said up to that point, and
+it shares the session's workspace — the same checkout, the same uncommitted
+edits — so it can pick up exactly where the first one was.
+
+`/summary-n-fork` does the same, but seeds the new conversation with a *summary*
+of the old one rather than the whole history:
+
+```
+/summary-n-fork now write the migration guide
+```
+
+Use it when the detail is settled and only the conclusions matter. It starts
+with a much smaller context, so it has more room to work in — at the cost of
+being unable to scroll back into what it came from.
+
+The original conversation is never changed by either. It gets a marker where the
+branch happened, linking to the conversation that left.
+
+A fork is a full conversation: it can ask you questions, spawn its own
+subagents, and be forked again. It names itself once the direction is clear, and
+appears in the rail nested under the session it belongs to, with its own status
+lamp. Forking a fork nests one level deeper.
+
+Nothing ever removes a fork on its own. Delete one from its menu in the rail
+when you are done with it; deleting the session removes its forks too.
+
 ## Stop, or delete
 
 **Stop** halts the current turn and keeps everything else.
