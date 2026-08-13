@@ -215,9 +215,6 @@ pub enum ForkCommand {
     /// failed write spawns nothing and the caller gets the error.
     FinishCreate {
         id: Uuid,
-        parent: ForkParent,
-        mode: ForkMode,
-        message: String,
         reply: ReplyTo<Result<Uuid, String>>,
         persisted: Result<(), horsie_actor::JournalError>,
     },
