@@ -1,7 +1,10 @@
 //! A publish/subscribe bus.
 
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::broadcast;
 
 /// How many frames a subscriber may fall behind before it is lagged.
@@ -11,6 +14,11 @@ const TOPIC_CAPACITY: usize = 256;
 pub enum BusError {
     #[error("bus unavailable: {0}")]
     Unavailable(String),
+    /// A value could not be turned into a frame. A bug in the payload type
+    /// rather than a fault of the deployment's bus, and kept separate for that
+    /// reason: retrying it would fail identically forever.
+    #[error("could not encode a frame for '{topic}': {reason}")]
+    Encode { topic: String, reason: String },
 }
 
 /// One subscriber's end of a topic.
@@ -102,6 +110,99 @@ impl Bus for MemoryBus {
     }
 }
 
+/// One topic, and the single type that travels on it.
+///
+/// This is what callers hold; [`Bus`] is the transport underneath. Nothing
+/// above this line encodes a frame by hand, which is the point — a topic name
+/// and its payload type are chosen together, once, and a publisher that sends
+/// the wrong shape is a compile error rather than a subscriber that quietly
+/// decodes nothing.
+///
+/// Cheap to clone: a name and a handle to the bus.
+///
+/// **Where topic names belong.** Construct these in one module per family
+/// (`rt:<session>:<incarnation>:in` and its payload, an account's session feed
+/// and its payload) rather than at call sites. A name written twice is a name
+/// that can be written differently twice, and the failure mode is silence.
+pub struct Topic<T> {
+    bus: Arc<dyn Bus>,
+    name: String,
+    /// `fn() -> T` rather than `T`: it makes the marker covariant and leaves
+    /// `Topic<T>` unconditionally `Send + Sync`, which a bare `PhantomData<T>`
+    /// would tie to `T` for no reason — nothing here ever holds a `T`.
+    payload: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Topic<T> {
+    fn clone(&self) -> Self {
+        Self {
+            bus: self.bus.clone(),
+            name: self.name.clone(),
+            payload: PhantomData,
+        }
+    }
+}
+
+impl<T: Serialize + DeserializeOwned + Send + 'static> Topic<T> {
+    #[must_use]
+    pub fn new(bus: Arc<dyn Bus>, name: impl Into<String>) -> Self {
+        Self {
+            bus,
+            name: name.into(),
+            payload: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Send one value to whoever is subscribed, now.
+    pub async fn publish(&self, value: &T) -> Result<(), BusError> {
+        let frame = serde_json::to_vec(value).map_err(|e| BusError::Encode {
+            topic: self.name.clone(),
+            reason: e.to_string(),
+        })?;
+        self.bus.publish(&self.name, frame).await
+    }
+
+    /// Start receiving values published from this moment on.
+    pub async fn subscribe(&self) -> Result<Reader<T>, BusError> {
+        Ok(Reader {
+            frames: self.bus.subscribe(&self.name).await?,
+            payload: PhantomData,
+        })
+    }
+}
+
+/// One subscriber's end of a [`Topic`].
+pub struct Reader<T> {
+    frames: Subscription,
+    payload: PhantomData<fn() -> T>,
+}
+
+impl<T: DeserializeOwned> Reader<T> {
+    /// The next value, or `None` once the topic can produce no more.
+    ///
+    /// A frame that will not decode is **skipped and logged**, never fatal. The
+    /// alternative — ending the stream — would let one malformed publisher take
+    /// down every reader of that topic, and a reader has no way to recover from
+    /// somebody else's bug. Skipping keeps the blast radius at one frame.
+    pub async fn recv(&mut self) -> Option<T> {
+        loop {
+            let frame = self.frames.recv().await?;
+            match serde_json::from_slice(&frame) {
+                Ok(value) => return Some(value),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "a frame on this topic did not decode; skipping it"
+                ),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -174,5 +275,65 @@ mod tests {
         let mut sub = bus.subscribe("t").await.unwrap();
         bus.publish("t", b"x".to_vec()).await.unwrap();
         assert_eq!(sub.recv().await, Some(b"x".to_vec()));
+    }
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Moved {
+        session: String,
+        revision: u64,
+    }
+
+    /// What every caller actually holds. Nobody outside this module should be
+    /// writing `serde_json::to_vec` to publish, or naming a topic as a bare
+    /// string next to a payload type that is only correct by convention.
+    #[tokio::test]
+    async fn a_topic_publishes_and_receives_its_own_type() {
+        let bus: std::sync::Arc<dyn Bus> = std::sync::Arc::new(MemoryBus::new());
+        let topic = Topic::<Moved>::new(bus, "agent:s1:main");
+
+        let mut reader = topic.subscribe().await.unwrap();
+        topic
+            .publish(&Moved {
+                session: "s1".into(),
+                revision: 7,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.recv().await,
+            Some(Moved {
+                session: "s1".into(),
+                revision: 7,
+            })
+        );
+    }
+
+    /// A frame that will not decode is skipped, not fatal. One malformed
+    /// publisher must not end a reader's stream — it would take down every
+    /// session watching that topic, and the reader has no way to recover.
+    #[tokio::test]
+    async fn a_frame_that_will_not_decode_is_skipped_rather_than_ending_the_stream() {
+        let bus: std::sync::Arc<dyn Bus> = std::sync::Arc::new(MemoryBus::new());
+        let topic = Topic::<Moved>::new(bus.clone(), "t");
+        let mut reader = topic.subscribe().await.unwrap();
+
+        bus.publish("t", b"not json at all".to_vec()).await.unwrap();
+        topic
+            .publish(&Moved {
+                session: "s1".into(),
+                revision: 1,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            reader.recv().await,
+            Some(Moved {
+                session: "s1".into(),
+                revision: 1,
+            }),
+            "the good frame after a bad one must still arrive"
+        );
     }
 }
