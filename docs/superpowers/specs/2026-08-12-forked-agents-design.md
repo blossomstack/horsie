@@ -112,17 +112,14 @@ exists to bound a machine that can spawn in a loop.
 `ForkedAgents`, in `session_actor/fork.rs`, with the pure data in
 `sessions/forks.rs` — mirroring how `subagent.rs` and `subagents.rs` split.
 
-It earns all four `Component` hooks, which is the test for whether something
-deserves to be one (`Read` and `Hooks` are `SessionCommand` variants that are
-*not* components):
+It earns three of the four `Component` hooks, which is the test for whether
+something deserves to be one (`Read` and `Hooks` are `SessionCommand` variants
+that are *not* components):
 
 - **`apply`** — folds `ForkCreated` / `ForkSeeded` / `ForkTitled` /
   `ForkStatusChanged` / `ForkDeleted` into `state.forks`. `SessionActor::apply_event`
   matches every variant explicitly and routes each to one component, so adding
   these forces a compile error there, which is where classification belongs.
-- **`actions`** — a fork whose seed has landed becomes startable, and nobody
-  commanded that: an event arrived, state changed, work became available. That
-  is what `actions` is for.
 - **`on_load`** — a fork left `Provisioning` by a dead process has nobody to
   finish it. Unlike a turn, which the *agent* reports as interrupted from its
   own recovery, seeding is session-owned work with no journal of its own. This
@@ -131,6 +128,12 @@ deserves to be one (`Read` and `Hooks` are `SessionCommand` variants that are
   run.
 - **`busy`** — a fork mid-seed must keep the session loaded, or the idle sweep
   unloads it out from under an in-flight summariser call.
+
+Not `actions`. A fork becoming runnable needs nothing started at the session's
+turn boundary: the seed and the fork's first message land in **one write** on the
+fork's own journal, and that write drains the fork exactly as an ordinary
+`Enqueue` does. An `actions` arm would be a second thing deciding when a fork may
+run, disagreeing with the first.
 
 Message routing stays in `Turns`. `Turns` recognises `/fork` where it already
 recognises `/compact`, and hands the work to `ForkedAgents`, which owns
