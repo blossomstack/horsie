@@ -254,11 +254,33 @@ export const api = {
         body: JSON.stringify({ name }),
       }),
 
-    send: (id: string, text: string): Promise<SessionAck> =>
-      request(`/sessions/${encodeURIComponent(id)}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      }),
+    /** Send a message to one of a session's agents.
+     *
+     * `agentId` names who it is for. Not optional in practice: a fork is an
+     * agent, and leaving it out delivered everything typed on a fork's page to
+     * the session's main agent instead. Absent means the main agent, which is
+     * what the session page itself wants. */
+    send: (
+      id: string,
+      text: string,
+      agentId?: string,
+    ): Promise<SessionAck> =>
+      request(
+        `/sessions/${encodeURIComponent(id)}/messages` +
+          (agentId ? `?aid=${encodeURIComponent(agentId)}` : ""),
+        {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        },
+      ),
+
+    /** Remove one fork. Only a fork: a subagent and a workflow step are part of
+     * what their session did, and nothing removes one. */
+    deleteFork: (id: string, forkId: string): Promise<Ack> =>
+      request(
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(forkId)}`,
+        { method: "DELETE" },
+      ),
 
     /** Answer every pending ask at once; a partial set is refused by the server.
      *

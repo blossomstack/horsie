@@ -202,10 +202,18 @@ export function SessionView() {
     // echo is left stuck as an unmatched duplicate.
     const optimisticId = addOptimisticUser(text);
     try {
-      const ack = await send.mutateAsync({ id: sessionId, text });
+      const ack = await send.mutateAsync({ id: sessionId, text, agentId });
       // From here the server owns the message: the echo is handed its
       // server-side id so the queue can take it over without duplicating it.
       ackOptimisticUser(optimisticId, ack.messageId);
+      // `/fork` and `/summary-n-fork` create a conversation and answer with it.
+      // The message belongs to that conversation, not this one, so the echo
+      // goes with it — leaving it here would show the command as something
+      // said in the conversation it branched away from.
+      if (ack.forkedAgent) {
+        removeOptimisticUser(optimisticId);
+        navigate(`/sessions/${sessionId}/agents/${ack.forkedAgent}`);
+      }
     } catch (e) {
       removeOptimisticUser(optimisticId);
       setSendError(

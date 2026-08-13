@@ -99,6 +99,31 @@ export function statusMeta(status: SessionStatusKind): StatusMeta {
   return META[status];
 }
 
+/** An agent's status, in the session vocabulary the panel lamps speak.
+ *
+ * A fork is a conversation, so it moves through the same states a session does
+ * and reads on the same lamps — but it is an *agent*, so the server sends it in
+ * the agent vocabulary. This is the one translation, in one place.
+ *
+ * `completed` maps to idle rather than getting a lamp of its own: only a
+ * subagent or a workflow step reaches it, and neither is ever shown here. An
+ * unknown value reads as idle too, so a status added server-side renders as a
+ * quiet row rather than a blank one. */
+export function agentStatusMeta(status: string): SessionStatusKind {
+  switch (status) {
+    case "provisioning":
+      return SessionStatusKind.Provisioning;
+    case "running":
+      return SessionStatusKind.Running;
+    case "awaiting_input":
+      return SessionStatusKind.AwaitingInput;
+    case "failed":
+      return SessionStatusKind.Failed;
+    default:
+      return SessionStatusKind.Idle;
+  }
+}
+
 /** Friendly label for a progression stage.
  *
  * The keys are the server's own stage vocabulary, and there are two sources of

@@ -10,6 +10,8 @@ import {
 } from "../hooks/useGroups";
 import { Menu, MenuItem } from "./Menu";
 import { GROUP_DRAG_MIME, SESSION_DRAG_MIME, SessionRow } from "./SessionRow";
+import { ForkRow } from "./ForkRow";
+import { forkTree } from "../lib/forkTree";
 
 /** One sidebar section: a group (or the Ungrouped sentinel) with its session
  * rows. The header is the collapse toggle, the drop target for sessions, and
@@ -206,7 +208,22 @@ export function SessionGroupSection({
       )}
       <div id={bodyId}>
         {(bare || !collapsed) &&
-          sessions.map((s) => <SessionRow key={s.id} s={s} groups={groups} />)}
+          sessions.map((s) => (
+            <div key={s.id}>
+              <SessionRow s={s} groups={groups} />
+              {/* Forks nest under the conversation they branched from. Built
+                  from the flat, parent-linked list the registry holds, so
+                  listing sessions still loads none of them. */}
+              {forkTree(s.forks).map(({ fork, depth }) => (
+                <ForkRow
+                  key={fork.id}
+                  sessionId={s.id}
+                  fork={fork}
+                  depth={depth}
+                />
+              ))}
+            </div>
+          ))}
       </div>
     </div>
   );
