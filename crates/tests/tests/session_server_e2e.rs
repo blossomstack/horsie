@@ -378,13 +378,30 @@ async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want:
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
-        let got = turns_ended(&messages_page(client, addr, id, "main").await);
-        if got >= want {
+        // A read can answer "no such agent" while a just-restarted server is
+        // still recovering the session, and this loop exists precisely to wait
+        // that out — so an unreadable page is *not ready yet*, never a failure.
+        // Handing it straight to `turns_ended`, which panics on a page with no
+        // entries, made that transient fatal to the one helper written to
+        // survive it.
+        let page = messages_page(client, addr, id, "main").await;
+        let got = page["entries"].is_array().then(|| turns_ended(&page));
+        if let Some(got) = got
+            && got >= want
+        {
             assert_eq!(got, want, "more turns ran than the test expected");
             return;
         }
         if start.elapsed() > deadline {
-            panic!("timed out waiting for {want} finished turns; the agent has finished {got}");
+            match got {
+                Some(got) => panic!(
+                    "timed out waiting for {want} finished turns; the agent has finished {got}"
+                ),
+                None => panic!(
+                    "timed out waiting for {want} finished turns; the agent never became \
+                     readable, last answer: {page}"
+                ),
+            }
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
