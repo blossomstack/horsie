@@ -71,9 +71,6 @@ impl ForkedAgents {
                     let _ = self_ref
                         .tell(SessionCommand::Fork(ForkCommand::FinishCreate {
                             id,
-                            parent,
-                            mode,
-                            message,
                             reply,
                             persisted,
                         }))
@@ -83,9 +80,6 @@ impl ForkedAgents {
             }
             ForkCommand::FinishCreate {
                 id,
-                parent,
-                mode,
-                message,
                 reply,
                 persisted,
             } => {
@@ -101,7 +95,7 @@ impl ForkedAgents {
                 // write as the seed, because a fork with a message and no
                 // history drains it immediately and answers a conversation it
                 // has not been given yet.
-                actor.start_seeding(ctx, state, id, parent, mode, message);
+                actor.start_seeding(ctx, state, id);
                 // The id travels now rather than when the seed lands: the
                 // client redirects to a fork that is visibly building itself,
                 // which is exactly what a newly created session does.
@@ -171,20 +165,13 @@ impl ForkedAgents {
             }
             ForkCommand::ReseedInterrupted => {
                 for id in state.forks.seeding() {
-                    let Some((parent, mode, message)) = state
-                        .forks
-                        .get(id)
-                        .map(|rec| (rec.parent, rec.mode, rec.message.clone()))
-                    else {
-                        continue;
-                    };
                     // Spawning is what a fork needs to be seeded *into*: a
                     // session that reloaded has no resident agents at all.
                     if actor.spawn_fork_actor(ctx, state, id).is_none() {
                         tracing::warn!(fork = %id, "could not restart a fork to re-seed it");
                         continue;
                     }
-                    actor.start_seeding(ctx, state, id, parent, mode, message);
+                    actor.start_seeding(ctx, state, id);
                 }
                 CommandEffect::none()
             }
@@ -311,10 +298,17 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         id: Uuid,
-        parent: ForkParent,
-        mode: ForkMode,
-        message: String,
     ) {
+        // Everything this needs is on the record, and the record is what a
+        // re-seed after a crash reads too — so taking it from there is what
+        // makes the first attempt and the retry cut the copy at the same
+        // place, from the same branch point, with the same message.
+        let Some(rec) = state.forks.get(id).cloned() else {
+            tracing::warn!(fork = %id, "no record to seed a fork from");
+            return;
+        };
+        let (parent, mode, source_seq, message) =
+            (rec.parent, rec.mode, rec.source_seq, rec.message);
         let (Some(source), Some(fork)) = (
             self.fork_source(state, ctx, parent),
             self.agents
@@ -334,7 +328,8 @@ impl SessionActor {
                 id: format!("fork-message:{id}"),
                 text: message,
             };
-            let cmd = match seed_fork(&source, &fork, mode, &source_title, queued).await {
+            let cmd = match seed_fork(&source, &fork, mode, source_seq, &source_title, queued).await
+            {
                 Ok(()) => ForkCommand::Seeded { id },
                 Err(error) => ForkCommand::SeedFailed { id, error },
             };
@@ -375,13 +370,17 @@ async fn seed_fork(
     source: &ActorRef<AgentCommand>,
     fork: &ActorRef<AgentCommand>,
     mode: ForkMode,
+    source_seq: u64,
     source_title: &str,
     message: Incoming,
 ) -> Result<(), String> {
     let (state, summary) = match mode {
         ForkMode::Copy => {
             let state = source
-                .ask(|reply| AgentCommand::ForkSeed { reply })
+                .ask(|reply| AgentCommand::ForkSeed {
+                    at_seq: source_seq,
+                    reply,
+                })
                 .await
                 .map_err(|e| format!("read the conversation to fork: {e}"))?;
             (state, String::new())
@@ -722,6 +721,146 @@ mod tests {
             ForkParent::Fork(first_id),
             "a fork of a fork is rooted on that fork"
         );
+    }
+
+    /// Forking a conversation that is parked on a question.
+    ///
+    /// The copied log carries the `ask_user` `tool_use` with no result. A
+    /// dangling call 400s every provider, so what makes this work is the
+    /// sanitization every turn start already runs — this is the proof that a
+    /// fork's first turn goes through it like any other.
+    ///
+    /// Note what this does *not* prove: the fork would run even if `asks` were
+    /// carried, because its own queued message is a person speaking and that
+    /// overrides a park by design. Dropping `asks` is defensive, not what makes
+    /// this pass.
+    #[tokio::test]
+    async fn a_fork_of_a_parked_conversation_runs_rather_than_inheriting_the_question() {
+        use horsie_agentcore::{
+            StopReason,
+            testkit::{MockProvider, Script},
+        };
+        // The source's first call asks the user and parks. Everything after —
+        // including every call the fork makes — answers with plain text.
+        let provider = MockProvider::scripted(
+            Script::of([Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "ask-1".into(),
+                        name: "ask_user".into(),
+                        input: serde_json::json!({"question": "which migration?"}),
+                    },
+                )],
+                stop_reason: StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })])
+            .then_repeating_with(|| {
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "the fork answered".to_string(),
+                        },
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }),
+        );
+        let (_f, session, id, journal) = spawn_session_with_provider(provider).await;
+
+        send(&session, "start").await;
+        wait_for_state(&journal, id, "the source parks on its question", |s| {
+            matches!(
+                s.status,
+                crate::sessions::spec::SessionStatus::AwaitingInput
+            )
+        })
+        .await;
+
+        let fork = fork_via(&session, None, "/fork never mind, do the other thing")
+            .await
+            .expect("a parked conversation can still be forked");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        // The question is *visible* in the copied transcript — it happened —
+        // but the fork is not waiting on it, so its own turn runs to an answer.
+        for _ in 0..200 {
+            let t = transcript(&session, Some(fork.clone())).await;
+            if t.contains("the fork answered") {
+                assert!(
+                    t.contains("which migration?"),
+                    "the question is still readable in the copied history: {t}"
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the fork never answered: {}",
+            transcript(&session, Some(fork)).await
+        );
+    }
+
+    /// Forking a conversation with a message still queued on it.
+    ///
+    /// This is the drop that is genuinely load-bearing. A message the source
+    /// has accepted but not yet answered belongs to the *source*: it queued
+    /// because a turn was in flight, and that turn's boundary is what answers
+    /// it. Copied into the fork, both conversations answer it — the person
+    /// gets two replies to one message, and the fork's first turn is polluted
+    /// by a message that was never meant for it.
+    #[tokio::test]
+    async fn a_fork_does_not_take_over_a_message_queued_on_the_source() {
+        use super::super::testing::BlockingProvider;
+
+        let provider = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(provider.clone()).await;
+
+        // Hold the source inside a turn, so the next message queues rather
+        // than draining.
+        send(&session, "the turn that is running").await;
+        wait_for_state(&journal, id, "the source is running", |s| {
+            matches!(s.status, crate::sessions::spec::SessionStatus::Running)
+        })
+        .await;
+        send(&session, "QUEUED-FOR-THE-SOURCE").await;
+
+        let fork = fork_via(&session, None, "/fork the fork's own instruction")
+            .await
+            .expect("a busy conversation can still be forked");
+
+        // The fork's *queue* must not hold it. The source's log records that
+        // the message was queued — that happened, and the copied history says
+        // so — but the fork must not be the one to answer it, so it is not an
+        // `Incoming` the fork will merge into a turn.
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+        let forked = transcript(&session, Some(fork.clone())).await;
+        assert!(
+            !forked.contains("Received") && !forked.contains("QUEUED-FOR-THE-SOURCE\", "),
+            "the source's queued message is not the fork's to answer: {forked}"
+        );
+        // And the copy stops at the branch point: the `Forked` entry recording
+        // this very fork is written onto the *source* after the branch, so a
+        // copy taken at the log's end would hand the fork a marker pointing at
+        // itself.
+        assert!(
+            !forked.contains("Forked("),
+            "a fork must not carry its own creation marker: {forked}"
+        );
+
+        provider.release();
     }
 
     /// The seed always frames where the fork came from; only a summary fork

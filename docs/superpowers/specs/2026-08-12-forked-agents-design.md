@@ -173,12 +173,32 @@ The source agent's state is copied and scrubbed:
 | `log`, `next_seq` | carried | the conversation is the point |
 | `context_tokens` | carried | the fork's prompt really is that big |
 | `task_list` | carried | the working state the copied messages refer to |
-| `inbox`, `asks`, `timers` | dropped | a fork must not inherit a pending question |
-| `parked`, `turn_in_flight` | dropped | a fork must not start life interrupted |
+| `inbox` | dropped | a message queued on the source is the source's to answer |
+| `asks`, `timers`, `parked`, `turn_in_flight` | dropped | defensive; see below |
 | `usage_total`, `last_turn_usage` | reset | the source's spend must not be counted twice |
+
+Only `inbox` is load-bearing. Carried, both conversations answer the same
+message. The rest are defensive and worth saying so plainly: `asks` survives
+being carried because the fork's own queued message is a person speaking, and
+that overrides a park by design; `timers`/`parked` are always empty for a
+conversation, which never gets the timer tools; `turn_in_flight` would be
+cleared by the fork's own first turn before anything read it. They are dropped
+because a fork inheriting them is never *right*, not because something breaks
+today.
+
+A dangling `tool_use` in the copied log — from a parked ask, or a turn the fork
+was taken mid-way through — is repaired by the sanitization every turn start
+already runs, so it never reaches a provider.
 
 The result is saved as the fork's initial snapshot, and its own events number on
 from there.
+
+**The copy is cut at the branch point**, not at the log's current end. Journaling
+the fork writes a `Forked` entry onto the source's own log, and a source that is
+mid-turn goes on appending while the seed is being built — so copying to the end
+hands the fork its own creation marker plus whatever else landed in that window.
+`source_seq` is read when the fork is asked for and is what the cut uses; it is
+also on the record, so a re-seed after a crash cuts in the same place.
 
 ### `/summary-n-fork` — summarise
 

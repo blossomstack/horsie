@@ -204,10 +204,13 @@ pub enum AgentCommand {
     /// anything is written so the number names the moment the fork was asked
     /// for rather than the moment its seed happened to be built.
     LogHead { reply: ReplyTo<u64> },
-    /// This agent's state as a fork's starting point — see
+    /// This agent's state as a fork's starting point, cut at `at_seq` — see
     /// [`AgentState::scrub_for_fork`]. Read-only: forking changes nothing about
     /// the conversation being forked.
-    ForkSeed { reply: ReplyTo<Box<AgentState>> },
+    ForkSeed {
+        at_seq: u64,
+        reply: ReplyTo<Box<AgentState>>,
+    },
     /// Summarise this agent's whole history, changing nothing. What
     /// `/summary-n-fork` runs against the conversation it branches from.
     SummariseAll {
@@ -760,13 +763,25 @@ impl AgentState {
     /// `usage_total` would make the session's aggregate count the same tokens
     /// twice, once under each conversation.
     ///
-    /// `next_seq` carries too, so the fork's own entries number on from where
-    /// the copied ones stop and every cursor in the copied log still resolves.
+    /// Cut at `at_seq` — the branch point, read when the fork was asked for.
+    /// Not at the log's current end: journaling the fork writes a `Forked`
+    /// entry onto this very log, and a source that is mid-turn goes on
+    /// appending while the seed is being built. Copying to the end handed the
+    /// fork its own creation marker and whatever else had landed since.
+    ///
+    /// `next_seq` becomes `at_seq` for the same reason: the fork's own entries
+    /// number on from where the copied ones stop, so every cursor into the
+    /// copied log still resolves and nothing collides.
     #[must_use]
-    pub fn scrub_for_fork(&self) -> Self {
+    pub fn scrub_for_fork(&self, at_seq: u64) -> Self {
         Self {
-            log: self.log.clone(),
-            next_seq: self.next_seq,
+            log: self
+                .log
+                .iter()
+                .filter(|e| e.seq < at_seq)
+                .cloned()
+                .collect(),
+            next_seq: at_seq,
             context_tokens: self.context_tokens,
             task_list: self.task_list.clone(),
             inbox: Vec::new(),
@@ -2474,8 +2489,8 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(state.next_seq);
                 CommandEffect::none()
             }
-            AgentCommand::ForkSeed { reply } => {
-                let _ = reply.send(Box::new(state.scrub_for_fork()));
+            AgentCommand::ForkSeed { at_seq, reply } => {
+                let _ = reply.send(Box::new(state.scrub_for_fork(at_seq)));
                 CommandEffect::none()
             }
             AgentCommand::SummariseAll { reply } => {
