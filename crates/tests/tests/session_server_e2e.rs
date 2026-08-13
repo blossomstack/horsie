@@ -2998,6 +2998,13 @@ async fn a_compacted_session_keeps_every_message_readable() {
 
     let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
     wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    // The reply's text lands several entries before the turn's `TurnEnded`, so
+    // waiting for it is not waiting for the turn. Snapshotting `before` in that
+    // gap counts zero finished turns, which makes the `+ 1` below satisfied by
+    // the *first* turn ending — and the compaction assertion then runs while
+    // the second turn is still in flight, blaming compaction for not having
+    // happened yet.
+    wait_turns(&client, &server.addr, &id, 1).await;
     let before = messages_page(&client, &server.addr, &id, "main").await;
     let count_before = page_messages(&before).len();
     assert!(
