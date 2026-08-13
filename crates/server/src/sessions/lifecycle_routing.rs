@@ -9,8 +9,8 @@
 //! `agent_log` is: the interesting part is the table, and a table wants tests
 //! that can enumerate it.
 
-use crate::sessions::session_actor::{AgentKey, SessionDomainEvent, SessionState};
 use crate::sessions::forks::ForkParent;
+use crate::sessions::session_actor::{AgentKey, SessionDomainEvent, SessionState};
 use crate::sessions::subagents::SubAgentParent;
 use horsie_agentcore::{
     EmptyOutcome, FailedOutcome, ForkLifecycle, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,

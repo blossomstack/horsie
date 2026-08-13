@@ -178,7 +178,14 @@ mod tests {
     #[test]
     fn a_created_fork_starts_provisioning_and_unnamed() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 42, ForkMode::Copy, "go".into(), 1_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            42,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
         let rec = r.get(id(1)).unwrap();
         assert_eq!(rec.message, "go");
         assert_eq!(rec.parent, ForkParent::Main);
@@ -194,7 +201,14 @@ mod tests {
     #[test]
     fn seeding_moves_a_fork_to_idle() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Summary, "go".into(), 1_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Summary,
+            "go".into(),
+            1_000,
+        );
         assert!(
             r.has_seeding(),
             "a fork awaiting its seed keeps the session loaded"
@@ -208,7 +222,14 @@ mod tests {
     #[test]
     fn a_fork_names_itself() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 1_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
         r.apply_titled(id(1), "Try the other migration".to_string());
         assert_eq!(
             r.get(id(1)).unwrap().title.as_deref(),
@@ -219,16 +240,44 @@ mod tests {
     #[test]
     fn a_fork_of_a_fork_records_its_parent() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 1_000);
-        r.apply_created(id(2), ForkParent::Fork(id(1)), 7, ForkMode::Copy, "go".into(), 2_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
+        r.apply_created(
+            id(2),
+            ForkParent::Fork(id(1)),
+            7,
+            ForkMode::Copy,
+            "go".into(),
+            2_000,
+        );
         assert_eq!(r.get(id(2)).unwrap().parent, ForkParent::Fork(id(1)));
     }
 
     #[test]
     fn deleting_a_fork_leaves_its_siblings() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 1_000);
-        r.apply_created(id(2), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 2_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
+        r.apply_created(
+            id(2),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            2_000,
+        );
         r.apply_deleted(id(2));
         assert!(r.contains(id(1)));
         assert!(!r.contains(id(2)));
@@ -239,8 +288,22 @@ mod tests {
     #[test]
     fn deleting_a_parent_fork_leaves_its_child() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 1_000);
-        r.apply_created(id(2), ForkParent::Fork(id(1)), 0, ForkMode::Copy, "go".into(), 2_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
+        r.apply_created(
+            id(2),
+            ForkParent::Fork(id(1)),
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            2_000,
+        );
         r.apply_deleted(id(1));
         assert!(r.contains(id(2)), "a child fork is its own conversation");
     }
@@ -250,7 +313,14 @@ mod tests {
     #[test]
     fn events_for_a_deleted_fork_are_ignored() {
         let mut r = ForkRoster::default();
-        r.apply_created(id(1), ForkParent::Main, 0, ForkMode::Copy, "go".into(), 1_000);
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
         r.apply_deleted(id(1));
         r.apply_seeded(id(1));
         r.apply_titled(id(1), "ghost".to_string());

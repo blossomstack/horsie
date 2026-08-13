@@ -52,6 +52,7 @@ describe("Transcript user turn", () => {
         orphanTools={[]}
         showLive={false}
         showThinking={false}
+        sessionId="s1"
       />,
     );
     fireEvent.click(screen.getByTestId("turn-copy-plain"));

@@ -25,6 +25,19 @@ use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::forks::{ForkMode, ForkParent};
+
+/// A recognised fork command: which of the two it was, and what the new
+/// conversation is for.
+///
+/// A struct rather than three parameters because they are one decision, made
+/// in one place and acted on in another — and because `name` exists only to put
+/// the command the user actually typed into the refusal.
+struct ForkRequest {
+    mode: ForkMode,
+    /// The builtin's name, for a refusal that quotes what was typed.
+    name: &'static str,
+    message: String,
+}
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
@@ -199,7 +212,7 @@ impl SessionActor {
     /// Pure and separate from acting on it, so `on_user_message` can classify
     /// before it gives up ownership of the reply — and so the table of what
     /// counts as a fork command is testable with no actor in sight.
-    fn fork_request(text: &str) -> Option<(ForkMode, &'static str, String)> {
+    fn fork_request(text: &str) -> Option<ForkRequest> {
         let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/')
             .and_then(|(name, args)| {
                 horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
@@ -209,7 +222,11 @@ impl SessionActor {
             "summary-n-fork" => ForkMode::Summary,
             _ => return None,
         };
-        Some((mode, builtin.name, args.trim().to_string()))
+        Some(ForkRequest {
+            mode,
+            name: builtin.name,
+            message: args.trim().to_string(),
+        })
     }
 
     /// Hand a fork command to the component that owns forks.
@@ -224,12 +241,15 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         key: AgentKey,
-        mode: ForkMode,
-        name: &'static str,
-        message: String,
+        req: ForkRequest,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
+        let ForkRequest {
+            mode,
+            name,
+            message,
+        } = req;
         if message.is_empty() {
             let _ = reply.send(Err(UserMessageError::Rejected(format!(
                 "/{name} needs a message saying what the new conversation should do"
@@ -320,8 +340,8 @@ impl SessionActor {
         // Resolved before the session is titled, because a fork command is not
         // a thing to name a session after: it says what the *new* conversation
         // should do.
-        if let Some((mode, name, message)) = Self::fork_request(text.trim()) {
-            return self.start_fork(state, key, mode, name, message, reply, ctx);
+        if let Some(req) = Self::fork_request(text.trim()) {
+            return self.start_fork(state, key, req, reply, ctx);
         }
         // An unnamed session is titled from its first message, once. The rule is
         // `SessionCore`'s — a session's name is its own bookkeeping, not the

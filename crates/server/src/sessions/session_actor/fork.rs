@@ -46,7 +46,8 @@ impl ForkedAgents {
                 // The branch point, read before anything is written: where the
                 // source's log stands right now is what this fork carries.
                 let Some(source_seq) = actor.source_log_head(state, ctx, parent).await else {
-                    let _ = reply.send(Err("the conversation to fork is not available".to_string()));
+                    let _ =
+                        reply.send(Err("the conversation to fork is not available".to_string()));
                     return CommandEffect::none();
                 };
                 let id = Uuid::new_v4();
@@ -137,7 +138,8 @@ impl ForkedAgents {
                 }])
             }
             ForkCommand::SetTitle { id, title, reply } => {
-                let normalized = match crate::sessions::title_tool::normalize_session_title(&title) {
+                let normalized = match crate::sessions::title_tool::normalize_session_title(&title)
+                {
                     Ok(t) => t,
                     Err(e) => {
                         let _ = reply.send(Err(e.to_string()));
@@ -443,9 +445,14 @@ mod tests {
 
     fn state_with_fork(status: AgentStatus) -> SessionState {
         let mut state = SessionState::default();
-        state
-            .forks
-            .apply_created(id(1), ForkParent::Main, 0, ForkMode::Summary, "go".into(), 1);
+        state.forks.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Summary,
+            "go".into(),
+            1,
+        );
         state.forks.apply_status(id(1), status);
         state
     }
@@ -532,8 +539,8 @@ mod tests {
     use super::super::testing::{
         EchoProvider, agent_history, send, spawn_session_with_provider, spawn_sub, wait_for_state,
     };
-    use crate::sessions::session_actor::{SessionCommand, TurnCommand};
     use crate::sessions::addressing::SessionRef;
+    use crate::sessions::session_actor::{SessionCommand, TurnCommand};
     use std::sync::Arc;
 
     /// Type `text` at `agent_id` and hand back what the fork command answered.
@@ -571,8 +578,7 @@ mod tests {
     /// and answers the message that created it.
     #[tokio::test]
     async fn a_fork_carries_the_conversation_and_answers_its_own_message() {
-        let (_f, session, id, journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "the original question").await;
 
         let fork = fork_via(&session, None, "/fork try the other migration")
@@ -608,8 +614,7 @@ mod tests {
     /// so the source's messages must *not* be in its log.
     #[tokio::test]
     async fn a_summary_fork_does_not_carry_the_source_messages() {
-        let (_f, session, id, journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "a very long conversation about migrations").await;
 
         let fork = fork_via(&session, None, "/summary-n-fork now do the other thing")
@@ -692,8 +697,7 @@ mod tests {
     /// Forks nest: a fork of a fork records the fork it came from, not main.
     #[tokio::test]
     async fn a_fork_of_a_fork_records_the_fork_it_came_from() {
-        let (_f, session, id, journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "start").await;
 
         let first = fork_via(&session, None, "/fork one").await.expect("a fork");

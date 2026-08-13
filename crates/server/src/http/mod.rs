@@ -800,7 +800,10 @@ mod tests {
             .as_str()
             .expect("a fork command answers with the agent to open")
             .to_string();
-        assert!(uuid::Uuid::parse_str(&fork).is_ok(), "{fork} is an agent id");
+        assert!(
+            uuid::Uuid::parse_str(&fork).is_ok(),
+            "{fork} is an agent id"
+        );
 
         // An ordinary message carries no fork, so a client never redirects.
         let res = app
@@ -817,7 +820,11 @@ mod tests {
         // The fork lists under its session, from the registry.
         let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
-        let row = list.sessions.iter().find(|s| s.id == id).expect("the session");
+        let row = list
+            .sessions
+            .iter()
+            .find(|s| s.id == id)
+            .expect("the session");
         assert!(
             row.forks.iter().any(|f| f.id == fork),
             "the fork is listed under its session: {:?}",

@@ -540,6 +540,7 @@ export function SessionView() {
                   orphanTools={stream.orphanTools}
                   showLive={status === SessionStatusKind.Running}
                   showThinking={uiSettings.showThinking}
+                  sessionId={id}
                 />
               </>
             )}

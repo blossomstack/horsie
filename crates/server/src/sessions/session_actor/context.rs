@@ -773,7 +773,11 @@ impl ContextProvider for SessionContextProvider {
             // it can ask the user — and it names *itself*, not the session.
             SessionAgentKind::Fork(id) => {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::for_fork(inner, self.session.clone(), id))
+                Arc::new(SessionTitleToolbox::for_fork(
+                    inner,
+                    self.session.clone(),
+                    id,
+                ))
             }
             SessionAgentKind::Sub(_) => with_spawn,
         };

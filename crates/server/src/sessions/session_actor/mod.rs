@@ -803,9 +803,10 @@ impl SessionActor {
             // record here the way a subagent's type does: a fork runs under
             // the session's own settings, like the conversation it branched
             // from.
-            AgentKey::Fork(id) => {
-                state.forks.contains(id).then(|| self.spawn_fork_actor(ctx, state, id))?
-            }
+            AgentKey::Fork(id) => state
+                .forks
+                .contains(id)
+                .then(|| self.spawn_fork_actor(ctx, state, id))?,
             // Spawned at load, so it is either resident or this session is a run
             // and has none.
             AgentKey::Main => None,

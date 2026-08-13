@@ -305,10 +305,7 @@ impl Agent {
     /// Whatever the summarising provider call fails with. An empty history
     /// summarises to nothing rather than erroring — a fork of a conversation
     /// that has not started yet is empty, not broken.
-    pub async fn summarise_all(
-        &self,
-        instructions: Option<&str>,
-    ) -> Result<String, AgentError> {
+    pub async fn summarise_all(&self, instructions: Option<&str>) -> Result<String, AgentError> {
         if self.history.is_empty() {
             return Ok(String::new());
         }

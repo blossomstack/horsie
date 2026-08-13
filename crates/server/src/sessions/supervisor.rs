@@ -240,10 +240,7 @@ pub enum SessionSupervisorCommand {
     /// [`Self::SessionStatusChanged`] sends the whole status: the session's own
     /// journal is the truth, this is a projection of it, and a projection built
     /// from deltas can drift where one built from the current value cannot.
-    ForksChanged {
-        id: SessionId,
-        forks: Vec<ForkRow>,
-    },
+    ForksChanged { id: SessionId, forks: Vec<ForkRow> },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
     /// Rename a session on someone's behalf rather than the agent's.
@@ -878,7 +875,10 @@ impl EventSourcedActor for SessionSupervisor {
                     // own state, and the supervisor's copy is a projection.
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Fork(ForkCommand::Delete { id: fork, reply }))
+                            .tell(SessionCommand::Fork(ForkCommand::Delete {
+                                id: fork,
+                                reply,
+                            }))
                             .await;
                     }
                 }
@@ -1172,9 +1172,12 @@ impl EventSourcedActor for SessionSupervisor {
                 // only a real change is worth a write. Without this, a busy
                 // session with one fork would journal a row here per batch.
                 match state.sessions.get(&id) {
-                    Some(rec) if rec.forks != forks => CommandEffect::persist(vec![
-                        SessionSupervisorEvent::SessionForksChanged { id, forks },
-                    ]),
+                    Some(rec) if rec.forks != forks => {
+                        CommandEffect::persist(vec![SessionSupervisorEvent::SessionForksChanged {
+                            id,
+                            forks,
+                        }])
+                    }
                     _ => CommandEffect::none(),
                 }
             }

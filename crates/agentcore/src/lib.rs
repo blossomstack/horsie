@@ -23,9 +23,9 @@ pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
 pub use horsie_models::agent::{
     AgentInput, AgentLogBody, AgentLogEntry, AgentOutput, AgentResult, AskLifecycle,
     CompactionEntry, CompactionTrigger, CompletedOutput, ContentPart, EmptyOutcome, FailedOutcome,
-    HandoffCall, HandoffOutput, HistoryEntry, HookEntry, LifecycleEvent, Message,
+    ForkLifecycle, HandoffCall, HandoffOutput, HistoryEntry, HookEntry, LifecycleEvent, Message,
     PreparingLifecycle, QueuedLifecycle, Role, RuntimeLifecycle, RuntimeStatus,
-    ForkLifecycle, SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TaskItem, TaskListLifecycle,
+    SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TaskItem, TaskListLifecycle,
     TaskStatus, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart,
     TurnBeganLifecycle, TurnEndedLifecycle, TurnOutcome, Usage, UserMessageInput,
 };

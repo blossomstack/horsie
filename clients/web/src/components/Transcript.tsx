@@ -3,12 +3,14 @@ import type { HookRecord } from "../api/types";
 import { cn } from "../lib/cn";
 import type {
   RenderedCompaction,
+  RenderedFork,
   RenderedMessage,
   RenderedToolCall,
   TranscriptItem,
 } from "../hooks/useSessionStream";
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { CompactionDivider } from "./CompactionDivider";
+import { ForkMarker } from "./ForkMarker";
 import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
@@ -182,7 +184,11 @@ export type TurnGroup =
   // A boundary between conversations, not a thing anyone said. Always breaks
   // the assistant thread: the messages either side of it belong to different
   // working sets, and running them together would read as one exchange.
-  | { kind: "compaction"; id: string; value: RenderedCompaction };
+  | { kind: "compaction"; id: string; value: RenderedCompaction }
+  // Where a conversation branched off. Not something anyone said, and not a
+  // break in the thread either — the conversation carried on here, and this
+  // marks the point another one left from.
+  | { kind: "fork"; id: string; value: RenderedFork };
 
 export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
   const turns: TurnGroup[] = [];
@@ -198,6 +204,10 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
         id: item.value.id,
         record: item.value.record,
       });
+      continue;
+    }
+    if (item.kind === "fork") {
+      turns.push({ kind: "fork", id: `fork:${item.value.id}`, value: item.value });
       continue;
     }
     if (item.kind === "compaction") {
@@ -237,12 +247,15 @@ export function Transcript({
   orphanTools,
   showLive,
   showThinking,
+  sessionId,
 }: {
   items: TranscriptItem[];
   streaming: string;
   orphanTools: RenderedToolCall[];
   showLive: boolean;
   showThinking: boolean;
+  /** Which session these agents belong to, so a fork marker can link to one. */
+  sessionId: string;
 }) {
   const turns = groupTurns(items);
   // Gated on session status alone (not on whether content has arrived yet) so
@@ -260,6 +273,8 @@ export function Transcript({
           <HookNoticeRow key={t.id} record={t.record} />
         ) : t.kind === "compaction" ? (
           <CompactionDivider key={t.id} value={t.value} />
+        ) : t.kind === "fork" ? (
+          <ForkMarker key={t.id} value={t.value} sessionId={sessionId} />
         ) : t.kind === "user" ? (
           <UserTurn key={t.msg.id} msg={t.msg} />
         ) : (

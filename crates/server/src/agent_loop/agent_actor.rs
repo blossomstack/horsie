@@ -210,7 +210,9 @@ pub enum AgentCommand {
     ForkSeed { reply: ReplyTo<Box<AgentState>> },
     /// Summarise this agent's whole history, changing nothing. What
     /// `/summary-n-fork` runs against the conversation it branches from.
-    SummariseAll { reply: ReplyTo<Result<String, String>> },
+    SummariseAll {
+        reply: ReplyTo<Result<String, String>>,
+    },
     /// Adopt `state` as this agent's whole history, append `seed` after it, and
     /// queue `message` — all in one write.
     ///
@@ -1220,13 +1222,9 @@ impl AgentActor {
         let conversation_id = self.ctx.journal_id.to_string();
         let thinking_effort = self.params.thinking_effort;
         tokio::spawn(async move {
-            let answer = summarise_history(
-                context_provider,
-                history,
-                conversation_id,
-                thinking_effort,
-            )
-            .await;
+            let answer =
+                summarise_history(context_provider, history, conversation_id, thinking_effort)
+                    .await;
             let _ = reply.send(answer);
         });
     }
@@ -3177,22 +3175,15 @@ async fn summarise_history(
     conversation_id: String,
     thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
 ) -> Result<String, String> {
-    let contexts = context_provider
-        .provide()
-        .await
-        .map_err(|e| e.message)?;
-    let agent = Agent::builder(
-        contexts.provider,
-        contexts.toolbox,
-        &conversation_id,
-    )
-    .with_config(AgentConfig {
-        thinking_effort,
-        ..AgentConfig::default()
-    })
-    .with_history(history)
-    .build()
-    .map_err(|e| e.to_string())?;
+    let contexts = context_provider.provide().await.map_err(|e| e.message)?;
+    let agent = Agent::builder(contexts.provider, contexts.toolbox, &conversation_id)
+        .with_config(AgentConfig {
+            thinking_effort,
+            ..AgentConfig::default()
+        })
+        .with_history(history)
+        .build()
+        .map_err(|e| e.to_string())?;
     agent.summarise_all(None).await.map_err(|e| e.to_string())
 }
 
