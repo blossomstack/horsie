@@ -2819,6 +2819,14 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
             .then_some(())
     })
     .await;
+    // The ordinary session goes cold on the same tick, and its offload signal
+    // is independent of this run's: `last_activity` is a map keyed by session
+    // uuid, so which of the two hibernates first is effectively random per run.
+    // Waiting for both is what makes the snapshot below a picture of a settled
+    // system rather than of a race — without it, `hibernate:{plain}` landing a
+    // moment late is indistinguishable from the list request having woken
+    // something, and the assertion blames the wrong thing.
+    wait_for_signal(&agent, &format!("hibernate:{plain}")).await;
     let before = agent.signals();
 
     let res = client
