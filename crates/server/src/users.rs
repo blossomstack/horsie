@@ -15,10 +15,13 @@ use crate::config::{DbConfigStore, StoreDeps, model_cards};
 use crate::db::Db;
 use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
+use crate::sessions::SessionRevisions;
+use crate::sessions::addressing::{SessionShard, SupervisorRef, SupervisorShard};
+use crate::sessions::session_actor::SessionActor;
 use crate::sessions::spec::ServerDeps;
 use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
-use crate::sessions::supervisor::{SessionSupervisorCommand, SupervisorConfig};
-use horsie_actor::{ActorRef, ActorSystem, Journal};
+use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
+use horsie_actor::{ActorSystem, Journal};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::session::GlobalSessionEvent;
 use horsie_models::settings::ServerInfo;
@@ -63,6 +66,16 @@ pub struct Shared {
     /// policy, not account preference — and the seam a test drives time
     /// through.
     pub supervisor: SupervisorConfig,
+    /// What every account's session actors run on, when the caller has already
+    /// assembled it.
+    ///
+    /// `None` in a deployment, where [`build_user`] assembles it from that
+    /// account's own stores — which is the only reason two accounts get
+    /// different clients at all. A harness that has stood up a fake runtime
+    /// vendor and a fake plugin library hands one in, because those are the
+    /// things it exists to test against, and a shard recipe has nowhere else to
+    /// take one from.
+    pub deps: Option<ServerDeps>,
     /// The Fly Machines API root every account's Fly vendors are built against.
     ///
     /// Deployment-wide because it is a property of where this server runs, not
@@ -75,9 +88,19 @@ pub struct Shared {
 /// Everything one account owns.
 pub struct UserServices {
     pub user: UserId,
-    /// This account's session list, and the parent of every session and agent
-    /// actor it has loaded.
-    pub supervisor: ActorRef<SessionSupervisorCommand>,
+    /// This account's session list, addressed rather than held. Resolving it
+    /// starts nothing: the supervisor comes into being on the first command
+    /// sent through this, on whichever node the cluster puts it.
+    pub supervisor: SupervisorRef,
+    /// What this account's session and agent actors run on: its runtime
+    /// manager, its provider clients, its plugin library.
+    ///
+    /// Here rather than passed at construction because a session is built by a
+    /// shard recipe now, from an id and nothing else — so an actor reaches its
+    /// wiring by resolving this bundle rather than by being handed it.
+    pub deps: ServerDeps,
+    /// Where readers wait for this account's sessions to move.
+    pub revisions: Arc<SessionRevisions>,
     /// This account's global event stream. One channel per account rather than
     /// one channel and a filter: a filter is one forgotten line from leaking
     /// every session title on the server.
@@ -217,7 +240,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             account: user.as_str().to_string(),
         },
     ));
-    let deps = ServerDeps {
+    let deps = shared.deps.clone().unwrap_or_else(|| ServerDeps {
         runtimes,
         provider_registry: opened.registry.clone(),
         vendors: opened.vendors.clone(),
@@ -225,25 +248,17 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         mcp: Some(mcp.clone()),
         plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
         memory: Some(memory.clone()),
-    };
+    });
 
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
-    // Created *at* its account id rather than spawned anonymously, so the system
-    // holds it at a path. That is also what keeps two accounts apart now that
-    // they share one system: `/acct-7` and `/acct-9` are different actors on the
-    // node's one registry, with no filter anywhere to forget to apply.
-    let supervisor_deps = crate::sessions::supervisor::SupervisorDeps {
-        server: deps,
-        global_tx: global_events.clone(),
-        config: shared.supervisor.clone(),
-    };
-    let system = &shared.system;
-    let supervisor = system
-        .actor_of(
-            user.as_str(),
-            system.persistent(supervisor_deps.build(user.as_str())),
-        )
-        .map_err(|e| format!("could not start the session supervisor: {e}"))?;
+    // Named, not started. A shard type's actors are built by the recipe this
+    // node registered, on whichever node the cluster placed them — so building
+    // an account's bundle no longer starts anything, and the supervisor comes
+    // into being when the first command is addressed to it.
+    let supervisor = SupervisorRef::new(
+        shared.system.shard_actor_of::<SupervisorShard>(),
+        user.clone(),
+    );
 
     // Destroy substrate left over from sessions that no longer exist. Deleting a
     // session already tells its vendor; this covers the case where the vendor
@@ -282,6 +297,8 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     Ok(Arc::new(UserServices {
         user,
         supervisor,
+        deps,
+        revisions: Arc::new(SessionRevisions::default()),
         global_events,
         config_store: opened.store,
         provider_registry: opened.registry,
@@ -314,12 +331,83 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 /// worth not inventing before anything has measured the need for it.
 pub struct UserRegistry {
     shared: Arc<Shared>,
-    /// The `OnceCell` is load-bearing, not tidiness. Two concurrent first
-    /// requests that each ran `build_user` would `ActorSystem` two
-    /// `SessionSupervisor`s on one persistence id — two event-sourced actors
-    /// writing one journal. The write lock is taken only to insert the empty
-    /// cell, so the build itself never runs under it.
+    /// The `OnceCell` is load-bearing, not tidiness. A bundle is what an
+    /// account's actors resolve their wiring from, and two concurrent first
+    /// requests that each ran `build_user` would leave the account with two of
+    /// them — two runtime managers over one set of sandboxes, two vendor maps,
+    /// two event channels, and a reader watching whichever one it happened to
+    /// resolve. The write lock is taken only to insert the empty cell, so the
+    /// build itself never runs under it.
     users: RwLock<HashMap<UserId, Arc<OnceCell<Arc<UserServices>>>>>,
+}
+
+/// One account's bundle, for an actor resolving its own wiring at recovery.
+///
+/// The failure branches are logged rather than handled because neither is
+/// reachable from a running deployment: a reference to one of this account's
+/// actors is only ever taken *out of* its bundle, so a caller that could not
+/// build one never had anything to address. What is left is a process on its
+/// way down, whose registry has already gone.
+pub async fn resolve(
+    users: &std::sync::Weak<UserRegistry>,
+    user: &UserId,
+) -> Option<Arc<UserServices>> {
+    let Some(registry) = users.upgrade() else {
+        tracing::warn!(user = %user, "the account registry is gone; the process is shutting down");
+        return None;
+    };
+    match registry.get(user).await {
+        Ok(services) => Some(services),
+        Err(e) => {
+            tracing::error!(user = %user, error = %e, "could not resolve the account's services");
+            None
+        }
+    }
+}
+
+/// Teach this node how to build an account's supervisor and its sessions.
+///
+/// Called once per node, after the registry exists, because that is what a
+/// recipe resolves an account's bundle through. A `Weak` and not an `Arc`: the
+/// registry holds [`Shared`], which holds the system, which would then hold the
+/// recipe — a cycle nothing ever collects.
+///
+/// A recipe is synchronous and infallible, so neither of these resolves a
+/// bundle here. Each actor does that in `on_recovery_complete`, which is async
+/// and runs before any command it is sent.
+pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> {
+    let system = &users.shared().system;
+    let config = users.shared().supervisor.clone();
+    let registry = Arc::downgrade(users);
+    system
+        .shard::<SupervisorShard>()
+        .register(move |system, entity| {
+            system.persistent(SessionSupervisor::new(
+                entity.entity_id.clone(),
+                registry.clone(),
+                config.clone(),
+            ))
+        })
+        .map_err(|e| format!("could not register the session supervisor: {e}"))?;
+
+    let registry = Arc::downgrade(users);
+    system
+        .shard::<SessionShard>()
+        .register(move |system, entity| {
+            // The supervisor is reached as a *name* for its whole type, so a
+            // session built on a host that never saw the request creating it
+            // still has one to report to.
+            let supervisor = SupervisorRef::new(
+                system.shard_actor_of::<SupervisorShard>(),
+                entity.entity_id.account.clone(),
+            );
+            system.persistent(SessionActor::new(
+                entity.entity_id.clone(),
+                supervisor,
+                registry.clone(),
+            ))
+        })
+        .map_err(|e| format!("could not register the session type: {e}"))
 }
 
 impl UserRegistry {
@@ -388,9 +476,9 @@ mod tests {
         }
     }
 
-    async fn registry(tmp: &tempfile::TempDir) -> UserRegistry {
+    async fn registry(tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
         let db = crate::db::testing::db().await;
-        UserRegistry::new(Arc::new(Shared {
+        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             system: node_system(&db),
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
@@ -399,8 +487,11 @@ mod tests {
             model_card_seed_marker: model_cards::seed_marker(&[]),
             anonymous: UserId::bootstrap(),
             supervisor: SupervisorConfig::default(),
+            deps: None,
             fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
-        }))
+        })));
+        register_session_shards(&users).expect("a fresh system has no shard types yet");
+        users
     }
 
     /// The assertion the `OnceCell` exists for. Two callers racing an account's
@@ -410,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_first_touches_build_one_bundle() {
         let tmp = tempfile::tempdir().unwrap();
-        let reg = Arc::new(registry(&tmp).await);
+        let reg = registry(&tmp).await;
         let user = UserId::generate();
 
         let mut tasks = Vec::new();
@@ -432,12 +523,16 @@ mod tests {
     }
 
     /// Two accounts' supervisors are two actors on the *one* system this node
-    /// runs, kept apart by their paths.
+    /// runs, kept apart by their addresses.
     ///
     /// The node has a single inbound channel when it is clustered, so a process
     /// holding a system per account would have nothing to route an arriving
-    /// envelope by. What replaced that separation is the thing a path was always
-    /// for: `/acct-7` and `/acct-9` are different addresses on one registry.
+    /// envelope by. What replaced that separation is what an address was always
+    /// for: two accounts are two entities of one shard type on one registry.
+    ///
+    /// Resolving a bundle deliberately starts nothing — the first command is
+    /// what builds the actor — so the count is taken after each account has
+    /// been spoken to.
     #[tokio::test]
     async fn every_account_is_hosted_on_the_one_node_system() {
         let tmp = tempfile::tempdir().unwrap();
@@ -445,8 +540,15 @@ mod tests {
         let before = reg.shared().system.hosted();
 
         let (a, b) = (UserId::generate(), UserId::generate());
-        let _ = reg.get(&a).await.unwrap();
-        let _ = reg.get(&b).await.unwrap();
+        for user in [&a, &b] {
+            reg.get(user)
+                .await
+                .unwrap()
+                .supervisor
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+                .unwrap();
+        }
 
         assert_eq!(
             reg.shared().system.hosted(),

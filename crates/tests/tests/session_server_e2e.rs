@@ -11,7 +11,6 @@
 )]
 
 use async_llm::mock::MockLlmServer;
-use horsie_actor::ActorRef;
 use horsie_agentcore::LlmProvider;
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_server::runtime_vendor::WebsocketRuntimeVendor;
@@ -43,7 +42,7 @@ fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
 
 struct Server {
     addr: SocketAddr,
-    supervisor: ActorRef<SessionSupervisorCommand>,
+    supervisor: horsie_server::sessions::addressing::SupervisorRef,
     vendors: Arc<horsie_server::runtime_vendor::RuntimeVendorRegistry>,
     task: tokio::task::JoinHandle<()>,
 }

@@ -13,33 +13,31 @@
 //! read as honest and was merely empty: the session's own journal is no more
 //! current than this copy, because both only learn better when it loads.
 //!
-//! Nothing is loaded at boot. A session actor is spawned the first time a
-//! command is addressed to it, and dropped again once it has been idle for
+//! Nothing is loaded at boot. A session actor comes into being the first time a
+//! command is addressed to it, and stops again once it has been idle for
 //! [`SupervisorConfig::idle_timeout`].
 
-use crate::sessions::UserMessageError;
+use crate::sessions::addressing::{SessionRef, SessionShard, SupervisorInbox, SupervisorRef};
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
-    AnswerError, AskAnswer, SessionActor, SessionCommand, SessionSnapshot, SessionUsageStats,
+    AnswerError, AskAnswer, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
     CoreCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
-use crate::sessions::spec::{
-    ServerDeps, SessionId, SessionSpec, SessionStatus, status_kind, status_reason,
-};
+use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus, status_kind, status_reason};
+use crate::sessions::{SessionRevisions, UserMessageError};
+use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
-use horsie_actor::{
-    ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
-};
+use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
 use horsie_models::session::{
     GlobalSessionEvent, GlobalSessionStatusEvent, GlobalSessionTitleEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// How long a loaded session may sit untouched before it is unloaded and its
@@ -49,8 +47,13 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 /// How often the supervisor looks for sessions to unload.
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Names this actor type in both the journal and the cluster. Changing it
-/// orphans every existing supervisor log.
+/// Names this actor type in the journal. Changing it orphans every existing
+/// supervisor log.
+///
+/// It happens to read the same as [`SupervisorShard::TYPE`], which names the
+/// type in the cluster, and the two are deliberately not the same constant: one
+/// is a durability contract and the other an address, and only one of them can
+/// be changed.
 const SUPERVISOR_KIND: &str = "session-supervisor";
 
 /// How long a reader's poll parks before being answered with no news.
@@ -423,168 +426,162 @@ pub struct SessionSupervisor {
     /// The account this supervisor is the session list of. Its only job is to
     /// key the persistence id — every scoped *store* binds its own copy.
     user: crate::auth::UserId,
-    deps: ServerDeps,
-    global_tx: broadcast::Sender<GlobalSessionEvent>,
+    /// Where this account's bundle is resolved from, and the reason a recipe
+    /// can stay synchronous: building one is async, so it happens at recovery
+    /// rather than at construction.
+    users: Weak<UserRegistry>,
+    /// This account's bundle. `None` means exactly one thing — recovery has not
+    /// run — and [`Self::services`] is what turns that into a fact the rest of
+    /// the file does not have to restate.
+    services: Option<Arc<UserServices>>,
     config: SupervisorConfig,
-    children: BTreeMap<SessionId, ActorRef<SessionCommand>>,
+    /// When each loaded session was last spoken to, which is the whole of the
+    /// idle policy. A session is in here for exactly as long as this supervisor
+    /// believes it is loaded, so it also answers "what is there to sweep".
     last_activity: BTreeMap<SessionId, Instant>,
-    /// One per-agent position registry per session, owned here rather than by
-    /// the session actor so that unloading an idle session does not disconnect
-    /// whoever is reading it.
-    ///
-    /// That is not a nicety: a disconnected browser reconnects, a reconnect
-    /// loads the session, and a loaded session goes idle again — so a channel
-    /// tied to the actor's life turns idle offload into an offload/reconnect/
-    /// load loop. Keeping it here means a reader simply waits, and hears from
-    /// the session the next time something wakes it.
-    revisions: BTreeMap<SessionId, crate::sessions::Revisions>,
 }
 
 impl SessionSupervisor {
     pub fn new(
         user: crate::auth::UserId,
-        deps: ServerDeps,
-        global_tx: broadcast::Sender<GlobalSessionEvent>,
-    ) -> Self {
-        Self::with_config(user, deps, global_tx, SupervisorConfig::default())
-    }
-
-    pub fn with_config(
-        user: crate::auth::UserId,
-        deps: ServerDeps,
-        global_tx: broadcast::Sender<GlobalSessionEvent>,
+        users: Weak<UserRegistry>,
         config: SupervisorConfig,
     ) -> Self {
         Self {
             user,
-            deps,
-            global_tx,
+            users,
+            services: None,
             config,
-            children: BTreeMap::new(),
             last_activity: BTreeMap::new(),
-            revisions: BTreeMap::new(),
         }
     }
 
-    /// The live child for `id`, spawning it if this is the first command to
-    /// reach it. Loading reads two journals and calls no vendor.
-    async fn ensure_loaded(
+    /// This account's bundle.
+    ///
+    /// Expects rather than handles: recovery resolves it, and recovery finishes
+    /// before the first command is handled, so a `None` here is a broken actor
+    /// lifecycle rather than a case with an answer.
+    #[expect(
+        clippy::expect_used,
+        reason = "recovery runs before any command, so this cannot be None"
+    )]
+    fn services(&self) -> &Arc<UserServices> {
+        self.services
+            .as_ref()
+            .expect("a supervisor handles no command before recovery has resolved its account")
+    }
+
+    fn revisions(&self) -> &Arc<SessionRevisions> {
+        &self.services().revisions
+    }
+
+    /// The session `id`, and a note that it has just been spoken to.
+    ///
+    /// A name rather than a handle: an unloaded session is reactivated by the
+    /// first command that arrives for it, so there is nothing to spawn here and
+    /// nothing to invalidate when one goes cold. `None` only when the registry
+    /// has no such session — which is what keeps a stranger's id from
+    /// materialising an actor.
+    fn session(
         &mut self,
-        ctx: &ActorContext<SessionSupervisorCommand>,
+        ctx: &ActorContext<SupervisorInbox>,
         state: &SessionSupervisorState,
         id: &SessionId,
-    ) -> Option<ActorRef<SessionCommand>> {
-        self.last_activity
-            .insert(id.clone(), self.config.clock.now());
-        if let Some(child) = self.children.get(id) {
-            return Some(child.clone());
-        }
-        let record = state.sessions.get(id)?;
-        let spec = record.spec.clone();
-        self.spawn_session(ctx, id, &spec).await
+    ) -> Option<SessionRef> {
+        state
+            .sessions
+            .contains_key(id)
+            .then(|| self.reach(ctx, id))?
     }
 
-    /// Spawn the actor for `id` and remember it.
+    /// The session `id` whether or not the registry knows it yet, and a note
+    /// that it has just been spoken to.
     ///
-    /// Separate from [`Self::ensure_loaded`] because creating a session has to
-    /// spawn one that is not in `state` yet: the `SessionCreated` event is still
-    /// being persisted when the session is first told to provision.
-    async fn spawn_session(
-        &mut self,
-        ctx: &ActorContext<SessionSupervisorCommand>,
-        id: &SessionId,
-        spec: &SessionSpec,
-    ) -> Option<ActorRef<SessionCommand>> {
-        if let Some(child) = self.children.get(id) {
-            return Some(child.clone());
-        }
-        let uuid = match Uuid::parse_str(id) {
+    /// Creating a session needs this: the `SessionCreated` event is still being
+    /// persisted when the session is first told what it is.
+    fn reach(&mut self, ctx: &ActorContext<SupervisorInbox>, id: &SessionId) -> Option<SessionRef> {
+        let session = match Uuid::parse_str(id) {
             Ok(uuid) => uuid,
             Err(e) => {
                 tracing::error!(session_id = %id, error = %e, "unparseable session id");
                 return None;
             }
         };
-        // Created at the session id under this supervisor's own path, so the
-        // session is reachable as `<account>/<session>` and reaches back with
-        // `ctx.parent()`. Get-or-create, so two callers racing to load one
-        // session get the one actor rather than two over its journal.
-        let child = match ctx.actor_of(
-            id,
-            ctx.persistent(SessionActor::new(
-                uuid,
-                spec.clone(),
-                self.deps.clone(),
-                ctx.self_ref(),
-                self.revisions_for(id),
-            )),
-        ) {
-            Ok(child) => child,
-            Err(e) => {
-                tracing::error!(session_id = %id, error = %e, "could not start the session");
-                return None;
-            }
-        };
-        self.children.insert(id.clone(), child.clone());
-        // Ahead of anything else this session will be told, because this is the
-        // first message into a mailbox nobody else has a reference to yet. The
-        // session ignores it once its log already says what it is, so this is a
-        // seed for a session that has none rather than a write on every load.
-        let _ = child
-            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
-                spec: Box::new(spec.clone()),
-            }))
-            .await;
-        Some(child)
+        self.last_activity
+            .insert(id.clone(), self.config.clock.now());
+        Some(SessionRef::new(
+            ctx.shard_actor_of::<SessionShard>(),
+            self.user.clone(),
+            session,
+        ))
+    }
+
+    /// The session `id` only if this supervisor believes it is loaded, and
+    /// *without* counting as having spoken to it.
+    ///
+    /// For everything that must reach a live session but must never wake a cold
+    /// one — a rename, a shutdown, an idle sweep. A reference cannot tell the
+    /// difference by itself, because reaching through one is exactly what brings
+    /// the actor back; `last_activity` is the only record of which sessions this
+    /// supervisor has loaded.
+    fn resident(&self, ctx: &ActorContext<SupervisorInbox>, id: &SessionId) -> Option<SessionRef> {
+        let session = self
+            .last_activity
+            .contains_key(id)
+            .then(|| Uuid::parse_str(id).ok())??;
+        Some(SessionRef::new(
+            ctx.shard_actor_of::<SessionShard>(),
+            self.user.clone(),
+            session,
+        ))
     }
 
     fn publish(&self, id: &str, status: &SessionStatus) {
-        let _ = self.global_tx.send(GlobalSessionEvent::StatusChanged(
-            GlobalSessionStatusEvent {
-                session_id: id.to_string(),
-                status: status_kind(status),
-                reason: status_reason(status),
-            },
-        ));
+        let _ = self
+            .services()
+            .global_events
+            .send(GlobalSessionEvent::StatusChanged(
+                GlobalSessionStatusEvent {
+                    session_id: id.to_string(),
+                    status: status_kind(status),
+                    reason: status_reason(status),
+                },
+            ));
     }
 
     fn publish_title(&self, id: &str, name: &str) {
         let _ = self
-            .global_tx
+            .services()
+            .global_events
             .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
                 session_id: id.to_string(),
                 name: name.to_string(),
             }));
     }
 
+    /// Stop counting `id` as loaded, and let go of its revision channels unless
+    /// a reader is still holding on.
     fn forget(&mut self, id: &SessionId) {
-        self.children.remove(id);
         self.last_activity.remove(id);
-        // The registry outlives the actor while anyone is still reading: an
-        // unloaded session has nothing to say until something reloads it, and
-        // ending the stream would only make the client reconnect and reload it.
-        if self.revisions.get(id).is_none_or(|p| !p.watched()) {
-            self.revisions.remove(id);
-        }
-    }
-
-    /// This session's position registry, created on first use.
-    fn revisions_for(&mut self, id: &SessionId) -> crate::sessions::Revisions {
-        self.revisions.entry(id.clone()).or_default().clone()
+        self.revisions().release(id);
     }
 
     /// Unload every session that has been idle past the timeout.
     ///
     /// Runs inline on this mailbox, which is what makes it race-free: every
-    /// command to a child goes through here, so nothing can reach a session
-    /// between it agreeing to unload and its reference being dropped.
-    async fn offload_idle(&mut self, state: &SessionSupervisorState) {
+    /// command to a session goes through here, so nothing can reach one between
+    /// it agreeing to unload and this supervisor forgetting it was loaded.
+    async fn offload_idle(
+        &mut self,
+        ctx: &ActorContext<SupervisorInbox>,
+        state: &SessionSupervisorState,
+    ) {
         let now = self.config.clock.now();
         let timeout = self.config.idle_timeout;
         let candidates: Vec<SessionId> = self
-            .children
-            .keys()
-            .filter(|id| {
+            .last_activity
+            .iter()
+            .filter(|(id, last)| {
                 // A running session is never a candidate: a long tool call must
                 // not be unloaded out from under itself. Nor is one still
                 // provisioning — unloading would strand the create's reply and
@@ -595,18 +592,19 @@ impl SessionSupervisor {
                 ) {
                     return false;
                 }
-                self.last_activity
-                    .get(*id)
-                    .is_none_or(|last| now.duration_since(*last) >= timeout)
+                now.duration_since(**last) >= timeout
             })
-            .cloned()
+            .map(|(id, _)| id.clone())
             .collect();
 
         for id in candidates {
-            let Some(child) = self.children.get(&id).cloned() else {
+            // Deliberately not `session()`: reaching for one would count as
+            // having spoken to it, and asking one that is not loaded would wake
+            // it only to put it back to sleep.
+            let Some(session) = self.resident(ctx, &id) else {
                 continue;
             };
-            match child
+            match session
                 .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
                 .await
             {
@@ -618,46 +616,16 @@ impl SessionSupervisor {
                 Ok(false) => {
                     self.last_activity.insert(id, now);
                 }
-                // Its mailbox is gone, so it is already unloaded.
+                // Nothing answered, so there is nothing loaded to unload.
                 Err(_) => self.forget(&id),
             }
         }
     }
 }
 
-/// Everything a supervisor needs that is not in its journal.
-///
-/// Node-local by definition: pools, clients, registries. A host that never saw
-/// the request creating an account's supervisor builds one from these plus the
-/// account id, which is what lets the supervisor move.
-#[derive(Clone)]
-pub struct SupervisorDeps {
-    pub server: ServerDeps,
-    pub global_tx: broadcast::Sender<GlobalSessionEvent>,
-    pub config: SupervisorConfig,
-}
-
-impl SupervisorDeps {
-    /// Build the supervisor for `account`.
-    ///
-    /// The account is both the name this actor is created under and the identity
-    /// its journal is keyed by — horsie builds one [`ActorSystem`] per account,
-    /// each over an account-scoped journal, so the two always agree.
-    ///
-    /// [`ActorSystem`]: horsie_actor::ActorSystem
-    pub fn build(self, account: &str) -> SessionSupervisor {
-        SessionSupervisor::with_config(
-            crate::auth::UserId::new(account),
-            self.server,
-            self.global_tx,
-            self.config,
-        )
-    }
-}
-
 #[async_trait]
 impl EventSourcedActor for SessionSupervisor {
-    type Command = SessionSupervisorCommand;
+    type Command = SupervisorInbox;
     type Event = SessionSupervisorEvent;
     type State = SessionSupervisorState;
 
@@ -743,13 +711,16 @@ impl EventSourcedActor for SessionSupervisor {
         state
     }
 
+    /// Every command arrives addressed to an account, and this is the one
+    /// place that reads the address: the shard already routed by it, so what is
+    /// left below is the command it was wrapped around.
     async fn handle_command(
         &mut self,
         state: &SessionSupervisorState,
-        cmd: SessionSupervisorCommand,
-        ctx: &mut ActorContext<SessionSupervisorCommand>,
+        cmd: SupervisorInbox,
+        ctx: &mut ActorContext<SupervisorInbox>,
     ) -> CommandEffect<SessionSupervisorEvent> {
-        match cmd {
+        match cmd.cmd {
             SessionSupervisorCommand::Create {
                 spec,
                 created_at,
@@ -766,9 +737,19 @@ impl EventSourcedActor for SessionSupervisor {
                 // runtime manager. And the attempt is journaled by the session,
                 // so a process that dies mid-create leaves a session that knows
                 // to finish it, which no in-memory gate could.
-                let child = self.spawn_session(ctx, &id, &spec).await;
-                if let Some(child) = &child {
-                    let _ = child
+                if let Some(session) = self.reach(ctx, &id) {
+                    // What this session is, ahead of everything else it will
+                    // ever be told. Nothing else can have addressed a uuid
+                    // generated on this line, so this command is what brings the
+                    // actor into being and is therefore first in its mailbox —
+                    // which is what an empty journal needs, since a session
+                    // recovers nothing and waits to be told what it is.
+                    let _ = session
+                        .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+                            spec: Box::new(spec.clone()),
+                        }))
+                        .await;
+                    let _ = session
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
                         .await;
                 }
@@ -797,10 +778,10 @@ impl EventSourcedActor for SessionSupervisor {
                     let _ = reply.send(None);
                     return CommandEffect::none();
                 };
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Read(ReadCommand::Snapshot {
                                 reply: ReplyTo::from_sender(tx),
                             }))
@@ -821,12 +802,12 @@ impl EventSourcedActor for SessionSupervisor {
                 text,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id).await {
+                match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(UserMessageError::NotFound));
                     }
-                    Some(child) => {
-                        let _ = child
+                    Some(session) => {
+                        let _ = session
                             .tell(SessionCommand::Turn(TurnCommand::UserMessage {
                                 agent_id,
                                 text,
@@ -838,13 +819,13 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Stop { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id).await {
+                match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(format!("no such session: {id}")));
                     }
-                    Some(child) => {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        if child
+                        if session
                             .tell(SessionCommand::Turn(TurnCommand::Stop {
                                 reply: ReplyTo::from_sender(tx),
                             }))
@@ -869,9 +850,9 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 // Loading it first is deliberate: the session actor is what
                 // knows how to cancel a run and tell the vendor.
-                if let Some(child) = self.ensure_loaded(ctx, state, &id).await {
+                if let Some(session) = self.session(ctx, state, &id) {
                     let (tx, rx) = oneshot::channel();
-                    if child
+                    if session
                         .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
                             reply: ReplyTo::from_sender(tx),
                         }))
@@ -891,10 +872,10 @@ impl EventSourcedActor for SessionSupervisor {
                 after,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Read(ReadCommand::ReadLog {
                                 agent_id,
                                 after,
@@ -918,10 +899,10 @@ impl EventSourcedActor for SessionSupervisor {
                 max,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Read(ReadCommand::PageLog {
                                 agent_id,
                                 before,
@@ -940,10 +921,10 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::UsageStats { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Read(ReadCommand::UsageStats {
                                 reply: ReplyTo::from_sender(tx),
                             }))
@@ -959,10 +940,10 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::RunState { id, reply } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Run(RunCommand::State {
                                 reply: ReplyTo::from_sender(tx),
                             }))
@@ -978,10 +959,10 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::RetryStep { id, index, reply } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Run(RunCommand::RetryStep {
                                 index,
                                 reply: ReplyTo::from_sender(tx),
@@ -1003,12 +984,12 @@ impl EventSourcedActor for SessionSupervisor {
                 answers,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id).await {
+                match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(AnswerError::NothingPending));
                     }
-                    Some(child) => {
-                        let _ = child
+                    Some(session) => {
+                        let _ = session
                             .tell(SessionCommand::Turn(TurnCommand::Answer {
                                 agent_id,
                                 answers,
@@ -1035,7 +1016,7 @@ impl EventSourcedActor for SessionSupervisor {
                     return CommandEffect::none();
                 }
                 let wire_id = agent_id.as_deref().unwrap_or("main");
-                let revisions = self.revisions_for(&id);
+                let revisions = self.revisions().of(&id);
                 revisions.touch();
                 let mut rx = revisions.for_agent(wire_id).subscribe();
                 let current = *rx.borrow_and_update();
@@ -1063,10 +1044,10 @@ impl EventSourcedActor for SessionSupervisor {
                 agent_id,
                 reply,
             } => {
-                match self.ensure_loaded(ctx, state, &id).await {
-                    Some(child) => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
                         let (tx, rx) = oneshot::channel();
-                        let _ = child
+                        let _ = session
                             .tell(SessionCommand::Read(ReadCommand::Agent {
                                 agent_id,
                                 reply: ReplyTo::from_sender(tx),
@@ -1083,14 +1064,14 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Tick => {
-                self.offload_idle(state).await;
+                self.offload_idle(ctx, state).await;
                 CommandEffect::none()
             }
             SessionSupervisorCommand::Shutdown { reply } => {
-                let ids: Vec<SessionId> = self.children.keys().cloned().collect();
+                let ids: Vec<SessionId> = self.last_activity.keys().cloned().collect();
                 for id in ids {
-                    if let Some(child) = self.children.get(&id) {
-                        let _ = child
+                    if let Some(session) = self.resident(ctx, &id) {
+                        let _ = session
                             .ask(|reply| {
                                 SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload {
                                     reply,
@@ -1137,9 +1118,12 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 // The resident actor's own copy of the spec is what decides
                 // whether a first message still gets to title the session, so a
-                // rename it never heard about would be overwritten by one.
-                if let Some(child) = self.children.get(&id) {
-                    let _ = child
+                // rename it never heard about would be overwritten by one. Only
+                // a resident one, because renaming must not wake a session:
+                // loading one re-attempts an interrupted provision, and nobody
+                // expects typing a name to start a machine.
+                if let Some(session) = self.resident(ctx, &id) {
+                    let _ = session
                         .tell(SessionCommand::Core(CoreCommand::TitleSet {
                             name: title.clone(),
                         }))
@@ -1239,16 +1223,26 @@ impl EventSourcedActor for SessionSupervisor {
         }
     }
 
-    /// Recovery rebuilds the registry and stops there. No session actor is
-    /// spawned, no journal but this one is read, and no vendor is called — a
-    /// restart costs one journal replay however many sessions exist.
+    /// Recovery rebuilds the registry, resolves this account's bundle, and
+    /// stops there. No session actor is loaded, no journal but this one is
+    /// read, and no vendor is called — a restart costs one journal replay
+    /// however many sessions exist.
+    ///
+    /// The bundle is resolved *here* because a shard recipe is synchronous and
+    /// building one is not. This runs before the first command, so everything
+    /// below may take it for granted.
     async fn on_recovery_complete(
         &mut self,
         _state: &SessionSupervisorState,
-        ctx: &mut ActorContext<SessionSupervisorCommand>,
+        ctx: &mut ActorContext<SupervisorInbox>,
     ) {
+        self.services = resolve(&self.users, &self.user).await;
+
         if let Some(interval) = self.config.tick_interval {
-            let me = ctx.self_ref();
+            // This instance's own mailbox, not the shard reference: a tick sent
+            // through the latter would rebuild the supervisor it was ticking,
+            // so a stopped one would come back and start a second ticker.
+            let me = SupervisorRef::new(ctx.self_ref(), self.user.clone());
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 ticker.tick().await; // the first tick fires immediately
@@ -1273,11 +1267,12 @@ impl EventSourcedActor for SessionSupervisor {
 mod tests {
     use super::*;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
+    use crate::sessions::addressing::SupervisorShard;
     use crate::sessions::clock::TestClock;
+    use crate::sessions::session_actor::SessionActor;
     use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
-    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
-    use std::collections::HashMap;
+    use horsie_actor::Journal;
 
     fn spec_fixture() -> SessionSpec {
         SessionSpec {
@@ -1306,38 +1301,46 @@ mod tests {
         }
     }
 
+    /// One account's deployment, on a fake runtime vendor and a clock the test
+    /// moves by hand.
+    ///
+    /// A whole deployment rather than a supervisor, because a supervisor is
+    /// built by a shard recipe now: it is handed an account id and resolves
+    /// everything else, so there has to be an account for it to resolve.
     struct Fixture {
-        deps: ServerDeps,
         agent: FakeRuntimeVendor,
-        _tmp: tempfile::TempDir,
+        clock: Arc<TestClock>,
+        node: crate::testing::Deployment,
+    }
+
+    impl Fixture {
+        async fn supervisor(&self) -> SupervisorRef {
+            self.node.supervisor().await
+        }
+
+        fn journal(&self) -> Arc<dyn Journal> {
+            self.node.journal.clone()
+        }
+
+        /// Move every session past the idle timeout and sweep.
+        async fn go_idle(&self, sup: &SupervisorRef) {
+            self.clock.advance(Duration::from_secs(181));
+            sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        }
     }
 
     async fn fixture() -> Fixture {
-        let tmp = tempfile::tempdir().unwrap();
         let agent = FakeRuntimeVendor::builder("mock")
             .serve_in_process()
             .await
             .expect("fake agent");
-        let mut vendors = HashMap::new();
-        vendors.insert(
-            "mock".to_string(),
-            agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
-        );
-        let vendors = Arc::new(std::sync::RwLock::new(vendors));
-        let deps = ServerDeps {
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
-            provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            vendors,
-            github_tokens: None,
-            mcp: None,
-            plugins: None,
-            memory: None,
-        };
-        Fixture {
-            deps,
-            agent,
-            _tmp: tmp,
-        }
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let node = crate::testing::Deployment::new(
+            crate::sessions::session_actor::testing::fake_deps(&agent, None),
+            manual_config(&clock),
+        )
+        .await;
+        Fixture { agent, clock, node }
     }
 
     fn manual_config(clock: &Arc<TestClock>) -> SupervisorConfig {
@@ -1350,31 +1353,7 @@ mod tests {
         }
     }
 
-    /// A supervisor the system knows by its account id, the way a real one is
-    /// started — at its account id, so a session created under it can reach it
-    /// with `ctx.parent()`. One spawned detached has no path, so it has no
-    /// children either.
-    fn supervisor_in(
-        system: &ActorSystem,
-        f: &Fixture,
-        gtx: broadcast::Sender<GlobalSessionEvent>,
-        config: SupervisorConfig,
-    ) -> ActorRef<SessionSupervisorCommand> {
-        let account = crate::auth::UserId::bootstrap();
-        let deps = SupervisorDeps {
-            server: f.deps.clone(),
-            global_tx: gtx,
-            config,
-        };
-        system
-            .actor_of(
-                account.as_str(),
-                system.persistent(deps.build(account.as_str())),
-            )
-            .expect("a fresh system has nothing at this path")
-    }
-
-    async fn create(sup: &ActorRef<SessionSupervisorCommand>) -> SessionId {
+    async fn create(sup: &SupervisorRef) -> SessionId {
         sup.ask(|reply| SessionSupervisorCommand::Create {
             spec: spec_fixture(),
             created_at: 1,
@@ -1382,13 +1361,6 @@ mod tests {
         })
         .await
         .unwrap()
-    }
-
-    async fn spawn_supervisor(f: &Fixture) -> ActorRef<SessionSupervisorCommand> {
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        supervisor_in(&ActorSystem::new(journal), f, gtx, manual_config(&clock))
     }
 
     async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
@@ -1547,16 +1519,7 @@ mod tests {
     #[tokio::test]
     async fn boot_loads_nothing() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-
-        let sup = supervisor_in(
-            &ActorSystem::new(journal.clone()),
-            &f,
-            gtx.clone(),
-            manual_config(&clock),
-        );
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
         // Wait for the session to have finished provisioning and said so, so
@@ -1569,8 +1532,8 @@ mod tests {
 
         // Second incarnation on the same journal: the registry comes back, but
         // nothing is loaded and no vendor is touched.
-        let sup2 = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
-        let rows = sup2
+        f.node.restart().await;
+        let rows = sup
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
@@ -1598,8 +1561,7 @@ mod tests {
     #[tokio::test]
     async fn a_status_survives_a_restart_without_loading_the_session() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sup = spawn_supervisor_on(&f, journal.clone()).await;
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
         let _ = sup
@@ -1615,8 +1577,8 @@ mod tests {
             .unwrap();
         let before = f.agent.signals();
 
-        let sup2 = spawn_supervisor_on(&f, journal).await;
-        let rows = sup2
+        f.node.restart().await;
+        let rows = sup
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
@@ -1644,8 +1606,8 @@ mod tests {
     #[tokio::test]
     async fn re_reporting_the_same_status_journals_nothing() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let sup = spawn_supervisor_on(&f, journal.clone()).await;
+        let journal = f.journal();
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
         let _ = sup
@@ -1685,11 +1647,7 @@ mod tests {
     }
 
     /// Poll the registry until `id` reads `want` (2s cap).
-    async fn wait_for_status(
-        sup: &ActorRef<SessionSupervisorCommand>,
-        id: &SessionId,
-        want: &SessionStatus,
-    ) {
+    async fn wait_for_status(sup: &SupervisorRef, id: &SessionId, want: &SessionStatus) {
         for _ in 0..200 {
             let rows = sup
                 .ask(|reply| SessionSupervisorCommand::List { reply })
@@ -1706,15 +1664,6 @@ mod tests {
         panic!("session {id} never reached {want:?}");
     }
 
-    async fn spawn_supervisor_on(
-        f: &Fixture,
-        journal: Arc<dyn Journal>,
-    ) -> ActorRef<SessionSupervisorCommand> {
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        supervisor_in(&ActorSystem::new(journal), f, gtx, manual_config(&clock))
-    }
-
     async fn journal_len(journal: &Arc<dyn Journal>, pid: &PersistenceId) -> usize {
         use futures_util::StreamExt;
         #[expect(
@@ -1728,10 +1677,7 @@ mod tests {
     #[tokio::test]
     async fn any_command_loads_the_session_without_acquiring_a_runtime() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -1758,15 +1704,8 @@ mod tests {
         // that parked on a question and then went cold reports nothing, and the
         // UI has no way to know the question is still answerable.
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(
-            &ActorSystem::new(journal.clone()),
-            &f,
-            gtx,
-            manual_config(&clock),
-        );
+        let journal = f.journal();
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         // Creating a session loads it — it has a runtime to build — so unload it
         // first. Seeding the journal behind a live actor would prove nothing
@@ -1775,8 +1714,7 @@ mod tests {
             await_signal(&f.agent, &format!("create:{id}")).await,
             "the create has to finish before the session can go idle"
         );
-        clock.advance(Duration::from_secs(181));
-        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        f.go_idle(&sup).await;
         assert!(
             await_signal(&f.agent, &format!("hibernate:{id}")).await,
             "the session must actually unload for this test to mean anything"
@@ -1817,7 +1755,7 @@ mod tests {
 
     /// Ask whether an agent has moved, the way the SSE handler does.
     async fn poll(
-        sup: &ActorRef<SessionSupervisorCommand>,
+        sup: &SupervisorRef,
         id: &SessionId,
         after: Option<crate::sessions::Revision>,
     ) -> Option<crate::sessions::Revision> {
@@ -1843,10 +1781,7 @@ mod tests {
     #[tokio::test]
     async fn a_reader_survives_an_offload_and_hears_the_reload() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         let start = poll(&sup, &id, None)
             .await
@@ -1880,8 +1815,7 @@ mod tests {
             .expect("the main agent is watchable");
         assert_ne!(seen, start, "the agent must have actually moved");
 
-        clock.advance(Duration::from_secs(181));
-        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        f.go_idle(&sup).await;
         assert!(
             await_signal(&f.agent, &format!("hibernate:{id}")).await,
             "the session must actually unload for this test to mean anything"
@@ -1918,41 +1852,32 @@ mod tests {
     /// A host that never saw the request creating an account can still build
     /// that account's supervisor, from the id alone.
     ///
-    /// This is what `actor_of` does after a failover, so the test resolves one
-    /// the same way rather than constructing it: a factory that needed anything
-    /// the original caller had would compile and then fail in exactly the
-    /// situation clustering exists for.
+    /// This is what a shard recipe does after a failover, so the test resolves
+    /// one the same way rather than constructing it: a recipe that needed
+    /// anything the original caller had would compile and then fail in exactly
+    /// the situation clustering exists for.
     #[tokio::test]
     async fn a_supervisor_can_be_built_from_its_account_id_alone() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let system = ActorSystem::new(journal);
-        let deps = || SupervisorDeps {
-            server: f.deps.clone(),
-            global_tx: gtx.clone(),
-            config: manual_config(&clock),
+        let account = crate::auth::UserId::new("some-account");
+        let reference = || {
+            SupervisorRef::new(
+                f.node
+                    .users
+                    .shared()
+                    .system
+                    .shard_actor_of::<SupervisorShard>(),
+                account.clone(),
+            )
         };
 
-        let sup = system
-            .actor_of(
-                "some-account",
-                system.persistent(deps().build("some-account")),
-            )
-            .expect("a fresh system has nothing at this path");
-        let id = create(&sup).await;
+        // Nothing has built this account: the first command is what does, from
+        // the id in the command and the recipe this node registered.
+        let id = create(&reference()).await;
 
-        // Asking again returns the same instance rather than a second one
-        // racing it for the same log — the second actor value is dropped
-        // without ever being started.
-        let again = system
-            .actor_of(
-                "some-account",
-                system.persistent(deps().build("some-account")),
-            )
-            .expect("get-or-create is idempotent");
-        let sessions = again
+        // A second, independently resolved reference names the same actor
+        // rather than a second one racing it for the same log.
+        let sessions = reference()
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
@@ -1971,10 +1896,7 @@ mod tests {
     #[tokio::test]
     async fn a_poll_answers_at_once_only_when_the_agent_moved() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
 
         // A first ask carries no revision, so there is nothing it could be
@@ -2009,10 +1931,7 @@ mod tests {
     #[tokio::test]
     async fn an_idle_session_is_unloaded_and_hibernated() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         sup.ask(|reply| SessionSupervisorCommand::UsageStats {
             id: id.clone(),
@@ -2032,8 +1951,7 @@ mod tests {
             "a session inside its idle window must not be unloaded"
         );
 
-        clock.advance(Duration::from_secs(181));
-        sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+        f.go_idle(&sup).await;
         let _ = sup
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
@@ -2048,10 +1966,7 @@ mod tests {
     #[tokio::test]
     async fn a_reloaded_session_never_creates_a_second_runtime() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         assert!(await_signal(&f.agent, &format!("create:{id}")).await);
 
@@ -2062,8 +1977,7 @@ mod tests {
                 .ask(|reply| SessionSupervisorCommand::List { reply })
                 .await
                 .unwrap();
-            clock.advance(Duration::from_secs(181));
-            sup.tell(SessionSupervisorCommand::Tick).await.unwrap();
+            f.go_idle(&sup).await;
             let _ = sup
                 .ask(|reply| SessionSupervisorCommand::List { reply })
                 .await
@@ -2085,18 +1999,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_session_routes_to_not_found() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, _) = broadcast::channel(16);
-        let sup = crate::testing::spawn_detached(
-            &ActorSystem::new(journal),
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps,
-                gtx,
-                manual_config(&clock),
-            ),
-        );
+        let sup = f.supervisor().await;
         let res = sup
             .ask(|reply| SessionSupervisorCommand::UserMessage {
                 id: "missing".into(),
@@ -2112,18 +2015,8 @@ mod tests {
     #[tokio::test]
     async fn rename_is_durable_and_publishes_the_current_title() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, mut grx) = broadcast::channel(16);
-        let sup = crate::testing::spawn_detached(
-            &ActorSystem::new(journal),
-            SessionSupervisor::with_config(
-                crate::auth::UserId::bootstrap(),
-                f.deps,
-                gtx,
-                manual_config(&clock),
-            ),
-        );
+        let sup = f.supervisor().await;
+        let mut grx = f.node.services().await.global_events.subscribe();
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
@@ -2173,10 +2066,8 @@ mod tests {
     #[tokio::test]
     async fn a_person_can_rename_a_session_without_waking_it() {
         let f = fixture().await;
-        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
-        let clock: Arc<TestClock> = Arc::new(TestClock::new());
-        let (gtx, mut grx) = broadcast::channel(16);
-        let sup = supervisor_in(&ActorSystem::new(journal), &f, gtx, manual_config(&clock));
+        let sup = f.supervisor().await;
+        let mut grx = f.node.services().await.global_events.subscribe();
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
@@ -2251,10 +2142,60 @@ mod tests {
         );
     }
 
+    /// The same rule against a session that has actually gone cold.
+    ///
+    /// A reference is a name now, and reaching through one is precisely what
+    /// brings a session back — so "do not wake it" cannot be a property of the
+    /// reference and has to be the supervisor declining to use one. Counted in
+    /// hosted actors rather than in vendor calls, because a reload only calls
+    /// the vendor when it has a provision to finish, and the point here is that
+    /// nothing loaded at all.
+    #[tokio::test]
+    async fn renaming_a_cold_session_leaves_it_cold() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let id = create(&sup).await;
+        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        wait_for_status(&sup, &id, &SessionStatus::Idle).await;
+        f.go_idle(&sup).await;
+        assert!(
+            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            "the session must actually unload for this test to mean anything"
+        );
+        let cold = f.node.users.shared().system.hosted();
+
+        sup.ask(|reply| SessionSupervisorCommand::SetSessionTitle {
+            id: id.clone(),
+            name: "Renamed while cold".into(),
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            f.node.users.shared().system.hosted(),
+            cold,
+            "renaming must not bring the session back"
+        );
+        let listed = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|(sid, ..)| *sid == id)
+                .and_then(|(_, rec)| rec.spec.name.as_deref()),
+            Some("Renamed while cold"),
+            "and the rename still takes"
+        );
+    }
+
     #[tokio::test]
     async fn group_create_list_and_duplicate_conflict() {
         let f = fixture().await;
-        let sup = spawn_supervisor(&f).await;
+        let sup = f.supervisor().await;
 
         sup.ask(|reply| SessionSupervisorCommand::CreateGroup {
             name: "web".into(),
@@ -2288,7 +2229,7 @@ mod tests {
     #[tokio::test]
     async fn group_validation_rejects_empty_and_overlong_names() {
         let f = fixture().await;
-        let sup = spawn_supervisor(&f).await;
+        let sup = f.supervisor().await;
         for bad in ["", &"x".repeat(129)] {
             let err = sup
                 .ask(|reply| SessionSupervisorCommand::CreateGroup {
@@ -2305,7 +2246,7 @@ mod tests {
     #[tokio::test]
     async fn rename_unregistered_group_rewrites_annotations() {
         let f = fixture().await;
-        let sup = spawn_supervisor(&f).await;
+        let sup = f.supervisor().await;
         let id = create(&sup).await;
         sup.ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
             id: id.clone(),
@@ -2346,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_group_rename_and_delete_are_not_found() {
         let f = fixture().await;
-        let sup = spawn_supervisor(&f).await;
+        let sup = f.supervisor().await;
         let err = sup
             .ask(|reply| SessionSupervisorCommand::RenameGroup {
                 old: "nope".into(),
@@ -2369,7 +2310,7 @@ mod tests {
     #[tokio::test]
     async fn set_annotations_on_unknown_session_errors() {
         let f = fixture().await;
-        let sup = spawn_supervisor(&f).await;
+        let sup = f.supervisor().await;
         let err = sup
             .ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
                 id: "nope".into(),

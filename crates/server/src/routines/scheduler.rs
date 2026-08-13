@@ -134,7 +134,7 @@ mod tests {
     }
 
     fn registry(db: Db, tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
-        Arc::new(UserRegistry::new(Arc::new(Shared {
+        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             system: crate::users::node_system(&db),
             db,
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
@@ -145,8 +145,11 @@ mod tests {
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
             anonymous: UserId::bootstrap(),
             supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
+            deps: None,
             fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
-        })))
+        })));
+        crate::users::register_session_shards(&users).unwrap();
+        users
     }
 
     /// `connected` false leaves the account's vendor map empty, which is how a

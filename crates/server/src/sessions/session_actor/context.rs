@@ -18,6 +18,7 @@ use crate::agent_loop::{
     AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
     StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
 };
+use crate::sessions::addressing::SessionRef;
 use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
@@ -26,7 +27,6 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use horsie_actor::ActorRef;
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_models::{
     hooks::HookRecord,
@@ -50,12 +50,7 @@ use uuid::Uuid;
 /// Routed through the session's mailbox rather than straight at the agent, so
 /// a caller needs only the session handle it already holds and the entry is
 /// ordered against whatever else the session is doing.
-async fn emit_progress(
-    session: &ActorRef<SessionCommand>,
-    key: AgentKey,
-    stage: &str,
-    detail: Option<String>,
-) {
+async fn emit_progress(session: &SessionRef, key: AgentKey, stage: &str, detail: Option<String>) {
     let _ = session
         .tell(SessionCommand::Core(CoreCommand::Progress {
             key,
@@ -75,7 +70,7 @@ async fn emit_progress(
 /// Returns the sink to hand the acquisition and the task draining it. The task
 /// ends when the sink is dropped, which the acquisition does on its way out.
 fn narration_pump(
-    session: &ActorRef<SessionCommand>,
+    session: &SessionRef,
     key: AgentKey,
 ) -> (
     crate::runtime_manager::NarrationSink,
@@ -233,7 +228,7 @@ pub(super) struct SessionContextProvider {
     /// thing: the main agent gets no `ask_user`, and is told why.
     pub(super) unattended: bool,
     /// The owning session's mailbox — routes the server-owned tools.
-    pub(super) session: ActorRef<SessionCommand>,
+    pub(super) session: SessionRef,
     /// The plugin bundles this session selected, and the library that can say
     /// what they offer. Together they answer "is `/commit` a command?" from the
     /// database, with no runtime involved — which is what lets a prompt merely
@@ -825,6 +820,7 @@ mod tests {
     use super::super::testing::*;
     use super::super::*;
     use super::*;
+    use crate::sessions::addressing::SessionInbox;
 
     use crate::agent_loop::{ContextProvider, Contexts, StartTurn};
     use horsie_models::hooks::HookAction;
@@ -1408,7 +1404,7 @@ mod tests {
 
     #[async_trait]
     impl horsie_actor::EventSourcedActor for RecordingSession {
-        type Command = SessionCommand;
+        type Command = SessionInbox;
         type Event = ();
         type State = ();
 
@@ -1423,10 +1419,10 @@ mod tests {
         async fn handle_command(
             &mut self,
             (): &(),
-            cmd: SessionCommand,
-            _ctx: &mut horsie_actor::ActorContext<SessionCommand>,
+            cmd: SessionInbox,
+            _ctx: &mut horsie_actor::ActorContext<SessionInbox>,
         ) -> super::super::CommandEffect<()> {
-            if let SessionCommand::Core(CoreCommand::Progress { stage, detail, .. }) = cmd {
+            if let SessionCommand::Core(CoreCommand::Progress { stage, detail, .. }) = cmd.cmd {
                 self.0
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -1446,9 +1442,13 @@ mod tests {
         );
         let vendors = Arc::new(std::sync::RwLock::new(vendors));
         let id = Uuid::new_v4();
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
-            RecordingSession(seen.clone()),
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
+                RecordingSession(seen.clone()),
+            ),
+            crate::auth::UserId::bootstrap(),
+            id,
         );
         SessionContextProvider {
             agent_type: None,

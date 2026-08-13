@@ -17,6 +17,7 @@ use super::{
     SessionState, SubAgentCommand, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::subagents::{
     INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, TreeOwner,
 };
@@ -35,7 +36,7 @@ impl SubAgents {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: SubAgentCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             SubAgentCommand::Spawn {
@@ -64,7 +65,7 @@ impl SubAgents {
                     )));
                     return CommandEffect::none();
                 }
-                let max = actor.spec.agent.max_subagents();
+                let max = actor.spec().agent.max_subagents();
                 if state.subagents.active_count() >= max {
                     let _ = reply.send(Err(format!("{max} subagents already active")));
                     return CommandEffect::none();
@@ -83,7 +84,7 @@ impl SubAgents {
                     agent_type: agent_type.clone(),
                 };
                 let (tx, rx) = oneshot::channel();
-                let self_ref = ctx.self_ref();
+                let self_ref = actor.me(ctx);
                 tokio::spawn(async move {
                     let persisted = rx.await.unwrap_or_else(|_| {
                         Err(horsie_actor::JournalError::Backend(
@@ -187,7 +188,7 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
         end: TurnEnd,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         if state.subagents.node(id).is_none() {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
@@ -238,7 +239,7 @@ impl SessionActor {
     /// prompt nobody can point at.
     pub(super) fn spawn_sub_agent_actor(
         &mut self,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         id: Uuid,
         agent_type: Option<String>,
@@ -248,7 +249,7 @@ impl SessionActor {
             state,
             AgentPlan {
                 kind: SessionAgentKind::Sub(id),
-                settings: self.spec.agent.clone(),
+                settings: self.spec().agent.clone(),
                 step_output_schema: None,
                 agent_type,
                 // No handoff tool: a subagent ends its turn with plain text,
@@ -358,6 +359,7 @@ mod tests {
     use super::super::testing::*;
     use super::super::*;
     use super::*;
+    use crate::sessions::session_actor::testing::seed_session;
 
     use std::sync::Arc;
     use uuid::Uuid;
@@ -384,8 +386,9 @@ mod tests {
         .await;
         drop(session);
 
-        let (parent, seen) = spawn_listening_supervisor();
-        let _revived = respawn_session(&f, id, journal, parent);
+        let seen = f.reports().await;
+        f.node.restart().await;
+        let _revived = f.start(id, actor_spec_fixture()).await;
         assert!(
             !wait_for_report(&seen).await.is_empty(),
             "a loaded session must report a status, repairs or not"
@@ -609,8 +612,7 @@ mod tests {
         let p = Uuid::new_v4();
         let c = Uuid::new_v4();
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let pid = SessionActor::persistence_id_for(id);
-        let events: Vec<Vec<u8>> = [
+        let events = [
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 0,
                 id: p,
@@ -640,23 +642,10 @@ mod tests {
                 id: c,
                 error: crate::sessions::subagents::INTERRUPTED_ERROR.into(),
             },
-        ]
-        .iter()
-        .map(|e| serde_json::to_vec(e).unwrap())
-        .collect();
-        journal.persist(&pid, &events, 0).await.unwrap();
+        ];
 
         // Loading must start no runs: C stays owed until someone acts.
-        let session2 = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                _f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let session2 = seed_session(&_f, id, actor_spec_fixture(), &events).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(!&state.subagents.node(c).unwrap().notified);
@@ -727,16 +716,8 @@ mod tests {
         drop(session);
 
         // Second incarnation on the same journal.
-        let session2 = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        f.node.restart().await;
+        let session2 = f.start(id, actor_spec_fixture()).await;
         wait_for_tree(&journal, id, |t| {
             t.node(sub)
                 .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)

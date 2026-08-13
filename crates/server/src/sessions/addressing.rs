@@ -62,11 +62,17 @@ pub struct Addressed<Id, C> {
     pub cmd: C,
 }
 
+/// What a supervisor's mailbox accepts: a command, and whose list it is for.
+pub type SupervisorInbox = Addressed<UserId, SessionSupervisorCommand>;
+
+/// What a session's mailbox accepts: a command, and which session it is for.
+pub type SessionInbox = Addressed<SessionEntityId, SessionCommand>;
+
 /// One account's session list.
 pub struct SupervisorShard;
 
 impl Shard for SupervisorShard {
-    type Command = Addressed<UserId, SessionSupervisorCommand>;
+    type Command = SupervisorInbox;
     type EntityId = UserId;
     /// The account, which is the same as the entity: an account has exactly one
     /// supervisor, so there is nothing coarser to group it with.
@@ -86,7 +92,7 @@ impl Shard for SupervisorShard {
 pub struct SessionShard;
 
 impl Shard for SessionShard {
-    type Command = Addressed<SessionEntityId, SessionCommand>;
+    type Command = SessionInbox;
     type EntityId = SessionEntityId;
     /// The session alone, so sessions are placed independently of each other and
     /// of the supervisor that lists them.
@@ -110,16 +116,13 @@ impl Shard for SessionShard {
 /// would be ceremony that can be got wrong over a value that cannot.
 #[derive(Clone)]
 pub struct SupervisorRef {
-    shard: ActorRef<Addressed<UserId, SessionSupervisorCommand>>,
+    shard: ActorRef<SupervisorInbox>,
     account: UserId,
 }
 
 impl SupervisorRef {
     #[must_use]
-    pub fn new(
-        shard: ActorRef<Addressed<UserId, SessionSupervisorCommand>>,
-        account: UserId,
-    ) -> Self {
+    pub fn new(shard: ActorRef<SupervisorInbox>, account: UserId) -> Self {
         Self { shard, account }
     }
 
@@ -163,10 +166,7 @@ impl SupervisorRef {
             .await
     }
 
-    fn addressed(
-        &self,
-        cmd: SessionSupervisorCommand,
-    ) -> Addressed<UserId, SessionSupervisorCommand> {
+    fn addressed(&self, cmd: SessionSupervisorCommand) -> SupervisorInbox {
         Addressed {
             entity: self.account.clone(),
             cmd,
@@ -182,17 +182,13 @@ impl SupervisorRef {
 /// there is nothing to maintain and nothing to invalidate on offload.
 #[derive(Clone)]
 pub struct SessionRef {
-    shard: ActorRef<Addressed<SessionEntityId, SessionCommand>>,
+    shard: ActorRef<SessionInbox>,
     entity: SessionEntityId,
 }
 
 impl SessionRef {
     #[must_use]
-    pub fn new(
-        shard: ActorRef<Addressed<SessionEntityId, SessionCommand>>,
-        account: UserId,
-        session: Uuid,
-    ) -> Self {
+    pub fn new(shard: ActorRef<SessionInbox>, account: UserId, session: Uuid) -> Self {
         Self {
             shard,
             entity: SessionEntityId { account, session },
@@ -234,7 +230,7 @@ impl SessionRef {
             .await
     }
 
-    fn addressed(&self, cmd: SessionCommand) -> Addressed<SessionEntityId, SessionCommand> {
+    fn addressed(&self, cmd: SessionCommand) -> SessionInbox {
         Addressed {
             entity: self.entity.clone(),
             cmd,

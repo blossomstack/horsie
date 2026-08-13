@@ -13,6 +13,7 @@ use super::{
     CommandEffect, LifecycleCommand, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
 };
 use crate::runtime_manager::RuntimeError;
+use crate::sessions::addressing::SessionInbox;
 use crate::sessions::spec::SessionStatus;
 use horsie_actor::{ActorContext, EventSourcedActor};
 use horsie_models::now_ms;
@@ -42,7 +43,7 @@ impl RuntimeLifecycle {
         actor: &mut SessionActor,
         state: &SessionState,
         cmd: LifecycleCommand,
-        ctx: &ActorContext<SessionCommand>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             LifecycleCommand::Provision => {
@@ -66,11 +67,11 @@ impl RuntimeLifecycle {
                 ) {
                     return CommandEffect::none();
                 }
-                let runtimes = actor.deps.runtimes.clone();
+                let runtimes = actor.deps().runtimes.clone();
                 let session = actor.id.to_string();
-                let vendor = actor.spec.vendor.clone();
-                let spec = actor.spec.clone();
-                let me = ctx.self_ref();
+                let vendor = actor.spec().vendor.clone();
+                let spec = actor.spec().clone();
+                let me = actor.me(ctx);
                 // Off the mailbox: a real create runs for minutes, and this
                 // actor has to keep answering reads, stops and deletes
                 // throughout. The status it just journaled is what holds the
@@ -148,9 +149,9 @@ impl RuntimeLifecycle {
                 }
                 actor.stop_agents().await;
                 actor
-                    .deps
+                    .deps()
                     .runtimes
-                    .hibernate(&actor.id.to_string(), &actor.spec.vendor)
+                    .hibernate(&actor.id.to_string(), &actor.spec().vendor)
                     .await;
                 // Answered as this actor's last act: it writes nothing after
                 // returning, so the supervisor can drop its reference the
@@ -162,9 +163,9 @@ impl RuntimeLifecycle {
                 actor.cancel_in_flight(state).await;
                 actor.stop_agents().await;
                 actor
-                    .deps
+                    .deps()
                     .runtimes
-                    .delete(&actor.id.to_string(), &actor.spec.vendor)
+                    .delete(&actor.id.to_string(), &actor.spec().vendor)
                     .await;
                 let _ = reply.send(());
                 CommandEffect::stop()
@@ -367,7 +368,7 @@ mod tests {
             ),
         );
         let id = Uuid::new_v4();
-        let (session, journal) = spawn_unprovisioned(&f, id);
+        let (session, journal) = spawn_unprovisioned(&f, id).await;
 
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
@@ -421,32 +422,14 @@ mod tests {
         // process killed mid-create leaves behind. Seeded rather than produced
         // by a first incarnation, because the detached create holds a reference
         // to the actor it reports to — so dropping a handle is not death.
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let pid = SessionActor::persistence_id_for(id);
-        let at = journal.last_seq(&pid).await.unwrap();
-        journal
-            .persist(
-                &pid,
-                &[
-                    serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
-                        .unwrap(),
-                ],
-                at,
-            )
-            .await
-            .unwrap();
-
-        let _session2 = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let journal = f.journal();
+        let _session2 = seed_session(
+            &f,
+            id,
+            actor_spec_fixture(),
+            &[SessionDomainEvent::ProvisioningStarted { at_ms: 0 }],
+        )
+        .await;
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
             s.status != SessionStatus::Provisioning
         })
@@ -484,7 +467,7 @@ mod tests {
             .expect("the fixture registers one");
 
         let id = Uuid::new_v4();
-        let (session, journal) = spawn_unprovisioned(&f, id);
+        let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -555,36 +538,21 @@ mod tests {
     async fn loading_a_session_whose_create_failed_re_attempts_it() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        journal
-            .persist(
-                &SessionActor::persistence_id_for(id),
-                &[
-                    serde_json::to_vec(&SessionDomainEvent::ProvisioningStarted { at_ms: 0 })
-                        .unwrap(),
-                    serde_json::to_vec(&SessionDomainEvent::ProvisioningFailed {
-                        at_ms: 1,
-                        error: "runtime vendor unavailable: vendor 'mock' is not connected".into(),
-                        terminal: false,
-                    })
-                    .unwrap(),
-                ],
-                0,
-            )
-            .await
-            .unwrap();
-
-        let _session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal.clone()),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let journal = f.journal();
+        let _session = seed_session(
+            &f,
+            id,
+            actor_spec_fixture(),
+            &[
+                SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+                SessionDomainEvent::ProvisioningFailed {
+                    at_ms: 1,
+                    error: "runtime vendor unavailable: vendor 'mock' is not connected".into(),
+                    terminal: false,
+                },
+            ],
+        )
+        .await;
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
             !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
         })
@@ -611,7 +579,7 @@ mod tests {
             Arc::new(BootingVendor) as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
         );
         let id = Uuid::new_v4();
-        let (session, journal) = spawn_unprovisioned(&f, id);
+        let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -654,7 +622,7 @@ mod tests {
     async fn a_create_with_nothing_to_say_records_nothing() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let (session, journal) = spawn_unprovisioned(&f, id);
+        let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -680,7 +648,7 @@ mod tests {
     async fn narration_that_outlives_the_create_is_ignored() {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
-        let (session, journal) = spawn_unprovisioned(&f, id);
+        let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
             .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
             .await
@@ -734,18 +702,7 @@ mod tests {
             ),
         );
 
-        let journal: Arc<dyn horsie_actor::Journal> =
-            Arc::new(horsie_actor::InMemoryJournal::new());
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(journal),
-            SessionActor::new(
-                id,
-                actor_spec_fixture(),
-                f.deps.clone(),
-                deaf_supervisor(),
-                crate::sessions::Revisions::default(),
-            ),
-        );
+        let session = f.start(id, actor_spec_fixture()).await;
 
         session
             .ask(|reply| {

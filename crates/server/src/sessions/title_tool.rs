@@ -3,10 +3,10 @@
 //! The sandboxed runtime must not own session metadata, so this tool is layered
 //! on by the session server and routed through the owning SessionActor.
 
+use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::CoreCommand;
 use crate::sessions::session_actor::SessionCommand;
 use async_trait::async_trait;
-use horsie_actor::ActorRef;
 use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -80,11 +80,11 @@ fn set_session_title_spec() -> ToolSpec {
 /// Wraps the session toolbox, adding the server-owned title tool.
 pub struct SessionTitleToolbox {
     inner: Arc<dyn Toolbox>,
-    session: ActorRef<SessionCommand>,
+    session: SessionRef,
 }
 
 impl SessionTitleToolbox {
-    pub fn new(inner: Arc<dyn Toolbox>, session: ActorRef<SessionCommand>) -> Self {
+    pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef) -> Self {
         Self { inner, session }
     }
 }
@@ -134,6 +134,7 @@ impl Toolbox for SessionTitleToolbox {
 )]
 mod tests {
     use super::*;
+    use crate::sessions::addressing::SessionInbox;
     use crate::sessions::session_actor::SessionCommand;
     use horsie_actor::{
         ActorContext, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
@@ -171,9 +172,13 @@ mod tests {
 
     #[tokio::test]
     async fn tool_spec_documents_rename_any_time_and_latest_wins() {
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-            TitleActor,
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                TitleActor,
+            ),
+            crate::auth::UserId::bootstrap(),
+            uuid::Uuid::new_v4(),
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let spec = toolbox
@@ -195,9 +200,13 @@ mod tests {
 
     #[tokio::test]
     async fn execute_returns_the_normalized_title() {
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-            TitleActor,
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                TitleActor,
+            ),
+            crate::auth::UserId::bootstrap(),
+            uuid::Uuid::new_v4(),
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let result = toolbox
@@ -216,9 +225,13 @@ mod tests {
 
     #[tokio::test]
     async fn execute_delegates_other_tools() {
-        let session = crate::testing::spawn_detached(
-            &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-            TitleActor,
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                TitleActor,
+            ),
+            crate::auth::UserId::bootstrap(),
+            uuid::Uuid::new_v4(),
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let err = toolbox.execute("bash", json!({}), "tc1").await.unwrap_err();
@@ -232,7 +245,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl EventSourcedActor for TitleActor {
-        type Command = SessionCommand;
+        type Command = SessionInbox;
         type Event = ();
         type State = Empty;
 
@@ -251,9 +264,10 @@ mod tests {
         async fn handle_command(
             &mut self,
             _state: &Empty,
-            cmd: SessionCommand,
-            _ctx: &mut ActorContext<SessionCommand>,
+            cmd: SessionInbox,
+            _ctx: &mut ActorContext<SessionInbox>,
         ) -> CommandEffect<()> {
+            let cmd = cmd.cmd;
             if let SessionCommand::Core(CoreCommand::SetTitle { title, reply }) = cmd {
                 let _ =
                     reply.send(normalize_session_title(&title).map_err(|error| error.to_string()));

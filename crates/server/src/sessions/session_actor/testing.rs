@@ -20,6 +20,8 @@ use super::{
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
 use crate::sessions::spec::AgentSettings;
+use crate::sessions::spec::SessionSpec;
+use crate::sessions::supervisor::SupervisorConfig;
 use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use std::sync::PoisonError;
@@ -67,10 +69,60 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
     }
 }
 
-pub(super) struct ActorFixture {
+/// One account's deployment, on a fake runtime vendor.
+///
+/// Whole rather than a bag of dependencies, because a session is built by a
+/// shard recipe now: it is handed an id and resolves everything else from its
+/// account. So a test that wants a session has to have somewhere for one to
+/// come from, and the cheapest honest "somewhere" is a real registry with the
+/// wiring handed in.
+pub(crate) struct ActorFixture {
+    /// The wiring every session here runs on — the same value the account's
+    /// bundle was built with, kept to hand for the tests that drive it
+    /// directly.
     pub(super) deps: ServerDeps,
     pub(super) agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
-    pub(super) _tmp: tempfile::TempDir,
+    pub(super) node: crate::testing::Deployment,
+}
+
+impl ActorFixture {
+    /// Every actor's log, for a test that reads what was persisted.
+    pub(super) fn journal(&self) -> Arc<dyn horsie_actor::Journal> {
+        self.node.journal.clone()
+    }
+
+    /// Bring a session into being by telling it what it is.
+    ///
+    /// Exactly what the supervisor does on `Create`, and for the same reason: a
+    /// session with no log yet cannot know its own spec, and the command that
+    /// creates the actor is the only one guaranteed to reach it first.
+    pub(super) async fn start(&self, id: Uuid, spec: SessionSpec) -> SessionRef {
+        let session = self.node.session(id);
+        let _ = session
+            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+                spec: Box::new(spec),
+            }))
+            .await;
+        session
+    }
+
+    /// Everything this account's sessions publish about themselves from now on.
+    /// What a supervisor stand-in used to be watched for.
+    pub(super) async fn reports(&self) -> ReportedStatuses {
+        let seen: ReportedStatuses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut rx = self.node.services().await.global_events.subscribe();
+        let sink = seen.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                if let horsie_models::session::GlobalSessionEvent::StatusChanged(status) = event {
+                    sink.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(status.status);
+                }
+            }
+        });
+        seen
+    }
 }
 
 pub(super) async fn actor_fixture() -> ActorFixture {
@@ -92,152 +144,75 @@ pub(super) async fn actor_fixture_blocking_creates() -> ActorFixture {
 pub(super) async fn actor_fixture_from(
     builder: crate::runtime_vendor::fake::FakeRuntimeVendorBuilder,
 ) -> ActorFixture {
-    let tmp = tempfile::tempdir().unwrap();
     let agent = builder.serve_in_process().await.expect("fake agent");
+    fixture_over(agent, None).await
+}
+
+/// The wiring a test deployment runs on: one fake vendor under `mock`, an
+/// empty provider registry the test fills in, and `plugins` as its library.
+pub(crate) fn fake_deps(
+    agent: &crate::runtime_vendor::fake::FakeRuntimeVendor,
+    plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+) -> ServerDeps {
     let mut vendors = HashMap::new();
     vendors.insert(
         "mock".to_string(),
         agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
     );
     let vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
+    ServerDeps {
         runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
         provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
         vendors,
         github_tokens: None,
         mcp: None,
-        plugins: None,
+        plugins,
         memory: None,
-    };
-    ActorFixture {
-        deps,
+    }
+}
+
+/// A deployment over `agent`, with `plugins` as its plugin library.
+pub(super) async fn fixture_over(
+    agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
+    plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+) -> ActorFixture {
+    fixture_on(
+        Arc::new(horsie_actor::InMemoryJournal::new()),
         agent,
-        _tmp: tmp,
-    }
-}
-
-/// A supervisor stand-in for tests that spawn a bare `SessionActor`: it
-/// answers nothing, and exists only so `report_status()`'s `.tell()` has a live
-/// mailbox to land in.
-pub(super) struct DeafSupervisor;
-
-#[async_trait]
-impl EventSourcedActor for DeafSupervisor {
-    type Command = SessionSupervisorCommand;
-    type Event = ();
-    type State = ();
-
-    fn persistence_id(&self) -> PersistenceId {
-        PersistenceId::new("test", "deaf-supervisor")
-    }
-
-    fn initial_state() {}
-
-    fn apply_event((): (), (): ()) {}
-
-    async fn handle_command(
-        &mut self,
-        (): &(),
-        _cmd: SessionSupervisorCommand,
-        _ctx: &mut ActorContext<SessionSupervisorCommand>,
-    ) -> CommandEffect<()> {
-        CommandEffect::none()
-    }
-}
-
-/// The frame channel a supervisor would hand the actor. Owned by the test,
-/// exactly as the real one is owned by the supervisor rather than the actor.
-/// The account a test session belongs to.
-///
-/// A session reaches its supervisor by resolving this id, so a test that never
-/// registers a supervisor simply has none — which is what the old deaf stand-in
-/// was for, minus an actor that had to be spawned to be ignored.
-pub(super) fn test_account() -> crate::auth::UserId {
-    crate::auth::UserId::bootstrap()
-}
-
-/// Every status reported to a [`ListeningSupervisor`], in order.
-pub(super) type ReportedStatuses = Arc<std::sync::Mutex<Vec<SessionStatus>>>;
-
-/// A supervisor stand-in that records what a session reports about itself.
-///
-/// `DeafSupervisor` exists so a report has somewhere to land; this one exists
-/// so a test can assert that the report happened at all.
-pub(super) struct ListeningSupervisor(ReportedStatuses);
-
-#[async_trait]
-impl EventSourcedActor for ListeningSupervisor {
-    type Command = SessionSupervisorCommand;
-    type Event = ();
-    type State = ();
-
-    fn persistence_id(&self) -> PersistenceId {
-        PersistenceId::new("test", "listening-supervisor")
-    }
-
-    fn initial_state() {}
-
-    fn apply_event((): (), (): ()) {}
-
-    async fn handle_command(
-        &mut self,
-        (): &(),
-        cmd: SessionSupervisorCommand,
-        _ctx: &mut ActorContext<SessionSupervisorCommand>,
-    ) -> CommandEffect<()> {
-        if let SessionSupervisorCommand::SessionStatusChanged { status, .. } = cmd {
-            self.0
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(status);
-        }
-        CommandEffect::none()
-    }
-}
-
-/// A supervisor stand-in for a test that does not care what is reported to it.
-///
-/// Every session is given a supervisor reference at construction, so a test that
-/// builds one bare still has to supply something for its reports to land in.
-pub(super) fn deaf_supervisor() -> ActorRef<SessionSupervisorCommand> {
-    crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
-        DeafSupervisor,
+        plugins,
     )
+    .await
 }
 
-pub(super) fn spawn_listening_supervisor() -> (ActorRef<SessionSupervisorCommand>, ReportedStatuses)
-{
-    let seen: ReportedStatuses = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let actor = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
-        ListeningSupervisor(seen.clone()),
-    );
-    (actor, seen)
-}
-
-/// Re-spawn a session actor over an existing journal — a restart, from the
-/// session's point of view, and the only way to reach the recovery path.
-pub(super) fn respawn_session(
-    f: &ActorFixture,
-    id: Uuid,
+/// The same, over a journal the test is watching.
+pub(super) async fn fixture_on(
     journal: Arc<dyn horsie_actor::Journal>,
-    parent: ActorRef<SessionSupervisorCommand>,
-) -> ActorRef<SessionCommand> {
-    crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(journal),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            parent,
-            crate::sessions::Revisions::default(),
-        ),
+    agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
+    plugins: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
+) -> ActorFixture {
+    let deps = fake_deps(&agent, plugins);
+    // No background ticker: a session here is driven directly, and a sweep
+    // nobody asked for would be a race in every test at once.
+    let node = crate::testing::Deployment::on(
+        journal,
+        deps.clone(),
+        SupervisorConfig {
+            tick_interval: None,
+            ..SupervisorConfig::default()
+        },
     )
+    .await;
+    ActorFixture { deps, agent, node }
 }
+
+/// Every status a session published about itself, in order.
+pub(super) type ReportedStatuses =
+    Arc<std::sync::Mutex<Vec<horsie_models::session::SessionStatusKind>>>;
 
 /// Poll until the session has reported anything at all (2s cap).
-pub(super) async fn wait_for_report(seen: &ReportedStatuses) -> Vec<SessionStatus> {
+pub(super) async fn wait_for_report(
+    seen: &ReportedStatuses,
+) -> Vec<horsie_models::session::SessionStatusKind> {
     for _ in 0..200 {
         let got = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
         if !got.is_empty() {
@@ -329,7 +304,7 @@ pub(super) async fn spawn_session_with_provider(
     provider: Arc<dyn LlmProvider>,
 ) -> (
     ActorFixture,
-    ActorRef<SessionCommand>,
+    SessionRef,
     Uuid,
     Arc<dyn horsie_actor::Journal>,
 ) {
@@ -344,17 +319,8 @@ pub(super) async fn spawn_session_with_provider(
         "mock".to_string(),
         crate::sessions::spec::ModelEntry::provider_only(provider),
     );
-    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(journal.clone()),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    let journal = f.journal();
+    let session = f.start(id, actor_spec_fixture()).await;
     (f, session, id, journal)
 }
 
@@ -425,7 +391,7 @@ pub(super) async fn spawn_run_with_provider(
     provider: Arc<dyn LlmProvider>,
 ) -> (
     ActorFixture,
-    ActorRef<SessionCommand>,
+    SessionRef,
     Uuid,
     Arc<dyn horsie_actor::Journal>,
 ) {
@@ -445,17 +411,8 @@ pub(super) async fn spawn_run_with_provider(
         "mock".to_string(),
         crate::sessions::spec::ModelEntry::provider_only(provider),
     );
-    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(journal.clone()),
-        SessionActor::new(
-            id,
-            spec,
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    let journal = f.journal();
+    let session = f.start(id, spec).await;
     (f, session, id, journal)
 }
 
@@ -542,23 +499,49 @@ pub(super) async fn wait_for_tree(
     panic!("tree condition not met within 2s");
 }
 
-/// Spawn a session actor over a fresh journal, provisioning nothing. The
-/// session owns its create now, so a test that wants a runtime asks for one.
-pub(super) fn spawn_unprovisioned(
+/// Write a history into a session's log and load it from there.
+///
+/// A crash, from the session's point of view: every actor is stopped first, so
+/// what was resident cannot write over the history being planted, and the
+/// session that comes back reads only the log. `SpecRecorded` leads a log that
+/// has none, because a session that never recorded one is a session that was
+/// never created — recovery would have nothing to adopt and nothing to repair.
+///
+/// The `RecordSpec` at the end is a no-op the log already answers. It is there
+/// because a command is what brings the actor into being, and the test that
+/// follows wants to find it recovered.
+pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
-) -> (ActorRef<SessionCommand>, Arc<dyn horsie_actor::Journal>) {
-    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(journal.clone()),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    spec: SessionSpec,
+    events: &[SessionDomainEvent],
+) -> SessionRef {
+    f.node.restart().await;
+    let journal = f.journal();
+    let pid = SessionActor::persistence_id_for(id);
+    let at = journal.last_seq(&pid).await.unwrap();
+    let mut encoded = Vec::new();
+    if at == 0 {
+        encoded.push(
+            serde_json::to_vec(&SessionDomainEvent::SpecRecorded {
+                spec: Box::new(spec.clone()),
+            })
+            .unwrap(),
+        );
+    }
+    encoded.extend(events.iter().map(|e| serde_json::to_vec(e).unwrap()));
+    journal.persist(&pid, &encoded, at).await.unwrap();
+    f.start(id, spec).await
+}
+
+/// Bring a session into being, provisioning nothing. The session owns its
+/// create now, so a test that wants a runtime asks for one.
+pub(super) async fn spawn_unprovisioned(
+    f: &ActorFixture,
+    id: Uuid,
+) -> (SessionRef, Arc<dyn horsie_actor::Journal>) {
+    let journal = f.journal();
+    let session = f.start(id, actor_spec_fixture()).await;
     (session, journal)
 }
 
@@ -729,7 +712,7 @@ impl horsie_actor::Journal for CountingJournal {
     }
 }
 
-pub(super) async fn spawn_sub(session: &ActorRef<SessionCommand>, label: &str, task: &str) -> Uuid {
+pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
     session
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
@@ -798,7 +781,7 @@ pub(super) fn hook_record(plugin: &str, call: &str) -> HookRecord {
 }
 
 pub(super) async fn agent_history(
-    session: &ActorRef<SessionCommand>,
+    session: &SessionRef,
     agent_id: Option<String>,
 ) -> crate::agent_loop::LogPage {
     session
@@ -888,9 +871,7 @@ impl LlmProvider for PromptRecorder {
 
 /// A session whose runtime answers every `RunHooks` from `records`, with an
 /// LLM that concludes on the first call.
-pub(super) async fn stop_harness(
-    records: Vec<Vec<HookRecord>>,
-) -> (ActorFixture, ActorRef<SessionCommand>) {
+pub(super) async fn stop_harness(records: Vec<Vec<HookRecord>>) -> (ActorFixture, SessionRef) {
     let (f, session, _, _, _) = stop_harness_full(records).await;
     (f, session)
 }
@@ -898,11 +879,7 @@ pub(super) async fn stop_harness(
 /// The same harness, also handing back every prompt the model was sent.
 pub(super) async fn stop_harness_with_prompts(
     records: Vec<Vec<HookRecord>>,
-) -> (
-    ActorFixture,
-    ActorRef<SessionCommand>,
-    Arc<Mutex<Vec<String>>>,
-) {
+) -> (ActorFixture, SessionRef, Arc<Mutex<Vec<String>>>) {
     let (f, session, prompts, _, _) = stop_harness_full(records).await;
     (f, session, prompts)
 }
@@ -914,7 +891,7 @@ pub(super) async fn stop_harness_with_journal(
     records: Vec<Vec<HookRecord>>,
 ) -> (
     ActorFixture,
-    ActorRef<SessionCommand>,
+    SessionRef,
     Uuid,
     Arc<dyn horsie_actor::Journal>,
 ) {
@@ -926,37 +903,17 @@ pub(super) async fn stop_harness_full(
     records: Vec<Vec<HookRecord>>,
 ) -> (
     ActorFixture,
-    ActorRef<SessionCommand>,
+    SessionRef,
     Arc<Mutex<Vec<String>>>,
     Uuid,
     Arc<dyn horsie_actor::Journal>,
 ) {
-    let tmp = tempfile::tempdir().unwrap();
     let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
         .hook_records(records)
         .serve_in_process()
         .await
         .expect("fake agent");
-    let mut vendors = HashMap::new();
-    vendors.insert(
-        "mock".to_string(),
-        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
-    );
-    let vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
-        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
-        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        vendors,
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
-    let f = ActorFixture {
-        deps,
-        agent,
-        _tmp: tmp,
-    };
+    let f = fixture_over(agent, None).await;
     let id = Uuid::new_v4();
     f.deps
         .runtimes
@@ -970,23 +927,14 @@ pub(super) async fn stop_harness_full(
             Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>
         ),
     );
-    let journal: Arc<dyn horsie_actor::Journal> = Arc::new(horsie_actor::InMemoryJournal::new());
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(journal.clone()),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    let journal = f.journal();
+    let session = f.start(id, actor_spec_fixture()).await;
     (f, session, prompts, id, journal)
 }
 
 /// Every user-role message in the main agent's transcript, in order — which
 /// is one per turn, so its length is the number of turns that ran.
-pub(super) async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+pub(super) async fn turn_inputs(session: &SessionRef) -> Vec<String> {
     agent_history(session, None)
         .await
         .entries
@@ -1009,7 +957,7 @@ pub(super) async fn turn_inputs(session: &ActorRef<SessionCommand>) -> Vec<Strin
 }
 
 /// The `Stop` outcomes journaled on the main agent's transcript.
-pub(super) async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<StopOutcome> {
+pub(super) async fn stop_outcomes(session: &SessionRef) -> Vec<StopOutcome> {
     agent_history(session, None)
         .await
         .entries
@@ -1028,7 +976,7 @@ pub(super) async fn stop_outcomes(session: &ActorRef<SessionCommand>) -> Vec<Sto
 
 /// Wait until the transcript stops growing, so a test asserting "no further
 /// turn ran" observes a real stop rather than a race it won.
-pub(super) async fn settled_inputs(session: &ActorRef<SessionCommand>) -> Vec<String> {
+pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
     let mut last = turn_inputs(session).await;
     let mut stable = 0;
     for _ in 0..200 {
@@ -1047,7 +995,7 @@ pub(super) async fn settled_inputs(session: &ActorRef<SessionCommand>) -> Vec<St
     last
 }
 
-pub(super) async fn send(session: &ActorRef<SessionCommand>, text: &str) {
+pub(super) async fn send(session: &SessionRef, text: &str) {
     session
         .ask(|reply| {
             SessionCommand::Turn(TurnCommand::UserMessage {
@@ -1128,40 +1076,20 @@ pub(super) fn catalog_entry(
 
 pub(super) async fn catalog_harness(
     entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
-) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
+) -> (ActorFixture, SessionRef, Uuid) {
     catalog_harness_with(entries, Vec::new()).await
 }
 
 pub(super) async fn catalog_harness_with(
     entries: Vec<horsie_support::plugin::catalog::CatalogEntry>,
     hook_records: Vec<Vec<HookRecord>>,
-) -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
-    let tmp = tempfile::tempdir().unwrap();
+) -> (ActorFixture, SessionRef, Uuid) {
     let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
         .hook_records(hook_records)
         .serve_in_process()
         .await
         .expect("fake agent");
-    let mut vendors = HashMap::new();
-    vendors.insert(
-        "mock".to_string(),
-        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
-    );
-    let vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
-        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
-        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        vendors,
-        github_tokens: None,
-        mcp: None,
-        plugins: Some(Arc::new(FakeLibrary(entries))),
-        memory: None,
-    };
-    let f = ActorFixture {
-        deps,
-        agent,
-        _tmp: tmp,
-    };
+    let f = fixture_over(agent, Some(Arc::new(FakeLibrary(entries)))).await;
     let id = Uuid::new_v4();
     f.deps
         .runtimes
@@ -1174,24 +1102,13 @@ pub(super) async fn catalog_harness_with(
             Arc::new(PromptRecorder(Arc::default())) as Arc<dyn LlmProvider>
         ),
     );
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(
-            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>
-        ),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    let session = f.start(id, actor_spec_fixture()).await;
     (f, session, id)
 }
 
 pub(super) fn catalog_provider(
     f: &ActorFixture,
-    session: &ActorRef<SessionCommand>,
+    session: &SessionRef,
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
@@ -1235,8 +1152,7 @@ pub(super) async fn prepared_message(
 /// A session whose runtime library declares `code-reviewer`, with a
 /// `PromptRecorder` so the test can assert what the model was actually
 /// told rather than what the transcript would render.
-pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, Uuid) {
-    let tmp = tempfile::tempdir().unwrap();
+pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
     let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
         .shared_agents(vec![horsie_models::runtime::PluginAgent {
             plugin: "feature-dev".into(),
@@ -1248,26 +1164,7 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
         .serve_in_process()
         .await
         .expect("fake agent");
-    let mut vendors = HashMap::new();
-    vendors.insert(
-        "mock".to_string(),
-        agent.link() as std::sync::Arc<dyn crate::runtime_vendor::RuntimeVendor>,
-    );
-    let vendors = Arc::new(std::sync::RwLock::new(vendors));
-    let deps = ServerDeps {
-        runtimes: crate::runtime_manager::test_runtime_manager(&vendors),
-        provider_registry: Arc::new(std::sync::RwLock::new(HashMap::new())),
-        vendors,
-        github_tokens: None,
-        mcp: None,
-        plugins: None,
-        memory: None,
-    };
-    let f = ActorFixture {
-        deps,
-        agent,
-        _tmp: tmp,
-    };
+    let f = fixture_over(agent, None).await;
     let id = Uuid::new_v4();
     f.deps
         .runtimes
@@ -1281,24 +1178,13 @@ pub(super) async fn agent_harness() -> (ActorFixture, ActorRef<SessionCommand>, 
             Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>
         ),
     );
-    let session = crate::testing::spawn_detached(
-        &horsie_actor::ActorSystem::new(
-            Arc::new(horsie_actor::InMemoryJournal::new()) as Arc<dyn horsie_actor::Journal>
-        ),
-        SessionActor::new(
-            id,
-            actor_spec_fixture(),
-            f.deps.clone(),
-            deaf_supervisor(),
-            crate::sessions::Revisions::default(),
-        ),
-    );
+    let session = f.start(id, actor_spec_fixture()).await;
     drop(prompts);
     (f, session, id)
 }
 
 pub(super) async fn spawn_typed(
-    session: &ActorRef<SessionCommand>,
+    session: &SessionRef,
     agent_type: Option<&str>,
 ) -> Result<Uuid, String> {
     session
@@ -1319,7 +1205,7 @@ pub(super) async fn spawn_typed(
 /// carrying a session-level tool allowlist.
 pub(super) fn typed_provider(
     f: &ActorFixture,
-    session: &ActorRef<SessionCommand>,
+    session: &SessionRef,
     id: Uuid,
     sub: Uuid,
     allowed_tools: Option<Vec<String>>,
@@ -1348,7 +1234,7 @@ pub(super) fn typed_provider(
     }
 }
 
-pub(super) async fn main_history(session: &ActorRef<SessionCommand>) -> crate::agent_loop::LogPage {
+pub(super) async fn main_history(session: &SessionRef) -> crate::agent_loop::LogPage {
     session
         .ask(|reply| {
             SessionCommand::Read(ReadCommand::PageLog {
@@ -1449,7 +1335,7 @@ impl LlmProvider for StepStallsProvider {
 /// spawns belong in.
 pub(super) async fn a_run_with_a_step_in_flight() -> (
     ActorFixture,
-    ActorRef<SessionCommand>,
+    SessionRef,
     Uuid,
     Arc<dyn horsie_actor::Journal>,
 ) {
