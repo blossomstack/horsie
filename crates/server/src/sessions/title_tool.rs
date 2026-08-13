@@ -77,15 +77,40 @@ fn set_session_title_spec() -> ToolSpec {
     }
 }
 
+/// Which conversation a `set_session_title` call renames.
+///
+/// A target rather than a second toolbox type: the tool's name, schema and
+/// description are identical either way, and the model should not have to know
+/// what kind of conversation it is in to name the one it is having.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleTarget {
+    Session,
+    Fork(uuid::Uuid),
+}
+
 /// Wraps the session toolbox, adding the server-owned title tool.
 pub struct SessionTitleToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
+    target: TitleTarget,
 }
 
 impl SessionTitleToolbox {
     pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef) -> Self {
-        Self { inner, session }
+        Self {
+            inner,
+            session,
+            target: TitleTarget::Session,
+        }
+    }
+
+    /// The same tool, renaming one fork instead of the session it lives in.
+    pub fn for_fork(inner: Arc<dyn Toolbox>, session: SessionRef, id: uuid::Uuid) -> Self {
+        Self {
+            inner,
+            session,
+            target: TitleTarget::Fork(id),
+        }
     }
 }
 
@@ -112,11 +137,18 @@ impl Toolbox for SessionTitleToolbox {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
         let title = self
             .session
-            .ask(|reply| {
-                SessionCommand::Core(CoreCommand::SetTitle {
+            .ask(|reply| match self.target {
+                TitleTarget::Session => SessionCommand::Core(CoreCommand::SetTitle {
                     title: title.to_string(),
                     reply,
-                })
+                }),
+                TitleTarget::Fork(id) => {
+                    SessionCommand::Fork(crate::sessions::session_actor::ForkCommand::SetTitle {
+                        id,
+                        title: title.to_string(),
+                        reply,
+                    })
+                }
             })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?

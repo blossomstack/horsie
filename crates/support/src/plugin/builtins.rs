@@ -27,12 +27,26 @@ pub struct Builtin {
 }
 
 /// Every built-in command, in the order a typeahead should offer them.
-pub const BUILTINS: &[Builtin] = &[Builtin {
-    name: "compact",
-    description: "Summarise earlier history to free up context. The full \
-                  transcript stays readable.",
-    argument_hint: Some("[what to keep]"),
-}];
+pub const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "compact",
+        description: "Summarise earlier history to free up context. The full \
+                      transcript stays readable.",
+        argument_hint: Some("[what to keep]"),
+    },
+    Builtin {
+        name: "fork",
+        description: "Continue in a new conversation carrying a copy of this \
+                      one. Same workspace, separate history.",
+        argument_hint: Some("<what to do next>"),
+    },
+    Builtin {
+        name: "summary-n-fork",
+        description: "Continue in a new conversation seeded with a summary of \
+                      this one. Same workspace, fresh context.",
+        argument_hint: Some("<what to do next>"),
+    },
+];
 
 /// The built-in `name` names, if it names one.
 #[must_use]
@@ -84,6 +98,21 @@ mod tests {
         assert!(builtin("Compact").is_none(), "names are exact");
         assert!(builtin("compact-all").is_none());
         assert!(builtin("").is_none());
+    }
+
+    /// Both fork commands need a message saying what the new conversation is
+    /// for, so the typeahead has to say so rather than offering a bare name.
+    #[test]
+    fn fork_and_summary_n_fork_are_builtins_that_take_a_message() {
+        for name in ["fork", "summary-n-fork"] {
+            let b = builtin(name).unwrap_or_else(|| panic!("{name} is a builtin"));
+            assert_eq!(b.name, name);
+            assert!(b.argument_hint.is_some(), "{name} needs a message");
+        }
+        // Exact names, not prefixes — otherwise `/fork` would be ambiguous with
+        // the longer one and resolution order would decide which you got.
+        assert!(builtin("summary-n").is_none());
+        assert!(builtin("fork-summary").is_none());
     }
 
     /// Two built-ins with one name would make resolution order decide which

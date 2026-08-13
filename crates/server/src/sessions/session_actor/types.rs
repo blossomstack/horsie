@@ -17,6 +17,7 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
+    forks::{ForkMode, ForkParent, ForkRoster},
     spec::{SessionSpec, SessionStatus},
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
@@ -39,6 +40,8 @@ pub enum SessionCommand {
     Run(RunCommand),
     /// The tree of delegated work.
     SubAgent(SubAgentCommand),
+    /// Branching a conversation into a second one inside this session.
+    Fork(ForkCommand),
     /// Questions answered without waking anything.
     Read(ReadCommand),
     /// What plugin hooks did, routed to the agent it happened to.
@@ -95,7 +98,7 @@ pub enum TurnCommand {
     UserMessage {
         agent_id: Option<String>,
         text: String,
-        reply: ReplyTo<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel the turn in flight. Queued messages are *not* discarded — stop
     /// means "not this turn", not "throw away what I asked for".
@@ -165,6 +168,80 @@ pub enum SubAgentCommand {
     /// under (tree nodes still `Running`). Their runs are over; the parents
     /// are owed the failure like any other terminal result.
     Reconcile,
+}
+
+/// What accepting a message produced.
+///
+/// More than the message's id because one message can do more than queue
+/// itself: `/fork` creates a conversation, and the client has to be told which
+/// one to open. A field rather than a second endpoint, so every client that can
+/// send a message can fork without learning a new call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageAccepted {
+    pub message_id: String,
+    /// The fork this message created. Absent for every ordinary message, which
+    /// is what makes the field additive.
+    pub forked_agent: Option<String>,
+}
+
+impl MessageAccepted {
+    /// An ordinary message, which created no fork.
+    #[must_use]
+    pub fn queued(message_id: String) -> Self {
+        Self {
+            message_id,
+            forked_agent: None,
+        }
+    }
+}
+
+/// Branching a conversation into a second one inside this session.
+///
+/// A fork is a conversation, not delegated work: nothing here reports a result
+/// to anybody, and the only reply any of it carries is the fork's own id, which
+/// is what a client redirects to.
+#[derive(Serialize, Deserialize)]
+pub enum ForkCommand {
+    /// `/fork` or `/summary-n-fork`: branch `parent`, and queue `message` in the
+    /// new fork so it has something to do when its seed lands.
+    Create {
+        parent: ForkParent,
+        mode: ForkMode,
+        message: String,
+        reply: ReplyTo<Result<Uuid, String>>,
+    },
+    /// Internal: the `ForkCreated` write came back — only now does the fork's
+    /// actor exist (persist-then-spawn, exactly as a subagent spawn does). A
+    /// failed write spawns nothing and the caller gets the error.
+    FinishCreate {
+        id: Uuid,
+        parent: ForkParent,
+        mode: ForkMode,
+        message: String,
+        reply: ReplyTo<Result<Uuid, String>>,
+        persisted: Result<(), horsie_actor::JournalError>,
+    },
+    /// Internal: the detached seeding task wrote the fork's initial state, so
+    /// the fork may run and the message waiting in its queue is released.
+    Seeded { id: Uuid },
+    /// Internal: the detached seeding task could not. Carries the reason
+    /// verbatim, because that string is what the user is shown.
+    SeedFailed { id: Uuid, error: String },
+    /// A fork's own `set_session_title` call. Renames the fork, never the
+    /// session — the model should not have to know which kind of conversation
+    /// it is in to name it.
+    SetTitle {
+        id: Uuid,
+        title: String,
+        reply: ReplyTo<Result<String, String>>,
+    },
+    /// Someone asked for this fork to go. Nothing ever removes one on its own.
+    Delete {
+        id: Uuid,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// Internal: recovery found forks a dead process abandoned mid-seed.
+    ReseedInterrupted,
 }
 
 /// Questions answered from the resident actor's memory. None of these touches
@@ -440,6 +517,46 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         error: String,
     },
+    /// A conversation was branched. Persisted before the fork's actor exists —
+    /// a crash between the two replays as a fork still `Provisioning`, which
+    /// `ForkedAgents::on_load` re-seeds. Strictly better than an untracked
+    /// agent, which is the same trade `SubAgentSpawned` makes.
+    ForkCreated {
+        at_ms: u64,
+        id: Uuid,
+        parent: ForkParent,
+        /// The source agent's log seq at the branch point.
+        source_seq: u64,
+        mode: ForkMode,
+        /// What the fork was created to do. On the event so a fork abandoned
+        /// mid-seed can be re-seeded with it, rather than coming back idle
+        /// with nothing to answer.
+        message: String,
+    },
+    /// The fork's initial state is durable, so it may run and the message
+    /// seeded alongside it is drained.
+    ForkSeeded {
+        at_ms: u64,
+        id: Uuid,
+    },
+    /// A fork named itself.
+    ForkTitled {
+        at_ms: u64,
+        id: Uuid,
+        name: String,
+    },
+    /// A fork moved. Journaled so the session list can show it without loading
+    /// the session, exactly as the session's own status is.
+    ForkStatusChanged {
+        at_ms: u64,
+        id: Uuid,
+        status: AgentStatus,
+    },
+    /// A fork was removed, because someone asked. Never automatic.
+    ForkDeleted {
+        at_ms: u64,
+        id: Uuid,
+    },
 }
 
 /// How a turn ended.
@@ -553,6 +670,12 @@ pub struct SessionState {
     /// lives inside one kind is a capability the other kind silently loses.
     #[serde(default)]
     pub subagents: SubAgentForest,
+    /// Every fork this session holds. Beside the subagent forest rather than
+    /// inside it: that forest's whole vocabulary is about a parent being owed a
+    /// result, and a fork owes nobody one. `#[serde(default)]` so pre-fork
+    /// journal rows load with an empty roster.
+    #[serde(default)]
+    pub forks: ForkRoster,
 }
 
 impl SessionState {
@@ -705,4 +828,25 @@ pub enum AgentKey {
     /// spawned by an agent, it is chosen by the definition, and it roots a
     /// subagent tree of its own.
     Step(Uuid),
+    /// One fork of a conversation. Its own key for the same reason a step's is:
+    /// nothing spawned it expecting a result, and it roots a subagent tree of
+    /// its own.
+    Fork(Uuid),
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Every session journaled before forks existed carries no `forks` key. It
+    /// must load with an empty roster — the alternative is a `recover()` that
+    /// fails for every existing session and takes the supervisor with it, which
+    /// is what renamed event variants did on 2026-08-02.
+    #[test]
+    fn a_session_state_without_forks_deserializes_empty() {
+        let row = r#"{"status":"Idle","last_error":null}"#;
+        let state: SessionState = serde_json::from_str(row).unwrap();
+        assert!(state.forks.is_empty());
+    }
 }

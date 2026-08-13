@@ -24,6 +24,7 @@ vi.mock("../api/client", () => ({
       list: vi.fn(),
       setAnnotations: vi.fn(),
       remove: vi.fn(),
+      deleteFork: vi.fn(),
     },
     sessionGroups: {
       list: vi.fn(),
@@ -55,6 +56,7 @@ function session(id: string, group?: string): SessionSummary {
     status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: group ? [{ key: "group", value: group }] : [],
+    forks: [],
   };
 }
 
@@ -318,5 +320,60 @@ describe("Sidebar groups", () => {
       expect(screen.queryAllByTestId("session-row")).toHaveLength(0),
     );
     expect(screen.getByText(/No session matches/)).toBeDefined();
+  });
+});
+
+describe("forks in the rail", () => {
+  function fork(id: string, parent?: string, status = "idle", title?: string) {
+    return { id, parent, title, status, createdAtMs: 1 };
+  }
+
+  it("nests a fork of a fork under the fork it came from", async () => {
+    const s = session("s1");
+    s.forks = [fork("a", undefined, "idle", "first"), fork("b", "a", "idle", "second")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar();
+
+    const rows = await screen.findAllByTestId("fork-row");
+    expect(rows.map((r) => r.getAttribute("data-fork-id"))).toEqual(["a", "b"]);
+    expect(rows.map((r) => r.getAttribute("data-depth"))).toEqual(["0", "1"]);
+  });
+
+  /* The session row is the main agent, each fork row is itself. A rollup would
+     be a derived status that can disagree with the durable one. */
+  it("badges each row with its own status, never a rollup", async () => {
+    const s = session("s1");
+    s.status = SessionStatusKind.Idle;
+    s.forks = [fork("a", undefined, "running", "busy one")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar();
+
+    const forkRow = await screen.findByTestId("fork-row");
+    expect(forkRow.getAttribute("title")).toMatch(/running|working/i);
+    const sessionRow = screen.getByTestId("session-row");
+    expect(sessionRow.getAttribute("title")).not.toMatch(/running|working/i);
+  });
+
+  it("names an unnamed fork rather than showing its id", async () => {
+    const s = session("s1");
+    s.forks = [fork("a")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar();
+
+    expect(await screen.findByText("Untitled fork")).toBeTruthy();
+  });
+
+  it("links a fork to its own agent page", async () => {
+    const s = session("s1");
+    s.forks = [fork("a", undefined, "idle", "branch")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar();
+
+    const row = await screen.findByTestId("fork-row");
+    expect(row.getAttribute("href")).toBe("/sessions/s1/agents/a");
   });
 });

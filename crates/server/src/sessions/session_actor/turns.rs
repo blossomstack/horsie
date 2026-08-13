@@ -18,12 +18,26 @@
 use super::component::{ActionCx, Component};
 use super::{AgentAction, LifecycleCommand, TurnEnd};
 use super::{
-    AnswerError, AskAnswer, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
-    SessionState, TurnCommand,
+    AgentKey, AnswerError, AskAnswer, CommandEffect, ForkCommand, MessageAccepted, SessionActor,
+    SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SessionInbox;
+use crate::sessions::forks::{ForkMode, ForkParent};
+
+/// A recognised fork command: which of the two it was, and what the new
+/// conversation is for.
+///
+/// A struct rather than three parameters because they are one decision, made
+/// in one place and acted on in another — and because `name` exists only to put
+/// the command the user actually typed into the refusal.
+struct ForkRequest {
+    mode: ForkMode,
+    /// The builtin's name, for a refusal that quotes what was typed.
+    name: &'static str,
+    message: String,
+}
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
@@ -193,6 +207,103 @@ impl SessionActor {
         self.persist_and_advance(state, events, ctx).await
     }
 
+    /// What a fork command asked for, if the text is one.
+    ///
+    /// Pure and separate from acting on it, so `on_user_message` can classify
+    /// before it gives up ownership of the reply — and so the table of what
+    /// counts as a fork command is testable with no actor in sight.
+    fn fork_request(text: &str) -> Option<ForkRequest> {
+        let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/')
+            .and_then(|(name, args)| {
+                horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
+            })?;
+        let mode = match builtin.name {
+            "fork" => ForkMode::Copy,
+            "summary-n-fork" => ForkMode::Summary,
+            _ => return None,
+        };
+        Some(ForkRequest {
+            mode,
+            name: builtin.name,
+            message: args.trim().to_string(),
+        })
+    }
+
+    /// Hand a fork command to the component that owns forks.
+    ///
+    /// Recognising one is this component's job — it is where every built-in is
+    /// caught, before the text can be treated as a prompt. *Creating* one is
+    /// not: `state.forks` belongs to `ForkedAgents`, and a component writes only
+    /// its own slice. So this decides what was typed and forwards a command,
+    /// the same shape `/compact` has, where `Turns` compacts nothing and hands
+    /// an `Incoming::Compact` to the agent.
+    fn start_fork(
+        &mut self,
+        state: &SessionState,
+        key: AgentKey,
+        req: ForkRequest,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let ForkRequest {
+            mode,
+            name,
+            message,
+        } = req;
+        if message.is_empty() {
+            let _ = reply.send(Err(UserMessageError::Rejected(format!(
+                "/{name} needs a message saying what the new conversation should do"
+            ))));
+            return CommandEffect::none();
+        }
+        // A run has no conversation to branch: its steps are chosen by the
+        // definition, and nobody talks to one.
+        if state.run.is_some() {
+            let _ = reply.send(Err(UserMessageError::Rejected(
+                "a workflow run cannot be forked".to_string(),
+            )));
+            return CommandEffect::none();
+        }
+        // Only a conversation forks. A subagent's is delegated work and a
+        // step's belongs to the run, so neither has a branch to take.
+        let parent = match key {
+            AgentKey::Main => ForkParent::Main,
+            AgentKey::Fork(id) => ForkParent::Fork(id),
+            AgentKey::Sub(_) | AgentKey::Step(_) => {
+                let _ = reply.send(Err(UserMessageError::Rejected(
+                    "only a conversation can be forked".to_string(),
+                )));
+                return CommandEffect::none();
+            }
+        };
+        // Off the mailbox: `Create` reads the source agent's log head and then
+        // waits on its own write, and holding this mailbox across both would
+        // stall every other agent in the session.
+        let self_ref = self.me(ctx);
+        tokio::spawn(async move {
+            let created = self_ref
+                .ask(|r| {
+                    SessionCommand::Fork(ForkCommand::Create {
+                        parent,
+                        mode,
+                        message,
+                        reply: r,
+                    })
+                })
+                .await;
+            let answer = match created {
+                Ok(Ok(id)) => Ok(MessageAccepted {
+                    message_id: id.to_string(),
+                    forked_agent: Some(id.to_string()),
+                }),
+                Ok(Err(why)) => Err(UserMessageError::Rejected(why)),
+                Err(e) => Err(UserMessageError::Rejected(format!("fork: {e}"))),
+            };
+            let _ = reply.send(answer);
+        });
+        CommandEffect::none()
+    }
+
     /// Accept a message for one of this session's agents.
     ///
     /// The reply is answered by the *agent*, once its write is durable — the
@@ -204,7 +315,7 @@ impl SessionActor {
         state: &SessionState,
         agent_id: Option<String>,
         text: String,
-        reply: ReplyTo<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         if let SessionStatus::Unrecoverable { reason } = &state.status {
@@ -222,10 +333,16 @@ impl SessionActor {
             )));
             return CommandEffect::none();
         }
-        let Some((_, agent)) = self.resolve_agent(state, ctx, agent_id.as_deref()) else {
+        let Some((key, agent)) = self.resolve_agent(state, ctx, agent_id.as_deref()) else {
             let _ = reply.send(Err(UserMessageError::NotFound));
             return CommandEffect::none();
         };
+        // Resolved before the session is titled, because a fork command is not
+        // a thing to name a session after: it says what the *new* conversation
+        // should do.
+        if let Some(req) = Self::fork_request(text.trim()) {
+            return self.start_fork(state, key, req, reply, ctx);
+        }
         // An unnamed session is titled from its first message, once. The rule is
         // `SessionCore`'s — a session's name is its own bookkeeping, not the
         // turn's — so this only says when to apply it.
@@ -265,7 +382,7 @@ impl SessionActor {
         let accepted = id.clone();
         tokio::spawn(async move {
             let answer = match rx.await {
-                Ok(Ok(())) => Ok(accepted),
+                Ok(Ok(())) => Ok(MessageAccepted::queued(accepted)),
                 // Never written, so it is not owed an answer, and the caller
                 // must not be told it was accepted.
                 Ok(Err(e)) => Err(UserMessageError::Rejected(format!("persist message: {e}"))),
@@ -651,7 +768,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .expect("an accepted message");
+            .expect("an accepted message")
+            .message_id;
         assert!(!accepted.is_empty(), "the caller is given the message id");
         // The id names an entry in the agent's own log, which is where the
         // queue lives now.
@@ -803,7 +921,8 @@ mod tests {
             })
             .await
             .unwrap()
-            .expect("a subagent takes messages like any other agent");
+            .expect("a subagent takes messages like any other agent")
+            .message_id;
 
         let queued_in = |page: &crate::agent_loop::LogPage| {
             page.entries.iter().any(|e| {

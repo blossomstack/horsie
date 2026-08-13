@@ -177,6 +177,7 @@ pub async fn invoke_agent(
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Idle,
+        forks: Vec::new(),
     };
     Ok((
         StatusCode::CREATED,

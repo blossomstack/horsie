@@ -64,6 +64,18 @@ pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
         last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
+        forks: rec.forks.iter().map(wire_fork).collect(),
+    }
+}
+
+/// One fork row, for the session list.
+fn wire_fork(row: &crate::sessions::supervisor::ForkRow) -> horsie_models::session::ForkView {
+    horsie_models::session::ForkView {
+        id: row.id.to_string(),
+        parent: row.parent.map(|p| p.to_string()),
+        title: row.title.clone(),
+        status: wire_agent_status(row.status).to_string(),
+        created_at_ms: row.created_at_ms,
     }
 }
 
@@ -121,6 +133,7 @@ pub async fn create_session(
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Provisioning,
+        forks: Vec::new(),
     };
     Ok((
         StatusCode::CREATED,
@@ -377,7 +390,13 @@ pub async fn send_message(
     match result {
         // Always accepted, never 409: a turn in flight queues the message and
         // the agent answers it at its next turn boundary.
-        Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
+        Ok(accepted) => Ok((
+            StatusCode::ACCEPTED,
+            Json(SessionAck {
+                message_id: accepted.message_id,
+                forked_agent: accepted.forked_agent,
+            }),
+        )),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
         Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
@@ -424,6 +443,28 @@ pub async fn delete_session(
 ) -> Result<impl IntoResponse, Api> {
     let result = ask(&state, |reply| SessionSupervisorCommand::Delete {
         id,
+        reply,
+    })
+    .await?;
+    match result {
+        Ok(()) => Ok(Json(Ack {})),
+        Err(msg) => Err(Api::not_found(msg)),
+    }
+}
+
+/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one fork.
+///
+/// Only a fork. A subagent and a workflow step are part of what their session
+/// did, and deleting one would leave a transcript referring to work with no
+/// record. A fork is a conversation somebody started and can be done with.
+pub async fn delete_fork(
+    Scope(state): Scope,
+    Path((id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, Api> {
+    let fork = uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such fork"))?;
+    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteFork {
+        id,
+        fork,
         reply,
     })
     .await?;

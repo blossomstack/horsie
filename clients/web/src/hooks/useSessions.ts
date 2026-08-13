@@ -232,12 +232,35 @@ export function useAnswerAsks() {
 export function useSendMessage() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, text }: { id: string; text: string }) =>
-      api.sessions.send(id, text),
+    mutationFn: ({
+      id,
+      text,
+      agentId,
+    }: {
+      id: string;
+      text: string;
+      agentId?: string;
+    }) => api.sessions.send(id, text, agentId),
     // The session view renders a failed send inline, right above the composer
     // that produced it. Without this the global notice reported it a second
     // time, in a corner, in the same words.
     meta: { inlineError: true },
-    onMutate: ({ id, text }) => applyOptimisticTitle(client, id, text),
+    // Only the session's own first message names it. A message to a fork is
+    // that fork's business, and titling the session from it would rename the
+    // conversation somebody branched *away* from.
+    onMutate: ({ id, text, agentId }) =>
+      agentId ? undefined : applyOptimisticTitle(client, id, text),
+  });
+}
+
+/** Remove one fork. Nothing removes one on its own, so this is the only way. */
+export function useDeleteFork() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, forkId }: { id: string; forkId: string }) =>
+      api.sessions.deleteFork(id, forkId),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["sessions"] });
+    },
   });
 }

@@ -75,10 +75,20 @@ export interface RenderedCompaction {
   atMs: number;
 }
 
+/** A conversation branched off here, as the transcript shows it. */
+export interface RenderedFork {
+  /** The forked agent, which is where the marker links to. */
+  id: string;
+  /** `copy` or `summary` — what the fork was given to start from. */
+  mode: string;
+  atMs: number;
+}
+
 export type TranscriptItem =
   | { kind: "message"; value: RenderedMessage }
   | { kind: "notice"; value: RenderedHookNotice }
-  | { kind: "compaction"; value: RenderedCompaction };
+  | { kind: "compaction"; value: RenderedCompaction }
+  | { kind: "fork"; value: RenderedFork };
 
 export interface SessionStream {
   items: TranscriptItem[];
@@ -619,6 +629,22 @@ export function useSessionStream(
         items.push({
           kind: "notice",
           value: { id: entry.body.value.id, record, atMs: entry.body.value.createdAtMs },
+        });
+      } else if (
+        entry.body.type === "Lifecycle" &&
+        entry.body.value.kind === "Forked"
+      ) {
+        // The one lifecycle entry the transcript renders. The rest are folded
+        // into status and progress, because they describe the conversation
+        // rather than sitting *in* it — but a branch happened at a point, and
+        // the point is the whole of what it says.
+        items.push({
+          kind: "fork",
+          value: {
+            id: entry.body.value.value.id,
+            mode: entry.body.value.value.mode,
+            atMs: entry.atMs,
+          },
         });
       } else if (entry.body.type === "Compaction") {
         const c = entry.body.value;

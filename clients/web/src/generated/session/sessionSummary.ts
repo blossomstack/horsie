@@ -1,5 +1,6 @@
 
 import { AnnotationEntry } from './annotationEntry';
+import { ForkView } from './forkView';
 import { SessionStatusKind } from './sessionStatusKind';
 export interface SessionSummary {
   id: string;
@@ -21,4 +22,11 @@ export interface SessionSummary {
    * User-set key-value metadata (e.g. `group=<name>`). Empty when none.
    */
   annotations: AnnotationEntry[];
+  /**
+   * The conversations forked out of this session, so a list can nest them
+   * under it. Flat and parent-linked rather than already nested, because the
+   * registry holds it flat — and answered from that registry, so listing
+   * sessions still loads none of them.
+   */
+  forks: ForkView[];
 }

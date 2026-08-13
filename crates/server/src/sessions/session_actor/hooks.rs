@@ -195,7 +195,7 @@ impl AgentOutcomeSink for StopHookParent {
             // A step keeps `Stop`: it fires `SessionStart` and roots its own
             // subagent tree, so answering `SubagentStop` would contradict its
             // own start.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) => {
+            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
                 ServerHookEvent::Stop(StopInput {
                     last_assistant_message,
                     stop_hook_active,
@@ -467,7 +467,7 @@ impl HookRouting {
                         AgentOutcome::Failed {
                             agent: match key {
                                 AgentKey::Main => actor.id,
-                                AgentKey::Sub(id) | AgentKey::Step(id) => id,
+                                AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => id,
                             },
                             error: reason,
                             // Not recoverable and not terminal: re-running the same

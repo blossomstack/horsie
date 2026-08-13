@@ -16,6 +16,7 @@ function session(id: string, group?: string): SessionSummary {
     status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: group ? [{ key: "group", value: group }] : [],
+    forks: [],
   };
 }
 

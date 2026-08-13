@@ -179,6 +179,8 @@ impl RoutineRunner {
             workflow: None,
             // A run's session was just created; it has no annotations yet.
             annotations: vec![],
+            // Nor forks: nobody has had a conversation in it to branch.
+            forks: vec![],
         })
     }
 }

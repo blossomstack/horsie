@@ -1,5 +1,6 @@
 
 import { AskLifecycle } from './askLifecycle';
+import { ForkLifecycle } from './forkLifecycle';
 import { PreparingLifecycle } from './preparingLifecycle';
 import { QueuedLifecycle } from './queuedLifecycle';
 import { RuntimeLifecycle } from './runtimeLifecycle';
@@ -25,6 +26,7 @@ export type LifecycleEvent =
   | { kind: "TurnEnded"; value: TurnEndedLifecycle }
   | { kind: "AskRecorded"; value: AskLifecycle }
   | { kind: "SubAgent"; value: SubAgentLifecycle }
+  | { kind: "Forked"; value: ForkLifecycle }
   | { kind: "Step"; value: StepLifecycle }
   | { kind: "TaskList"; value: TaskListLifecycle }
   | { kind: "SessionFailed"; value: SessionFailedLifecycle };

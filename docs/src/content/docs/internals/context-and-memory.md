@@ -53,6 +53,11 @@ Type `/compact` to do it by hand, optionally with instructions —
 `/compact keep the migration details` adds a focus without discarding the rest.
 It runs at the next turn boundary, so a turn in flight finishes first.
 
+`/summary-n-fork` is the other way out of a full context, and it does the
+opposite thing with the summary: rather than rewriting this conversation, it
+starts a [second one](/using/sessions/#branch-a-conversation) with the summary
+as its whole history, and leaves this one exactly as it was.
+
 Separately and confusingly similarly named, the *journal* is periodically
 snapshotted and compacted: a snapshot is a serialized state, and replay starts
 from the newest one rather than from the first event. That keeps recovery

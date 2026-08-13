@@ -249,6 +249,7 @@ pub async fn start_run(
         created_at,
         annotations: Default::default(),
         status: SessionStatus::Idle,
+        forks: Vec::new(),
     };
     Ok((
         StatusCode::CREATED,

@@ -135,6 +135,9 @@ pub(super) enum SessionAgentKind {
     Main,
     Sub(Uuid),
     Step(Uuid),
+    /// A fork of a conversation. Its own kind, not `Sub`: it owes nobody a
+    /// result, it can ask the user, and it names itself.
+    Fork(Uuid),
 }
 
 impl SessionAgentKind {
@@ -145,6 +148,7 @@ impl SessionAgentKind {
             Self::Main => AgentKey::Main,
             Self::Sub(id) => AgentKey::Sub(*id),
             Self::Step(id) => AgentKey::Step(*id),
+            Self::Fork(id) => AgentKey::Fork(*id),
         }
     }
 
@@ -152,7 +156,7 @@ impl SessionAgentKind {
     /// session to watch does; a subagent is quiet by design, and its progress
     /// reaches the reader as the parent's `SubAgent` entry instead.
     fn broadcasts(&self) -> bool {
-        matches!(self, Self::Main | Self::Step(_))
+        matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
     }
 }
 
@@ -165,7 +169,7 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
         // Steps share the run's sandbox — that is the point — but never its
         // cwd/env bucket: the runtime keys that state by agent id, so each acts
         // under its own identity, exactly as a subagent does.
-        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
             client.with_agent_id(id.to_string())
         }
     }
@@ -192,6 +196,18 @@ is both this step's result and what the workflow reads to decide which step runs
 so make it accurate and self-contained. You share one workspace with every other step: \
 what you change on disk is what the next step sees. You may spawn subagents with \
 spawn_agent. You cannot rename the session.";
+
+/// Appended to a fork's system prompt.
+///
+/// A fork is a conversation, so almost nothing a subagent is told applies: it
+/// can ask the user, and it owes nobody a report. What it does need is to know
+/// it is one of several under one session sharing one workspace, and that its
+/// title is how a person tells them apart.
+const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked conversation\n\
+You are a fork: a conversation branched from another one in this session, carrying its \
+history up to the branch point. You share one workspace with it — what you change on disk \
+is what it sees. Name yourself with set_session_title as soon as the new direction is \
+clear; that title is how a person tells this conversation from the one it came from.";
 
 /// Appended to an unattended session's system prompt (a routine run). It has
 /// no `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -463,7 +479,7 @@ impl ContextProvider for SessionContextProvider {
                     agent_id: id.to_string(),
                     agent_type: self.agent_type(),
                 }),
-                SessionAgentKind::Main | SessionAgentKind::Step(_) => {
+                SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
                     ServerHookEvent::SessionStart(SessionStartInput { source })
                 }
             };
@@ -712,7 +728,10 @@ impl ContextProvider for SessionContextProvider {
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let caller = match self.kind {
             // A step roots its own tree, so its spawns are that tree's `Main`.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) => SubAgentParent::Main,
+            // A fork roots its own tree too, for the same reason a step does.
+            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
+                SubAgentParent::Main
+            }
             SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
         };
         // A zero cap disables subagents outright: no tools advertised, so the
@@ -750,6 +769,16 @@ impl ContextProvider for SessionContextProvider {
                 // only a step with a declared output has.
                 self.step_output_schema.is_some() && !self.unattended,
             ),
+            // A fork takes the main agent's arms: it is a conversation, so
+            // it can ask the user — and it names *itself*, not the session.
+            SessionAgentKind::Fork(id) => {
+                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
+                Arc::new(SessionTitleToolbox::for_fork(
+                    inner,
+                    self.session.clone(),
+                    id,
+                ))
+            }
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(
@@ -775,6 +804,7 @@ impl ContextProvider for SessionContextProvider {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
             SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
+            SessionAgentKind::Fork(_) => Some(FORK_PROMPT_SUFFIX),
             SessionAgentKind::Sub(_) => {
                 Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
             }

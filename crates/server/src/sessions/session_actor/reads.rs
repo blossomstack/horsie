@@ -15,6 +15,7 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::sessions::addressing::SessionInbox;
+use crate::sessions::forks::{ForkParent, ForkRecord, ForkRoster};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::workflow::{StepRun, StepStatus};
@@ -147,6 +148,61 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
     }
 }
 
+/// One fork of a conversation.
+///
+/// Its status is read straight off the roster rather than mapped from anything:
+/// a fork *is* a conversation, so `AgentStatus` is already the vocabulary its
+/// record is kept in. `label` carries the title it gave itself, which is `None`
+/// until it does — a client shows what it was branched from instead.
+fn fork_entry(id: Uuid, roster: &ForkRoster, rec: &ForkRecord) -> AgentEntry {
+    AgentEntry {
+        id: id.to_string(),
+        parent: match rec.parent {
+            // Rooted on the session's main agent, which is not a fork.
+            ForkParent::Main => None,
+            ForkParent::Fork(pid) => Some(pid),
+        },
+        label: rec.title.clone(),
+        depth: fork_depth(roster, rec),
+        agent_type: None,
+        // Read straight off the roster rather than mapped: a fork *is* a
+        // conversation, so `AgentStatus` is already the vocabulary its record
+        // is kept in.
+        status: rec.status,
+        error: None,
+        started_at_ms: rec.created_at_ms,
+        // A conversation is never *done*, so it has no end.
+        ended_at_ms: 0,
+    }
+}
+
+/// How deep a fork sits, by walking its parents.
+///
+/// Bounded by the roster's own size rather than trusted to terminate: a chain
+/// is only ever built by appending, so a cycle is impossible — but this walks
+/// data recovered from a journal, and a bound costs one comparison.
+fn fork_depth(roster: &ForkRoster, rec: &ForkRecord) -> u32 {
+    let limit = roster.iter().count();
+    let mut depth = 0;
+    let mut at = rec.parent;
+    while let ForkParent::Fork(pid) = at {
+        depth += 1;
+        if depth as usize > limit {
+            // A parent chain longer than the roster means the roster is not a
+            // tree. Nothing can produce that, so say so rather than spin.
+            tracing::warn!("a fork's parent chain does not terminate; reporting it flat");
+            return 0;
+        }
+        match roster.get(pid) {
+            Some(parent) => at = parent.parent,
+            // A deleted parent leaves its child where it stands: the chain
+            // above it is gone, so this is as deep as it can be said to be.
+            None => break,
+        }
+    }
+    depth
+}
+
 /// One node of a subagent tree.
 fn sub_entry(id: Uuid, rec: &SubAgentRecord) -> AgentEntry {
     AgentEntry {
@@ -227,16 +283,17 @@ impl SessionActor {
                 .run
                 .as_ref()
                 .and_then(|run| run.index_of_agent(id).and_then(|i| run.get(i))),
-            AgentKey::Main | AgentKey::Sub(_) => None,
+            AgentKey::Main | AgentKey::Sub(_) | AgentKey::Fork(_) => None,
         };
         let node = match key {
             AgentKey::Sub(id) => state.subagents.node(id),
-            AgentKey::Main | AgentKey::Step(_) => None,
+            AgentKey::Main | AgentKey::Step(_) | AgentKey::Fork(_) => None,
         };
         let entry = match key {
             AgentKey::Main => main_entry(&state.status),
             AgentKey::Step(_) => step_entry(execution?),
             AgentKey::Sub(id) => sub_entry(id, node?),
+            AgentKey::Fork(id) => fork_entry(id, &state.forks, state.forks.get(id)?),
         };
         Some(AgentDetail {
             entry,

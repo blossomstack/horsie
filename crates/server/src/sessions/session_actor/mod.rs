@@ -26,6 +26,7 @@ use horsie_actor::ReplyTo;
 mod component;
 mod context;
 mod core;
+mod fork;
 mod hooks;
 mod lifecycle;
 mod reads;
@@ -38,6 +39,7 @@ pub use types::*;
 
 use component::Component;
 use core::SessionCore;
+use fork::ForkedAgents;
 use hooks::{HookRouting, StopHookParent};
 use lifecycle::RuntimeLifecycle;
 use reads::Reads;
@@ -53,7 +55,7 @@ use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
-    supervisor::SessionSupervisorCommand,
+    supervisor::{ForkRow, SessionSupervisorCommand},
     workflow::WorkflowRunState,
 };
 use crate::users::{UserRegistry, UserServices, resolve};
@@ -139,7 +141,7 @@ impl SessionAgents {
     fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
         match key {
             AgentKey::Main => self.main(),
-            AgentKey::Sub(id) | AgentKey::Step(id) => self.sub(id),
+            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.sub(id),
         }
     }
 
@@ -151,6 +153,16 @@ impl SessionAgents {
             Self::Workflow { live } => {
                 live.insert(id, agent);
             }
+        }
+    }
+
+    /// Forget one agent, handing it back so the caller can stop it. Only a
+    /// fork's delete uses this: every other agent lives as long as the session
+    /// is loaded, and nothing else removes one on request.
+    fn remove_sub(&mut self, id: Uuid) -> Option<ResidentAgent> {
+        match self {
+            Self::Interactive { subs, .. } => subs.remove(&id),
+            Self::Workflow { live } => live.remove(&id),
         }
     }
 
@@ -222,6 +234,9 @@ pub struct SessionActor {
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
     last_reported: Option<SessionStatus>,
+    /// The same, for the fork roster. Empty until it has reported once — which
+    /// costs nothing, because a session with no forks reports none either way.
+    last_reported_forks: Vec<ForkRow>,
 }
 
 impl SessionActor {
@@ -239,6 +254,7 @@ impl SessionActor {
             supervisor,
             agents: None,
             last_reported: None,
+            last_reported_forks: Vec::new(),
         }
     }
 
@@ -378,6 +394,45 @@ impl SessionActor {
     ///
     /// `None` at load, so a freshly recovered session always reports once —
     /// which is the moment anyone can first learn its status.
+    /// Tell the supervisor what forks this session now holds, so the session
+    /// list can nest them without loading it.
+    ///
+    /// The whole roster every time, and the supervisor drops a report that
+    /// changed nothing. A projection built from the current value cannot drift
+    /// the way one built from deltas can — and `List` is documented to load
+    /// nothing, so a sidebar that could not read this from the registry could
+    /// not show forks at all without waking every session that has one.
+    async fn report_forks(&mut self, state: &SessionState) {
+        if state.forks.is_empty() && self.last_reported_forks.is_empty() {
+            return;
+        }
+        let forks: Vec<ForkRow> = state
+            .forks
+            .iter()
+            .map(|(id, rec)| ForkRow {
+                id: *id,
+                parent: match rec.parent {
+                    crate::sessions::forks::ForkParent::Main => None,
+                    crate::sessions::forks::ForkParent::Fork(pid) => Some(pid),
+                },
+                title: rec.title.clone(),
+                status: rec.status,
+                created_at_ms: rec.created_at_ms,
+            })
+            .collect();
+        if forks == self.last_reported_forks {
+            return;
+        }
+        self.last_reported_forks = forks.clone();
+        let _ = self
+            .supervisor
+            .tell(SessionSupervisorCommand::ForksChanged {
+                id: self.id.to_string(),
+                forks,
+            })
+            .await;
+    }
+
     async fn report_status(&mut self, state: &SessionState) {
         if self.last_reported.as_ref() == Some(&state.status) {
             return;
@@ -415,14 +470,16 @@ impl SessionActor {
         // session's. The revision channel follows the same split.
         let (journal_id, revision) = match plan.kind {
             SessionAgentKind::Main => (self.id, revisions.for_agent(MAIN_AGENT_ID)),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
                 (id, revisions.for_agent(&id.to_string()))
             }
         };
         // Its name under this session, and the id it is addressed by.
         let name = match plan.kind {
             SessionAgentKind::Main => MAIN_AGENT_ID.to_string(),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => id.to_string(),
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
+                id.to_string()
+            }
         };
         let key = plan.kind.agent_key();
         let provider = Arc::new(SessionContextProvider {
@@ -500,7 +557,7 @@ impl SessionActor {
             SessionAgentKind::Main => {
                 self.agents = Some(SessionAgents::interactive(resident.clone()));
             }
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
                 if let Some(agents) = self.agents.as_mut() {
                     agents.insert_sub(id, resident.clone());
                 }
@@ -556,6 +613,15 @@ impl SessionActor {
                 let id = Uuid::parse_str(raw).ok()?;
                 if let Some(resolved) = self.resolve_step(state, ctx, id) {
                     return Some(resolved);
+                }
+                // Before the roster is consulted, because the roster cannot
+                // say what *kind* of agent an id names — forks and subagents
+                // share one map. Answering `Sub` for a fork made a fork of a
+                // fork read as a fork of a subagent, and be refused.
+                if state.forks.contains(id) {
+                    return self
+                        .spawn_fork_actor(ctx, state, id)
+                        .map(|actor| (AgentKey::Fork(id), actor));
                 }
                 if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
                     return Some((AgentKey::Sub(id), agent.actor.clone()));
@@ -733,6 +799,14 @@ impl SessionActor {
             // cold subagent's does: a boundary can owe a result to a step whose
             // actor has since been unloaded.
             AgentKey::Step(id) => self.resolve_step(state, ctx, id).map(|(_, actor)| actor),
+            // A cold fork, woken to be read or messaged. Nothing comes off a
+            // record here the way a subagent's type does: a fork runs under
+            // the session's own settings, like the conversation it branched
+            // from.
+            AgentKey::Fork(id) => state
+                .forks
+                .contains(id)
+                .then(|| self.spawn_fork_actor(ctx, state, id))?,
             // Spawned at load, so it is either resident or this session is a run
             // and has none.
             AgentKey::Main => None,
@@ -953,6 +1027,11 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::SubAgentCompleted { .. }
             | SessionDomainEvent::SubAgentFailed { .. }
             | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
+            SessionDomainEvent::ForkCreated { .. }
+            | SessionDomainEvent::ForkSeeded { .. }
+            | SessionDomainEvent::ForkTitled { .. }
+            | SessionDomainEvent::ForkStatusChanged { .. }
+            | SessionDomainEvent::ForkDeleted { .. } => ForkedAgents::apply(&mut state, &event),
             SessionDomainEvent::UsageRecorded { .. }
             | SessionDomainEvent::SpecRecorded { .. }
             | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
@@ -969,6 +1048,7 @@ impl EventSourcedActor for SessionActor {
     /// copy can lag the journal, never lead it.
     async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
         self.record_lifecycle(events, state).await;
+        self.report_forks(state).await;
         self.report_status(state).await;
     }
 
@@ -986,6 +1066,7 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
             SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
             SessionCommand::SubAgent(c) => SubAgents::handle(self, state, c, ctx).await,
+            SessionCommand::Fork(c) => ForkedAgents::handle(self, state, c, ctx).await,
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             SessionCommand::Hooks(c) => HookRouting::handle(self, state, c, ctx).await,
             SessionCommand::Core(c) => SessionCore::handle(self, state, c, ctx).await,

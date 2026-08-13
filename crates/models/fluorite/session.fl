@@ -84,6 +84,29 @@ struct SessionSummary {
     workflow: Option<String>,
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
     annotations: Vec<AnnotationEntry>,
+    /// The conversations forked out of this session, so a list can nest them
+    /// under it. Flat and parent-linked rather than already nested, because the
+    /// registry holds it flat — and answered from that registry, so listing
+    /// sessions still loads none of them.
+    forks: Vec<ForkView>,
+}
+
+/// One forked conversation under a session.
+///
+/// `parent` absent means the session's main agent; present names another fork.
+/// That is what lets a client nest them to any depth without learning the
+/// server's own vocabulary for where a fork is rooted.
+struct ForkView {
+    id: String,
+    parent: Option<String>,
+    /// What the fork named itself, once it has. Absent until then — a client
+    /// shows what it was branched from instead of inventing a name.
+    title: Option<String>,
+    /// The same vocabulary an agent's document speaks: "provisioning" |
+    /// "running" | "idle" | "awaiting_input" | "failed" | "cancelled". A fork
+    /// is a conversation, so it never reads "completed".
+    status: String,
+    created_at_ms: u64,
 }
 
 /// Answers to every question one agent is parked on, delivered together
