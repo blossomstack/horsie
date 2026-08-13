@@ -43,6 +43,11 @@ Every field has a default, so an empty file — or no file — is valid.
   "auth": {
     // "password" (the default), "delegated", or "off".
     "mode": "password"
+  },
+  "bus": {
+    // Only for a deployment running more than one node. Absent means nodes
+    // do not talk to each other, which is correct for a single server.
+    "url": "redis://redis.internal:6379"
   }
 }
 ```
@@ -58,6 +63,7 @@ That is the whole server-side file.
 | `database.url` | SQLite at `<data_dir>/server/config.db` | Settings store and session journal. |
 | `database.max_connections` | `10` | Connection pool size. |
 | `auth.mode` | `password` | `password`, `delegated`, or `off`. See [Authentication](/operating/authentication/). |
+| `bus.url` | *(none)* | Where nodes publish to each other. Leave unset for a single server. Setting it on a deployment of one is harmless; leaving it unset on a deployment of several is not — see below. |
 
 An unknown key is ignored rather than rejected, so an old file keeps parsing.
 
@@ -90,8 +96,21 @@ Writing either side never destroys the other's keys.
 | --- | --- |
 | `HORSIE_DATABASE_URL` | Overrides `database.url`. Takes precedence over the config file. Accepts `sqlite://` or `postgres://`. |
 | `HORSIE_AUTH_MODE` | Overrides `auth.mode`: `password`, `delegated`, or `off`. An unrecognised value falls through to the config file rather than silently changing who may reach the server. |
+| `HORSIE_BUS_URL` | Overrides `bus.url`. Takes precedence over the config file. |
 | `HORSIE_MODEL_CARDS_SEED` | Same as `--model-cards-seed`. |
 | `HORSIE_TOKEN` | **CLI.** Bearer token to send instead of reading stored credentials. For scripts and CI. |
+
+### Running more than one node
+
+One server needs no `bus.url`: everything that has to reach anything else is in
+the same process.
+
+More than one server sharing a database does. Nodes reach each other by
+publishing to the bus, and without it each one publishes into its own process
+and hears nothing from the others. Nothing errors — a live stream simply never
+delivers, and a runtime that dials one node cannot be reached from another. A
+bad URL fails the boot on purpose, so a node that cannot reach the bus refuses
+to start rather than running in that state.
 
 ## What is not here
 

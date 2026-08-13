@@ -51,6 +51,13 @@ pub struct Shared {
     pub db: Db,
     /// Every actor this node hosts, for every account. See [`node_system`].
     pub system: ActorSystem,
+    /// Where a frame goes to reach another node.
+    ///
+    /// One per deployment, not one per account: a topic name already carries
+    /// the account, and a bus per account would mean a connection per account
+    /// to whatever backs it. Isolation between accounts is the topic namespace,
+    /// exactly as it is for actors and their addresses.
+    pub bus: Arc<dyn crate::bus::Bus>,
     /// Bundle bytes, addressed by content and therefore shared by construction.
     pub artifacts: Arc<ArtifactStore>,
     /// Read-only deployment paths, surfaced in every account's settings view.
@@ -482,6 +489,7 @@ mod tests {
     async fn registry(tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
         let db = crate::db::testing::db().await;
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+            bus: Arc::new(crate::bus::MemoryBus::new()),
             system: node_system(&db),
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
