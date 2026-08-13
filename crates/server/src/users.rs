@@ -66,15 +66,16 @@ pub struct Shared {
     /// policy, not account preference — and the seam a test drives time
     /// through.
     pub supervisor: SupervisorConfig,
-    /// What every account's session actors run on, when the caller has already
+    /// What every account's session actors run on, when a harness has already
     /// assembled it.
     ///
-    /// `None` in a deployment, where [`build_user`] assembles it from that
-    /// account's own stores — which is the only reason two accounts get
-    /// different clients at all. A harness that has stood up a fake runtime
-    /// vendor and a fake plugin library hands one in, because those are the
-    /// things it exists to test against, and a shard recipe has nowhere else to
-    /// take one from.
+    /// Compiled out of a deployment entirely, and that is the point rather than
+    /// tidiness: setting it replaces *every* account's clients with one bundle,
+    /// which is the per-account boundary this module opens by describing
+    /// collapsing in a single line. A test has one account and cannot notice; a
+    /// deployment would, silently. It exists at all because a shard recipe has
+    /// nowhere else to take a fake runtime vendor from.
+    #[cfg(any(test, feature = "test-util"))]
     pub deps: Option<ServerDeps>,
     /// The Fly Machines API root every account's Fly vendors are built against.
     ///
@@ -240,7 +241,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             account: user.as_str().to_string(),
         },
     ));
-    let deps = shared.deps.clone().unwrap_or_else(|| ServerDeps {
+    let deps = ServerDeps {
         runtimes,
         provider_registry: opened.registry.clone(),
         vendors: opened.vendors.clone(),
@@ -248,7 +249,9 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         mcp: Some(mcp.clone()),
         plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
         memory: Some(memory.clone()),
-    });
+    };
+    #[cfg(any(test, feature = "test-util"))]
+    let deps = shared.deps.clone().unwrap_or(deps);
 
     let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
     // Named, not started. A shard type's actors are built by the recipe this

@@ -137,6 +137,8 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         model_card_seed: Arc::new(seed),
         anonymous,
         supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
+        // Only exists in a test build; see `Shared::deps`.
+        #[cfg(any(test, feature = "test-util"))]
         deps: None,
         fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
     });
