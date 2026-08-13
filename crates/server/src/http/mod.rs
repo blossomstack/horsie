@@ -493,6 +493,7 @@ mod tests {
             &horsie_support::dial_token::DialClaims {
                 user_id: account.as_str().to_string(),
                 runtime_id: runtime_id.to_string(),
+                incarnation: "i1".to_string(),
             },
         )
     }
@@ -1477,6 +1478,7 @@ mod tests {
             &horsie_support::dial_token::DialClaims {
                 user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
                 runtime_id: "rt-1".to_string(),
+                incarnation: "i1".to_string(),
             },
         );
         let req = Request::builder()
@@ -1657,6 +1659,7 @@ mod tests {
             &horsie_support::dial_token::DialClaims {
                 user_id: crate::auth::UserId::bootstrap().as_str().to_string(),
                 runtime_id: "rt-1".to_string(),
+                incarnation: "i1".to_string(),
             },
         );
         let req = Request::builder()
@@ -2107,6 +2110,7 @@ mod tests {
             &horsie_support::dial_token::DialClaims {
                 user_id: services.user.as_str().to_string(),
                 runtime_id: "s1".to_string(),
+                incarnation: "i1".to_string(),
             },
         );
         let addr = serve_state(state).await;
@@ -2150,6 +2154,7 @@ mod tests {
             &horsie_support::dial_token::DialClaims {
                 user_id: services.user.as_str().to_string(),
                 runtime_id: "mine".to_string(),
+                incarnation: "i1".to_string(),
             },
         );
         let addr = serve_state(state).await;
@@ -2196,6 +2201,7 @@ mod tests {
                 &horsie_support::dial_token::DialClaims {
                     user_id: services.user.as_str().to_string(),
                     runtime_id: "s1".to_string(),
+                    incarnation: "i1".to_string(),
                 },
             );
             let addr = serve_state(state).await;

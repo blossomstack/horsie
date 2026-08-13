@@ -673,6 +673,19 @@ pub struct SessionState {
     /// journal rows load with an empty roster.
     #[serde(default)]
     pub forks: ForkRoster,
+    /// Which provision of this session's runtime is the current one.
+    ///
+    /// Derived from the `ProvisioningStarted` that began it rather than stored
+    /// as its own event: that entry is already journaled exactly once per
+    /// provision, immediately before the vendor is called, so it already *is*
+    /// the fact. Recording it a second time would be two sources for one
+    /// answer, and a journal shape to keep in step.
+    ///
+    /// It has to survive a reload because re-acquiring a sandbox means
+    /// addressing the one already running, and a server that forgot which
+    /// provision that was could not name it.
+    #[serde(default)]
+    pub provisioned_at_ms: Option<u64>,
 }
 
 impl SessionState {

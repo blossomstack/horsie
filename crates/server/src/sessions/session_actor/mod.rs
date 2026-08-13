@@ -486,6 +486,14 @@ impl SessionActor {
         let provider = Arc::new(SessionContextProvider {
             runtimes: self.deps().runtimes.provider(
                 self.id.to_string(),
+                // The provision this run speaks to. A session that has never
+                // provisioned has none, and the empty string is what the
+                // acquisition below will fail on rather than silently
+                // addressing some other sandbox.
+                state
+                    .provisioned_at_ms
+                    .map(|at| at.to_string())
+                    .unwrap_or_default(),
                 self.spec().vendor.clone(),
                 self.spec().clone(),
             ),

@@ -72,23 +72,31 @@ impl RuntimeLifecycle {
                 let vendor = actor.spec().vendor.clone();
                 let spec = actor.spec().clone();
                 let me = actor.me(ctx);
+                // Minted here and journaled below in the same breath, so the
+                // sandbox this create starts and the entry that records it
+                // agree on one name. Reading the clock twice would give the
+                // spawned task an identity the journal never saw.
+                let at_ms = now_ms();
+                let incarnation = at_ms.to_string();
                 // Off the mailbox: a real create runs for minutes, and this
                 // actor has to keep answering reads, stops and deletes
                 // throughout. The status it just journaled is what holds the
                 // turn back meanwhile.
                 tokio::spawn(async move {
-                    let (error, terminal, detail) =
-                        match runtimes.create(&session, &vendor, &spec).await {
-                            Ok(detail) => (None, false, detail),
-                            // Exactly the split `get` makes: only a live vendor
-                            // refusing to produce the runtime is terminal. An
-                            // offline vendor or a failed token mint is a bad
-                            // moment, not a dead session.
-                            Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
-                            Err(
-                                e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)),
-                            ) => (Some(e.to_string()), false, None),
-                        };
+                    let (error, terminal, detail) = match runtimes
+                        .create(&session, &incarnation, &vendor, &spec)
+                        .await
+                    {
+                        Ok(detail) => (None, false, detail),
+                        // Exactly the split `get` makes: only a live vendor
+                        // refusing to produce the runtime is terminal. An
+                        // offline vendor or a failed token mint is a bad
+                        // moment, not a dead session.
+                        Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                        Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
+                            (Some(e.to_string()), false, None)
+                        }
+                    };
                     // Before the outcome, and separately from it: the vendor
                     // described the runtime it accepted, and that sentence
                     // belongs to the wait rather than to how the wait ended.
@@ -105,9 +113,7 @@ impl RuntimeLifecycle {
                         ))
                         .await;
                 });
-                CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted {
-                    at_ms: now_ms(),
-                }])
+                CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted { at_ms }])
             }
             LifecycleCommand::NarrateProvisioning { detail } => {
                 // Only while a create is actually outstanding. A vendor's word
@@ -204,8 +210,13 @@ impl Component for RuntimeLifecycle {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
-            SessionDomainEvent::ProvisioningStarted { .. } => {
+            SessionDomainEvent::ProvisioningStarted { at_ms } => {
                 state.status = SessionStatus::Provisioning;
+                // The identity of this provision, and the reason this arm reads
+                // a field it used to ignore. Every later acquisition addresses
+                // the sandbox this create produced, so the name has to outlive
+                // the create — and a reload.
+                state.provisioned_at_ms = Some(at_ms);
             }
             // Narration: it changes nothing, and the status it is describing
             // was set by the `ProvisioningStarted` before it. Journaled all the
@@ -253,6 +264,32 @@ mod tests {
 
     use std::sync::Arc;
     use uuid::Uuid;
+
+    /// The identity a sandbox is addressed by, recovered from the journal.
+    ///
+    /// It has to come back on a reload: re-acquiring means reaching the sandbox
+    /// this create started, and a server that forgot which provision that was
+    /// would address one that never existed.
+    #[test]
+    fn a_provision_is_named_by_the_entry_that_began_it() {
+        let started = fold(vec![SessionDomainEvent::ProvisioningStarted {
+            at_ms: 1234,
+        }]);
+        assert_eq!(started.provisioned_at_ms, Some(1234));
+    }
+
+    /// And a second provision replaces the first, which is the whole point: a
+    /// sandbox left over from the earlier one answers to a name nothing
+    /// publishes to any more, so it cannot be handed a tool call meant for its
+    /// replacement.
+    #[test]
+    fn provisioning_again_gives_the_session_a_new_name() {
+        let reprovisioned = fold(vec![
+            SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
+            SessionDomainEvent::ProvisioningStarted { at_ms: 2 },
+        ]);
+        assert_eq!(reprovisioned.provisioned_at_ms, Some(2));
+    }
 
     /// A session is `Provisioning` from the moment its create is journaled
     /// until the event that says how the create ended. Nothing else reaches
@@ -691,7 +728,7 @@ mod tests {
         let id = Uuid::new_v4();
         f.deps
             .runtimes
-            .create(&id.to_string(), "mock", &actor_spec_fixture())
+            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
             .await
             .expect("create");
         let provider = BlockingProvider::new();

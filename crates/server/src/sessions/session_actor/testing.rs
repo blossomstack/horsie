@@ -312,7 +312,7 @@ pub(super) async fn spawn_session_with_provider(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -404,7 +404,7 @@ pub(super) async fn spawn_run_with_provider(
     spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
     f.deps
         .runtimes
-        .create(&id.to_string(), "mock", &spec)
+        .create(&id.to_string(), "i1", "mock", &spec)
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -917,7 +917,7 @@ pub(super) async fn stop_harness_full(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
         .await
         .expect("create");
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -1093,7 +1093,7 @@ pub(super) async fn catalog_harness_with(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -1114,6 +1114,7 @@ pub(super) fn catalog_provider(
     SessionContextProvider {
         runtimes: f.deps.runtimes.provider(
             id.to_string(),
+            "i1".to_string(),
             "mock".to_string(),
             crate::sessions::spec::SessionSpec::for_vendor("mock"),
         ),
@@ -1168,7 +1169,7 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "mock", &actor_spec_fixture())
+        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
         .await
         .expect("create");
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -1215,6 +1216,7 @@ pub(super) fn typed_provider(
     SessionContextProvider {
         runtimes: f.deps.runtimes.provider(
             id.to_string(),
+            "i1".to_string(),
             "mock".to_string(),
             crate::sessions::spec::SessionSpec::for_vendor("mock"),
         ),

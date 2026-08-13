@@ -131,6 +131,7 @@ impl RuntimeManager {
     async fn runtime_spec(
         &self,
         session: &str,
+        incarnation: &str,
         spec: &SessionSpec,
     ) -> Result<RuntimeSpec, RuntimeError> {
         let mut rt_spec = RuntimeSpec {
@@ -182,6 +183,11 @@ impl RuntimeManager {
                 &horsie_support::dial_token::DialClaims {
                     user_id: self.deps.account.clone(),
                     runtime_id: session.to_string(),
+                    // Not minted here. A fresh value per call would differ
+                    // between the create that started the sandbox and the
+                    // acquisition that later reaches for it, so the server
+                    // would be addressing a provision that never existed.
+                    incarnation: incarnation.to_string(),
                 },
             ),
         });
@@ -239,11 +245,12 @@ impl RuntimeManager {
     pub async fn create(
         &self,
         session: &str,
+        incarnation: &str,
         vendor: &str,
         spec: &SessionSpec,
     ) -> Result<Option<String>, RuntimeError> {
         let link = self.vendor(vendor)?;
-        let rt_spec = self.runtime_spec(session, spec).await?;
+        let rt_spec = self.runtime_spec(session, incarnation, spec).await?;
         // Not awaited to `Ready`, unlike an acquisition. A create's job is to
         // get the substrate to accept the runtime; the session journals that it
         // happened and the first `get` is what waits for it to come up — a wait
@@ -290,6 +297,7 @@ impl RuntimeManager {
     pub async fn get(
         &self,
         session: &str,
+        incarnation: &str,
         vendor: &str,
         spec: &SessionSpec,
         narrate: Option<NarrationSink>,
@@ -302,7 +310,7 @@ impl RuntimeManager {
         // acquisition failed as "not reachable yet" no matter how long the
         // runtime had been up.
         let (progress, mut rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
-        let rt_spec = self.runtime_spec(session, spec).await?;
+        let rt_spec = self.runtime_spec(session, incarnation, spec).await?;
         let first = link
             .get(session, &rt_spec.to_wire(), progress)
             .await
@@ -431,12 +439,14 @@ impl RuntimeManager {
     pub fn provider(
         self: &Arc<Self>,
         session: String,
+        incarnation: String,
         vendor: String,
         spec: SessionSpec,
     ) -> RuntimeClientProvider {
         RuntimeClientProvider {
             manager: self.clone(),
             session,
+            incarnation,
             vendor,
             spec,
         }
@@ -448,6 +458,10 @@ impl RuntimeManager {
 pub struct RuntimeClientProvider {
     manager: Arc<RuntimeManager>,
     session: String,
+    /// Which provision this provider speaks to. Bound when the provider is
+    /// built rather than read per call, so every acquisition in one run
+    /// addresses the same sandbox even if the session re-provisions beneath it.
+    incarnation: String,
     vendor: String,
     /// Held so an acquisition can carry the spec: the server is the only
     /// durable holder of it, and a vendor keeps no copy on disk.
@@ -461,7 +475,13 @@ impl RuntimeClientProvider {
     /// is `None` for a caller with nowhere to show it.
     pub async fn get(&self, narrate: Option<NarrationSink>) -> Result<RuntimeClient, RuntimeError> {
         self.manager
-            .get(&self.session, &self.vendor, &self.spec, narrate)
+            .get(
+                &self.session,
+                &self.incarnation,
+                &self.vendor,
+                &self.spec,
+                narrate,
+            )
             .await
     }
 }
@@ -547,7 +567,7 @@ mod tests {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let spec = manager
-            .runtime_spec("sess-1", &session_spec("v"))
+            .runtime_spec("sess-1", "i1", &session_spec("v"))
             .await
             .unwrap();
         let token = spec
@@ -566,11 +586,11 @@ mod tests {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let one = manager
-            .runtime_spec("sess-1", &session_spec("v"))
+            .runtime_spec("sess-1", "i1", &session_spec("v"))
             .await
             .unwrap();
         let two = manager
-            .runtime_spec("sess-2", &session_spec("v"))
+            .runtime_spec("sess-2", "i1", &session_spec("v"))
             .await
             .unwrap();
         let token_of = |s: &RuntimeSpec| {
@@ -602,7 +622,7 @@ mod tests {
     async fn unavailable_when_the_vendor_name_is_not_registered() {
         let m = manager(Arc::new(RwLock::new(HashMap::new())));
         let Err(err) = m
-            .get("s1", "nope", &SessionSpec::for_vendor("v"), None)
+            .get("s1", "i1", "nope", &SessionSpec::for_vendor("v"), None)
             .await
         else {
             panic!("an unregistered vendor must not yield a client")
@@ -624,7 +644,10 @@ mod tests {
         // The link notices asynchronously; poll briefly rather than sleep-and-hope.
         let mut err = None;
         for _ in 0..50 {
-            match m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await {
+            match m
+                .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+                .await
+            {
                 Err(RuntimeError::Unavailable(e)) => {
                     err = Some(e);
                     break;
@@ -642,7 +665,10 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
+        let Err(err) = m
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .await
+        else {
             panic!("a get must never provision")
         };
         assert!(
@@ -658,10 +684,10 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
-        m.get("s1", "v", &SessionSpec::for_vendor("v"), None)
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
             .await
             .expect("get after create");
         assert_eq!(
@@ -677,7 +703,7 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
         let sent = agent.last_create_request().expect("create request");
@@ -696,7 +722,7 @@ mod tests {
             name: "RUST_LOG".into(),
             value: "debug".into(),
         });
-        m.create("s1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec).await.expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(
             sent.env
@@ -760,7 +786,7 @@ mod tests {
         }));
         let mut spec = session_spec("v");
         spec.plugins = vec!["superpowers".to_string()];
-        m.create("s1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec).await.expect("create");
 
         let sent = agent.last_create_request().expect("create request");
         let env = |name: &str| {
@@ -835,7 +861,7 @@ mod tests {
                 with: vec![("url".into(), "https://github.com/o/repo.git".into())],
             });
 
-        m.create("s1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec).await.expect("create");
         let env = agent.last_create_request().expect("create request").env;
         assert!(
             !env.iter().any(|e| e.name == "GITHUB_TOKEN"),
@@ -995,7 +1021,7 @@ mod tests {
     async fn an_acquisition_follows_a_booting_runtime_to_ready() {
         let vendor = BootingVendor::ready();
         let m = manager(published_vendor(vendor));
-        m.get("s1", "v", &SessionSpec::for_vendor("v"), None)
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
             .await
             .expect("a runtime that comes up on the sink must be handed back");
     }
@@ -1009,7 +1035,10 @@ mod tests {
             reason: "the machine never dialed back".into(),
         });
         let m = manager(published_vendor(vendor));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
+        let Err(err) = m
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .await
+        else {
             panic!("a runtime reported gone must not yield a client")
         };
         assert!(
@@ -1023,7 +1052,10 @@ mod tests {
     #[tokio::test]
     async fn a_vendor_that_stops_reporting_leaves_the_session_recoverable() {
         let m = manager(published_vendor(BootingVendor::silent()));
-        let Err(err) = m.get("s1", "v", &SessionSpec::for_vendor("v"), None).await else {
+        let Err(err) = m
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .await
+        else {
             panic!("a silent vendor must not yield a client")
         };
         assert!(matches!(err, RuntimeError::Unavailable(_)), "{err:?}");
@@ -1037,7 +1069,7 @@ mod tests {
     async fn a_create_hands_back_what_the_vendor_said_about_the_runtime() {
         let m = manager(published_vendor(BootingVendor::ready()));
         let said = m
-            .create("s1", "v", &session_spec("v"))
+            .create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
         assert_eq!(
@@ -1058,7 +1090,7 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let said = m
-            .create("s1", "v", &session_spec("v"))
+            .create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
         assert_eq!(said, None);
@@ -1079,7 +1111,7 @@ mod tests {
         ]);
         let m = manager(published_vendor(vendor));
         let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
-        m.get("s1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), Some(tx))
             .await
             .expect("get");
 
@@ -1110,7 +1142,7 @@ mod tests {
         )));
         let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
         let _ = m
-            .get("s1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), Some(tx))
             .await;
         let mut said = Vec::new();
         while let Ok(line) = rx.try_recv() {
@@ -1130,11 +1162,12 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
         let provider = m.provider(
             "s1".to_string(),
+            "i1".to_string(),
             "v".to_string(),
             SessionSpec::for_vendor("v"),
         );
