@@ -28,6 +28,9 @@
 //!    carry `SqliteConnectOptions::busy_timeout`. So WAL and the busy timeout
 //!    are set by [`after_connect`] PRAGMAs and `create_if_missing` becomes
 //!    `?mode=rwc` on the URL.
+//! 5. `sqlx-sqlite`'s defaults are not SQLite's: it turns foreign keys *on* for
+//!    every connection. This schema is written as though they are off, so
+//!    [`Db::open`] turns them off again.
 
 pub mod journal;
 #[cfg(test)]
@@ -146,6 +149,19 @@ impl Db {
                         // some builds. `CommandEffect::PersistAndAck` promises
                         // the ack means the event reached the disk.
                         conn.execute("PRAGMA synchronous = FULL").await?;
+                        // Off, and stated rather than assumed: `sqlx-sqlite`
+                        // issues `PRAGMA foreign_keys = ON` on every connection
+                        // it opens unless it is told not to. This schema's only
+                        // `REFERENCES` clauses are the journal's, and nothing
+                        // relies on them firing — `SqlJournal::clear` deletes
+                        // its children itself. What enforcement buys instead is
+                        // that `DROP TABLE` performs an implicit `DELETE`, so
+                        // the create-copy-drop-rename rebuild SQLite forces on
+                        // any table whose constraints change takes every
+                        // referencing row with it. `0035_journal_drop_user.sql`
+                        // did that to `journal_logs` and deleted every event on
+                        // the server it ran on.
+                        conn.execute("PRAGMA foreign_keys = OFF").await?;
                         // `AssertSqlSafe` because sqlx 0.9 wants `'static` SQL:
                         // the only interpolation is our own constant.
                         conn.execute(AssertSqlSafe(format!(
@@ -486,6 +502,60 @@ mod tests {
         assert_eq!(sync, 2, "the ack must mean the write reached the disk");
     }
 
+    /// The rebuild every SQLite migration reaches for — create, copy, drop,
+    /// rename — must not take the rows of the tables that reference the one
+    /// being dropped.
+    ///
+    /// `0035_journal_drop_user.sql` did exactly this to `journal_logs`, which
+    /// `journal_events` and `journal_snapshots` reference `ON DELETE CASCADE`.
+    /// SQLite's `DROP TABLE` performs an implicit `DELETE` that fires those
+    /// cascades whenever `PRAGMA foreign_keys` is on — and sqlx turns it on for
+    /// every connection unless it is told not to, which is the assumption five
+    /// migration comments make and none of them checked. A deployment lost every
+    /// event it had that way while `last_seq` was copied across intact, so every
+    /// actor recovered at sequence 0 and had its first write rejected as a
+    /// conflict, which the write fence turns into a stopped actor.
+    #[tokio::test]
+    async fn rebuilding_a_referenced_table_keeps_the_rows_that_reference_it() {
+        let db = testing::sqlite().await;
+
+        let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            enabled, 0,
+            "this schema's REFERENCES clauses are documentation and a PostgreSQL \
+             backstop; enforcing them on SQLite makes every table rebuild a cascade"
+        );
+
+        let mut tx = db.begin_write().await.unwrap();
+        for statement in [
+            "INSERT INTO journal_logs (log_id, kind, id, last_seq) VALUES (1, 'session', 'x', 1)",
+            "INSERT INTO journal_events (log_id, seq, payload) VALUES (1, 1, x'00')",
+            // The shape of 0024 and 0035, which is the shape of every rebuild
+            // SQLite forces on a table whose constraints have to change.
+            "CREATE TABLE journal_logs_rebuilt (\
+                 log_id INTEGER PRIMARY KEY, kind TEXT NOT NULL, id TEXT NOT NULL, \
+                 last_seq INTEGER NOT NULL DEFAULT 0, UNIQUE (kind, id))",
+            "INSERT INTO journal_logs_rebuilt SELECT log_id, kind, id, last_seq FROM journal_logs",
+            "DROP TABLE journal_logs",
+            "ALTER TABLE journal_logs_rebuilt RENAME TO journal_logs",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let events: i64 = sqlx::query_scalar("SELECT count(*) FROM journal_events")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(
+            events, 1,
+            "an actor's history must survive a rebuild of the table it references"
+        );
+    }
+
     /// The bootstrap account keeps a usable id across the retype — `'1'`, the
     /// text of the integer it had. It is a legitimate id, not a sentinel:
     /// accounts created after this migration get a random one.
@@ -577,11 +647,17 @@ mod tests {
         assert_eq!(seeded, 1, "the seeded space should survive the rebuild");
     }
 
-    /// The journal's children survive their parent's rebuild. Foreign keys are
-    /// never enabled, so `DROP TABLE journal_logs` fires no cascade -- but that
-    /// is a property worth pinning rather than trusting.
+    /// One persistence id is one log row.
+    ///
+    /// This used to be called `rebuilding_the_journal_log_table_keeps_its_events`
+    /// and claimed to pin that a rebuild fires no cascade. It never rebuilt
+    /// anything — it inserted a log and an event and then asserted the unique
+    /// key, which is what the body below still does. The property the name
+    /// promised is pinned by
+    /// `rebuilding_a_referenced_table_keeps_the_rows_that_reference_it`, and was
+    /// false for as long as this test was green.
     #[tokio::test]
-    async fn rebuilding_the_journal_log_table_keeps_its_events() {
+    async fn one_kind_and_id_name_exactly_one_log() {
         let db = testing::db().await;
         sqlx::query(&db.q("INSERT INTO journal_logs (kind, id, last_seq) VALUES (?, ?, ?)"))
             .bind("session")

@@ -429,9 +429,9 @@ impl Journal for SqlJournal {
 
     async fn clear(&self, pid: &PersistenceId) -> JournalResult<()> {
         // Deleted explicitly rather than left to `ON DELETE CASCADE`, which
-        // fires on PostgreSQL and does nothing on SQLite: this server never
-        // enables `PRAGMA foreign_keys` (see `0009_memory.sql`), so the
-        // declaration there is documentation and a PostgreSQL backstop, not a
+        // fires on PostgreSQL and does nothing on SQLite: `Db::open` turns
+        // `PRAGMA foreign_keys` off on every connection, so the declaration in
+        // `0017_journal.sql` is documentation and a PostgreSQL backstop, not a
         // mechanism. Relying on it would leave orphaned events and snapshots on
         // SQLite — invisible, since the next `persist` allocates a fresh
         // `log_id`, and so permanent.
@@ -528,5 +528,62 @@ mod tests {
     fn a_full_chunks_statement_has_one_slot_per_row() {
         let sql = insert_statement(INSERT_CHUNK_ROWS);
         assert_eq!(sql.matches("(?, ?, ?)").count(), INSERT_CHUNK_ROWS);
+    }
+
+    /// SQLite-only, like the other migration tests: it builds the schema by hand
+    /// and applies exactly 0036, which is the repair for a log 0035 emptied.
+    ///
+    /// The three rows are the three shapes a log can be in. Only the first is
+    /// damaged — a compacted log has no events either, and zeroing *its*
+    /// allocator would renumber a history its snapshot still describes.
+    #[tokio::test]
+    async fn migration_0036_zeroes_the_allocator_of_a_log_with_no_history_left() {
+        let pool = &crate::db::testing::unmigrated_sqlite().await;
+
+        for statement in [
+            "CREATE TABLE journal_logs (log_id INTEGER PRIMARY KEY, kind TEXT NOT NULL, \
+             id TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0, UNIQUE (kind, id))",
+            "CREATE TABLE journal_events (log_id INTEGER NOT NULL, seq INTEGER NOT NULL, \
+             payload BLOB NOT NULL, PRIMARY KEY (log_id, seq)) WITHOUT ROWID",
+            "CREATE TABLE journal_snapshots (log_id INTEGER PRIMARY KEY, seq INTEGER NOT NULL, \
+             state BLOB NOT NULL)",
+            "INSERT INTO journal_logs (log_id, kind, id, last_seq) VALUES \
+             (1, 'session-supervisor', 'truncated', 82), \
+             (2, 'session', 'intact', 3), \
+             (3, 'session', 'compacted', 9)",
+            "INSERT INTO journal_events (log_id, seq, payload) VALUES (2, 3, x'00')",
+            "INSERT INTO journal_snapshots (log_id, seq, state) VALUES (3, 9, x'00')",
+        ] {
+            sqlx::query(statement).execute(pool).await.unwrap();
+        }
+
+        sqlx::query(include_str!(
+            "../../migrations/sqlite/0036_journal_repair_truncated.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let rows = sqlx::query("SELECT id, last_seq FROM journal_logs ORDER BY log_id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        let got: Vec<(String, i64)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.try_get::<String, _>("id").unwrap(),
+                    r.try_get::<i64, _>("last_seq").unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("truncated".to_string(), 0),
+                ("intact".to_string(), 3),
+                ("compacted".to_string(), 9),
+            ]
+        );
     }
 }
