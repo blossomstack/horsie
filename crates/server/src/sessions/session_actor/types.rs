@@ -98,7 +98,7 @@ pub enum TurnCommand {
     UserMessage {
         agent_id: Option<String>,
         text: String,
-        reply: ReplyTo<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel the turn in flight. Queued messages are *not* discarded — stop
     /// means "not this turn", not "throw away what I asked for".
@@ -168,6 +168,31 @@ pub enum SubAgentCommand {
     /// under (tree nodes still `Running`). Their runs are over; the parents
     /// are owed the failure like any other terminal result.
     Reconcile,
+}
+
+/// What accepting a message produced.
+///
+/// More than the message's id because one message can do more than queue
+/// itself: `/fork` creates a conversation, and the client has to be told which
+/// one to open. A field rather than a second endpoint, so every client that can
+/// send a message can fork without learning a new call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageAccepted {
+    pub message_id: String,
+    /// The fork this message created. Absent for every ordinary message, which
+    /// is what makes the field additive.
+    pub forked_agent: Option<String>,
+}
+
+impl MessageAccepted {
+    /// An ordinary message, which created no fork.
+    #[must_use]
+    pub fn queued(message_id: String) -> Self {
+        Self {
+            message_id,
+            forked_agent: None,
+        }
+    }
 }
 
 /// Branching a conversation into a second one inside this session.

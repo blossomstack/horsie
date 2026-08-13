@@ -20,7 +20,7 @@
 use crate::sessions::addressing::{SessionRef, SessionShard, SupervisorInbox, SupervisorRef};
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
-    AnswerError, AskAnswer, SessionCommand, SessionSnapshot, SessionUsageStats,
+    AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
     CoreCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
@@ -125,7 +125,7 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         agent_id: Option<String>,
         text: String,
-        reply: ReplyTo<Result<String, UserMessageError>>,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
     /// Cancel the session's turn in flight.
     Stop {

@@ -377,7 +377,13 @@ pub async fn send_message(
     match result {
         // Always accepted, never 409: a turn in flight queues the message and
         // the agent answers it at its next turn boundary.
-        Ok(message_id) => Ok((StatusCode::ACCEPTED, Json(SessionAck { message_id }))),
+        Ok(accepted) => Ok((
+            StatusCode::ACCEPTED,
+            Json(SessionAck {
+                message_id: accepted.message_id,
+                forked_agent: accepted.forked_agent,
+            }),
+        )),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
         Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
