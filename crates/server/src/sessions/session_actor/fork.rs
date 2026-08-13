@@ -56,6 +56,7 @@ impl ForkedAgents {
                     parent,
                     source_seq,
                     mode,
+                    message: message.clone(),
                 };
                 // Persist first, spawn second — see the module doc.
                 let (tx, rx) = oneshot::channel();
@@ -91,23 +92,15 @@ impl ForkedAgents {
                     let _ = reply.send(Err(format!("persist fork: {e}")));
                     return CommandEffect::none();
                 }
-                let Some(agent) = actor.spawn_fork_actor(ctx, state, id) else {
+                if actor.spawn_fork_actor(ctx, state, id).is_none() {
                     let _ = reply.send(Err("could not start the fork".to_string()));
                     return CommandEffect::none();
-                };
-                // The message waits in the fork's own queue while the seed is
-                // built, exactly as a session's first message waits behind its
-                // create. The fork is not ready yet, so nothing drains it.
-                let _ = agent
-                    .tell(AgentCommand::Enqueue {
-                        item: Incoming::User {
-                            id: format!("fork-message:{id}"),
-                            text: message,
-                        },
-                        ack: None,
-                    })
-                    .await;
-                actor.start_seeding(ctx, state, id, parent, mode);
+                }
+                // The message is *not* enqueued here. It rides into the same
+                // write as the seed, because a fork with a message and no
+                // history drains it immediately and answers a conversation it
+                // has not been given yet.
+                actor.start_seeding(ctx, state, id, parent, mode, message);
                 // The id travels now rather than when the seed lands: the
                 // client redirects to a fork that is visibly building itself,
                 // which is exactly what a newly created session does.
@@ -176,8 +169,10 @@ impl ForkedAgents {
             }
             ForkCommand::ReseedInterrupted => {
                 for id in state.forks.seeding() {
-                    let Some((parent, mode)) =
-                        state.forks.get(id).map(|rec| (rec.parent, rec.mode))
+                    let Some((parent, mode, message)) = state
+                        .forks
+                        .get(id)
+                        .map(|rec| (rec.parent, rec.mode, rec.message.clone()))
                     else {
                         continue;
                     };
@@ -187,7 +182,7 @@ impl ForkedAgents {
                         tracing::warn!(fork = %id, "could not restart a fork to re-seed it");
                         continue;
                     }
-                    actor.start_seeding(ctx, state, id, parent, mode);
+                    actor.start_seeding(ctx, state, id, parent, mode, message);
                 }
                 CommandEffect::none()
             }
@@ -229,10 +224,11 @@ impl Component for ForkedAgents {
                 parent,
                 source_seq,
                 mode,
+                message,
                 at_ms,
             } => state
                 .forks
-                .apply_created(id, parent, source_seq, mode, at_ms),
+                .apply_created(id, parent, source_seq, mode, message, at_ms),
             SessionDomainEvent::ForkSeeded { id, .. } => state.forks.apply_seeded(id),
             SessionDomainEvent::ForkTitled { id, name, .. } => state.forks.apply_titled(id, name),
             SessionDomainEvent::ForkStatusChanged { id, status, .. } => {
@@ -315,6 +311,7 @@ impl SessionActor {
         id: Uuid,
         parent: ForkParent,
         mode: ForkMode,
+        message: String,
     ) {
         let (Some(source), Some(fork)) = (
             self.fork_source(state, ctx, parent),
@@ -329,7 +326,13 @@ impl SessionActor {
         let source_title = self.source_title(state, parent);
         let self_ref = self.me(ctx);
         tokio::spawn(async move {
-            let cmd = match seed_fork(&source, &fork, mode, &source_title).await {
+            let queued = Incoming::User {
+                // Derived from the fork's id, not generated: a re-seed after a
+                // crash must produce the same item rather than a second one.
+                id: format!("fork-message:{id}"),
+                text: message,
+            };
+            let cmd = match seed_fork(&source, &fork, mode, &source_title, queued).await {
                 Ok(()) => ForkCommand::Seeded { id },
                 Err(error) => ForkCommand::SeedFailed { id, error },
             };
@@ -371,6 +374,7 @@ async fn seed_fork(
     fork: &ActorRef<AgentCommand>,
     mode: ForkMode,
     source_title: &str,
+    message: Incoming,
 ) -> Result<(), String> {
     let (state, summary) = match mode {
         ForkMode::Copy => {
@@ -403,6 +407,7 @@ async fn seed_fork(
     fork.ask(|reply| AgentCommand::SeedFrom {
         state,
         seed: Box::new(seed),
+        message,
         reply,
     })
     .await
@@ -440,7 +445,7 @@ mod tests {
         let mut state = SessionState::default();
         state
             .forks
-            .apply_created(id(1), ForkParent::Main, 0, ForkMode::Summary, 1);
+            .apply_created(id(1), ForkParent::Main, 0, ForkMode::Summary, "go".into(), 1);
         state.forks.apply_status(id(1), status);
         state
     }
@@ -485,6 +490,7 @@ mod tests {
                 parent: ForkParent::Main,
                 source_seq: 12,
                 mode: ForkMode::Copy,
+                message: "go".into(),
             },
         );
         assert_eq!(
@@ -519,6 +525,199 @@ mod tests {
             },
         );
         assert!(!state.forks.contains(id(1)));
+    }
+
+    // ---- integration, over the real actors ----
+
+    use super::super::testing::{
+        EchoProvider, agent_history, send, spawn_session_with_provider, spawn_sub, wait_for_state,
+    };
+    use crate::sessions::session_actor::{SessionCommand, TurnCommand};
+    use crate::sessions::addressing::SessionRef;
+    use std::sync::Arc;
+
+    /// Type `text` at `agent_id` and hand back what the fork command answered.
+    async fn fork_via(
+        session: &SessionRef,
+        agent_id: Option<String>,
+        text: &str,
+    ) -> Result<String, crate::sessions::UserMessageError> {
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id,
+                    text: text.into(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .map(|a| a.forked_agent.expect("a fork command answers with a fork"))
+    }
+
+    /// Every text an agent's log holds, joined — enough to ask whether the
+    /// conversation came across.
+    async fn transcript(session: &SessionRef, agent_id: Option<String>) -> String {
+        agent_history(session, agent_id)
+            .await
+            .entries
+            .iter()
+            .map(|e| format!("{:?}", e.body))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The whole of `/fork`: the fork exists, carries what was said before it,
+    /// and answers the message that created it.
+    #[tokio::test]
+    async fn a_fork_carries_the_conversation_and_answers_its_own_message() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "the original question").await;
+
+        let fork = fork_via(&session, None, "/fork try the other migration")
+            .await
+            .expect("a fork");
+
+        // Seeded, not merely created: `Idle` is what the seed landing produces,
+        // and it is what releases the message waiting in the fork's queue.
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        let forked = transcript(&session, Some(fork.clone())).await;
+        assert!(
+            forked.contains("the original question"),
+            "a copy fork carries the conversation it came from: {forked}"
+        );
+        assert!(
+            forked.contains("forked from"),
+            "and is told where it came from: {forked}"
+        );
+        assert!(
+            forked.contains("try the other migration"),
+            "and holds the message that created it: {forked}"
+        );
+    }
+
+    /// A summary fork starts small. That is the entire reason to ask for one,
+    /// so the source's messages must *not* be in its log.
+    #[tokio::test]
+    async fn a_summary_fork_does_not_carry_the_source_messages() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "a very long conversation about migrations").await;
+
+        let fork = fork_via(&session, None, "/summary-n-fork now do the other thing")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the summary fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        let forked = transcript(&session, Some(fork.clone())).await;
+        assert!(
+            !forked.contains("a very long conversation about migrations"),
+            "a summary fork discards the history it summarised: {forked}"
+        );
+        assert!(
+            forked.contains("forked from"),
+            "but is still told where it came from: {forked}"
+        );
+    }
+
+    /// The branch point is visible where it happened, so scrolling the source
+    /// shows where each fork left.
+    #[tokio::test]
+    async fn the_source_transcript_records_where_a_fork_left() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "first").await;
+        let fork = fork_via(&session, None, "/fork branch here")
+            .await
+            .expect("a fork");
+
+        for _ in 0..200 {
+            if transcript(&session, None).await.contains(&fork) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the source never recorded the branch: {}",
+            transcript(&session, None).await
+        );
+    }
+
+    /// A subagent's conversation is delegated work, not a branch to take.
+    #[tokio::test]
+    async fn only_a_conversation_can_be_forked() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let sub = spawn_sub(&session, "research", "dig").await;
+
+        let err = fork_via(&session, Some(sub.to_string()), "/fork off you go")
+            .await
+            .expect_err("a subagent cannot be forked");
+        assert!(
+            matches!(err, crate::sessions::UserMessageError::Rejected(ref m)
+                if m.contains("only a conversation")),
+            "{err:?}"
+        );
+    }
+
+    /// A fork with nothing to do is a fork nobody comes back to.
+    #[tokio::test]
+    async fn a_fork_needs_a_message() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let err = fork_via(&session, None, "/fork")
+            .await
+            .expect_err("a bare fork is refused");
+        assert!(
+            matches!(err, crate::sessions::UserMessageError::Rejected(ref m)
+                if m.contains("needs a message")),
+            "{err:?}"
+        );
+    }
+
+    /// Forks nest: a fork of a fork records the fork it came from, not main.
+    #[tokio::test]
+    async fn a_fork_of_a_fork_records_the_fork_it_came_from() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "start").await;
+
+        let first = fork_via(&session, None, "/fork one").await.expect("a fork");
+        let first_id = Uuid::parse_str(&first).unwrap();
+        wait_for_state(&journal, id, "the first fork is seeded", |s| {
+            s.forks
+                .get(first_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        let second = fork_via(&session, Some(first.clone()), "/fork two")
+            .await
+            .expect("a fork of a fork");
+        let second_id = Uuid::parse_str(&second).unwrap();
+        let state = wait_for_state(&journal, id, "the second fork exists", |s| {
+            s.forks.contains(second_id)
+        })
+        .await;
+        assert_eq!(
+            state.forks.get(second_id).unwrap().parent,
+            ForkParent::Fork(first_id),
+            "a fork of a fork is rooted on that fork"
+        );
     }
 
     /// The seed always frames where the fork came from; only a summary fork

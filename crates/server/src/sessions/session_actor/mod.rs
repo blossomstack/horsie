@@ -571,6 +571,15 @@ impl SessionActor {
                 if let Some(resolved) = self.resolve_step(state, ctx, id) {
                     return Some(resolved);
                 }
+                // Before the roster is consulted, because the roster cannot
+                // say what *kind* of agent an id names — forks and subagents
+                // share one map. Answering `Sub` for a fork made a fork of a
+                // fork read as a fork of a subagent, and be refused.
+                if state.forks.contains(id) {
+                    return self
+                        .spawn_fork_actor(ctx, state, id)
+                        .map(|actor| (AgentKey::Fork(id), actor));
+                }
                 if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
                     return Some((AgentKey::Sub(id), agent.actor.clone()));
                 }

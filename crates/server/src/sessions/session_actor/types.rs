@@ -528,9 +528,13 @@ pub enum SessionDomainEvent {
         /// The source agent's log seq at the branch point.
         source_seq: u64,
         mode: ForkMode,
+        /// What the fork was created to do. On the event so a fork abandoned
+        /// mid-seed can be re-seeded with it, rather than coming back idle
+        /// with nothing to answer.
+        message: String,
     },
     /// The fork's initial state is durable, so it may run and the message
-    /// waiting in its queue is released.
+    /// seeded alongside it is drained.
     ForkSeeded {
         at_ms: u64,
         id: Uuid,

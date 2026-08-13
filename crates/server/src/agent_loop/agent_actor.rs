@@ -211,16 +211,22 @@ pub enum AgentCommand {
     /// Summarise this agent's whole history, changing nothing. What
     /// `/summary-n-fork` runs against the conversation it branches from.
     SummariseAll { reply: ReplyTo<Result<String, String>> },
-    /// Adopt `state` as this agent's whole history, then append `seed` as its
-    /// last entry.
+    /// Adopt `state` as this agent's whole history, append `seed` after it, and
+    /// queue `message` — all in one write.
     ///
-    /// Sent once, to a fork, before it has run anything — which is what makes
-    /// replacing state wholesale safe. Journaled as a single event, so the
-    /// fork's own log explains where its history came from rather than a
-    /// snapshot appearing from nowhere.
+    /// Sent once, to a fork, before it has run anything, which is what makes
+    /// replacing state wholesale safe. Journaled as one batch rather than a
+    /// snapshot written behind the actor's back, so the fork's own log explains
+    /// where its history came from.
+    ///
+    /// The message rides along rather than being enqueued separately for two
+    /// reasons, both learned the hard way: enqueued first, the fork drains and
+    /// answers it *before* it has a history; enqueued after, a crash in between
+    /// leaves a seeded fork with nothing to do.
     SeedFrom {
         state: Box<AgentState>,
         seed: Box<Message>,
+        message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
     },
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
@@ -2478,12 +2484,19 @@ impl EventSourcedActor for AgentActor {
                 self.summarise_all(state, reply).await;
                 CommandEffect::none()
             }
-            AgentCommand::SeedFrom { state: seeded, seed, reply } => {
-                // Only ever an agent's first event. A fork is seeded before it
-                // has run anything, so there is no history to merge with and
-                // nothing that could have read the old one.
+            AgentCommand::SeedFrom {
+                state: seeded,
+                seed,
+                message,
+                reply,
+            } => {
+                // Already seeded. Not an error: a process that died between
+                // this write and the session journaling `ForkSeeded` comes back
+                // and re-seeds, and the honest answer is that the work is done.
+                // Saying otherwise would fail a fork that is perfectly fine.
                 if !state.log.is_empty() {
-                    let _ = reply.send(Err("this agent already has a history".to_string()));
+                    let _ = reply.send(Ok(()));
+                    let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
                     return CommandEffect::none();
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2495,12 +2508,24 @@ impl EventSourcedActor for AgentActor {
                     };
                     let _ = reply.send(answer);
                 });
-                CommandEffect::persist(vec![AgentDomainEvent::Seeded { state: seeded, seed }])
-                    .and_ack(ReplyTo::from_sender(tx))
-                    // A whole conversation in one event is exactly the case a
-                    // snapshot exists for: without one, every later recovery
-                    // replays it.
-                    .and_snapshot()
+                // Decided after the write, exactly as `Enqueue` does: the queue
+                // a turn drains has to be the durable one.
+                let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
+                CommandEffect::persist(vec![
+                    AgentDomainEvent::Seeded {
+                        state: seeded,
+                        seed,
+                    },
+                    AgentDomainEvent::Received {
+                        item: message,
+                        at_ms: now_ms(),
+                    },
+                ])
+                .and_ack(ReplyTo::from_sender(tx))
+                // A whole conversation in one event is exactly the case a
+                // snapshot exists for: without one, every later recovery
+                // replays it.
+                .and_snapshot()
             }
             AgentCommand::Shutdown => CommandEffect::stop(),
         }
