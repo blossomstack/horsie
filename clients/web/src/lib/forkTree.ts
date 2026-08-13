@@ -1,7 +1,21 @@
 import type { ForkView } from "../api/types";
 
 /** One fork, placed in the lineage the flat list describes. */
-export type PlacedFork = { fork: ForkView; depth: number };
+export type PlacedFork = {
+  fork: ForkView;
+  depth: number;
+  /**
+   * For each ancestor level, whether that ancestor still has a sibling below
+   * this row — which is exactly what decides between drawing a rail in that
+   * column and leaving it blank. Without it a deep fork's connection to its
+   * grandparent either vanishes or runs through rows that are not its lineage.
+   *
+   * Always `depth` long.
+   */
+  rails: boolean[];
+  /** Whether this is the last child of its parent — an elbow, not a tee. */
+  last: boolean;
+};
 
 /**
  * Flatten a session's forks into render order: each fork immediately after the
@@ -38,21 +52,31 @@ export function forkTree(forks: ForkView[]): PlacedFork[] {
 
   const out: PlacedFork[] = [];
   const seen = new Set<string>();
-  const walk = (parent: string, depth: number) => {
-    for (const fork of byParent.get(parent) ?? []) {
-      if (seen.has(fork.id)) continue;
+  const walk = (parent: string, depth: number, rails: boolean[]) => {
+    // Filtered up front rather than skipped in the loop: `last` is a property
+    // of the rows actually drawn at this level, and a cycle's already-placed
+    // node would otherwise make the final row claim it has a sibling below.
+    const children = (byParent.get(parent) ?? []).filter((f) => !seen.has(f.id));
+    children.forEach((fork, i) => {
+      // The descent below can reach a node between the filter above and here
+      // if the data is not a tree. Kept from the version before rails: this
+      // walks a journal, and placing a row twice is worse than misplacing it.
+      if (seen.has(fork.id)) return;
       seen.add(fork.id);
-      out.push({ fork, depth });
-      walk(fork.id, depth + 1);
-    }
+      const last = i === children.length - 1;
+      out.push({ fork, depth, rails, last });
+      walk(fork.id, depth + 1, [...rails, !last]);
+    });
   };
-  walk("", 0);
+  walk("", 0, []);
 
   // Whatever the descent could not reach — only possible if the data is not a
   // tree. Shown flat, because a conversation nobody can open is worse than one
   // shown in the wrong place.
   for (const fork of forks) {
-    if (!seen.has(fork.id)) out.push({ fork, depth: 0 });
+    if (!seen.has(fork.id)) {
+      out.push({ fork, depth: 0, rails: [], last: true });
+    }
   }
   return out;
 }

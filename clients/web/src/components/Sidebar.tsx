@@ -46,8 +46,9 @@ function PrimaryLink({
       className={({ isActive }) =>
         cn(
           "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors",
+          // Fill only, like every other selected row in the app.
           isActive
-            ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+            ? "bg-raised text-legend"
             : "text-dim hover:bg-raised hover:text-legend",
         )
       }

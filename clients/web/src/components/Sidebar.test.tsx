@@ -36,13 +36,13 @@ vi.mock("../api/client", () => ({
   },
 }));
 
-function renderSidebar() {
+function renderSidebar(at = "/") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[at]}>
         <Sidebar />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -364,6 +364,37 @@ describe("forks in the rail", () => {
     renderSidebar();
 
     expect(await screen.findByText("Untitled fork")).toBeTruthy();
+  });
+
+  /* A fork's route is a descendant of its session's, and a `NavLink` counts a
+     descendant as active. So opening a fork lit both rows and the rail claimed
+     two conversations were on screen at once. */
+  it("marks only the fork as open when a fork is the page", async () => {
+    const s = session("s1");
+    s.forks = [fork("a", undefined, "idle", "branch")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar("/sessions/s1/agents/a");
+
+    const forkRow = await screen.findByTestId("fork-row");
+    expect(forkRow.getAttribute("aria-current")).toBe("page");
+    expect(
+      screen.getByTestId("session-row").getAttribute("aria-current"),
+    ).toBeNull();
+  });
+
+  it("marks the session as open when the session itself is the page", async () => {
+    const s = session("s1");
+    s.forks = [fork("a", undefined, "idle", "branch")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
+    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+    renderSidebar("/sessions/s1");
+
+    const sessionRow = await screen.findByTestId("session-row");
+    expect(sessionRow.getAttribute("aria-current")).toBe("page");
+    expect(
+      screen.getByTestId("fork-row").getAttribute("aria-current"),
+    ).toBeNull();
   });
 
   it("links a fork to its own agent page", async () => {
