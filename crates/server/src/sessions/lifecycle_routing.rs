@@ -10,9 +10,10 @@
 //! that can enumerate it.
 
 use crate::sessions::session_actor::{AgentKey, SessionDomainEvent, SessionState};
+use crate::sessions::forks::ForkParent;
 use crate::sessions::subagents::SubAgentParent;
 use horsie_agentcore::{
-    EmptyOutcome, FailedOutcome, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
+    EmptyOutcome, FailedOutcome, ForkLifecycle, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
     SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TurnEndedLifecycle, TurnOutcome,
 };
 
@@ -169,6 +170,34 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         | E::SubAgentNotified { .. }
         | E::SpecRecorded { .. }
         | E::Renamed { .. } => Vec::new(),
+        // On the conversation that was forked, not in the session-wide log: a
+        // fork of a fork belongs in *that* fork's transcript, where the branch
+        // actually happened. The same rule `SubAgentLifecycle` follows.
+        //
+        // It never reaches the model — `prompt_messages` drops every lifecycle
+        // body — which is deliberate: a fork is for the person reading, and
+        // telling the source about it would disturb its prompt cache for
+        // nothing.
+        E::ForkCreated {
+            id, parent, mode, ..
+        } => vec![(
+            match parent {
+                ForkParent::Main => AgentKey::Main,
+                ForkParent::Fork(pid) => AgentKey::Fork(*pid),
+            },
+            LifecycleEvent::Forked(ForkLifecycle {
+                id: id.to_string(),
+                title: None,
+                mode: mode.as_str().to_string(),
+            }),
+        )],
+        // Nothing in the source's transcript changes when a fork is seeded,
+        // renames itself, moves or goes. Those belong in the fork's own log,
+        // and the session list is where a reader watches them.
+        E::ForkSeeded { .. }
+        | E::ForkTitled { .. }
+        | E::ForkStatusChanged { .. }
+        | E::ForkDeleted { .. } => Vec::new(),
         // Recorded by the agent itself, in its own log, because the agent is
         // what decided them. Routing them from here as well would render the
         // same fact twice. The session keeps its own copy only to move

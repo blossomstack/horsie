@@ -26,6 +26,7 @@ use horsie_actor::ReplyTo;
 mod component;
 mod context;
 mod core;
+mod fork;
 mod hooks;
 mod lifecycle;
 mod reads;
@@ -38,6 +39,7 @@ pub use types::*;
 
 use component::Component;
 use core::SessionCore;
+use fork::ForkedAgents;
 use hooks::{HookRouting, StopHookParent};
 use lifecycle::RuntimeLifecycle;
 use reads::Reads;
@@ -139,7 +141,7 @@ impl SessionAgents {
     fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
         match key {
             AgentKey::Main => self.main(),
-            AgentKey::Sub(id) | AgentKey::Step(id) => self.sub(id),
+            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.sub(id),
         }
     }
 
@@ -151,6 +153,16 @@ impl SessionAgents {
             Self::Workflow { live } => {
                 live.insert(id, agent);
             }
+        }
+    }
+
+    /// Forget one agent, handing it back so the caller can stop it. Only a
+    /// fork's delete uses this: every other agent lives as long as the session
+    /// is loaded, and nothing else removes one on request.
+    fn remove_sub(&mut self, id: Uuid) -> Option<ResidentAgent> {
+        match self {
+            Self::Interactive { subs, .. } => subs.remove(&id),
+            Self::Workflow { live } => live.remove(&id),
         }
     }
 
@@ -415,14 +427,16 @@ impl SessionActor {
         // session's. The revision channel follows the same split.
         let (journal_id, revision) = match plan.kind {
             SessionAgentKind::Main => (self.id, revisions.for_agent(MAIN_AGENT_ID)),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
                 (id, revisions.for_agent(&id.to_string()))
             }
         };
         // Its name under this session, and the id it is addressed by.
         let name = match plan.kind {
             SessionAgentKind::Main => MAIN_AGENT_ID.to_string(),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => id.to_string(),
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
+                id.to_string()
+            }
         };
         let key = plan.kind.agent_key();
         let provider = Arc::new(SessionContextProvider {
@@ -500,7 +514,7 @@ impl SessionActor {
             SessionAgentKind::Main => {
                 self.agents = Some(SessionAgents::interactive(resident.clone()));
             }
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) => {
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
                 if let Some(agents) = self.agents.as_mut() {
                     agents.insert_sub(id, resident.clone());
                 }
@@ -733,6 +747,13 @@ impl SessionActor {
             // cold subagent's does: a boundary can owe a result to a step whose
             // actor has since been unloaded.
             AgentKey::Step(id) => self.resolve_step(state, ctx, id).map(|(_, actor)| actor),
+            // A cold fork, woken to be read or messaged. Nothing comes off a
+            // record here the way a subagent's type does: a fork runs under
+            // the session's own settings, like the conversation it branched
+            // from.
+            AgentKey::Fork(id) => {
+                state.forks.contains(id).then(|| self.spawn_fork_actor(ctx, state, id))?
+            }
             // Spawned at load, so it is either resident or this session is a run
             // and has none.
             AgentKey::Main => None,
@@ -953,6 +974,11 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::SubAgentCompleted { .. }
             | SessionDomainEvent::SubAgentFailed { .. }
             | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
+            SessionDomainEvent::ForkCreated { .. }
+            | SessionDomainEvent::ForkSeeded { .. }
+            | SessionDomainEvent::ForkTitled { .. }
+            | SessionDomainEvent::ForkStatusChanged { .. }
+            | SessionDomainEvent::ForkDeleted { .. } => ForkedAgents::apply(&mut state, &event),
             SessionDomainEvent::UsageRecorded { .. }
             | SessionDomainEvent::SpecRecorded { .. }
             | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
@@ -986,6 +1012,7 @@ impl EventSourcedActor for SessionActor {
             SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
             SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
             SessionCommand::SubAgent(c) => SubAgents::handle(self, state, c, ctx).await,
+            SessionCommand::Fork(c) => ForkedAgents::handle(self, state, c, ctx).await,
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             SessionCommand::Hooks(c) => HookRouting::handle(self, state, c, ctx).await,
             SessionCommand::Core(c) => SessionCore::handle(self, state, c, ctx).await,

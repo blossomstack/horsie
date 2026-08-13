@@ -200,6 +200,29 @@ pub enum AgentCommand {
     /// ordering is the only reason this is a command at all — nothing here is
     /// journaled.
     RecordDelta { text: String },
+    /// Where this agent's log stands. A fork's branch point, read before
+    /// anything is written so the number names the moment the fork was asked
+    /// for rather than the moment its seed happened to be built.
+    LogHead { reply: ReplyTo<u64> },
+    /// This agent's state as a fork's starting point — see
+    /// [`AgentState::scrub_for_fork`]. Read-only: forking changes nothing about
+    /// the conversation being forked.
+    ForkSeed { reply: ReplyTo<Box<AgentState>> },
+    /// Summarise this agent's whole history, changing nothing. What
+    /// `/summary-n-fork` runs against the conversation it branches from.
+    SummariseAll { reply: ReplyTo<Result<String, String>> },
+    /// Adopt `state` as this agent's whole history, then append `seed` as its
+    /// last entry.
+    ///
+    /// Sent once, to a fork, before it has run anything — which is what makes
+    /// replacing state wholesale safe. Journaled as a single event, so the
+    /// fork's own log explains where its history came from rather than a
+    /// snapshot appearing from nowhere.
+    SeedFrom {
+        state: Box<AgentState>,
+        seed: Box<Message>,
+        reply: ReplyTo<Result<(), String>>,
+    },
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
     /// is resident for the session's *loaded* lifetime, not forever, and going
     /// cold must not leave a task behind holding a whole transcript in memory.
@@ -302,6 +325,20 @@ impl ReadOutcome {
 /// (text/tool-input deltas) are emitted to the event sink but never journaled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentDomainEvent {
+    /// This agent was seeded from another conversation: `state` is the history
+    /// it adopts, `seed` the synthetic message appended after it.
+    ///
+    /// One event rather than a snapshot written behind the actor's back, so a
+    /// fork's own journal explains where its history came from. Only ever the
+    /// *first* event an agent has — replacing state wholesale is safe precisely
+    /// because nothing has run.
+    ///
+    /// Boxed: a whole conversation is far larger than any other variant here,
+    /// and an enum is as big as its widest arm.
+    Seeded {
+        state: Box<AgentState>,
+        seed: Box<Message>,
+    },
     InputMessage {
         message: Message,
     },
@@ -706,6 +743,34 @@ impl AgentState {
     ///
     /// The single place a `seq` is handed out, so the fold cannot produce a gap
     /// or a duplicate by accident.
+    /// This conversation as a fork's starting point.
+    ///
+    /// Everything that is *about the conversation* carries; everything that is
+    /// in flight, or is a bill, does not. A fork that inherited an ask would
+    /// park on a question nobody put to it; one that inherited `turn_in_flight`
+    /// would be reported interrupted before it had ever run; one that inherited
+    /// `usage_total` would make the session's aggregate count the same tokens
+    /// twice, once under each conversation.
+    ///
+    /// `next_seq` carries too, so the fork's own entries number on from where
+    /// the copied ones stop and every cursor in the copied log still resolves.
+    #[must_use]
+    pub fn scrub_for_fork(&self) -> Self {
+        Self {
+            log: self.log.clone(),
+            next_seq: self.next_seq,
+            context_tokens: self.context_tokens,
+            task_list: self.task_list.clone(),
+            inbox: Vec::new(),
+            asks: Vec::new(),
+            timers: Vec::new(),
+            parked: false,
+            turn_in_flight: false,
+            usage_total: UsageTotal::default(),
+            last_turn_usage: None,
+        }
+    }
+
     fn push(&mut self, at_ms: u64, body: AgentLogBody) {
         self.log.push(AgentLogEntry {
             seq: self.next_seq,
@@ -1132,6 +1197,32 @@ impl AgentActor {
         }
         self.events_since_snapshot = 0;
         true
+    }
+
+    /// Summarise this agent's whole conversation, off the mailbox.
+    ///
+    /// Detached because it is a provider call: a fork of a long conversation
+    /// takes as long as any other completion, and holding this agent's mailbox
+    /// for it would stall the very conversation being summarised. The session
+    /// keeps itself loaded meanwhile — see `ForkedAgents::busy`.
+    ///
+    /// Nothing is journaled and nothing is streamed. The summary is not this
+    /// agent's turn; it is a reading of it, for somebody else.
+    async fn summarise_all(&mut self, state: &AgentState, reply: ReplyTo<Result<String, String>>) {
+        let context_provider = self.ctx.context_provider.clone();
+        let history = state.prompt_messages();
+        let conversation_id = self.ctx.journal_id.to_string();
+        let thinking_effort = self.params.thinking_effort;
+        tokio::spawn(async move {
+            let answer = summarise_history(
+                context_provider,
+                history,
+                conversation_id,
+                thinking_effort,
+            )
+            .await;
+            let _ = reply.send(answer);
+        });
     }
 
     /// Persist `events`, taking a snapshot too if enough have accrued. The
@@ -1910,6 +2001,10 @@ fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
         | LifecycleEvent::TurnEnded(_)
         | LifecycleEvent::AskRecorded(_)
         | LifecycleEvent::SubAgent(_)
+        // A fork branching off says nothing about *this* agent's runtime:
+        // they share the session's, and it was already up for the fork to
+        // have been taken at all.
+        | LifecycleEvent::Forked(_)
         | LifecycleEvent::Step(_)
         | LifecycleEvent::TaskList(_) => None,
     }
@@ -1991,6 +2086,16 @@ impl EventSourcedActor for AgentActor {
 
     fn apply_event(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
         match event {
+            AgentDomainEvent::Seeded {
+                state: seeded,
+                seed,
+            } => {
+                // Wholesale, because this is the agent's first event: anything
+                // already here would be a bug rather than a history to merge.
+                state = *seeded;
+                let at_ms = seed.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(*seed));
+            }
             AgentDomainEvent::InputMessage { message } => {
                 // A new turn began — the agent is no longer parked.
                 state.parked = false;
@@ -2360,6 +2465,42 @@ impl EventSourcedActor for AgentActor {
                     state,
                 ));
                 CommandEffect::none()
+            }
+            AgentCommand::LogHead { reply } => {
+                let _ = reply.send(state.next_seq);
+                CommandEffect::none()
+            }
+            AgentCommand::ForkSeed { reply } => {
+                let _ = reply.send(Box::new(state.scrub_for_fork()));
+                CommandEffect::none()
+            }
+            AgentCommand::SummariseAll { reply } => {
+                self.summarise_all(state, reply).await;
+                CommandEffect::none()
+            }
+            AgentCommand::SeedFrom { state: seeded, seed, reply } => {
+                // Only ever an agent's first event. A fork is seeded before it
+                // has run anything, so there is no history to merge with and
+                // nothing that could have read the old one.
+                if !state.log.is_empty() {
+                    let _ = reply.send(Err("this agent already has a history".to_string()));
+                    return CommandEffect::none();
+                }
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let answer = match rx.await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(format!("persist the fork's history: {e}")),
+                        Err(_) => Err("the fork's history was never written".to_string()),
+                    };
+                    let _ = reply.send(answer);
+                });
+                CommandEffect::persist(vec![AgentDomainEvent::Seeded { state: seeded, seed }])
+                    .and_ack(ReplyTo::from_sender(tx))
+                    // A whole conversation in one event is exactly the case a
+                    // snapshot exists for: without one, every later recovery
+                    // replays it.
+                    .and_snapshot()
             }
             AgentCommand::Shutdown => CommandEffect::stop(),
         }
@@ -2999,6 +3140,36 @@ const COMPACT_AT_PERCENT: u32 = 80;
 /// Not zero, because a summary alone loses the file path or error the agent was
 /// part-way through, and those live in the last few messages.
 const COMPACT_RETAIN_PERCENT: u32 = 20;
+
+/// Build a throwaway `Agent` over this history and ask it to summarise itself.
+///
+/// A full `provide()` for a call that needs only the provider, because that is
+/// the one way to resolve it — and a fork is seeded once, so the toolbox this
+/// builds and discards costs nothing anybody notices.
+async fn summarise_history(
+    context_provider: Arc<dyn crate::agent_loop::ContextProvider>,
+    history: Vec<Message>,
+    conversation_id: String,
+    thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
+) -> Result<String, String> {
+    let contexts = context_provider
+        .provide()
+        .await
+        .map_err(|e| e.message)?;
+    let agent = Agent::builder(
+        contexts.provider,
+        contexts.toolbox,
+        &conversation_id,
+    )
+    .with_config(AgentConfig {
+        thinking_effort,
+        ..AgentConfig::default()
+    })
+    .with_history(history)
+    .build()
+    .map_err(|e| e.to_string())?;
+    agent.summarise_all(None).await.map_err(|e| e.to_string())
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn run_with_retries(

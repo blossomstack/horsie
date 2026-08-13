@@ -289,6 +289,32 @@ impl Agent {
         .await
     }
 
+    /// Summarise this agent's whole history, changing nothing.
+    ///
+    /// What `/summary-n-fork` runs. Distinct from [`Self::compact`] in the one
+    /// way that matters: no boundary is written and `self.history` is untouched,
+    /// because the conversation being summarised is not the one that receives
+    /// the summary. Folding it back would make the command do two things, only
+    /// one of which was asked for.
+    ///
+    /// Needs no [`CompactionPolicy`] for the same reason: nothing here is
+    /// carried into a rewritten history, so there is no state to render and no
+    /// hook with an opinion about a rewrite that is not happening.
+    ///
+    /// # Errors
+    /// Whatever the summarising provider call fails with. An empty history
+    /// summarises to nothing rather than erroring — a fork of a conversation
+    /// that has not started yet is empty, not broken.
+    pub async fn summarise_all(
+        &self,
+        instructions: Option<&str>,
+    ) -> Result<String, AgentError> {
+        if self.history.is_empty() {
+            return Ok(String::new());
+        }
+        self.summarise(self.history.len(), instructions).await
+    }
+
     /// Summarise everything before the cut and rewrite the history.
     ///
     /// `Ok(())` with nothing done when there is no policy or nothing worth
