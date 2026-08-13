@@ -1851,14 +1851,12 @@ git commit -m "feat(web): nest forks under their session and open a new one"
 - Modify: `crates/server/src/sessions/session_actor/testing.rs` (its fake's impl)
 - Modify: `crates/server/tests/sql_journal.rs` (delete its two tests)
 
-- [ ] **Step 1: Delete `copy_snapshot`**
+- [ ] **Step 1: `copy_snapshot` stays — record why**
 
-Dead code with no call site, whose doc says it exists so "the caller forks a
-session from this snapshot". A fork cannot use it: it must scrub state a
-verbatim copy carries over. Remove the trait method, the `SqlJournal` impl, the
-testing fake's impl, and `copy_snapshot_seeds_new_id` /
-`copy_snapshot_without_source_errors` /
-`a_fork_continues_numbering_from_the_copied_snapshot`.
+It is dead code built for a fork and unusable by one, but it is a *required*
+method on the `Journal` trait in the published `horsie-actor` crate. Deleting it
+means releasing a new actor version, and a feature must not wait on a dependency
+release for a tidy-up. Leave it; note it in the spec and the PR.
 
 - [ ] **Step 2: Full workspace verification**
 

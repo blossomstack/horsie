@@ -291,12 +291,17 @@ because that is the user deciding about the session.
 - **No fork of a subagent or a workflow step.** A subagent's conversation is a
   delegated task, and a step's belongs to the run. Only conversations fork.
 
-## Cleanup
+## Cleanup, deferred
 
-`copy_snapshot` in `crates/server/src/db/journal.rs` is dead code with no call
-site, whose doc comment says it exists so *"the caller forks a session from this
-snapshot"*. It is unusable by an actual fork, which must scrub state a verbatim
-copy carries over. It and its two tests go.
+`copy_snapshot` in `crates/server/src/db/journal.rs` has no call site and says
+in its own doc comment that it exists so *"the caller forks a session from this
+snapshot"*. An actual fork cannot use it — it must scrub state a verbatim copy
+carries over, and a summary fork copies nothing at all — so it stays dead.
+
+It is **not** removed here. It is a required method on the `Journal` trait in
+the published `horsie-actor` crate, so deleting it means releasing a new actor
+version, and a feature should not wait on a dependency release for a tidy-up.
+Worth doing next time `horsie-actor` ships a breaking change.
 
 ## Testing
 
