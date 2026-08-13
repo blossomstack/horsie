@@ -1,5 +1,6 @@
 
 import { AskLifecycle } from './askLifecycle';
+import { CompactionSkippedLifecycle } from './compactionSkippedLifecycle';
 import { ForkLifecycle } from './forkLifecycle';
 import { PreparingLifecycle } from './preparingLifecycle';
 import { QueuedLifecycle } from './queuedLifecycle';
@@ -29,4 +30,5 @@ export type LifecycleEvent =
   | { kind: "Forked"; value: ForkLifecycle }
   | { kind: "Step"; value: StepLifecycle }
   | { kind: "TaskList"; value: TaskListLifecycle }
-  | { kind: "SessionFailed"; value: SessionFailedLifecycle };
+  | { kind: "SessionFailed"; value: SessionFailedLifecycle }
+  | { kind: "CompactionSkipped"; value: CompactionSkippedLifecycle };

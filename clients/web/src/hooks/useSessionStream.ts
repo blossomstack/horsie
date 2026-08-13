@@ -75,6 +75,16 @@ export interface RenderedCompaction {
   atMs: number;
 }
 
+/** A `/compact` that found nothing to fold, as the transcript shows it. */
+export interface RenderedCompactionSkip {
+  /** The prompt size the last provider call reported. */
+  contextTokens: number;
+  /** How much a compaction would have kept verbatim, or `null` when the model
+   * declares no context window and there is no budget to measure against. */
+  retainTokens: number | null;
+  atMs: number;
+}
+
 /** A conversation branched off here, as the transcript shows it. */
 export interface RenderedFork {
   /** The forked agent, which is where the marker links to. */
@@ -88,6 +98,7 @@ export type TranscriptItem =
   | { kind: "message"; value: RenderedMessage }
   | { kind: "notice"; value: RenderedHookNotice }
   | { kind: "compaction"; value: RenderedCompaction }
+  | { kind: "compaction-skipped"; value: RenderedCompactionSkip }
   | { kind: "fork"; value: RenderedFork };
 
 export interface SessionStream {
@@ -632,12 +643,26 @@ export function useSessionStream(
         });
       } else if (
         entry.body.type === "Lifecycle" &&
+        entry.body.value.kind === "CompactionSkipped"
+      ) {
+        // Sits in the transcript for the same reason a fork marker does: it
+        // answers something typed at a point, and the point is the answer.
+        items.push({
+          kind: "compaction-skipped",
+          value: {
+            contextTokens: entry.body.value.value.contextTokens,
+            retainTokens: entry.body.value.value.retainTokens ?? null,
+            atMs: entry.atMs,
+          },
+        });
+      } else if (
+        entry.body.type === "Lifecycle" &&
         entry.body.value.kind === "Forked"
       ) {
-        // The one lifecycle entry the transcript renders. The rest are folded
-        // into status and progress, because they describe the conversation
-        // rather than sitting *in* it — but a branch happened at a point, and
-        // the point is the whole of what it says.
+        // One of the two lifecycle entries the transcript renders. The rest are
+        // folded into status and progress, because they describe the
+        // conversation rather than sitting *in* it — but a branch happened at a
+        // point, and the point is the whole of what it says.
         items.push({
           kind: "fork",
           value: {

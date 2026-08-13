@@ -2929,6 +2929,20 @@ fn page_boundaries(page: &serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The notices saying a typed `/compact` found nothing to fold.
+fn page_compaction_skips(page: &serde_json::Value) -> Vec<serde_json::Value> {
+    page["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a messages page must carry entries: {page}"))
+        .iter()
+        .filter(|e| {
+            e["body"]["type"] == serde_json::json!("Lifecycle")
+                && e["body"]["value"]["kind"] == serde_json::json!("CompactionSkipped")
+        })
+        .map(|e| e["body"]["value"]["value"].clone())
+        .collect()
+}
+
 /// The requirement the whole feature exists for: what the model is handed may
 /// shrink, but what a person can read must not.
 ///
@@ -3084,6 +3098,159 @@ async fn a_typed_compact_command_compacts_without_prompting_the_model() {
         page_messages(&after).len() >= messages_before,
         "and nothing already said was removed"
     );
+
+    server.shutdown().await;
+}
+
+/// `/compact` on a session whose model declares a real context window.
+///
+/// The distinction that hid the bug: with no window there is no retain budget,
+/// so the cut lands on the last boundary and something is always folded. Every
+/// deployed model declares one — 1M-token windows give a 200k retain budget —
+/// so a session of a few thousand tokens fits entirely, the cut lands on index
+/// 0, and the command did nothing *and said nothing*. Doing nothing is right;
+/// the silence was the bug. The test above cannot see this, because its one
+/// configuration is the one where a cut is always available.
+#[tokio::test]
+async fn a_typed_compact_command_with_nothing_to_fold_says_so() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("an answer to the first thing");
+    mock.queue_response("an answer to the second thing");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    // Large enough that this session is nowhere near either the 80% auto
+    // trigger or the 20% retain budget.
+    let server = start_server_on(
+        tmp.path(),
+        Some(agent.link()),
+        provider_at(&mock.url()),
+        None,
+        Some(1_000_000),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    assert!(
+        send_message(&client, &server.addr, &id, "the second thing I asked")
+            .await
+            .is_success()
+    );
+    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
+
+    assert!(
+        send_message(&client, &server.addr, &id, "/compact")
+            .await
+            .is_success()
+    );
+
+    let mut notices = Vec::new();
+    for _ in 0..200 {
+        let page = messages_page(&client, &server.addr, &id, "main").await;
+        notices = page_compaction_skips(&page);
+        if !notices.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(notices.len(), 1, "the command must be answered");
+    assert_eq!(
+        notices[0]["retainTokens"],
+        serde_json::json!(200_000),
+        "and say what the conversation was measured against: {:?}",
+        notices[0]
+    );
+
+    let page = messages_page(&client, &server.addr, &id, "main").await;
+    assert!(
+        page_boundaries(&page).is_empty(),
+        "nothing was folded: the conversation already fits, and summarising it \
+         would trade real messages for room that was never scarce"
+    );
+    // The queue held exactly two answers. A third provider call — a summariser
+    // nobody needed — would have found it empty.
+    assert!(
+        page_messages(&page).iter().any(|m| serde_json::to_string(m)
+            .unwrap_or_default()
+            .contains("the first thing")),
+        "and the history it declined to fold is still there"
+    );
+
+    server.shutdown().await;
+}
+
+/// A `/compact` is not a turn, so it has no input message to journal.
+///
+/// It used to write one anyway: with nothing typed and no results owed, the
+/// turn fell through to `AgentInput::tool_results(vec![])`, whose own contract
+/// says empty is meaningless. That produced a `role: Tool` message with no
+/// parts, which the turn itself ignored but which folded into the log — so
+/// every *later* turn carried an empty tool message in its prompt.
+#[tokio::test]
+async fn a_compact_only_turn_journals_no_empty_input_message() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("an answer to the first thing");
+    mock.queue_response("an answer to the second thing");
+    mock.queue_response("a summary written on request");
+    mock.queue_response("an answer after the compaction");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server_on(
+        tmp.path(),
+        Some(agent.link()),
+        provider_at(&mock.url()),
+        None,
+        None,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    assert!(
+        send_message(&client, &server.addr, &id, "the second thing I asked")
+            .await
+            .is_success()
+    );
+    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
+
+    assert!(
+        send_message(&client, &server.addr, &id, "/compact")
+            .await
+            .is_success()
+    );
+    for _ in 0..200 {
+        if !page_boundaries(&messages_page(&client, &server.addr, &id, "main").await).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let empty: Vec<_> = page_messages(&page)
+        .iter()
+        .filter(|m| m["parts"].as_array().is_some_and(std::vec::Vec::is_empty))
+        .cloned()
+        .collect();
+    assert!(
+        empty.is_empty(),
+        "the compaction turn journaled a message with no parts: {empty:?}"
+    );
+
+    // And the session still runs: the next turn's prompt is well-formed.
+    assert!(
+        send_message(&client, &server.addr, &id, "the third thing I asked")
+            .await
+            .is_success()
+    );
+    wait_for_reply(&client, &server.addr, &id, "an answer after the compaction").await;
 
     server.shutdown().await;
 }

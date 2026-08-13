@@ -2,6 +2,7 @@
 package events;
 
 use agent.AgentInput;
+use agent.CompactionSkippedLifecycle;
 use agent.CompactionTrigger;
 use agent.Message;
 use agent.Usage;
@@ -86,6 +87,13 @@ struct CompactedEvent {
     at_ms: u64,
 }
 
+/// A compaction that was asked for and folded nothing. Carries the same
+/// account the journaled lifecycle entry does, because it becomes one.
+struct CompactionSkippedEvent {
+    detail: CompactionSkippedLifecycle,
+    at_ms: u64,
+}
+
 /// All events emitted during agent execution.
 ///
 /// Flow per assistant turn:
@@ -116,4 +124,5 @@ union AgentEvent {
     RunComplete(RunCompleteEvent),
     RunAborted(RunAbortedEvent),
     Compacted(CompactedEvent),
+    CompactionSkipped(CompactionSkippedEvent),
 }
