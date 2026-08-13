@@ -2836,15 +2836,23 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
             .then_some(())
     })
     .await;
-    // The ordinary session goes cold on the same tick, and its offload signal
-    // is independent of this run's: `last_activity` is a map keyed by session
-    // uuid, so which of the two hibernates first is effectively random per run.
-    // Waiting for both is what makes the snapshot below a picture of a settled
-    // system rather than of a race — without it, `hibernate:{plain}` landing a
-    // moment late is indistinguishable from the list request having woken
-    // something, and the assertion blames the wrong thing.
-    wait_for_signal(&agent, &format!("hibernate:{plain}")).await;
-    let before = agent.signals();
+    // Only this run's signals, on both sides of the request. The other session
+    // goes cold on the same tick and its offload lands independently — and may
+    // not land at all, since `offload_idle` skips a session still `Running` or
+    // `Provisioning` and the test fires exactly one tick. Comparing whole
+    // signal vectors therefore failed for a reason the assertion then
+    // misreported as "listing woke a run".
+    //
+    // Filtering to `id` is also the property this test is named for: a cold
+    // *run* must survive being listed without its vendor hearing anything.
+    let signals_for_run = |agent: &FakeRuntimeVendor| -> Vec<String> {
+        agent
+            .signals()
+            .into_iter()
+            .filter(|s| s.ends_with(&format!(":{id}")))
+            .collect()
+    };
+    let before = signals_for_run(&agent);
 
     let res = client
         .get(format!("{base}/api/sessions?workflow=e2e-flow"))
@@ -2873,7 +2881,7 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
         "the filter must leave out everything that is not a run of it: {body}"
     );
     assert_eq!(
-        agent.signals(),
+        signals_for_run(&agent),
         before,
         "listing runs woke one, which re-attempts its provision"
     );
