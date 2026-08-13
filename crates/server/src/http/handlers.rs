@@ -64,6 +64,18 @@ pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
         last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
+        forks: rec.forks.iter().map(wire_fork).collect(),
+    }
+}
+
+/// One fork row, for the session list.
+fn wire_fork(row: &crate::sessions::supervisor::ForkRow) -> horsie_models::session::ForkView {
+    horsie_models::session::ForkView {
+        id: row.id.to_string(),
+        parent: row.parent.map(|p| p.to_string()),
+        title: row.title.clone(),
+        status: wire_agent_status(row.status).to_string(),
+        created_at_ms: row.created_at_ms,
     }
 }
 
@@ -121,6 +133,7 @@ pub async fn create_session(
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Provisioning,
+        forks: Vec::new(),
     };
     Ok((
         StatusCode::CREATED,

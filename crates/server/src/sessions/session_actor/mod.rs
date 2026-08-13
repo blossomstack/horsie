@@ -55,7 +55,7 @@ use crate::sessions::{
     ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
-    supervisor::SessionSupervisorCommand,
+    supervisor::{ForkRow, SessionSupervisorCommand},
     workflow::WorkflowRunState,
 };
 use crate::users::{UserRegistry, UserServices, resolve};
@@ -234,6 +234,9 @@ pub struct SessionActor {
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
     last_reported: Option<SessionStatus>,
+    /// The same, for the fork roster. Empty until it has reported once — which
+    /// costs nothing, because a session with no forks reports none either way.
+    last_reported_forks: Vec<ForkRow>,
 }
 
 impl SessionActor {
@@ -251,6 +254,7 @@ impl SessionActor {
             supervisor,
             agents: None,
             last_reported: None,
+            last_reported_forks: Vec::new(),
         }
     }
 
@@ -390,6 +394,45 @@ impl SessionActor {
     ///
     /// `None` at load, so a freshly recovered session always reports once —
     /// which is the moment anyone can first learn its status.
+    /// Tell the supervisor what forks this session now holds, so the session
+    /// list can nest them without loading it.
+    ///
+    /// The whole roster every time, and the supervisor drops a report that
+    /// changed nothing. A projection built from the current value cannot drift
+    /// the way one built from deltas can — and `List` is documented to load
+    /// nothing, so a sidebar that could not read this from the registry could
+    /// not show forks at all without waking every session that has one.
+    async fn report_forks(&mut self, state: &SessionState) {
+        if state.forks.is_empty() && self.last_reported_forks.is_empty() {
+            return;
+        }
+        let forks: Vec<ForkRow> = state
+            .forks
+            .iter()
+            .map(|(id, rec)| ForkRow {
+                id: *id,
+                parent: match rec.parent {
+                    crate::sessions::forks::ForkParent::Main => None,
+                    crate::sessions::forks::ForkParent::Fork(pid) => Some(pid),
+                },
+                title: rec.title.clone(),
+                status: rec.status,
+                created_at_ms: rec.created_at_ms,
+            })
+            .collect();
+        if forks == self.last_reported_forks {
+            return;
+        }
+        self.last_reported_forks = forks.clone();
+        let _ = self
+            .supervisor
+            .tell(SessionSupervisorCommand::ForksChanged {
+                id: self.id.to_string(),
+                forks,
+            })
+            .await;
+    }
+
     async fn report_status(&mut self, state: &SessionState) {
         if self.last_reported.as_ref() == Some(&state.status) {
             return;
@@ -1004,6 +1047,7 @@ impl EventSourcedActor for SessionActor {
     /// copy can lag the journal, never lead it.
     async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
         self.record_lifecycle(events, state).await;
+        self.report_forks(state).await;
         self.report_status(state).await;
     }
 

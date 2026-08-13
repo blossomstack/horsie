@@ -227,6 +227,16 @@ pub enum SessionSupervisorCommand {
         name: String,
         reply: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
+    /// Internal: a session actor reports what forks it now holds.
+    ///
+    /// The whole roster rather than a delta, for the same reason
+    /// [`Self::SessionStatusChanged`] sends the whole status: the session's own
+    /// journal is the truth, this is a projection of it, and a projection built
+    /// from deltas can drift where one built from the current value cannot.
+    ForksChanged {
+        id: SessionId,
+        forks: Vec<ForkRow>,
+    },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
     /// Rename a session on someone's behalf rather than the agent's.
@@ -311,6 +321,11 @@ pub enum SessionSupervisorEvent {
     GroupDeleted {
         name: String,
     },
+    /// A session's forks, as the list now holds them.
+    SessionForksChanged {
+        id: SessionId,
+        forks: Vec<ForkRow>,
+    },
     /// Merge-update of one session's annotations: `set` upserts, `remove` drops.
     SessionAnnotationsSet {
         id: SessionId,
@@ -382,6 +397,25 @@ fn group_exists(state: &SessionSupervisorState, name: &str) -> bool {
             .any(|rec| rec.annotations.get("group").is_some_and(|g| g == name))
 }
 
+/// One fork under a session, as the session list holds it.
+///
+/// A projection of the session's own `ForkRecord`, not a second source of
+/// truth — the same relationship `SessionRecord.status` has to the session's
+/// journal, and durable for the same reason: `List` loads nothing, so what it
+/// cannot read from the registry it cannot show at all.
+///
+/// `parent: None` means the session's main agent. Flattening `ForkParent` to an
+/// `Option` here is what lets a client nest forks without learning the server's
+/// own vocabulary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForkRow {
+    pub id: Uuid,
+    pub parent: Option<Uuid>,
+    pub title: Option<String>,
+    pub status: crate::sessions::session_actor::AgentStatus,
+    pub created_at_ms: u64,
+}
+
 /// One registry row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -399,6 +433,10 @@ pub struct SessionRecord {
     /// is never less accurate than the truth it projects.
     #[serde(default)]
     pub status: SessionStatus,
+    /// This session's forks, so the sidebar can nest them without loading the
+    /// session. `#[serde(default)]` so pre-fork journal rows load with none.
+    #[serde(default)]
+    pub forks: Vec<ForkRow>,
 }
 
 /// One registered group. Registration is optional metadata: a group can exist
@@ -662,6 +700,7 @@ impl EventSourcedActor for SessionSupervisor {
                         // can run anything, and creating one is the first thing
                         // it is asked to do.
                         status: SessionStatus::Provisioning,
+                        forks: Vec::new(),
                     },
                 );
             }
@@ -671,6 +710,11 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorEvent::SessionNamed { id, name } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
                     rec.spec.name = Some(name);
+                }
+            }
+            SessionSupervisorEvent::SessionForksChanged { id, forks } => {
+                if let Some(rec) = state.sessions.get_mut(&id) {
+                    rec.forks = forks;
                 }
             }
             SessionSupervisorEvent::SessionStatusChanged { id, status } => {
@@ -1097,6 +1141,18 @@ impl EventSourcedActor for SessionSupervisor {
                             status,
                         }])
                     }
+                    _ => CommandEffect::none(),
+                }
+            }
+            SessionSupervisorCommand::ForksChanged { id, forks } => {
+                // Idempotent, exactly as `SessionStatusChanged` is: a session
+                // reports after every persisted batch and once more at load, so
+                // only a real change is worth a write. Without this, a busy
+                // session with one fork would journal a row here per batch.
+                match state.sessions.get(&id) {
+                    Some(rec) if rec.forks != forks => CommandEffect::persist(vec![
+                        SessionSupervisorEvent::SessionForksChanged { id, forks },
+                    ]),
                     _ => CommandEffect::none(),
                 }
             }
@@ -1694,6 +1750,104 @@ mod tests {
             f.agent.signals(),
             before,
             "loading a session to read it must not touch its runtime"
+        );
+    }
+
+    /// Poll the list until the session shows at least one fork.
+    async fn wait_for_forks(sup: &SupervisorRef, id: &SessionId) {
+        for _ in 0..200 {
+            let rows = sup
+                .ask(|reply| SessionSupervisorCommand::List { reply })
+                .await
+                .unwrap();
+            if rows
+                .iter()
+                .any(|(row_id, rec)| row_id == id && !rec.forks.is_empty())
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("session {id} never listed a fork");
+    }
+
+    /// The sidebar is built from the durable registry — `List` is documented
+    /// "Loads nothing". Deriving fork rows from session state instead would
+    /// wake every session that has ever been forked, every time the app opens.
+    #[tokio::test]
+    async fn forks_are_listed_without_loading_the_session() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let id = create(&sup).await;
+        let fork = Uuid::from_bytes([7; 16]);
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: vec![ForkRow {
+                id: fork,
+                parent: None,
+                title: Some("Other migration".into()),
+                status: crate::sessions::session_actor::AgentStatus::Idle,
+                created_at_ms: 5,
+            }],
+        })
+        .await
+        .unwrap();
+        wait_for_forks(&sup, &id).await;
+
+        // A second supervisor over the same journal, which has loaded nothing.
+        let cold = f.supervisor().await;
+        let listed = cold
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let (_, rec) = listed.iter().find(|(s, _)| *s == id).expect("the session");
+        assert_eq!(rec.forks.len(), 1);
+        assert_eq!(rec.forks[0].id, fork);
+        assert_eq!(rec.forks[0].title.as_deref(), Some("Other migration"));
+    }
+
+    /// A session reports its whole roster after every persisted batch. Writing
+    /// a row for each would journal one per batch for the life of the session.
+    #[tokio::test]
+    async fn re_reporting_the_same_forks_journals_nothing() {
+        let f = fixture().await;
+        let journal = f.journal();
+        let sup = f.supervisor().await;
+        let id = create(&sup).await;
+        let rows = vec![ForkRow {
+            id: Uuid::from_bytes([7; 16]),
+            parent: None,
+            title: None,
+            status: crate::sessions::session_actor::AgentStatus::Idle,
+            created_at_ms: 5,
+        }];
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: rows.clone(),
+        })
+        .await
+        .unwrap();
+        wait_for_forks(&sup, &id).await;
+        let pid = PersistenceId::new(SUPERVISOR_KIND, sup.account().as_str());
+        let after_first = journal.last_seq(&pid).await.unwrap();
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: rows,
+        })
+        .await
+        .unwrap();
+        // Round-trip something else so the repeat has definitely been handled.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.last_seq(&pid).await.unwrap(),
+            after_first,
+            "an unchanged roster is not worth a write"
         );
     }
 
