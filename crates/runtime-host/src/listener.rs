@@ -32,10 +32,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{accept_hdr_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
-/// How long a runtime may spend in provision steps (e.g. cloning) between its
-/// Provisioning announce and Ready before the link is dropped.
-const PROVISION_WINDOW: Duration = Duration::from_secs(900);
-
 /// How long a peer may take to complete the WebSocket handshake. Bounded so a
 /// connection that never speaks costs one task, not a listener.
 const HANDSHAKE_WINDOW: Duration = Duration::from_secs(10);
@@ -192,25 +188,20 @@ pub async fn handle_runtime_connection<S>(
 {
     let (sink, mut stream) = ws.split();
 
-    enum Handshake {
-        Ready(String),
-        Provisioning(String),
-    }
-
-    // First message must arrive within a bounded window so a peer that connects
-    // but never announces itself can't leak this task forever.
+    // The handshake is one message now. It used to have a second phase, because
+    // a runtime announced `Provisioning` and then cloned repositories for up to
+    // fifteen minutes before it could say `Ready` — and the only way it could
+    // report a failed clone was a `ProvisionFailed` frame on this same link.
+    // Provisioning is a request the server issues after the handshake, so a
+    // runtime now announces itself as soon as its loop is running.
     let first = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match stream.next().await {
                 Some(Ok(Message::Text(text))) => {
-                    match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
-                        Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                            return Some(Handshake::Ready(ev.runtime_id));
-                        }
-                        Ok(RuntimeOutboundMessage::Provisioning(ev)) => {
-                            return Some(Handshake::Provisioning(ev.runtime_id));
-                        }
-                        _ => {}
+                    if let Ok(RuntimeOutboundMessage::Ready(ev)) =
+                        serde_json::from_str::<RuntimeOutboundMessage>(&text)
+                    {
+                        return Some(ev.runtime_id);
                     }
                 }
                 _ => return None,
@@ -220,42 +211,7 @@ pub async fn handle_runtime_connection<S>(
     .await;
 
     let runtime_id = match first {
-        Ok(Some(Handshake::Ready(id))) => id,
-        Ok(Some(Handshake::Provisioning(id))) => {
-            // Provision phase: wait (much longer) for Ready or ProvisionFailed.
-            let outcome = tokio::time::timeout(PROVISION_WINDOW, async {
-                loop {
-                    match stream.next().await {
-                        Some(Ok(Message::Text(text))) => {
-                            match serde_json::from_str::<RuntimeOutboundMessage>(&text) {
-                                Ok(RuntimeOutboundMessage::Ready(ev)) => {
-                                    return Ok(ev.runtime_id);
-                                }
-                                Ok(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
-                                    return Err(ev.message);
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => return Err("runtime disconnected during provisioning".to_string()),
-                    }
-                }
-            })
-            .await;
-            match outcome {
-                Ok(Ok(ready)) => ready,
-                Ok(Err(message)) => {
-                    registry.fail_pending(&id, message).await;
-                    return;
-                }
-                Err(_) => {
-                    registry
-                        .fail_pending(&id, "timed out during provisioning".to_string())
-                        .await;
-                    return;
-                }
-            }
-        }
+        Ok(Some(id)) => id,
         // Timed out, stream closed, or garbage before an announce — drop the link.
         Ok(None) | Err(_) => return,
     };

@@ -333,7 +333,11 @@ mod tests {
     #[tokio::test]
     async fn a_reserved_env_var_name_is_rejected() {
         let s = service().await;
-        for reserved in ["HORSIE_PROVISION", "HORSIE_ANYTHING", "GIT_CONFIG_COUNT"] {
+        for reserved in [
+            "HORSIE_CONNECT_TOKEN",
+            "HORSIE_ANYTHING",
+            "GIT_CONFIG_COUNT",
+        ] {
             let mut i = input("a", "fly");
             i.env_vars = Some(vec![EnvVar {
                 name: reserved.into(),

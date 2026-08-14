@@ -559,7 +559,6 @@ mod tests {
             workspaces: vec![crate::runtime_vendor::WorkspaceSpec {
                 name: "main".to_string(),
             }],
-            provision: vec![],
             env: vec![],
         }
     }

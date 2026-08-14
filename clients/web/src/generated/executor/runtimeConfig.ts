@@ -1,6 +1,5 @@
 
 import { EnvVar } from './envVar';
-import { ProvisionStep } from './provisionStep';
 import { WorkspaceConfig } from './workspaceConfig';
 /**
  * Runtime configuration
@@ -19,11 +18,6 @@ export interface RuntimeConfig {
    * allowlist on conflict. Empty injects nothing.
    */
   env: EnvVar[];
-  /**
-   * Setup steps the runtime executes before the agent loop (vendor-injected
-   * into the child via the HORSIE_PROVISION env var). Empty runs nothing.
-   */
-  provision: ProvisionStep[];
   /**
    * Where the runtime mirrors its per-agent cwd/env map, so a respawn
    * resumes with it intact. Set only by a vendor that can respawn a runtime;

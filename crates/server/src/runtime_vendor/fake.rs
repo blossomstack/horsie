@@ -38,8 +38,12 @@ struct Recorder {
     scans: std::sync::atomic::AtomicUsize,
     live: Mutex<BTreeSet<String>>,
     /// The most recent create request, so a test can assert what the server
-    /// actually put on the wire (workspaces, env, provision steps).
+    /// actually put on the wire (workspaces, env).
     last_create: Mutex<Option<WireRuntimeSpec>>,
+    /// Every `ProvisionWorkspace` the server sent, as the step names it asked
+    /// for. A list rather than a count because the interesting assertion is
+    /// that an acquisition sends one *each time*, with the same steps.
+    provisions: Mutex<Vec<Vec<String>>>,
     /// Remaining attach failures to inject, and whether creates fail.
     gone_on_get: Mutex<bool>,
     tool_calls: Mutex<usize>,
@@ -327,6 +331,16 @@ impl FakeRuntimeVendor {
     pub fn cancelled_calls(&self) -> Vec<String> {
         self.recorder
             .cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The step names of every `ProvisionWorkspace` the server sent, in order.
+    #[must_use]
+    pub fn provision_requests(&self) -> Vec<Vec<String>> {
+        self.recorder
+            .provisions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -803,6 +817,23 @@ async fn run_agent<S>(
                         // One-way by protocol: no reply.
                         None
                     }
+                    RuntimeInboundMessage::ProvisionWorkspace(req) => {
+                        let applied: Vec<String> =
+                            req.steps.iter().map(|s| s.name.clone()).collect();
+                        recorder
+                            .provisions
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(applied.clone());
+                        Some(RuntimeOutboundMessage::ProvisionResult(
+                            horsie_models::runtime::ProvisionWorkspaceResponse {
+                                call_id: req.call_id,
+                                result: horsie_models::runtime::ProvisionResult::Ok(
+                                    horsie_models::runtime::ProvisionOk { applied },
+                                ),
+                            },
+                        ))
+                    }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
                         recorder
                             .scans
@@ -936,7 +967,6 @@ pub fn runtime_spec_fixture(workspace: &str) -> RuntimeSpec {
         workspaces: vec![WorkspaceSpec {
             name: workspace.to_string(),
         }],
-        provision: vec![],
         env: vec![],
     }
 }

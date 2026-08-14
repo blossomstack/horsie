@@ -844,7 +844,6 @@ impl RuntimeVendorClient {
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
             env,
-            provision: request.provision.clone(),
             // Only worth mirroring if this runtime can come back: for anyone
             // else the file would outlive nothing.
             state_file: self

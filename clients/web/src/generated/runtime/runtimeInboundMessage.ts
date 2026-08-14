@@ -3,6 +3,7 @@ import { CancelCallRequest } from './cancelCallRequest';
 import { McpDiscoverRequest } from './mcpDiscoverRequest';
 import { McpInvokeRequest } from './mcpInvokeRequest';
 import { PingRequest } from './pingRequest';
+import { ProvisionWorkspaceRequest } from './provisionWorkspaceRequest';
 import { RunHooksRequest } from './runHooksRequest';
 import { ScanRequest } from './scanRequest';
 import { ToolCallRequest } from './toolCallRequest';
@@ -13,4 +14,5 @@ export type RuntimeInboundMessage =
   | { type: "RunHooks"; value: RunHooksRequest }
   | { type: "McpDiscover"; value: McpDiscoverRequest }
   | { type: "McpInvoke"; value: McpInvokeRequest }
-  | { type: "Ping"; value: PingRequest };
+  | { type: "Ping"; value: PingRequest }
+  | { type: "ProvisionWorkspace"; value: ProvisionWorkspaceRequest };

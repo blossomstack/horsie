@@ -40,9 +40,6 @@ struct RuntimeConfig {
     /// Applied after the sandbox env scrub, so injection wins over the ambient
     /// allowlist on conflict. Empty injects nothing.
     env: Vec<EnvVar>,
-    /// Setup steps the runtime executes before the agent loop (vendor-injected
-    /// into the child via the HORSIE_PROVISION env var). Empty runs nothing.
-    provision: Vec<ProvisionStep>,
     /// Where the runtime mirrors its per-agent cwd/env map, so a respawn
     /// resumes with it intact. Set only by a vendor that can respawn a runtime;
     /// absent keeps that state in memory for the life of the process.

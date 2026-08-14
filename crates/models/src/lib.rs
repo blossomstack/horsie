@@ -242,11 +242,6 @@ pub mod routines {
     include!(concat!(env!("OUT_DIR"), "/routines/mod.rs"));
 }
 
-/// Env var carrying the provision-steps JSON a vendor injects into a runtime
-/// child. Read by `horsie-runtime` at startup; written by the executor
-/// providers from `RuntimeConfig.provision`.
-pub const ENV_PROVISION: &str = "HORSIE_PROVISION";
-
 /// The bearer a runtime presents on its dial-back, minted by whoever spawned it
 /// for that runtime's id alone.
 ///

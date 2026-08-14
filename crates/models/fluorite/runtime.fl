@@ -1,6 +1,7 @@
 /// Protocol types for executor ↔ runtime communication
 package runtime;
 
+use executor.ProvisionStep;
 use hooks.HookRecord;
 
 // --- Tool inputs ---
@@ -258,6 +259,33 @@ struct RunHooksResponse { call_id: String, records: Vec<HookRecord> }
 struct ToolCallRequest  { call_id: String, agent_id: String, call: ToolCall }
 struct CancelCallRequest { call_id: String }
 
+/// Bring this runtime's workspaces to the state `steps` describes.
+///
+/// A request rather than a boot phase. As a phase it had no caller: nothing
+/// could time it, retry it, or run it a second time, and the only way to report
+/// a failure was for the runtime to exit. It is also why `Ready` used to assert
+/// three separate things at once, of which this was the one most likely to have
+/// gone wrong.
+///
+/// Idempotent, which is what lets the server send it on every acquisition
+/// rather than remembering whether it already did. A `git_checkout` over a
+/// directory that already holds that checkout does nothing. The server cannot
+/// know whether a hibernated runtime kept its workspace; the runtime always can.
+struct ProvisionWorkspaceRequest { call_id: String, steps: Vec<ProvisionStep> }
+
+/// The steps that ran, in order. Named rather than counted so a failure says
+/// which step failed and leaves the ones before it known to have applied.
+struct ProvisionOk { applied: Vec<String> }
+struct ProvisionError { reason: String }
+
+/// Fail-whole: a workspace that is only partly built is not a workspace an
+/// agent can be pointed at, and every later failure would be a confusing
+/// consequence of this one.
+#[type_tag = "status"]
+union ProvisionResult { Ok(ProvisionOk), Err(ProvisionError) }
+
+struct ProvisionWorkspaceResponse { call_id: String, result: ProvisionResult }
+
 /// Asks the runtime what it is currently executing.
 ///
 /// A liveness call, and the only request in this protocol with a bound the
@@ -274,6 +302,7 @@ union RuntimeInboundMessage {
     McpDiscover(McpDiscoverRequest),
     McpInvoke(McpInvokeRequest),
     Ping(PingRequest),
+    ProvisionWorkspace(ProvisionWorkspaceRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -292,17 +321,14 @@ struct ToolCallResponse {
     hooks: Vec<HookRecord>,
 }
 
-/// First message the runtime sends after connecting.
+/// First message the runtime sends after connecting, and the only one it sends
+/// unprompted.
+///
+/// Asserts one thing: the process is up, confined, and listening. It used to
+/// assert three — that provisioning had also been attempted and had also
+/// succeeded — which is why a session whose checkout silently failed was
+/// indistinguishable from one that never had a checkout to do.
 struct RuntimeReady { runtime_id: String }
-
-/// Announces that the runtime is executing provision steps before Ready. The
-/// executor extends its handshake deadline and expects Ready or
-/// ProvisionFailed next on this connection.
-struct RuntimeProvisioning { runtime_id: String }
-
-/// Provision steps failed; the runtime exits after sending this. `message` is
-/// surfaced as the create/attach failure reason.
-struct RuntimeProvisionFailed { runtime_id: String, message: String }
 
 /// Every request this runtime is currently executing, by call id.
 ///
@@ -317,9 +343,8 @@ struct PongResponse { call_id: String, in_flight: Vec<String> }
 #[type_tag = "type"]
 union RuntimeOutboundMessage {
     Ready(RuntimeReady),
-    Provisioning(RuntimeProvisioning),
-    ProvisionFailed(RuntimeProvisionFailed),
     ToolCallResponse(ToolCallResponse),
+    ProvisionResult(ProvisionWorkspaceResponse),
     ScanResult(ScanResponse),
     HookRecords(RunHooksResponse),
     McpTools(McpDiscoverResponse),

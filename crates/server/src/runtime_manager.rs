@@ -83,8 +83,6 @@ enum Awaited {
     Substrate(horsie_runtime_host::RuntimeProgress),
     /// The runtime announced itself on its out topic.
     Dialled,
-    /// The runtime came up, ran its provision steps, and failed them.
-    ProvisionFailed(String),
     /// The out topic itself ended, so nothing can ever be observed on it.
     TopicClosed,
 }
@@ -221,6 +219,32 @@ impl RuntimeManager {
         Ok(link)
     }
 
+    /// The session's provision steps in the shape the runtime protocol speaks.
+    ///
+    /// A conversion rather than one shared type: `ProvisionStepSpec` is
+    /// persisted with the session and evolves at the speed of a migration, while
+    /// the wire type evolves at the speed of the protocol. Conflating them is
+    /// how one ends up gating the other.
+    fn wire_steps(
+        steps: &[crate::sessions::spec::ProvisionStepSpec],
+    ) -> Vec<horsie_models::executor::ProvisionStep> {
+        steps
+            .iter()
+            .map(|s| horsie_models::executor::ProvisionStep {
+                name: s.name.clone(),
+                uses: s.uses.clone(),
+                with: s
+                    .with
+                    .iter()
+                    .map(|(k, v)| horsie_models::executor::StepParam {
+                        key: k.clone(),
+                        value: v.clone(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// Assemble the vendor-facing spec.
     ///
     /// Re-assembled on every create rather than cached. Nothing in here is
@@ -238,22 +262,6 @@ impl RuntimeManager {
                 .iter()
                 .map(|w| WorkspaceSpec {
                     name: w.name.clone(),
-                })
-                .collect(),
-            provision: spec
-                .provision
-                .iter()
-                .map(|s| horsie_models::executor::ProvisionStep {
-                    name: s.name.clone(),
-                    uses: s.uses.clone(),
-                    with: s
-                        .with
-                        .iter()
-                        .map(|(k, v)| horsie_models::executor::StepParam {
-                            key: k.clone(),
-                            value: v.clone(),
-                        })
-                        .collect(),
                 })
                 .collect(),
             // The environment's variables first; the server pushes its own
@@ -437,7 +445,21 @@ impl RuntimeManager {
             )
             .await?;
         let slot = self.slot(session, incarnation, &transport);
-        Ok(Self::client(session, transport, slot.in_flight.clone()))
+        let client = Self::client(session, transport, slot.in_flight.clone());
+
+        // Every acquisition, not only the first. The steps are idempotent, and
+        // this is the one party that cannot know whether a hibernated runtime
+        // kept its workspace — a Fly machine with a volume did, a rebuilt velos
+        // container did not, and the vendor contract deliberately does not say
+        // which. So it asks rather than remembering, and the runtime answers
+        // from the only place the truth lives.
+        if !spec.provision.is_empty() {
+            client
+                .provision_workspace(Self::wire_steps(&spec.provision))
+                .await
+                .map_err(|e| RuntimeError::Provision(e.to_string()))?;
+        }
+        Ok(client)
     }
 
     fn vendor_error(e: RuntimeVendorError) -> RuntimeError {
@@ -471,7 +493,7 @@ impl RuntimeManager {
         dialled: &mut crate::bus::Reader<horsie_models::runtime::RuntimeOutboundMessage>,
         narrate: Option<&NarrationSink>,
     ) -> Result<Arc<dyn horsie_runtime_host::RuntimeTransport>, RuntimeError> {
-        use Awaited::{Dialled, ProvisionFailed, Substrate, TopicClosed};
+        use Awaited::{Dialled, Substrate, TopicClosed};
         use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
         let mut progress = first;
@@ -544,9 +566,6 @@ impl RuntimeManager {
                                 // somebody else's request. Only the handshake
                                 // ends the wait.
                                 Some(RuntimeOutboundMessage::Ready(_)) => return Dialled,
-                                Some(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
-                                    return ProvisionFailed(ev.message);
-                                }
                                 Some(_) => continue,
                                 None => return TopicClosed,
                             }
@@ -568,7 +587,6 @@ impl RuntimeManager {
                     .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
                     return Ok(Arc::new(transport));
                 }
-                Ok(ProvisionFailed(message)) => return Err(RuntimeError::Provision(message)),
                 Ok(Substrate(next)) => next,
                 // The out topic ended. Nothing the runtime says can be observed
                 // any more, so waiting out the window would prove nothing.
@@ -1356,39 +1374,215 @@ mod tests {
         }
     }
 
-    /// Provisioning that fails is the runtime's own news too, and it is terminal
-    /// for this attempt: the machine is up, so nothing about the substrate will
-    /// ever explain why the session cannot run.
+    /// A session with steps to run has them run on *every* acquisition, not just
+    /// the first.
+    ///
+    /// The server deliberately keeps no memory of having provisioned. It cannot:
+    /// a Fly machine with a volume keeps its workspace across a hibernate and a
+    /// rebuilt velos container does not, and the vendor contract does not say
+    /// which happened. So it asks each time and the steps absorb the repeat.
     #[tokio::test]
-    async fn a_runtime_that_fails_its_provision_steps_fails_the_acquisition() {
-        let bus: Arc<dyn crate::bus::Bus> = Arc::new(crate::bus::MemoryBus::new());
-        let m = manager_on(published_vendor(BootingVendor::silent()), bus.clone());
-        let acquiring = tokio::spawn({
-            let m = m.clone();
-            async move {
-                m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-                    .await
-            }
-        });
+    async fn every_acquisition_provisions_the_workspace() {
+        let handle = Arc::new(ProvisionRecorder::default());
+        let vendors = published_vendor(WarmVendor::over(handle.clone()));
+        let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
+        let spec = spec_with_checkout();
 
-        tokio::time::sleep(SETTLE).await;
-        crate::bus::topics::runtime_out(bus.clone(), "acct-1", "s1", "i1")
-            .publish(&RuntimeOutboundMessage::ProvisionFailed(
-                horsie_models::runtime::RuntimeProvisionFailed {
-                    runtime_id: "s1".to_string(),
-                    message: "git_checkout: repository not found".to_string(),
-                },
-            ))
+        for _ in 0..2 {
+            m.get("s1", "i1", "v", &spec, false, None)
+                .await
+                .expect("acquiring a runtime that is already up");
+        }
+
+        assert_eq!(
+            handle.provisions(),
+            vec![
+                vec!["checkout repo".to_string()],
+                vec!["checkout repo".to_string()]
+            ],
+            "each acquisition sends its own ProvisionWorkspace, with the same steps"
+        );
+    }
+
+    /// A session with nothing to check out sends nothing. Provisioning is a real
+    /// round trip, and an empty one would cost every plain session a relay.
+    #[tokio::test]
+    async fn a_session_with_no_steps_sends_no_provision_request() {
+        let handle = Arc::new(ProvisionRecorder::default());
+        let vendors = published_vendor(WarmVendor::over(handle.clone()));
+        let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
+
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
-            .expect("publishing a provision failure");
+            .expect("acquiring");
 
-        let Err(err) = acquiring.await.expect("the acquiring task") else {
+        assert!(handle.provisions().is_empty());
+    }
+
+    /// A failed step fails the acquisition. Fail-whole: a workspace that is only
+    /// partly built is not one an agent can be pointed at, and every later
+    /// failure would be a confusing consequence of this one.
+    #[tokio::test]
+    async fn a_failed_step_fails_the_acquisition_with_its_own_reason() {
+        let handle = Arc::new(ProvisionRecorder::failing(
+            "git_checkout: repository not found",
+        ));
+        let vendors = published_vendor(WarmVendor::over(handle));
+        let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
+
+        let Err(err) = m
+            .get("s1", "i1", "v", &spec_with_checkout(), false, None)
+            .await
+        else {
             panic!("a failed provision must not yield a client")
         };
         assert!(
             matches!(&err, RuntimeError::Provision(m) if m.contains("repository not found")),
             "the runtime's own reason has to survive: {err:?}"
         );
+    }
+
+    fn spec_with_checkout() -> SessionSpec {
+        SessionSpec {
+            provision: vec![crate::sessions::spec::ProvisionStepSpec {
+                name: "checkout repo".to_string(),
+                uses: "git_checkout".to_string(),
+                with: vec![("url".to_string(), "file:///fixture".to_string())],
+            }],
+            ..SessionSpec::for_vendor("v")
+        }
+    }
+
+    /// A vendor whose runtime is already up, and stays up.
+    ///
+    /// Answers `Ready(transport)` as its *return value* on every acquisition, so
+    /// the manager takes the vendor-owns-the-pipe path and never waits on the
+    /// bus. `BootingVendor` cannot stand in: it drains its outcome list per call,
+    /// so a second acquisition would be told nothing and would wait out the whole
+    /// acquisition window.
+    struct WarmVendor(Arc<dyn horsie_runtime_host::RuntimeTransport>);
+
+    impl WarmVendor {
+        fn over(transport: Arc<dyn horsie_runtime_host::RuntimeTransport>) -> Arc<Self> {
+            Arc::new(Self(transport))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime_vendor::RuntimeVendor for WarmVendor {
+        fn name(&self) -> &str {
+            "warm"
+        }
+        fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+            horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+                supports_provisioning: true,
+            }
+        }
+        async fn create(
+            &self,
+            _: &str,
+            _: &horsie_models::runtime_vendor::RuntimeSpec,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Ready(self.0.clone()))
+        }
+        async fn get(
+            &self,
+            _: &str,
+            _: &horsie_models::runtime_vendor::RuntimeSpec,
+            _: bool,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Ready(self.0.clone()))
+        }
+        async fn hibernate(
+            &self,
+            _: &str,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Stopped)
+        }
+        async fn delete(
+            &self,
+            _: &str,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Gone {
+                reason: "deleted".into(),
+            })
+        }
+    }
+
+    /// A transport that answers `ProvisionWorkspace` and records what it was
+    /// asked, so a test can see the request the manager actually sent rather
+    /// than infer it from a side effect.
+    #[derive(Default)]
+    struct ProvisionRecorder {
+        seen: std::sync::Mutex<Vec<Vec<String>>>,
+        /// When set, every provision fails with this reason.
+        fail: Option<String>,
+    }
+
+    impl ProvisionRecorder {
+        fn failing(reason: &str) -> Self {
+            Self {
+                seen: std::sync::Mutex::new(Vec::new()),
+                fail: Some(reason.to_string()),
+            }
+        }
+
+        fn provisions(&self) -> Vec<Vec<String>> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl horsie_runtime_host::RuntimeTransport for ProvisionRecorder {
+        async fn relay(
+            &self,
+            message: horsie_models::runtime::RuntimeInboundMessage,
+        ) -> Result<
+            horsie_models::runtime::RuntimeOutboundMessage,
+            horsie_runtime_host::TransportError,
+        > {
+            match message {
+                horsie_models::runtime::RuntimeInboundMessage::ProvisionWorkspace(req) => {
+                    let applied: Vec<String> = req.steps.iter().map(|s| s.name.clone()).collect();
+                    self.seen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(applied.clone());
+                    let result = match &self.fail {
+                        Some(reason) => horsie_models::runtime::ProvisionResult::Err(
+                            horsie_models::runtime::ProvisionError {
+                                reason: reason.clone(),
+                            },
+                        ),
+                        None => horsie_models::runtime::ProvisionResult::Ok(
+                            horsie_models::runtime::ProvisionOk { applied },
+                        ),
+                    };
+                    Ok(
+                        horsie_models::runtime::RuntimeOutboundMessage::ProvisionResult(
+                            horsie_models::runtime::ProvisionWorkspaceResponse {
+                                call_id: req.call_id,
+                                result,
+                            },
+                        ),
+                    )
+                }
+                _ => Err(horsie_runtime_host::TransportError::Disconnected),
+            }
+        }
+        async fn send_oneway(
+            &self,
+            _: horsie_models::runtime::RuntimeInboundMessage,
+        ) -> Result<(), horsie_runtime_host::TransportError> {
+            Ok(())
+        }
     }
 
     /// What a create knows and used to throw away. The substrate has just

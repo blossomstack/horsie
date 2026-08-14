@@ -1,9 +1,11 @@
 use async_trait::async_trait;
+use horsie_models::executor::ProvisionStep;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
     CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, PingRequest,
-    RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
-    ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
+    ProvisionResult, ProvisionWorkspaceRequest, RunHooksRequest, RuntimeInboundMessage,
+    RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent, ToolCall, ToolCallRequest,
+    ToolResult,
 };
 use thiserror::Error;
 
@@ -72,8 +74,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -105,8 +106,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -127,6 +127,36 @@ pub trait RuntimeTransport: Send + Sync {
     /// by the vendor link's table, not by one here.
     async fn abandon(&self, call_id: &str) {
         let _ = call_id;
+    }
+
+    /// Bring the workspaces to the state `steps` describes.
+    ///
+    /// Bounded by the steps themselves and never by a deadline here: a clone of
+    /// a large repository and a checkout that is already present ride this same
+    /// call, which is precisely the spread the reconciler exists to handle.
+    async fn provision_workspace(
+        &self,
+        call_id: &str,
+        steps: Vec<ProvisionStep>,
+    ) -> Result<ProvisionResult, TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::ProvisionWorkspace(
+                ProvisionWorkspaceRequest {
+                    call_id: call_id.to_string(),
+                    steps,
+                },
+            ))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::ProvisionResult(resp) => Ok(resp.result),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::HookRecords(_)
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a workspace provision")),
+        }
     }
 
     /// Scan the selected workspaces (`workspace`: `None` = all, `Some(name)` = one),
@@ -154,8 +184,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -183,8 +212,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -206,8 +234,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::McpTools(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -233,8 +260,7 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
             RuntimeOutboundMessage::Ready(_)
-            | RuntimeOutboundMessage::Provisioning(_)
-            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -287,11 +313,12 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::McpDiscover(req) => &req.call_id,
         RuntimeInboundMessage::McpInvoke(req) => &req.call_id,
         RuntimeInboundMessage::Ping(req) => &req.call_id,
+        RuntimeInboundMessage::ProvisionWorkspace(req) => &req.call_id,
     }
 }
 
-/// The request this reply answers, or `None` for the handshake messages a runtime
-/// sends unprompted.
+/// The request this reply answers, or `None` for the one message a runtime sends
+/// unprompted.
 #[must_use]
 pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
     match message {
@@ -301,9 +328,8 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::McpTools(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::McpResult(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Pong(resp) => Some(&resp.call_id),
-        RuntimeOutboundMessage::Ready(_)
-        | RuntimeOutboundMessage::Provisioning(_)
-        | RuntimeOutboundMessage::ProvisionFailed(_) => None,
+        RuntimeOutboundMessage::ProvisionResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::Ready(_) => None,
     }
 }
 

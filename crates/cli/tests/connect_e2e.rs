@@ -213,7 +213,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: dial_env("rt-1"),
-                provision: vec![],
             },
         }),
     )
@@ -268,7 +267,6 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
             spec: RuntimeSpec {
                 workspaces: vec!["nope".to_string()],
                 env: dial_env("rt-2"),
-                provision: vec![],
             },
         }),
     )
@@ -355,7 +353,6 @@ async fn a_runtime_survives_restarting_the_agent() {
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: dial_env("rt-1"),
-                provision: vec![],
             },
         }),
     )
@@ -410,7 +407,6 @@ async fn a_runtime_survives_restarting_the_agent() {
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: dial_env("rt-1"),
-                provision: vec![],
             },
         }),
     )
@@ -557,7 +553,6 @@ async fn runtimes_die_with_the_agent() {
             spec: RuntimeSpec {
                 workspaces: vec!["main".to_string()],
                 env: dial_env("rt-1"),
-                provision: vec![],
             },
         }),
     )

@@ -8,9 +8,10 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, PluginSkill, PongResponse, RunHooksResponse,
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse,
-    ToolError, ToolOutput, ToolResult, WorkspaceScan,
+    McpDiscoverResponse, McpInvokeResponse, PluginSkill, PongResponse, ProvisionOk,
+    ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse, ToolError, ToolOutput,
+    ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
@@ -389,6 +390,22 @@ impl RuntimeTransport for MockTransport {
                     result,
                     hooks: self.hooks.clone(),
                 }))
+            }
+            RuntimeInboundMessage::ProvisionWorkspace(req) => {
+                // Behind the same gate the scan uses: both are session
+                // preparation, and a test that wants to observe one mid-flight
+                // wants the same handle for the other.
+                if let Some(gate) = &self.prep_gate {
+                    gate.notified().await;
+                }
+                Ok(RuntimeOutboundMessage::ProvisionResult(
+                    ProvisionWorkspaceResponse {
+                        call_id: req.call_id,
+                        result: ProvisionResult::Ok(ProvisionOk {
+                            applied: req.steps.iter().map(|s| s.name.clone()).collect(),
+                        }),
+                    },
+                ))
             }
             RuntimeInboundMessage::ScanWorkspace(req) => {
                 if let Some(gate) = &self.prep_gate {

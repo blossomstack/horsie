@@ -137,14 +137,6 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
                 self.settings.workspace_root.trim_end_matches('/')
             ),
         );
-        // Encoding cannot fail for this type, and a container with no provision
-        // steps is a working container — so a failure drops the steps rather
-        // than the runtime.
-        if !spec.provision.is_empty()
-            && let Ok(json) = serde_json::to_string(&spec.provision)
-        {
-            env.insert(horsie_models::ENV_PROVISION.to_string(), json);
-        }
         Ok(ContainerLaunchSpec {
             image: self.settings.image.clone(),
             command: build_runtime_command(
@@ -440,7 +432,6 @@ mod tests {
         RuntimeSpec {
             workspaces: vec!["main".to_string()],
             env: vec![],
-            provision: vec![],
         }
     }
 
@@ -709,29 +700,6 @@ mod tests {
         assert!(
             !argv.contains("acct.s1.deadbeef"),
             "argv is readable by any process through ps"
-        );
-    }
-
-    #[test]
-    fn provision_steps_ride_the_environment() {
-        let v = vendor(FakeVelos::default());
-        let launch = v
-            .launch_spec(
-                "s1",
-                &RuntimeSpec {
-                    provision: vec![horsie_models::executor::ProvisionStep {
-                        name: "checkout".to_string(),
-                        uses: "git_checkout".to_string(),
-                        with: vec![],
-                    }],
-                    ..spec()
-                },
-            )
-            .unwrap();
-        assert!(
-            launch.env[horsie_models::ENV_PROVISION].contains("git_checkout"),
-            "{:?}",
-            launch.env
         );
     }
 

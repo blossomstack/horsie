@@ -1,6 +1,5 @@
 
 import { EnvVar } from '../executor';
-import { ProvisionStep } from '../executor';
 /**
  * Everything the server can supply about a runtime. Deliberately minimal:
  * anything the vendor knows better (workspace paths, plugin unpack dirs,
@@ -23,8 +22,4 @@ export interface RuntimeSpec {
    * is fetched by the runtime against that token instead.
    */
   env: EnvVar[];
-  /**
-   * Setup steps the runtime executes before its message loop.
-   */
-  provision: ProvisionStep[];
 }
