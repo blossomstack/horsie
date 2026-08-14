@@ -42,35 +42,41 @@ export function CollapsibleText({
   const clamped = overflows && !open;
 
   return (
+    // The control lives *inside* the block it opens, bottom right, over the
+    // fade. Below it, it read as a detached strip under the message rather than
+    // part of it. `paddingBottom` is inline because it has to beat whatever
+    // padding the caller's class list already sets — that is a specificity
+    // fight a utility class does not reliably win.
     <div className="relative">
       <div
         ref={body}
         data-testid="collapsible-body"
         className={cn("overflow-hidden", className)}
-        style={clamped ? { maxHeight } : undefined}
+        style={{
+          maxHeight: clamped ? maxHeight : undefined,
+          paddingBottom: overflows ? "1.75rem" : undefined,
+        }}
       >
         {children}
       </div>
       {clamped && (
-        // The fade says the text continues; the button says what to do about
-        // it. Without the fade a clamp reads as a message that ends mid-word.
+        // The fade says the text continues. Without it a clamp reads as a
+        // message that ends mid-word.
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-[var(--radius-control)] bg-[linear-gradient(to_top,var(--panel-raised),transparent)]"
+          className="pointer-events-none absolute inset-x-px bottom-px h-14 rounded-b-[var(--radius-control)] bg-[linear-gradient(to_top,var(--panel-raised),transparent)]"
         />
       )}
       {overflows && (
-        <div className="flex justify-end">
-          <button
-            type="button"
-            data-testid="expand-text"
-            className="legend relative px-2 py-1 hover:!text-legend"
-            aria-expanded={open}
-            onClick={() => setOpen((v) => !v)}
-          >
-            {open ? "Less" : "More"}
-          </button>
-        </div>
+        <button
+          type="button"
+          data-testid="expand-text"
+          className="legend absolute bottom-1.5 right-3 px-1.5 py-0.5 hover:!text-legend"
+          aria-expanded={open}
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? "Less" : "More"}
+        </button>
       )}
     </div>
   );
