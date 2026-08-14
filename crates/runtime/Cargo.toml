@@ -26,7 +26,14 @@ clap          = { version = "4", features = ["derive"] }
 tracing       = { workspace = true }
 async-trait   = { workspace = true }
 regex         = "1"
+# Ignore-aware traversal for grep/glob/list_files: standard filters (hidden,
+# .gitignore, .ignore, .git/info/exclude, global excludes) decide what the
+# walkers visit, and globset applies the user's pattern as a second-stage
+# filter over the base-relative path. glob stays for scan.rs, which reads
+# hidden skill directories and is deliberately not ignore-aware.
 glob          = "0.3"
+ignore        = "0.4"
+globset       = "0.4"
 # killpg(2) on timeout: SIGKILL the command's process group, not just bash.
 libc          = "0.2"
 base64        = { workspace = true }
