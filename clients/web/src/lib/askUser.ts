@@ -3,14 +3,6 @@
  * `ASK_USER_TOOL` in `server/src/sessions/ask_tool.rs`. */
 export const ASK_USER_TOOL = "ask_user";
 
-/** A workflow step's terminal tool — kept in sync with `CONCLUDE_TOOL`.
- *
- * A step never gets `ask_user`: naming it beside `conclude` would stop the agent
- * loop treating `conclude` as terminal. A step asks through
- * `conclude({kind: "ask", question})` instead, which is why asking is not one
- * tool name here but two shapes. */
-export const CONCLUDE_TOOL = "conclude";
-
 /** The tool call's input, as the model supplies it. */
 export interface AskInput {
   question?: string;
@@ -24,15 +16,14 @@ export function askInputOf(input: unknown): AskInput {
 
 /** Whether this tool call is a question put to the user.
  *
- * `ask_user` always is. `conclude` is only when it carries a question — the same
- * tool submits a step's output, and that call is not an ask. Without this a
- * parked step's question rendered as a collapsed `conclude` row with no answer
- * box, so the run could not be unblocked from the browser at all. */
-export function isAskCall(name: string, input: unknown): boolean {
-  if (name === ASK_USER_TOOL) return true;
-  if (name !== CONCLUDE_TOOL) return false;
-  const asked = askInputOf(input);
-  return typeof asked.question === "string" && asked.question.length > 0;
+ * The tool's name answers it, for every kind of agent. This used to have to
+ * sniff the payload as well, because a workflow step asked through its
+ * finishing tool rather than through `ask_user` — so a parked step's question
+ * rendered as a collapsed row with no answer box, and the run could not be
+ * unblocked from the browser at all. A step asks with `ask_user` now, like
+ * everything else. */
+export function isAskCall(name: string, _input?: unknown): boolean {
+  return name === ASK_USER_TOOL;
 }
 
 /** The answer text sent to the model: picked labels joined, then any free text.

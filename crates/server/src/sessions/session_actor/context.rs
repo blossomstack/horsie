@@ -9,7 +9,7 @@
 //! One type serves all three kinds of agent a session hosts — main, subagent
 //! and workflow step — because they differ only in which layers they get.
 //! [`SessionAgentKind`] is what decides: the session-metadata tools are
-//! main-only, `conclude` is step-only, and preparation progress is broadcast
+//! main-only, `submit_result` is step-only, and preparation progress is broadcast
 //! for everything except a subagent, which is quiet by design.
 
 use super::CoreCommand;

@@ -36,9 +36,6 @@ export type Segment =
  * them — collapse into one `work` segment. A question always breaks the run
  * and renders standalone: a pending question must never be hidden inside a
  * collapsed group, and an answered one is the record that a human was asked.
- *
- * What counts as a question is `isAskCall`, not the `ask_user` name: a
- * workflow step has no `ask_user` and asks through `conclude` instead.
  */
 export function buildSegments(
   msgs: RenderedMessage[],

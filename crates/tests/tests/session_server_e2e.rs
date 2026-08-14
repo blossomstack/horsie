@@ -2890,6 +2890,111 @@ async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &st
     assert_eq!(res.status().as_u16(), 201, "create the definition");
 }
 
+/// Branching, over the wire: the same graph takes a different edge for a
+/// different outcome.
+///
+/// This is the one test that proves the schema compilation, the submitted
+/// result and the driver agree — a step declares `p0`/`p2`, the model picks
+/// one, and the run goes where the definition says it should. Everything else
+/// exercises one of the three in isolation.
+#[tokio::test]
+async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://{}", server.addr);
+    define_e2e_workflow(&client, &base, &mock.url()).await;
+
+    let res = client
+        .post(format!("{base}/api/workflows"))
+        .json(&serde_json::json!({
+            "name": "e2e-branch",
+            "start": "triage",
+            "steps": [
+                {
+                    "name": "triage", "agent": "wf-step", "prompt": "Triage it.",
+                    "outcomes": [
+                        {"value": "p0", "description": "drop everything"},
+                        {"value": "p2", "description": "file it"},
+                    ],
+                    "transitions": [
+                        {"to": "fix", "when": {"op": "In", "value": {"values": ["p0"]}}},
+                        {"to": "file"},
+                    ],
+                },
+                {"name": "fix", "agent": "wf-step", "prompt": "Fix it."},
+                {"name": "file", "agent": "wf-step", "prompt": "File it."},
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        res.status().as_u16(),
+        201,
+        "create the branching definition"
+    );
+
+    // Each run: triage submits an outcome, then the branch step submits its own.
+    for (outcome, expected) in [("p0", "fix"), ("p2", "file")] {
+        mock.queue_tool_call(
+            "submit_result",
+            serde_json::json!({"outcome": outcome, "description": "triaged"}),
+        );
+        mock.queue_tool_call(
+            "submit_result",
+            serde_json::json!({"outcome": "success", "description": "handled"}),
+        );
+
+        let res = client
+            .post(format!("{base}/api/workflows/e2e-branch/runs"))
+            .json(&serde_json::json!({
+                "input": "the build is red",
+                "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 201, "start a run");
+        let v: serde_json::Value = res.json().await.unwrap();
+        let id = v["session"]["id"].as_str().unwrap().to_string();
+
+        let graph_url = format!("{base}/api/sessions/{id}/workflow");
+        let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
+        let visited: Vec<&str> = graph["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| !n["runs"].as_array().unwrap().is_empty())
+            .map(|n| n["step"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            visited,
+            vec!["triage", expected],
+            "outcome {outcome} must route to {expected}; graph: {graph}"
+        );
+        // The edge a reader sees is labelled with the filter that took it.
+        let taken: Vec<&str> = graph["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| !e["traversals"].as_array().unwrap().is_empty())
+            .map(|e| e["condition"].as_str().unwrap_or("(always)"))
+            .collect();
+        let want = if outcome == "p0" {
+            "outcome in [p0]"
+        } else {
+            "(always)"
+        };
+        assert_eq!(taken, vec![want], "edge label: {graph}");
+    }
+}
+
 /// A workflow's runs are sessions, so they are read from the session list with
 /// a filter — and a cold run still says what became of it, because the registry
 /// keeps its status rather than caching it for as long as it happens to be

@@ -7,9 +7,9 @@ sidebar:
 ---
 
 A **workflow** is a graph of steps. Each step runs one of your agent presets
-against a fixed instruction, and what it concludes decides which step runs
-next. Every step in a run shares one workspace, so what one writes to disk the
-next one reads.
+against a fixed instruction, and the **outcome** it reports decides which step
+runs next. Every step in a run shares one workspace, so what one writes to disk
+the next one reads.
 
 Use a workflow when the order matters and you want to fix it yourself. If you
 would rather let the model decide how to split the work, give one agent the
@@ -27,9 +27,16 @@ Each step needs:
 - **Prompt** — the step's instruction. Whatever the step is handed — the run's
   input for the first step, the previous step's result for the rest — is
   appended below it.
-- **Output fields** — what the step reports back. A condition can only read
-  fields declared here.
-- **Goes to** — where to hand off, and on what condition.
+- **Outcomes** — how the step can end. It picks one, and it is the only thing
+  transitions read. Leave them alone and a step reports `success` or `failure`.
+  Each value needs a description: that is what the model reads to choose
+  between them.
+- **Result fields** — anything else the step reports back, each with a type and
+  a description. Optional; every result already carries its outcome and a
+  written summary.
+- **Can ask the person** — whether this step may stop and ask a question.
+  Without it the step has no way to ask and must decide for itself.
+- **Goes to** — where to hand off, and for which outcomes.
 
 **Limits** are optional: how many turns the step may take before it fails, and
 how many times a transient provider error is retried within it. Leave them
@@ -40,22 +47,31 @@ choosing a node opens that step. Steps can be dragged into another order, which
 changes how the list reads and nothing about how the run executes — the start
 step and the transitions decide that.
 
-### Conditions
+### What a step returns
 
-A condition is an expression over the step's output, bound to `output`:
+Every step finishes by submitting a result, and every result carries two things
+whether you ask for them or not:
 
-```text
-output.severity == "p0"
-output.approved
-output.attempts > 3
-```
+- **`outcome`** — one of the values the step declares. Transitions read this
+  and nothing else.
+- **`description`** — a written summary of what the step did. This is what the
+  next step is handed, so it is worth being specific about in the prompt.
 
-Transitions are tried in order and the first match wins. A row with no
-condition is the catch-all — put it last. If nothing matches, the run finishes
-and that step's output is the run's.
+Anything else you declare as a result field comes along too, and shows up under
+the description when the next step reads it.
 
-A step with **no output fields** ends its turn with plain text, which becomes
-its output. That is fine for a final step, but nothing can branch on it.
+### Transitions
+
+A transition names the outcomes it is taken for — `outcome in [p0, p1]`, or
+`outcome not in [wontfix]`. Transitions are tried in order and the first match
+wins. A row that names no outcome is the catch-all — put it last. If nothing
+matches, the run finishes and that step's result is the run's.
+
+A transition can only name outcomes its step actually declares, and the editor
+offers them as checkboxes for that reason. Saving one that names anything else
+is refused: at run time a filter that matches nothing is indistinguishable from
+a step that meant to end the graph, which is exactly how a typo used to pass
+for success.
 
 ### Loops
 
@@ -64,7 +80,7 @@ curve.
 
 Loops are bounded by the workflow's **step budget** — the most steps one run
 may execute, set on the definition, 100 if left blank. It is the only thing
-stopping a loop whose condition never flips: a run that hits it fails with
+stopping a loop whose outcome never changes: a run that hits it fails with
 `step budget exhausted` rather than spinning forever. A run snapshots the
 budget when it starts, so changing it never affects a run under way.
 
@@ -102,7 +118,7 @@ Not reached: file
 ```
 
 Once it finishes the same command prints what the run produced — the last
-step's output, which is the run's.
+step's result, which is the run's.
 
 Opening a run in the browser shows its graph; clicking a step opens that step's
 own page, which is the session view scoped to one agent. To follow one from a
@@ -117,9 +133,16 @@ horsie session tail 3f1a2b4c-… --output ./run.jsonl --agent 8a91f0d2-…
 **A step failed.** The run stops there. Read the step's page for why, then
 press **Retry** on that node.
 
-**A step asked a question.** A run started from the UI or the API is attended,
-so a step may ask. The run's page says which step is waiting; **Answer it**
-opens that step. Answering resumes it and the run carries on.
+**A step asked a question.** Only a step marked **can ask the person** has the
+tool to do it, and only when someone is there to answer. The run's page says
+which step is waiting; **Answer it** opens that step. Answering resumes it and
+the run carries on — asking pauses a step, it does not end it.
+
+**A step is waiting on something.** A step that has spawned subagents, or armed
+a timer, may end a turn without finishing; it stays running until whatever it
+is waiting for wakes it. What it may not do is stop with nothing pending and no
+result — that gets it one reminder, then one forced attempt, then the step
+fails saying it never submitted.
 
 **You interrupted it, or the server restarted mid-run.** The step that was
 running is marked cancelled and the run goes back to **idle** rather than
@@ -142,7 +165,7 @@ Retries append. The earlier attempt stays readable, and the node shows a count.
 ## What a step can and cannot do
 
 A step can read and write the shared workspace, call its preset's MCP servers,
-use its memory spaces, and spawn subagents of its own.
+use its memory spaces, arm timers, and spawn subagents of its own.
 
 A step cannot rename the session, and a run takes no messages — sending one is
 answered `409`. A workflow works from its definition; if you want to talk to
@@ -168,6 +191,35 @@ to another server:
 ```bash
 horsie workflow get fix-bug --json > fix-bug.json
 horsie workflow apply -f fix-bug.json --server https://other.example
+```
+
+A definition reads as the editor shows it:
+
+```json
+{
+  "name": "fix-bug",
+  "start": "triage",
+  "steps": [
+    {
+      "name": "triage",
+      "agent": "bug-triager",
+      "prompt": "Decide how urgent this is.",
+      "outcomes": [
+        { "value": "p0", "description": "Broken for everyone; fix it now." },
+        { "value": "p2", "description": "Worth filing, not worth stopping for." }
+      ],
+      "fields": [
+        { "name": "component", "kind": "String", "description": "Where it broke.", "required": true }
+      ],
+      "transitions": [
+        { "to": "fix", "when": { "op": "In", "value": { "values": ["p0"] } } },
+        { "to": "file" }
+      ]
+    },
+    { "name": "fix", "agent": "coder", "prompt": "Fix it and open a PR." },
+    { "name": "file", "agent": "writer", "prompt": "File an issue." }
+  ]
+}
 ```
 
 `apply` creates the workflow or fully replaces it; the name comes from the
