@@ -222,6 +222,43 @@ async fn a_session_belongs_to_one_account_and_is_invisible_to_the_other() {
     f.shutdown().await;
 }
 
+/// The one boundary a session's own id cannot supply.
+///
+/// `SessionActor`'s persistence id is `("session", <uuid>)` with **no account in
+/// it**, so nothing about the actor says whose it is. The supervisor's
+/// session-list check is the entirety of the isolation on this path, and this
+/// is the test that fails when it is removed.
+///
+/// It carries more weight than it used to. An agent's revision now travels
+/// between nodes on a per-session topic, and every wait still goes through the
+/// supervisor for exactly this reason — letting a reader follow a session's
+/// topic directly would be fewer hops and would move the boundary onto an id
+/// that another account could simply have been told.
+#[tokio::test]
+async fn one_account_cannot_open_anothers_message_stream() {
+    let f = fixture().await;
+    let id = create_session(&f, &f.a).await;
+
+    // The owner can, which is what makes the refusal below a statement about
+    // the account rather than about the stream being unavailable to anyone.
+    let mine = f.get(&f.a, &format!("/api/sessions/{id}/messages")).await;
+    assert_eq!(
+        mine.status().as_u16(),
+        200,
+        "the owner must be able to read its own stream"
+    );
+    drop(mine);
+
+    let theirs = f.get(&f.b, &format!("/api/sessions/{id}/messages")).await;
+    assert_eq!(
+        theirs.status().as_u16(),
+        404,
+        "another account must not be able to open this stream"
+    );
+
+    f.shutdown().await;
+}
+
 /// Two agents, both announcing `main`. Before per-account maps the second was
 /// refused outright — and had it been accepted, the first account's session
 /// would have run its tools on the second's machine.

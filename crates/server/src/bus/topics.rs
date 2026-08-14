@@ -11,8 +11,27 @@
 //! nothing can publish a runtime message onto an account's session feed.
 
 use super::{Bus, Topic};
+use crate::sessions::AgentRevision;
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use std::sync::Arc;
+
+/// How far each of one session's agents has got, for whichever node answers
+/// reads of them.
+///
+/// One topic per session rather than per agent: a reader of a session is
+/// interested in its agents together, and a per-agent topic would mean a
+/// subscription per subagent — several per session, appearing and vanishing as
+/// subagents come and go.
+///
+/// **The account is in the name and is load-bearing.** One bus serves the whole
+/// deployment, and a session id is the only other segment; without the account
+/// a node could follow a session by id alone. The supervisor's session-list
+/// check is what establishes a session belongs to the account asking, and this
+/// name is what keeps the bus from being a way around it.
+#[must_use]
+pub fn session_revisions(bus: Arc<dyn Bus>, account: &str, session: &str) -> Topic<AgentRevision> {
+    Topic::new(bus, format!("rev:{account}:{session}"))
+}
 
 /// What the server sends a runtime: tool calls, scans, hook runs.
 ///
@@ -98,6 +117,29 @@ mod tests {
         assert_ne!(
             runtime_in(bus(), "acct-1", &session, "1755043200000").name(),
             runtime_in(bus(), "acct-1", &session, "1755043200001").name()
+        );
+    }
+
+    /// The account segment is the only thing standing between a session's
+    /// counters and a node acting for somebody else, because the rest of the
+    /// name is a session id and nothing more.
+    #[test]
+    fn two_accounts_do_not_share_a_session_revision_topic() {
+        let session = Uuid::new_v4().to_string();
+        assert_ne!(
+            session_revisions(bus(), "acct-1", &session).name(),
+            session_revisions(bus(), "acct-2", &session).name()
+        );
+    }
+
+    /// A session's counters and its runtime traffic are separate feeds; a
+    /// collision would deliver each side frames it cannot decode.
+    #[test]
+    fn a_sessions_counters_are_not_its_runtime_channel() {
+        let session = Uuid::new_v4().to_string();
+        assert_ne!(
+            session_revisions(bus(), "acct-1", &session).name(),
+            runtime_in(bus(), "acct-1", &session, "1755043200000").name()
         );
     }
 

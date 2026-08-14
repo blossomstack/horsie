@@ -301,11 +301,14 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         supervisor.clone(),
     ));
 
+    // The same account form the runtime topics use, because both name topics on
+    // the one bus this deployment shares.
+    let account = user.as_str().to_string();
     Ok(Arc::new(UserServices {
         user,
         supervisor,
         deps,
-        revisions: Arc::new(SessionRevisions::default()),
+        revisions: Arc::new(SessionRevisions::new(&account, shared.bus.clone())),
         config_store: opened.store,
         provider_registry: opened.registry,
         vendors: opened.vendors,

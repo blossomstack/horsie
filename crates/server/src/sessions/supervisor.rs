@@ -1026,18 +1026,25 @@ impl EventSourcedActor for SessionSupervisor {
                     let _ = reply.send(None);
                     return CommandEffect::none();
                 }
-                let wire_id = agent_id.as_deref().unwrap_or("main");
+                let wire_id = agent_id.unwrap_or_else(|| "main".to_string());
                 let revisions = self.revisions().of(&id);
                 revisions.touch();
-                let mut rx = revisions.for_agent(wire_id).subscribe();
-                let current = *rx.borrow_and_update();
-                if after != Some(current) {
-                    let _ = reply.send(Some(current));
-                    return CommandEffect::none();
-                }
-                // Nothing new yet, so wait — off this mailbox, which has to stay
-                // free to serve every other session while one reader waits.
+                // Everything below is off this mailbox, which has to stay free
+                // to serve every other session while one reader waits — and
+                // now also while the first reader of a session waits for its
+                // feed.
                 tokio::spawn(async move {
+                    // The counter this agent moves may be moved in another
+                    // process entirely, and this is what makes a copy of it
+                    // arrive here. Awaited before the read below, so that a
+                    // move published after that read cannot be missed.
+                    revisions.mirror().await;
+                    let mut rx = revisions.for_agent(&wire_id).subscribe();
+                    let current = *rx.borrow_and_update();
+                    if after != Some(current) {
+                        let _ = reply.send(Some(current));
+                        return;
+                    }
                     let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
                     // A closed channel is not the end of the stream: the
                     // registry outlives the session precisely so a reader can

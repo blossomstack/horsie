@@ -101,6 +101,90 @@ impl Node {
         }
     }
 
+    /// Open an SSE connection and start collecting what it sends.
+    ///
+    /// The response headers are awaited here rather than on the task, so that
+    /// by the time this returns the handler is running. A test that raced its
+    /// own subscription would be deciding on timing rather than on delivery,
+    /// which for a bug whose signature is "nothing ever arrives" is the one
+    /// mistake that turns the assertion into noise.
+    async fn subscribe(&self, path: &str) -> Frames {
+        let start = Instant::now();
+        let res = loop {
+            let res = self.get(path).await;
+            if res.status() != 503 || start.elapsed() > FORMATION {
+                break res;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        assert_eq!(res.status(), 200, "{path} should have started streaming");
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use futures_util::StreamExt;
+            let mut body = res.bytes_stream();
+            let mut buffer = String::new();
+            while let Some(Ok(chunk)) = body.next().await {
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                // A blank line ends a frame; `data:` is the only line any
+                // assertion here cares about.
+                while let Some(end) = buffer.find("\n\n") {
+                    let frame: String = buffer.drain(..end + 2).collect();
+                    for data in frame.lines().filter_map(|l| l.strip_prefix("data:")) {
+                        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim())
+                        else {
+                            continue;
+                        };
+                        if tx.send(value).is_err() {
+                            return; // the test stopped reading
+                        }
+                    }
+                }
+            }
+        });
+        Frames(rx)
+    }
+
+    /// Every entry of one agent's transcript, read rather than streamed.
+    async fn transcript(&self, id: &str) -> serde_json::Value {
+        let res = self
+            .get_when_serving(&format!("/api/sessions/{id}/messages?max=200"))
+            .await;
+        assert_eq!(res.status(), 200, "a transcript should be readable");
+        res.json().await.unwrap()
+    }
+
+    /// Wait until this agent has finished `want` turns.
+    ///
+    /// The turn boundary, and not `Idle` — a session reports that both when
+    /// provisioning finishes and when a turn ends, so waiting on it can return
+    /// before the turn has run at all. `session_server_e2e.rs` settled this and
+    /// the reasoning is the same here.
+    async fn await_turns(&self, id: &str, want: usize) {
+        let start = Instant::now();
+        loop {
+            let page = self.transcript(id).await;
+            let ended = page["entries"]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|e| e["body"]["type"] == serde_json::json!("Lifecycle"))
+                        .filter(|e| e["body"]["value"]["kind"] == serde_json::json!("TurnEnded"))
+                        .count()
+                })
+                .unwrap_or_default();
+            if ended >= want {
+                return;
+            }
+            assert!(
+                start.elapsed() < FORMATION,
+                "timed out waiting for {want} finished turns; {ended} have ended"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Whether this node currently considers itself able to serve.
     fn serving(&self) -> bool {
         self.state
@@ -109,6 +193,47 @@ impl Node {
             .as_ref()
             .is_none_or(|rx| *rx.borrow())
     }
+}
+
+/// A live SSE connection's frames, decoded.
+///
+/// Collected on their own task rather than read inline, because every
+/// assertion below is about what arrives *after* something happens on another
+/// node — so the connection has to stay open across that.
+struct Frames(tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>);
+
+impl Frames {
+    /// The next frame satisfying `want`, or a panic naming what did arrive.
+    ///
+    /// Reporting the frames it passed over matters more here than usual: the
+    /// bugs these tests cover fail by delivering *nothing*, and "nothing
+    /// arrived" and "the wrong thing arrived" want different fixes.
+    async fn find(
+        &mut self,
+        what: &str,
+        want: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let deadline = Instant::now() + FORMATION;
+        let mut seen: Vec<serde_json::Value> = Vec::new();
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(left, self.0.recv()).await {
+                Ok(Some(frame)) if want(&frame) => return frame,
+                Ok(Some(frame)) => seen.push(frame),
+                Ok(None) => panic!("the stream ended before {what} arrived; it sent {seen:?}"),
+                Err(_) => panic!("timed out waiting for {what}; the stream sent {seen:?}"),
+            }
+        }
+    }
+}
+
+/// The body that creates a session against the mock provider.
+fn new_session(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "agent": { "model": "mock", "use_plugins": false },
+        "environment": {"type": "Runtime", "value": {"vendor": "main"}},
+        "message": message
+    })
 }
 
 struct Cluster {
@@ -382,4 +507,111 @@ async fn every_node_lists_the_same_sessions() {
         let count = page["sessions"].as_array().map_or(0, Vec::len);
         assert_eq!(count, 1, "node {i} should see the one session that exists");
     }
+}
+
+/// A session created on one node wakes a list reader on another.
+///
+/// The `/api/events` bug in its exact shape. The feed was a `broadcast::Sender`
+/// on the account's bundle — a pointer into one process — so a reader whose
+/// connection landed on node 1 never heard about a session whose supervisor was
+/// on node 0. It failed by staying open: keep-alives kept arriving and no event
+/// ever did, which is why nothing caught it until there was a second node to
+/// watch from.
+#[tokio::test]
+async fn a_session_created_on_one_node_wakes_a_list_reader_on_another() {
+    let Some(c) = Cluster::start().await else {
+        eprintln!("skipped: needs HORSIE_TEST_POSTGRES_URL and HORSIE_TEST_REDIS_URL");
+        return;
+    };
+
+    let mut frames = c.node(1).subscribe("/api/events").await;
+    // The opening frame, and the reason this test cannot pass by accident: it
+    // establishes that node 1 is listening, and that it is listening to an
+    // empty list, before node 0 is touched at all.
+    let opening = frames.find("the opening list", |_| true).await;
+    assert_eq!(
+        opening["sessions"].as_array().map_or(1, Vec::len),
+        0,
+        "no session exists yet: {opening}"
+    );
+
+    let created = c
+        .node(0)
+        .post_when_serving("/api/sessions", &new_session("hi"))
+        .await;
+    assert_eq!(created.status(), 201, "node 0 should create the session");
+    let body: serde_json::Value = created.json().await.unwrap();
+    let id = body["session"]["id"].as_str().expect("a session id");
+
+    let listed = frames
+        .find("the new session", |frame| {
+            frame["sessions"].as_array().is_some_and(|s| !s.is_empty())
+        })
+        .await;
+    assert_eq!(
+        listed["sessions"][0]["id"].as_str(),
+        Some(id),
+        "node 1's feed must carry the session node 0 created"
+    );
+}
+
+/// A turn on one node moves a message reader on another.
+///
+/// The asymmetric half of the same bug, and the one no `ask` could fix by
+/// itself: the *session* actor moves an agent's revision, the *supervisor*
+/// answers reads of it, and the shard model places those two independently. The
+/// transcript always crossed — reading it is an ask — so a reader received
+/// everything that existed when it connected and then nothing ever again,
+/// having parked forever on a counter nobody on its node was moving.
+#[tokio::test]
+async fn a_turn_on_one_node_moves_a_message_reader_on_another() {
+    let Some(c) = Cluster::start().await else {
+        eprintln!("skipped: needs HORSIE_TEST_POSTGRES_URL and HORSIE_TEST_REDIS_URL");
+        return;
+    };
+
+    let created = c
+        .node(0)
+        .post_when_serving("/api/sessions", &new_session("hi"))
+        .await;
+    assert_eq!(created.status(), 201, "node 0 should create the session");
+    let body: serde_json::Value = created.json().await.unwrap();
+    let id = body["session"]["id"]
+        .as_str()
+        .expect("a session id")
+        .to_string();
+
+    // The opening turn has to be over before the reader connects. A reader that
+    // is still working through a backlog picks the next message up on its way
+    // past, with nothing crossing a node — and this test would then pass on a
+    // build where the counter never arrives.
+    c.node(2).await_turns(&id, 1).await;
+
+    // Node 2 reads, node 0 writes, and the session is placed by the cluster —
+    // so neither is necessarily the node it runs on, which is the point.
+    let mut frames = c
+        .node(2)
+        .subscribe(&format!("/api/sessions/{id}/messages"))
+        .await;
+    frames
+        .find("the transcript so far", |frame| {
+            frame.to_string().contains("hi")
+        })
+        .await;
+
+    let marker = "a-second-turn-started-on-another-node";
+    let sent = c
+        .node(0)
+        .post_when_serving(
+            &format!("/api/sessions/{id}/messages"),
+            &serde_json::json!({ "text": marker }),
+        )
+        .await;
+    assert_eq!(sent.status(), 202, "node 0 should accept the message");
+
+    frames
+        .find("the second turn", |frame| {
+            frame.to_string().contains(marker)
+        })
+        .await;
 }

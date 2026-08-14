@@ -831,6 +831,30 @@ pub(super) fn user_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
 /// A user message's subagent-result parts, rendered the way the wire sees
 /// them — the counterpart to `user_texts` now that a result is a part of
 /// its own rather than text merged into what the person said.
+/// Poll the main agent's subagent-result parts until `want` holds (2s cap).
+///
+/// The honest wait for "the main agent has taken a result". A subagent's
+/// `notified` flag says the result was *handed over* — one message into main's
+/// mailbox — and main has yet to process it, so the flag is not a boundary the
+/// history can be read at.
+///
+/// Returns whatever it last saw either way, so the caller's own assertion is
+/// what reports the failure and says what it wanted.
+pub(super) async fn wait_for_subagent_text(
+    session: &SessionRef,
+    want: impl Fn(&[String]) -> bool,
+) -> Vec<String> {
+    let mut texts = Vec::new();
+    for _ in 0..200 {
+        texts = subagent_texts(&main_history(session).await);
+        if want(&texts) {
+            return texts;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    texts
+}
+
 pub(super) fn subagent_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
     page.messages()
         .flat_map(|m| m.parts.iter())
