@@ -101,12 +101,17 @@ impl ConnectedRuntimeRegistry {
         rx
     }
 
-    /// Whether anything is already waiting for this runtime to dial back.
+    /// Whether anything is still waiting for this runtime to dial back.
     ///
-    /// What a vendor asks before deciding to (re)build: an acquisition that
-    /// finds a create already waiting must join the wait, never start a second
-    /// substrate object for the same runtime.
-    pub async fn is_awaited(&self, runtime_id: &str) -> bool {
+    /// Test observability, not API. This was what a vendor asked before
+    /// deciding to (re)build, and nothing asks it any more: whether a create is
+    /// outstanding is a fact the *session* holds, journalled, so it is passed
+    /// down as `RuntimeManager::get`'s `provisioning` flag rather than guessed
+    /// at from who happens to be waiting. What is left is the one thing a test
+    /// cannot otherwise see — that resolving a runtime clears its waiters
+    /// instead of leaking them.
+    #[cfg(test)]
+    pub(crate) async fn is_awaited(&self, runtime_id: &str) -> bool {
         self.inner.lock().await.pending.contains_key(runtime_id)
     }
 
