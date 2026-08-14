@@ -11,8 +11,11 @@ use crate::agent::Agent;
 use crate::error::AgentError;
 use crate::events::{EventSink, EventSinkError};
 use crate::provider::{CompletionRequest, ToolChoice};
-use horsie_models::agent::{CompactionTrigger, ContentPart, EmptyOutcome, Message, Role, TextPart};
-use horsie_models::events::{AgentEvent, CompactedEvent};
+use horsie_models::agent::{
+    CompactionSkippedLifecycle, CompactionTrigger, ContentPart, EmptyOutcome, Message, Role,
+    TextPart,
+};
+use horsie_models::events::{AgentEvent, CompactedEvent, CompactionSkippedEvent};
 use horsie_models::now_ms;
 
 /// How much room a compaction is working with.
@@ -186,19 +189,6 @@ pub fn choose_cut(history: &[Message], retain_budget_tokens: u32) -> usize {
     latest_safe.unwrap_or(history.len())
 }
 
-/// Where the most recent turn begins — what a manual `/compact` keeps.
-///
-/// `history.len()` when there is no safe boundary at all, and `0` when the only
-/// one is the very first message, which makes the compaction a no-op: there is
-/// nothing before the current turn to fold.
-#[must_use]
-pub fn last_safe_boundary(history: &[Message]) -> usize {
-    history
-        .iter()
-        .rposition(is_safe_boundary)
-        .unwrap_or(history.len())
-}
-
 /// Build the request that asks a model to summarise a span.
 ///
 /// A fixed structure rather than a free "summarise this": the sections are what
@@ -324,13 +314,17 @@ impl Agent {
         events: &dyn EventSink,
     ) -> Result<(), AgentError> {
         let Some(policy) = self.compaction.clone() else {
+            self.report_nothing_to_fold(trigger, events).await?;
             return Ok(());
         };
         let retain = self.config.compaction.map_or(0, |b| b.retain_tokens());
         let cut = choose_cut(&self.history, retain);
         if cut == 0 {
             // Nothing would be folded away. Compacting here would spend a
-            // provider call to replace the history with a summary of itself.
+            // provider call to replace the history with a summary of itself,
+            // and trade real messages for that summary to buy room that was
+            // never scarce — so it says so instead of doing it.
+            self.report_nothing_to_fold(trigger, events).await?;
             return Ok(());
         }
         let tokens_before = self.last_context_tokens;
@@ -398,6 +392,33 @@ impl Agent {
                 trigger: trigger_name,
             })
             .await;
+        Ok(())
+    }
+
+    /// Say that a compaction found nothing to fold — but only for one that was
+    /// asked for.
+    ///
+    /// An automatic compaction is checked on every iteration of every tool
+    /// loop and declines almost all of them; announcing those would bury a
+    /// transcript in notices about work that was correctly not done. A typed
+    /// `/compact` is a question from a person, and silence was the whole bug.
+    async fn report_nothing_to_fold(
+        &self,
+        trigger: CompactionTrigger,
+        events: &dyn EventSink,
+    ) -> Result<(), AgentError> {
+        if matches!(trigger, CompactionTrigger::Auto(_)) {
+            return Ok(());
+        }
+        events
+            .emit(AgentEvent::CompactionSkipped(CompactionSkippedEvent {
+                detail: CompactionSkippedLifecycle {
+                    context_tokens: self.last_context_tokens,
+                    retain_tokens: self.config.compaction.map(|b| b.retain_tokens()),
+                },
+                at_ms: now_ms(),
+            }))
+            .await?;
         Ok(())
     }
 
@@ -648,6 +669,16 @@ mod tests {
             .collect()
     }
 
+    fn skips(sink: &CollectingEventSink) -> Vec<CompactionSkippedEvent> {
+        sink.events()
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::CompactionSkipped(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[tokio::test]
     async fn a_run_under_the_threshold_never_compacts() {
         let policy = RecordingPolicy::new();
@@ -856,35 +887,107 @@ mod tests {
         assert_eq!(policy.results(), 0);
     }
 
-    #[test]
-    fn a_manual_compaction_keeps_only_the_current_turn() {
-        let history = vec![
-            user("u0", "first question"),
-            msg(Role::Assistant, "a0", "first answer"),
-            user("u1", "second question"),
-            msg(Role::Assistant, "a1", "second answer"),
-            user("u2", "third question"),
-        ];
+    /// The regression: `/compact` used to do nothing *and say nothing*.
+    ///
+    /// A session inside the retain budget has no span to fold, which is most
+    /// sessions and exactly when someone reaches for the command. Declining is
+    /// right — compacting would trade real messages for a summary to buy room
+    /// that was never scarce — but declining in silence is not, and that is
+    /// what this pins.
+    #[tokio::test]
+    async fn a_manual_compaction_with_nothing_to_fold_says_so() {
+        let policy = RecordingPolicy::new();
+        let mut agent = crate::agent::Agent::builder(
+            MockProvider::text("a summary that must never be asked for"),
+            Arc::new(EmptyToolbox),
+            "conv",
+        )
+        .with_config(crate::AgentConfig {
+            // A window so large that the whole history is a rounding error
+            // against 20% of it — the shape of every real session.
+            compaction: Some(budget(1_000_000)),
+            ..Default::default()
+        })
+        .with_history(long_history(3))
+        .with_compaction(policy.clone())
+        .with_context_tokens(4_000)
+        .build()
+        .unwrap();
+
+        let sink = CollectingEventSink::new();
+        agent.compact_only(None, &sink).await.unwrap();
+
+        assert!(
+            compactions(&sink).is_empty(),
+            "there was room to spare, so nothing should have been folded"
+        );
+        let skipped = skips(&sink);
+        assert_eq!(skipped.len(), 1, "and the command must be answered");
+        assert_eq!(skipped[0].detail.context_tokens, 4_000);
         assert_eq!(
-            last_safe_boundary(&history),
-            4,
-            "everything before the turn in progress is folded, whatever a token \
-             budget would have said — someone typing `/compact` wants room now"
+            skipped[0].detail.retain_tokens,
+            Some(200_000),
+            "the notice says what the conversation was measured against"
+        );
+        assert_eq!(policy.results(), 0, "no summarising call was made");
+        assert_eq!(
+            agent.history_for_test().len(),
+            long_history(3).len(),
+            "and the history is untouched"
         );
     }
 
-    /// The no-op that matters: nothing precedes the only turn there is, so
-    /// there is nothing to fold and `compact` returns without a provider call.
-    #[test]
-    fn a_manual_compaction_on_a_single_turn_cuts_at_zero() {
-        let history = vec![user("u0", "hello"), msg(Role::Assistant, "a0", "hi")];
-        assert_eq!(last_safe_boundary(&history), 0);
+    /// An automatic compaction declines on nearly every tool-loop iteration.
+    /// Announcing those would bury the transcript in notices about work that
+    /// was correctly not done.
+    #[tokio::test]
+    async fn an_automatic_compaction_with_nothing_to_fold_stays_quiet() {
+        let policy = RecordingPolicy::new();
+        let mut agent =
+            crate::agent::Agent::builder(provider_reporting(&[10]), Arc::new(EmptyToolbox), "conv")
+                .with_config(crate::AgentConfig {
+                    compaction: Some(budget(1_000_000)),
+                    ..Default::default()
+                })
+                .with_history(long_history(3))
+                .with_compaction(policy.clone())
+                .with_context_tokens(10)
+                .build()
+                .unwrap();
+
+        let sink = CollectingEventSink::new();
+        run_once(&mut agent, &sink).await;
+
+        assert!(compactions(&sink).is_empty());
+        assert!(skips(&sink).is_empty(), "an automatic decline is not news");
     }
 
-    #[test]
-    fn a_manual_compaction_with_no_safe_boundary_retains_nothing() {
-        let history = vec![assistant_calling("a0", "tc1"), tool_result("tc1", "output")];
-        assert_eq!(last_safe_boundary(&history), history.len());
+    /// A model card with no context window gives no budget to measure against.
+    /// The command is still answered — with the part that is knowable.
+    #[tokio::test]
+    async fn a_manual_compaction_with_no_budget_reports_no_retain_figure() {
+        let mut agent = crate::agent::Agent::builder(
+            MockProvider::text("a summary that must never be asked for"),
+            Arc::new(EmptyToolbox),
+            "conv",
+        )
+        .with_config(crate::AgentConfig {
+            compaction: None,
+            ..Default::default()
+        })
+        .with_history(vec![user("u0", "hello"), msg(Role::Assistant, "a0", "hi")])
+        .with_compaction(RecordingPolicy::new())
+        .with_context_tokens(120)
+        .build()
+        .unwrap();
+
+        let sink = CollectingEventSink::new();
+        agent.compact_only(None, &sink).await.unwrap();
+
+        let skipped = skips(&sink);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].detail.context_tokens, 120);
+        assert_eq!(skipped[0].detail.retain_tokens, None);
     }
 
     #[test]

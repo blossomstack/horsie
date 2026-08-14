@@ -1490,9 +1490,17 @@ impl AgentActor {
         // Persist the input message here (not via the streaming sink), so a
         // turn-restarting provider retry that re-emits it can never
         // double-persist it into two consecutive user messages.
-        events.push(AgentDomainEvent::InputMessage {
-            message: agent_input.to_message(now_ms()),
-        });
+        //
+        // A compact-only turn is the one case with no input at all: nothing was
+        // typed and nothing is owed, so this would journal the empty `Tool`
+        // message `AgentInput::tool_results(vec![])` builds — which the run
+        // below never reads, but which every *later* turn would then carry in
+        // its prompt.
+        if !compact_only {
+            events.push(AgentDomainEvent::InputMessage {
+                message: agent_input.to_message(now_ms()),
+            });
+        }
         self.start_run(
             agent_input,
             ctx,
@@ -2024,6 +2032,9 @@ fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
         // they share the session's, and it was already up for the fork to
         // have been taken at all.
         | LifecycleEvent::Forked(_)
+        // A compaction declining to fold anything is an answer to a typed
+        // command. It touches neither the runtime nor the history.
+        | LifecycleEvent::CompactionSkipped(_)
         | LifecycleEvent::Step(_)
         | LifecycleEvent::TaskList(_) => None,
     }
@@ -2958,6 +2969,14 @@ fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
             instructions: ev.instructions.clone(),
             tokens_before: ev.tokens_before,
             tokens_after: ev.tokens_after,
+            at_ms: ev.at_ms,
+        }),
+        // A lifecycle entry rather than a `Compaction` one: nothing moved, so
+        // nothing may look like a boundary. `prompt_messages` drops every
+        // lifecycle body, so the notice answers the person and never reaches
+        // the model — which is right, since the model was not asked anything.
+        AgentEvent::CompactionSkipped(ev) => Some(AgentDomainEvent::LifecycleRecorded {
+            event: LifecycleEvent::CompactionSkipped(ev.detail.clone()),
             at_ms: ev.at_ms,
         }),
         AgentEvent::InputMessage(_)

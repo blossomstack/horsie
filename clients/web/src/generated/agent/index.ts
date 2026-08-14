@@ -29,6 +29,7 @@ export * from './forkLifecycle';
 export * from './stepLifecycle';
 export * from './taskListLifecycle';
 export * from './sessionFailedLifecycle';
+export * from './compactionSkippedLifecycle';
 export * from './compactionEntry';
 export * from './compactionTrigger';
 export * from './usage';
