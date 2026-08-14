@@ -50,6 +50,9 @@ pub struct BootOptions {
     /// process, which is what a single-node deployment wants; a URL is a
     /// deployment saying its nodes have to hear each other.
     pub bus_url: Option<String>,
+    /// This node's place in a cluster. `None` is a single-node deployment,
+    /// which binds no transport and opens no Raft store.
+    pub cluster: Option<crate::cluster::ClusterSection>,
 }
 
 impl BootOptions {
@@ -65,6 +68,7 @@ impl BootOptions {
             web_dir: None,
             config_path: None,
             bus_url: None,
+            cluster: None,
         }
     }
 }
@@ -140,8 +144,35 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         .await
         .map_err(|e| format!("opening the bus: {e}"))?;
 
+    // Before the system, because `ActorSystem::clustered` takes the node. A
+    // refused configuration stops the boot here rather than leaving a node that
+    // believes it is clustered and is not.
+    let cluster = match &opts.cluster {
+        None => None,
+        Some(section) => Some(
+            crate::cluster::start(&crate::cluster::ClusterInputs {
+                section,
+                // The *resolved* URL, not what was configured: an absent
+                // setting means the SQLite default, which is exactly the case
+                // the guard has to refuse.
+                database_url: Some(db_url.as_str()),
+                bus_url: opts.bus_url.as_deref(),
+                state_dir: &opts.state_dir,
+            })
+            .await
+            .map_err(|e| format!("joining the cluster: {e}"))?,
+        ),
+    };
+
+    let system = crate::users::node_system(&db, cluster.clone());
+    if let Some(node) = &cluster {
+        // Only now: the pump needs both halves, and nothing may arrive for this
+        // node before something is draining it.
+        crate::cluster::pump(node, system.clone());
+    }
+
     let shared = Arc::new(Shared {
-        system: crate::users::node_system(&db),
+        system,
         bus,
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),

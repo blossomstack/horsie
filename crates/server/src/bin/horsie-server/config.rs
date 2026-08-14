@@ -7,6 +7,7 @@
 //! stay CLI/job-daemon-only).
 
 use horsie_server::auth::AuthMode;
+pub use horsie_server::cluster::ClusterSection;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,11 @@ pub struct BootConfig {
     /// which is the default and needs nothing here.
     #[serde(default)]
     pub bus: BusConfig,
+    /// How this node participates in a cluster. Absent on a single-node
+    /// deployment, which is the default: no transport is bound, no Raft store
+    /// is opened, and boot takes exactly the path it took before this existed.
+    #[serde(default)]
+    pub cluster: Option<ClusterSection>,
 }
 
 /// Where nodes publish to each other.
@@ -227,6 +233,43 @@ mod tests {
         let cfg = BootConfig::default();
         assert_ne!(cfg.storage.state_dir, cfg.storage.data_dir);
         assert!(cfg.database.url.is_none());
+    }
+
+    #[test]
+    fn a_config_without_a_cluster_section_is_single_node() {
+        let cfg: BootConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.cluster.is_none());
+    }
+
+    /// An absent secret must stop the boot rather than default to an
+    /// unauthenticated cluster port, which anyone who could reach it could use
+    /// to inject envelopes into the actor system.
+    #[test]
+    fn a_cluster_section_without_a_secret_is_refused() {
+        let err = serde_json::from_str::<BootConfig>(
+            r#"{"cluster":{"node_id":1,"bind":"0.0.0.0:7100","peers":{}}}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("secret"),
+            "the error must name the field: {err}"
+        );
+    }
+
+    #[test]
+    fn a_cluster_section_carries_its_peers_and_raft_dir() {
+        let cfg: BootConfig = serde_json::from_str(
+            r#"{"cluster":{"node_id":2,"bind":"0.0.0.0:7101",
+                 "peers":{"1":"10.0.0.1:7100","3":"10.0.0.3:7102"},
+                 "secret":"s3cret","raft_dir":"/mnt/raft"}}"#,
+        )
+        .unwrap();
+        let cluster = cfg.cluster.unwrap();
+        assert_eq!(cluster.node_id, 2);
+        assert_eq!(cluster.peers.len(), 2);
+        assert_eq!(cluster.raft_dir.unwrap(), PathBuf::from("/mnt/raft"));
+        assert!(cluster.liveness_window_secs.is_none());
     }
 
     #[test]

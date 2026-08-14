@@ -121,6 +121,7 @@ async fn boot(
             .ok()
             .filter(|s| !s.is_empty())
             .or_else(|| cfg.bus.url.clone()),
+        cluster: cfg.cluster.clone(),
     })
     .await
     .map_err(BootError::Config)
@@ -186,6 +187,7 @@ mod tests {
             auth: config::AuthConfig {
                 mode: config::AuthModeSetting::Off,
             },
+            cluster: None,
         };
         let cli = Cli {
             config: None,
