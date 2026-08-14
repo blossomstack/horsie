@@ -101,15 +101,20 @@ pub async fn read_messages(
 }
 
 /// The page form: returns and closes.
-async fn page(
-    state: &crate::users::UserServices,
+/// One page of an agent's log, as data.
+///
+/// Shared with the control plane's `sessions.read`, which is why it takes an
+/// already-resolved `max` and returns a page rather than a response: the two
+/// surfaces clamp differently (a model's context is not a browser's) and only
+/// one of them has a `Response` to build.
+pub(crate) async fn read_page(
+    services: &crate::users::UserServices,
     id: String,
     agent_id: String,
     before: Option<u64>,
-    max: Option<usize>,
-) -> Result<Response, Api> {
-    let max = max.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
-    let page = state
+    max: usize,
+) -> Result<MessagesPage, crate::control::ControlError> {
+    let page = services
         .supervisor
         .ask(|reply| SessionSupervisorCommand::PageLog {
             id: id.clone(),
@@ -119,8 +124,10 @@ async fn page(
             reply,
         })
         .await
-        .map_err(|_| Api::internal("session supervisor unavailable"))?
-        .ok_or_else(|| Api::not_found("no such agent"))?;
+        .map_err(|_| {
+            crate::control::ControlError::Internal("session supervisor unavailable".to_string())
+        })?
+        .ok_or_else(|| crate::control::ControlError::NotFound("no such agent".to_string()))?;
     let mut entries = page.entries;
     // Thinking signatures are provider-replay artifacts — kilobytes each, and
     // meaningless to a client. They stay in state and in the journal, never on
@@ -128,7 +135,21 @@ async fn page(
     crate::wire_redact::strip_entry_signatures(&mut entries);
     // No `has_more`. Fewer entries than asked for means there are no more,
     // which says the same thing without a second way to say it.
-    Ok(Json(MessagesPage { entries }).into_response())
+    Ok(MessagesPage { entries })
+}
+
+async fn page(
+    state: &crate::users::UserServices,
+    id: String,
+    agent_id: String,
+    before: Option<u64>,
+    max: Option<usize>,
+) -> Result<Response, Api> {
+    let max = max.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
+    let page = read_page(state, id, agent_id, before, max)
+        .await
+        .map_err(Api::from)?;
+    Ok(Json(page).into_response())
 }
 
 /// The stream form: everything after the cursor, then live.
