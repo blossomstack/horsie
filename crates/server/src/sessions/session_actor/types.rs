@@ -549,6 +549,23 @@ pub enum SessionDomainEvent {
         id: Uuid,
         status: AgentStatus,
     },
+    /// One of a fork's turns ended, however it ended.
+    ///
+    /// One variant carrying an outcome, where the main agent's turn has four
+    /// siblings (`TurnEnded`/`TurnFailed`/`TurnStopped`/`TurnInterrupted`):
+    /// those four exist because each moves the *session's* status differently,
+    /// and a fork moves only its own roster entry, which is a function of the
+    /// outcome. Deriving the status here is also what stops the two from
+    /// disagreeing.
+    ///
+    /// Separate from `ForkStatusChanged` because it is the fork's turn
+    /// *boundary*, and a boundary is the one thing a reader must see in the
+    /// fork's own transcript — a status is not.
+    ForkTurnEnded {
+        at_ms: u64,
+        id: Uuid,
+        outcome: horsie_agentcore::TurnOutcome,
+    },
     /// A fork was removed, because someone asked. Never automatic.
     ForkDeleted {
         at_ms: u64,

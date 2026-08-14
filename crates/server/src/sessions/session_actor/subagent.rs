@@ -577,6 +577,46 @@ mod tests {
         );
     }
 
+    /// The child's own log, not the parent's card. A subagent page folds the
+    /// same `TurnBegan`/`TurnEnded` pair every other agent's does, and the
+    /// terminal entry used to reach only the parent — so a finished subagent's
+    /// own page read `RUNNING` for ever while the forest beside it said
+    /// `Completed`.
+    #[tokio::test]
+    async fn a_completed_subagent_closes_the_turn_in_its_own_log() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let sub = spawn_sub(&session, "research", "dig").await;
+        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+
+        let outcomes = turn_outcomes(&agent_history(&session, Some(sub.to_string())).await);
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [horsie_agentcore::TurnOutcome::Ended(_)]
+            ),
+            "a subagent's one turn ends in its own log: {outcomes:?}"
+        );
+    }
+
+    /// A subagent that failed says so where a reader opening it will look.
+    #[tokio::test]
+    async fn a_failed_subagents_own_log_carries_the_error() {
+        let provider = FailOnNeedleProvider {
+            needle: "doomed task".to_string(),
+        };
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
+        let sub = spawn_sub(&session, "risky", "doomed task").await;
+        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+
+        let outcomes = turn_outcomes(&agent_history(&session, Some(sub.to_string())).await);
+        match outcomes.as_slice() {
+            [horsie_agentcore::TurnOutcome::Failed(f)] => {
+                assert!(f.error.contains("bad key"), "{:?}", f.error);
+            }
+            other => panic!("a failed subagent's turn ends as failed: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_failed_subagent_reports_the_error_to_its_parent() {
         let provider = FailOnNeedleProvider {

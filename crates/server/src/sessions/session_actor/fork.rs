@@ -16,13 +16,15 @@ use super::component::{ActionCx, Component};
 use super::context::SessionAgentKind;
 use super::{
     AgentPlan, AgentStatus, CommandEffect, ForkCommand, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState,
+    SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::forks::{ForkMode, ForkParent};
 use horsie_actor::{ActorContext, ActorRef, ReplyTo};
-use horsie_agentcore::{ContentPart, Message, Role, TextPart};
+use horsie_agentcore::{
+    ContentPart, EmptyOutcome, FailedOutcome, Message, Role, TextPart, TurnOutcome,
+};
 use horsie_models::now_ms;
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -223,6 +225,19 @@ impl Component for ForkedAgents {
             SessionDomainEvent::ForkStatusChanged { at_ms, id, status } => {
                 state.forks.apply_status(id, status, at_ms);
             }
+            // The status is derived from the outcome, never carried beside it:
+            // a conversation that stopped working is idle unless the turn is
+            // what broke, and a second field saying so is a second thing that
+            // can disagree with the first.
+            SessionDomainEvent::ForkTurnEnded { at_ms, id, outcome } => {
+                let status = match outcome {
+                    TurnOutcome::Failed(_) => AgentStatus::Failed,
+                    TurnOutcome::Ended(_)
+                    | TurnOutcome::Stopped(_)
+                    | TurnOutcome::Interrupted(_) => AgentStatus::Idle,
+                };
+                state.forks.apply_status(id, status, at_ms);
+            }
             SessionDomainEvent::ForkDeleted { id, .. } => state.forks.apply_deleted(id),
             other => unreachable!("ForkedAgents was handed {other:?}"),
         }
@@ -233,6 +248,90 @@ impl Component for ForkedAgents {
 /// the roster and the spawn helpers. An inherent `impl` in a child module sees
 /// them, so moving the code needed no plumbing.
 impl SessionActor {
+    /// One of this session's forks finished a turn.
+    ///
+    /// The fork half of [`SessionActor::on_main_outcome`](super::SessionActor::on_main_outcome),
+    /// and it answers the same five ends — a fork *is* a conversation, so there
+    /// is no end the main agent can reach that a fork cannot. What differs is
+    /// only the scope: these move the fork's roster entry and write into the
+    /// fork's own log, never the session's status, because a fork working is
+    /// not the session working.
+    pub(super) async fn on_fork_outcome(
+        &mut self,
+        state: &SessionState,
+        id: Uuid,
+        end: TurnEnd,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let outcome = match end {
+            TurnEnd::Concluded { .. } => TurnOutcome::Ended(EmptyOutcome {}),
+            // Not a boundary: the turn is parked, not over, and the question is
+            // journaled into the fork's log by the agent that asked it — the
+            // same division the main agent's `AskRecorded` follows.
+            TurnEnd::Asked => {
+                return self
+                    .persist_and_advance(
+                        state,
+                        vec![SessionDomainEvent::ForkStatusChanged {
+                            at_ms: now_ms(),
+                            id,
+                            status: AgentStatus::AwaitingInput,
+                        }],
+                        ctx,
+                    )
+                    .await;
+            }
+            // Session-wide, exactly as it is for the main agent: forks share the
+            // one runtime, so a runtime that cannot be rebuilt takes every
+            // conversation in the session with it, not just this one.
+            TurnEnd::Failed {
+                error,
+                terminal: true,
+            } => {
+                return self
+                    .persist_and_advance(
+                        state,
+                        vec![SessionDomainEvent::SessionFailed {
+                            at_ms: now_ms(),
+                            reason: error,
+                        }],
+                        ctx,
+                    )
+                    .await;
+            }
+            TurnEnd::Failed {
+                error,
+                terminal: false,
+            } => TurnOutcome::Failed(FailedOutcome { error }),
+            TurnEnd::Parked => TurnOutcome::Failed(FailedOutcome {
+                error: "agent parked; timers are not supported in sessions".to_string(),
+            }),
+            // Only from a fork this session still believes is running — the
+            // same guard, for the same reason, as the main agent's: a report
+            // about anything but a live turn is history already written.
+            TurnEnd::Interrupted => {
+                let running = state
+                    .forks
+                    .get(id)
+                    .is_some_and(|rec| rec.status == AgentStatus::Running);
+                if !running {
+                    return CommandEffect::none();
+                }
+                TurnOutcome::Interrupted(EmptyOutcome {})
+            }
+        };
+        self.persist_and_advance(
+            state,
+            vec![SessionDomainEvent::ForkTurnEnded {
+                at_ms: now_ms(),
+                id,
+                outcome,
+            }],
+            ctx,
+        )
+        .await
+    }
+
     /// Spawn one fork's actor.
     ///
     /// Takes the main agent's plan, because a fork is a conversation: the
@@ -536,7 +635,8 @@ mod tests {
     // ---- integration, over the real actors ----
 
     use super::super::testing::{
-        EchoProvider, agent_history, send, spawn_session_with_provider, spawn_sub, wait_for_state,
+        EchoProvider, FailOnNeedleProvider, agent_history, send, spawn_session_with_provider,
+        spawn_sub, turn_outcomes, turns_begun, wait_for_state,
     };
     use crate::sessions::addressing::SessionRef;
     use crate::sessions::session_actor::{SessionCommand, TurnCommand};
@@ -571,6 +671,139 @@ mod tests {
             .map(|e| format!("{:?}", e.body))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// How many turns began in one agent's log, and how the ones that ended
+    /// ended. A page folds exactly this pair — an unmatched `TurnBegan` is what
+    /// reads `RUNNING` for ever.
+    ///
+    /// Counted rather than merely looked for: a *copy* fork is seeded with its
+    /// source's log, boundaries and all, so "the log holds a `TurnEnded`" is
+    /// true before the fork has run at all.
+    async fn turn_boundaries(
+        session: &SessionRef,
+        agent_id: Option<String>,
+    ) -> (usize, Vec<horsie_agentcore::TurnOutcome>) {
+        let page = agent_history(session, agent_id).await;
+        (turns_begun(&page), turn_outcomes(&page))
+    }
+
+    /// Wait until `agent_id`'s log holds `turns` turns, all of them closed, and
+    /// hand back how the last one ended.
+    ///
+    /// An exact count rather than "at least one has ended": the seeded copy
+    /// arrives already closed, so a floor would pass on a fork whose own turn
+    /// never ends — which is the whole thing under test.
+    async fn wait_for_turn_end(
+        session: &SessionRef,
+        agent_id: Option<String>,
+        turns: usize,
+    ) -> horsie_agentcore::TurnOutcome {
+        let mut last = (0, Vec::new());
+        for _ in 0..300 {
+            last = turn_boundaries(session, agent_id.clone()).await;
+            if last.0 == turns && last.1.len() == turns {
+                return last.1.pop().expect("a closed turn has an outcome");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "wanted {turns} turns, all closed; {} began and {} ended: {}",
+            last.0,
+            last.1.len(),
+            transcript(session, agent_id).await
+        )
+    }
+
+    /// A fork's page folds its own log: `TurnBegan` reads `Running` and only a
+    /// `TurnEnded` clears it. Without one the page says `RUNNING` for ever —
+    /// through reloads *and* restarts, because the status is derived from the
+    /// journal rather than from anything live.
+    #[tokio::test]
+    async fn a_forks_turn_ends_in_its_own_log() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "the original question").await;
+
+        let fork = fork_via(&session, None, "/fork try the other migration")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        // Two: the source's one turn, which the copy carried over already
+        // closed, and the fork's own answer to the message that created it.
+        assert!(
+            matches!(
+                wait_for_turn_end(&session, Some(fork.clone()), 2).await,
+                horsie_agentcore::TurnOutcome::Ended(_)
+            ),
+            "a fork's turn ends like any other conversation's: {}",
+            transcript(&session, Some(fork)).await
+        );
+    }
+
+    /// A fork working is not the session working. The two statuses are read off
+    /// different things — the roster and `state.status` — and a client shows
+    /// them side by side, so a fork's turn must move exactly one of them.
+    #[tokio::test]
+    async fn a_forks_turn_moves_the_forks_status_and_not_the_sessions() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "the original question").await;
+
+        let fork = fork_via(&session, None, "/fork try the other migration")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_turn_end(&session, Some(fork.clone()), 2).await;
+
+        let state = wait_for_state(&journal, id, "the fork settles", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| r.status == AgentStatus::Idle && r.last_activity_ms > 0)
+        })
+        .await;
+        assert_eq!(
+            state.status,
+            crate::sessions::spec::SessionStatus::Idle,
+            "the session's own status belongs to its main agent"
+        );
+    }
+
+    /// The reason a fork's turn failed has one place a reader will look for it:
+    /// the fork's own page. It used to be dropped with a warning, so a fork
+    /// whose turn broke went on reading `RUNNING` and said nothing about why.
+    #[tokio::test]
+    async fn a_forks_failed_turn_says_so_in_its_own_log() {
+        let provider = FailOnNeedleProvider {
+            needle: "the doomed branch".to_string(),
+        };
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
+        send(&session, "the original question").await;
+
+        let fork = fork_via(&session, None, "/fork the doomed branch")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle | AgentStatus::Failed))
+        })
+        .await;
+
+        let outcome = wait_for_turn_end(&session, Some(fork.clone()), 2).await;
+        let horsie_agentcore::TurnOutcome::Failed(failed) = &outcome else {
+            panic!(
+                "a fork's failed turn ends as failed, not {outcome:?}: {}",
+                transcript(&session, Some(fork)).await
+            );
+        };
+        assert!(failed.error.contains("bad key"), "{:?}", failed.error);
     }
 
     /// The whole of `/fork`: the fork exists, carries what was said before it,
