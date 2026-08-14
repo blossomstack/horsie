@@ -6,9 +6,132 @@
 //! mounting it are the same act rather than two lists someone keeps in step.
 
 use crate::http::error::Api;
+use crate::users::UserServices;
+use futures_util::future::BoxFuture;
 use horsie_agentcore::ToolCallError;
+use schemars::JsonSchema;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use std::future::Future;
+use std::sync::Arc;
 
 pub mod http;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Method {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+/// Which surfaces an operation reaches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Expose {
+    /// Route only.
+    Api,
+    /// Route and tool. The common case.
+    ApiAndTool,
+    /// Tool only, with no route of its own — for a route that cannot be an
+    /// operation because it is a stream, but whose non-streaming half a tool
+    /// still wants. Both then call one shared function.
+    ToolOnly,
+}
+
+type Run = Arc<
+    dyn Fn(Arc<UserServices>, Value) -> BoxFuture<'static, Result<Value, ControlError>>
+        + Send
+        + Sync,
+>;
+
+/// One management operation, and the single place it is declared.
+#[derive(Clone)]
+pub struct Operation {
+    /// Groups operations into one tool: "agents", "workflows", …
+    pub resource: &'static str,
+    /// The `action` value within that tool: "list", "create", "invoke", …
+    pub action: &'static str,
+    pub method: Method,
+    /// axum path template. Every `{param}` must also be a field of the input
+    /// type — the HTTP adapter merges path and query params into the input
+    /// object, so a tool and a route see one identical shape.
+    pub path: &'static str,
+    /// Written for the model, and the OpenAPI summary if we ever want one.
+    pub summary: &'static str,
+    pub expose: Expose,
+    pub schema: Value,
+    run: Run,
+}
+
+impl Operation {
+    pub async fn run(
+        &self,
+        services: Arc<UserServices>,
+        input: Value,
+    ) -> Result<Value, ControlError> {
+        (self.run)(services, input).await
+    }
+}
+
+/// Declare an operation. `f` is the whole implementation; the HTTP handler is a
+/// fold over the table rather than a second copy of it.
+#[allow(clippy::too_many_arguments)]
+pub fn op<I, O, F, Fut>(
+    resource: &'static str,
+    action: &'static str,
+    method: Method,
+    path: &'static str,
+    summary: &'static str,
+    expose: Expose,
+    f: F,
+) -> Operation
+where
+    I: DeserializeOwned + JsonSchema + Send + 'static,
+    O: Serialize + Send + 'static,
+    F: Fn(Arc<UserServices>, I) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<O, ControlError>> + Send + 'static,
+{
+    Operation {
+        resource,
+        action,
+        method,
+        path,
+        summary,
+        expose,
+        schema: schema_for::<I>(),
+        run: Arc::new(move |services, raw| {
+            let f = f.clone();
+            Box::pin(async move {
+                let input: I =
+                    serde_json::from_value(raw).map_err(|e| ControlError::Invalid(e.to_string()))?;
+                let out = f(services, input).await?;
+                serde_json::to_value(out).map_err(|e| ControlError::Internal(e.to_string()))
+            })
+        }),
+    }
+}
+
+/// Subschemas are inlined: a tool `input_schema` carrying `$defs` and `$ref` is
+/// not reliably read by every provider, and these schemas are small enough that
+/// inlining costs nothing.
+fn schema_for<I: JsonSchema>() -> Value {
+    schemars::generate::SchemaSettings::default()
+        .with(|s| s.inline_subschemas = true)
+        .into_generator()
+        .into_root_schema_for::<I>()
+        .to_value()
+}
+
+/// The input of an operation that takes none.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NoInput {}
+
+/// The input of an operation addressed only by its slug.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct NameRef {
+    /// Slug of the resource, as it appears in the path.
+    pub name: String,
+}
 
 /// The shared failure vocabulary. Each surface renders it its own way: HTTP as
 /// a status plus an `ApiError` body, a tool as a `ToolCallError` the model reads
@@ -134,5 +257,56 @@ mod tests {
     fn internal_is_not_something_the_model_can_retry() {
         let err: ToolCallError = ControlError::Internal("db is on fire".into()).into();
         assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+    }
+
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    struct Greeting {
+        /// Who to greet.
+        who: String,
+    }
+
+    fn greet() -> Operation {
+        op(
+            "greetings",
+            "say",
+            Method::Post,
+            "/api/greetings",
+            "Say hello.",
+            Expose::ApiAndTool,
+            |_services: Arc<UserServices>, input: Greeting| async move {
+                Ok::<String, ControlError>(format!("hello {}", input.who))
+            },
+        )
+    }
+
+    #[test]
+    fn op_derives_its_schema_from_the_input_type() {
+        let operation = greet();
+        assert_eq!(operation.resource, "greetings");
+        assert_eq!(operation.schema["properties"]["who"]["type"], "string");
+        assert_eq!(operation.schema["required"][0], "who");
+        assert!(
+            operation.schema.get("$defs").is_none(),
+            "subschemas must be inlined: a provider that ignores $ref would see an empty schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn op_runs_its_fn_and_rejects_input_that_does_not_deserialize() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::testing::state(dir.path()).build().await;
+        let services = state.services().await;
+
+        let out = greet()
+            .run(services.clone(), serde_json::json!({"who": "world"}))
+            .await
+            .unwrap();
+        assert_eq!(out, serde_json::json!("hello world"));
+
+        let err = greet()
+            .run(services, serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ControlError::Invalid(_)));
     }
 }
