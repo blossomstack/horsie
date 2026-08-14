@@ -49,28 +49,29 @@ agent's own page, which already exists.
 
 ## What the data already gives us
 
-Almost everything, which is the pleasant surprise here.
+Most of it, and the gap is smaller than it first looks.
 
-`SessionDetail.agents` is a flat `Vec<SubAgentView>` containing the main agent,
-every subagent, **and every fork** — `reads.rs` builds all three through
-`main_entry`, `sub_entry` and `fork_entry` into one roster. Each entry carries
-`parent`, `depth`, `label`, `status`, `spawned_at_ms` and `ended_at_ms`. One
-request draws every lane.
+`SessionDetail.agents` is a flat `Vec<SubAgentView>` carrying the main agent
+and its whole subagent tree, each entry with `parent`, `depth`, `label`,
+`status`, `spawned_at_ms` and `ended_at_ms`. That is every subagent lane and
+its exact span, in a request the page already makes.
 
 Three things that data does *not* say, and what each one costs:
 
-**A fork and a subagent look identical on the wire.** Both are a `SubAgentView`
-with a `parent`, a `depth` and a `label`. The only way to tell them apart today
-is to guess — a subagent's `label` is always set and a fork's is `None` until
-it names itself — which is a heuristic that silently reclassifies a fork the
-moment it picks a title. Forks and subagents belong in different sections of
-this view and mean different things, so guessing is not good enough. This is
-the one server change the feature needs; see below.
+**It does not carry forks.** `agent_roster` builds `main_entry` (or one
+`step_entry` per workflow execution) plus the subagent tree, and stops there —
+`fork_entry` exists, but only `read_agent` uses it, for a single agent's own
+document. A session's forks live on `SessionRecord.forks` in the supervisor,
+kept current by `ForksChanged`, and reach the wire only through
+`SessionSummary.forks` for the session list. This is the one server change the
+feature needs; see below.
 
-**A fork has no end.** `fork_entry` hardcodes `ended_at_ms: 0` with the comment
-"a conversation is never *done*", which is right. So a fork lane is drawn as a
-start marker and an open bar running to the right edge — never as a measured
-span. A subagent lane, whose `spawned_at_ms`/`ended_at_ms` are both real, is.
+**A fork has no end, and never had one.** `ForkView` is `id`, `parent`,
+`title`, `status`, `created_at_ms` — there is no end stamp to want, and
+`fork_entry` says why: "a conversation is never *done*". So a fork lane is
+drawn as a start marker and an open bar running to the right edge, never as a
+measured span. A subagent lane, whose `spawned_at_ms`/`ended_at_ms` are both
+real, is.
 
 **A tool call has no start time.** `ToolResultPart` carries `tool_call_id`,
 `output` and `is_error` and no timestamps at all. A tool's duration is
@@ -105,9 +106,9 @@ instead of a transcript and returns before this code is reached.
 
 ### The lane model — `lib/timeline.ts`
 
-One pure function, `buildTimeline(items, agents, nowMs)`, taking the main
-agent's `TranscriptItem[]` and the session's roster and returning a laid-out
-model in pixels. Pure and separate for the same reason `transcriptSegments.ts`
+One pure function, `buildTimeline(items, agents, forks, nowMs)`, taking the
+main agent's `TranscriptItem[]`, the session's subagent roster and its fork
+list, and returning a laid-out model in pixels. Pure and separate for the same reason `transcriptSegments.ts`
 and `forkTree.ts` are: the placement rules are where the bugs live, and they
 should be testable without a DOM.
 
@@ -194,11 +195,16 @@ at the spawn. A still-running subagent has `endedAtMs === 0` and gets an open
 span to the right edge. A fork lane starts at `toX(createdAtMs)` and is always
 open, since a fork has no end.
 
-Lanes nest by `parent`, and the placement follows the two rules `forkTree.ts`
-already learned the hard way, because it walks the same journal-derived data:
-an agent whose parent resolves to nothing renders at the top level rather than
-disappearing, and anything the descent cannot reach is appended flat rather
-than silently dropped. Deleting a fork does not delete its children.
+Fork nesting is `forkTree()`, called as-is — it already turns a flat
+parent-linked `ForkView[]` into render order with a depth per row, and it is
+already exercised by the rail. Subagent nesting is its own small walk, because
+`SubAgentView` carries a server-computed `depth` that `ForkView` does not.
+
+Both walks follow the two rules `forkTree.ts` learned the hard way, because
+both read journal-derived data: an agent whose parent resolves to nothing
+renders at the top level rather than disappearing, and anything the descent
+cannot reach is appended flat rather than silently dropped. Deleting a fork
+does not delete its children.
 
 Subagent lanes and fork lanes are separated by a divider, because a subagent is
 work inside a turn and a fork is a different conversation — the same
@@ -245,20 +251,30 @@ already a working route.
 
 ### The one server change
 
-`SubAgentView` gains a `kind` field in `crates/models/fluorite/session.fl`:
+`SessionDetail` gains a `forks` field in `crates/models/fluorite/session.fl`,
+the same shape `SessionSummary` already carries:
 
 ```
-/// What sort of agent this is: "main" | "subagent" | "fork" | "step". The
-/// other fields cannot say — a fork and a subagent are both a parent, a
-/// depth and a label — and a client that guesses from whether `label` is
-/// set reclassifies a fork the moment it names itself.
-kind: String,
+/// The conversations forked out of this session. Separate from `agents`
+/// rather than mixed into it, because a fork is not a delegated task: it
+/// owes nobody a result and it never ends. The server keeps them apart for
+/// the same reason — `ForkRoster` is deliberately not a `SubAgentTree`.
+forks: Vec<ForkView>,
 ```
 
-Set in `to_wire_agent` (`crates/server/src/http/handlers.rs`) from the
-`AgentKey` variant the entry was built for, which is the same information
-`agent_roster` already matched on to choose between `main_entry`, `sub_entry`,
-`fork_entry` and `step_entry`. Nothing derives it a second time.
+Populated in `get_session` from `rec.forks` through the existing `wire_fork`
+helper — the identical line `summary()` already uses. The supervisor keeps
+`SessionRecord.forks` current whether or not the session actor is loaded, so
+this costs no extra read.
+
+A second field rather than a `kind` discriminator on `SubAgentView` because it
+is both smaller and truer. Mixing forks into `agents` would need a tag to tell
+them apart again at the other end, and the two kinds do not even share a
+shape — a subagent has two real timestamps, a fork has one and no end.
+
+It also means the client needs no new nesting code for forks: `forkTree()`
+already places a `ForkView[]` into a lineage with depth, and the rail already
+uses it.
 
 A `.fl` edit means regenerating the type trees with `make types` in the same
 commit; a codegen bump that races a PR reddens main.
@@ -267,8 +283,8 @@ commit; a codegen bump that races a PR reddens main.
 
 | file | change |
 |---|---|
-| `crates/models/fluorite/session.fl` | `kind` on `SubAgentView` |
-| `crates/server/src/http/handlers.rs` | set `kind` in `to_wire_agent` |
+| `crates/models/fluorite/session.fl` | `forks` on `SessionDetail` |
+| `crates/server/src/http/handlers.rs` | populate it in `get_session` |
 | generated type trees | `make types` |
 | `clients/web/src/lib/timeline.ts` | new — the layout model |
 | `clients/web/src/lib/timeline.test.ts` | new |
@@ -285,6 +301,10 @@ interpolation and clamping past both ends, a subagent placed inside a tool
 bar's span, a fork branching from another fork, an orphaned parent rendering
 top-level, a cyclic roster appending flat rather than hanging, and an
 all-zero-stamp agent landing in the unplaced group.
+
+On the server, one test that `GET /sessions/:id` returns a fork the session
+holds. The supervisor already has `forks_are_listed_without_loading_the_session`
+for the list side; this is the detail side of the same fact.
 
 One Playwright spec covers the wiring: open a session with a subagent, toggle
 the view, assert the lanes, click the subagent lane and land on its page. Lane
