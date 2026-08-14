@@ -1,5 +1,7 @@
 //! A publish/subscribe bus.
 
+pub mod topics;
+
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
@@ -107,6 +109,21 @@ impl Bus for MemoryBus {
         Ok(Subscription {
             rx: self.sender(topic).subscribe(),
         })
+    }
+}
+
+/// The bus this deployment runs, from what it configured.
+///
+/// `None` is the ordinary single-node case and gets a bus confined to this
+/// process. A URL is a deployment saying its nodes have to reach each other,
+/// and **an unusable one fails the boot rather than falling back**: a server
+/// that asked for a shared bus and silently got a per-process one looks
+/// perfectly healthy while losing every message that was supposed to cross a
+/// node, which is the worst failure this design can have.
+pub async fn open(url: Option<&str>) -> Result<Arc<dyn Bus>, BusError> {
+    match url {
+        None => Ok(Arc::new(MemoryBus::new())),
+        Some(url) => Ok(Arc::new(RedisBus::connect(url).await?)),
     }
 }
 
@@ -388,6 +405,54 @@ mod tests {
         let mut sub = bus.subscribe("t").await.unwrap();
         bus.publish("t", b"x".to_vec()).await.unwrap();
         assert_eq!(sub.recv().await, Some(b"x".to_vec()));
+    }
+
+    /// Configuring nothing gets a bus confined to this process — which is what
+    /// a single-node deployment wants, and is asserted here as *behaviour*
+    /// rather than by asking the value what type it is: two of them do not
+    /// reach each other.
+    #[tokio::test]
+    async fn without_a_url_a_bus_reaches_only_its_own_process() {
+        let one = open(None).await.expect("open one");
+        let other = open(None).await.expect("open other");
+        let mut sub = other.subscribe("t").await.unwrap();
+        one.publish("t", b"x".to_vec()).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv())
+                .await
+                .is_err(),
+            "an in-process bus must not reach another instance"
+        );
+    }
+
+    /// The same assertion, inverted: configuring a URL is what makes two
+    /// separately-built buses one bus. Without this, `open` could return an
+    /// in-process bus for every input and every other test here would still
+    /// pass.
+    #[tokio::test]
+    async fn with_a_url_two_separately_opened_buses_are_one_bus() {
+        let Some(url) = redis_url() else {
+            eprintln!("skipped: HORSIE_TEST_REDIS_URL is not set");
+            return;
+        };
+        let one = open(Some(&url)).await.expect("open one");
+        let other = open(Some(&url)).await.expect("open other");
+        let mut sub = other.subscribe("shared").await.unwrap();
+        one.publish("shared", b"x".to_vec()).await.unwrap();
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .expect("a configured bus must join two instances");
+        assert_eq!(got, Some(b"x".to_vec()));
+    }
+
+    /// A URL that cannot be opened fails the boot rather than quietly falling
+    /// back. A deployment that asked for a shared bus and silently got a
+    /// per-process one would look healthy and lose every cross-node message.
+    #[tokio::test]
+    async fn an_unusable_url_is_an_error_rather_than_a_silent_downgrade() {
+        assert!(open(Some("not-a-url")).await.is_err());
     }
 
     /// A Redis to test against, or `None` when the run has none configured.

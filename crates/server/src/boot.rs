@@ -46,6 +46,10 @@ pub struct BootOptions {
     pub web_dir: Option<PathBuf>,
     /// Reported in the settings view, purely so an operator can see it.
     pub config_path: Option<PathBuf>,
+    /// Where this node reaches the others. Empty means a bus confined to this
+    /// process, which is what a single-node deployment wants; a URL is a
+    /// deployment saying its nodes have to hear each other.
+    pub bus_url: Option<String>,
 }
 
 impl BootOptions {
@@ -60,6 +64,7 @@ impl BootOptions {
             extra_model_cards: Vec::new(),
             web_dir: None,
             config_path: None,
+            bus_url: None,
         }
     }
 }
@@ -128,8 +133,16 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
     let mut seed = model_cards::bundled_seed()?;
     seed.extend(opts.extra_model_cards);
 
+    // Before anything that could publish. An unusable URL fails the boot
+    // rather than falling back to a per-process bus: a node that believes it is
+    // clustered and is not looks healthy while losing every cross-node message.
+    let bus = crate::bus::open(opts.bus_url.as_deref())
+        .await
+        .map_err(|e| format!("opening the bus: {e}"))?;
+
     let shared = Arc::new(Shared {
         system: crate::users::node_system(&db),
+        bus,
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
         info,

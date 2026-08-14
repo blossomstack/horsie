@@ -115,6 +115,12 @@ async fn boot(
         extra_model_cards,
         web_dir: cli.web.clone(),
         config_path,
+        // Same precedence as the database URL: the environment wins, so a
+        // deployment can point a node at its bus without editing a file.
+        bus_url: std::env::var("HORSIE_BUS_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| cfg.bus.url.clone()),
     })
     .await
     .map_err(BootError::Config)
@@ -176,6 +182,7 @@ mod tests {
                 data_dir: dir.path().join("data"),
             },
             database: config::DatabaseConfig::default(),
+            bus: config::BusConfig::default(),
             auth: config::AuthConfig {
                 mode: config::AuthModeSetting::Off,
             },

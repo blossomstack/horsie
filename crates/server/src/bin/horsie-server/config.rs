@@ -30,6 +30,21 @@ pub struct BootConfig {
     /// reachable from anywhere but localhost should not be open by accident.
     #[serde(default)]
     pub auth: AuthConfig,
+    /// How this node reaches the others. Absent on a single-node deployment,
+    /// which is the default and needs nothing here.
+    #[serde(default)]
+    pub bus: BusConfig,
+}
+
+/// Where nodes publish to each other.
+#[derive(Debug, Default, Deserialize)]
+pub struct BusConfig {
+    /// A `redis://` URL. Absent means a bus confined to this process, which is
+    /// correct for one node and wrong for more than one — so a deployment that
+    /// runs several nodes without setting this loses every message that was
+    /// meant to cross between them.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -194,6 +194,7 @@ impl TestStateBuilder {
             .expect("bootstrap leaves exactly one account");
 
         let shared = Arc::new(Shared {
+            bus: Arc::new(crate::bus::MemoryBus::new()),
             system: crate::users::node_system(&db),
             db,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
@@ -273,6 +274,7 @@ impl Deployment {
         let tmp = tempfile::tempdir().unwrap();
         let account = UserId::bootstrap();
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+            bus: Arc::new(crate::bus::MemoryBus::new()),
             system: horsie_actor::ActorSystem::new(journal.clone()),
             db: crate::db::testing::db().await,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
