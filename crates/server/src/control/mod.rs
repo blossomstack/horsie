@@ -20,6 +20,7 @@ pub mod environments;
 pub mod http;
 pub mod routines;
 pub mod toolbox;
+pub mod workflows;
 
 /// One manageable noun and everything you can do to it.
 ///
@@ -40,6 +41,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(agents::Agents),
         Box::new(routines::Routines),
         Box::new(environments::Environments),
+        Box::new(workflows::Workflows),
     ]
 }
 
