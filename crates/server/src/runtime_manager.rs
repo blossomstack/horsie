@@ -346,7 +346,7 @@ impl RuntimeManager {
         first: horsie_runtime_host::RuntimeProgress,
         rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_host::RuntimeEvent>,
         narrate: Option<&NarrationSink>,
-    ) -> Result<Arc<dyn crate::runtime_vendor::RuntimeHandle>, RuntimeError> {
+    ) -> Result<Arc<dyn horsie_runtime_host::RuntimeTransport>, RuntimeError> {
         use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
         let mut progress = first;
@@ -409,12 +409,9 @@ impl RuntimeManager {
     /// runtime derives its own handle with `RuntimeClient::with_agent_id`.
     fn client(
         session: &str,
-        handle: Arc<dyn crate::runtime_vendor::RuntimeHandle>,
+        handle: Arc<dyn horsie_runtime_host::RuntimeTransport>,
     ) -> RuntimeClient {
-        RuntimeClient::from_arc(
-            Arc::new(horsie_runtime_host::RuntimeHandleTransport(handle)),
-            session,
-        )
+        RuntimeClient::from_arc(handle, session)
     }
 
     /// Advisory: the session is going cold. Best effort — a vendor that is not
@@ -916,14 +913,10 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
     struct StubHandle;
 
     #[async_trait::async_trait]
-    impl crate::runtime_vendor::RuntimeHandle for StubHandle {
-        fn id(&self) -> &str {
-            "s1"
-        }
+    impl horsie_runtime_host::RuntimeTransport for StubHandle {
         async fn relay(
             &self,
             _: horsie_models::runtime::RuntimeInboundMessage,
@@ -933,14 +926,11 @@ mod tests {
         > {
             Err(horsie_runtime_host::TransportError::Disconnected)
         }
-        async fn relay_oneway(
+        async fn send_oneway(
             &self,
             _: horsie_models::runtime::RuntimeInboundMessage,
         ) -> Result<(), horsie_runtime_host::TransportError> {
             Ok(())
-        }
-        async fn closed(&self) {
-            std::future::pending::<()>().await;
         }
     }
 

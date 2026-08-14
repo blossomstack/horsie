@@ -478,16 +478,15 @@ impl WebsocketRuntimeVendor {
     ///
     /// The transport re-resolves the name on every call, so a reconnect
     /// mid-turn is invisible to the run already in flight.
-    fn handle(&self, runtime_id: &str) -> Arc<dyn crate::runtime_vendor::RuntimeHandle> {
-        Arc::new(horsie_runtime_host::RuntimeHandleImpl::new(
-            runtime_id.to_string(),
-            Arc::new(crate::runtime_vendor::RuntimeVendorTransport::new(
+    fn handle(&self, runtime_id: &str) -> Arc<dyn horsie_runtime_host::RuntimeTransport> {
+        Arc::new(
+            crate::runtime_vendor::RuntimeVendorTransport::new(
                 self.vendors.clone(),
                 self.vendor_name.clone(),
                 runtime_id.to_string(),
-            )),
-            self.closed.subscribe(),
-        ))
+            )
+            .watching(self.closed.subscribe()),
+        )
     }
 }
 

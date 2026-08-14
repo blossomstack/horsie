@@ -16,11 +16,11 @@
 //! and finishes on the progress sink.
 
 use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
-use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
+use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use horsie_runtime_host::{
-    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeHandleImpl, RuntimeProgress, RuntimeProgressSink,
+    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -206,20 +206,6 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         }
     }
 
-    fn handle(
-        &self,
-        runtime_id: &str,
-        transport: Arc<dyn horsie_runtime_host::RuntimeTransport>,
-    ) -> Arc<dyn RuntimeHandle> {
-        // The registry reports liveness by presence — a dropped runtime is
-        // simply absent from it — so there is no flag anyone flips, and the
-        // handle says so rather than inventing a channel nobody holds.
-        Arc::new(RuntimeHandleImpl::unwatched(
-            runtime_id.to_string(),
-            transport,
-        ))
-    }
-
     /// Delete every volume this runtime's creates have left behind.
     ///
     /// By name, and *all* of them: a Fly volume name is a group label rather
@@ -331,9 +317,7 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             let outcome = tokio::time::timeout(READY_WINDOW, waiter).await;
             let event = match outcome {
                 Ok(Ok(Ok(()))) => match connected.runtime_transport(&id).await {
-                    Some(transport) => RuntimeProgress::Ready(Arc::new(
-                        RuntimeHandleImpl::unwatched(id.clone(), transport),
-                    )),
+                    Some(transport) => RuntimeProgress::Ready(transport),
                     None => RuntimeProgress::Gone {
                         reason: "the runtime announced itself and then vanished".to_string(),
                     },
@@ -428,7 +412,7 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
         if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
-            return Ok(RuntimeProgress::Ready(self.handle(runtime_id, transport)));
+            return Ok(RuntimeProgress::Ready(transport));
         }
 
         let Some(machine) = self.api.machine_by_name(&machine_name(runtime_id)).await? else {
