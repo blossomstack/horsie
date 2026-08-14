@@ -3,32 +3,26 @@ import { composeAnswer, isAskCall, pickedChoices } from "./askUser";
 
 describe("isAskCall", () => {
   it("recognises the session tool", () => {
-    expect(isAskCall("ask_user", { question: "which?" })).toBe(true);
+    expect(isAskCall("ask_user")).toBe(true);
   });
 
-  /** A workflow step never gets `ask_user` — naming it beside `conclude` would
-   * stop the loop treating `conclude` as terminal — so a step asks through
-   * `conclude({kind:"ask"})`. Matching on one tool name left a parked step's
-   * question rendered as a collapsed tool row with nothing to answer it with,
-   * which is the whole reason a parked run could not be unblocked. */
-  it("recognises a step's conclude-shaped question", () => {
-    expect(isAskCall("conclude", { kind: "ask", question: "p0 or p2?" })).toBe(true);
+  /** A step asks with the same tool a conversation does. It used to ask
+   * through its finishing tool instead, so this had to sniff the payload —
+   * and a step that *submitted* looked enough like a question to need telling
+   * apart. Neither is true any more: the name is the whole test. */
+  it("recognises a step's question by the same name", () => {
+    expect(isAskCall("ask_user")).toBe(true);
   });
 
-  /** The same tool submits a step's output, and that call is not a question. */
-  it("is not fooled by a conclude that submits", () => {
-    expect(isAskCall("conclude", { kind: "submit", output: { severity: "p0" } })).toBe(
+  it("does not treat a submitted result as a question", () => {
+    expect(isAskCall("submit_result")).toBe(
       false,
     );
-    expect(isAskCall("conclude", { severity: "p0" })).toBe(false);
-    // An empty question is not a question — it would render a card with nothing
-    // in it.
-    expect(isAskCall("conclude", { kind: "ask", question: "" })).toBe(false);
   });
 
   it("leaves every other tool alone", () => {
-    expect(isAskCall("bash", { command: "ls" })).toBe(false);
-    expect(isAskCall("conclude", null)).toBe(false);
+    expect(isAskCall("bash")).toBe(false);
+    expect(isAskCall("submit_result")).toBe(false);
   });
 });
 

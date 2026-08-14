@@ -1675,8 +1675,8 @@ impl AgentActor {
         (!text.trim().is_empty()).then(|| Message::assistant_text(new_message_id(), text, now_ms()))
     }
 
-    /// Interpret a `conclude` payload (or plain-text completion) and deliver the
-    /// outcome to the parent. The conversation events were already persisted
+    /// Interpret what ended the run — a tool that stopped it, or a plain-text
+    /// completion — and deliver the outcome to the parent. The conversation events were already persisted
     /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
     /// terminal transition and decides the actor's lifecycle.
     async fn handle_finished(

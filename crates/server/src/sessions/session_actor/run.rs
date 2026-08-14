@@ -272,8 +272,8 @@ impl SessionActor {
     ///
     /// Differs from a subagent in three ways, all of them the point: it runs
     /// with its *own* preset's settings rather than the session's, it carries
-    /// the step's output schema so `conclude` is typed, and it is keyed as a
-    /// step so it roots its own subagent tree.
+    /// what the step promises to return so `submit_result` is typed, and it is
+    /// keyed as a step so it roots its own subagent tree.
     pub(super) fn spawn_step_agent(
         &mut self,
         ctx: &ActorContext<SessionInbox>,

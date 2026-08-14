@@ -9,10 +9,19 @@ import type {
 } from "../hooks/useSessionStream";
 
 function tool(id: string, endedAtMs?: number): RenderedToolCall {
-  return { id, name: "read_file", input: {}, running: false, endedAtMs, hooks: [] };
+  return {
+    id,
+    name: "read_file",
+    input: {},
+    running: false,
+    endedAtMs,
+    hooks: [],
+  };
 }
 
-function assistant(m: Partial<RenderedMessage> & { id: string }): RenderedMessage {
+function assistant(
+  m: Partial<RenderedMessage> & { id: string },
+): RenderedMessage {
   return {
     role: "Assistant",
     text: "",
@@ -68,7 +77,12 @@ describe("buildSegments work spans", () => {
         startedAtMs: 1_000,
         createdAtMs: 2_000,
       }),
-      assistant({ id: "m2", text: "here you go", startedAtMs: 5_000, createdAtMs: 6_000 }),
+      assistant({
+        id: "m2",
+        text: "here you go",
+        startedAtMs: 5_000,
+        createdAtMs: 6_000,
+      }),
       assistant({
         id: "m3",
         toolCalls: [tool("t2", 30_000)],
@@ -86,7 +100,11 @@ describe("buildSegments work spans", () => {
     // Only assistant messages carry `startedAtMs`; anything else that
     // contributes work is bounded by its own stamp rather than dropped.
     const segments = buildSegments([
-      assistant({ id: "m1", toolCalls: [tool("t1", 8_000)], createdAtMs: 2_000 }),
+      assistant({
+        id: "m1",
+        toolCalls: [tool("t1", 8_000)],
+        createdAtMs: 2_000,
+      }),
     ]);
     expect(workSpans(segments)).toEqual([[2_000, 8_000]]);
   });
@@ -100,21 +118,25 @@ describe("buildSegments work spans", () => {
   });
 });
 
-/** A workflow step has no `ask_user`: it asks through `conclude({kind: "ask"})`,
- * and submits its output through the very same tool. */
-function conclude(id: string, input: unknown): RenderedToolCall {
-  return { id, name: "conclude", input, running: false, hooks: [] };
+/** A step asks with `ask_user`, exactly as a conversation does. It used to ask
+ * through its finishing tool, which is why breaking a question out of a work
+ * group once needed the payload rather than the name. */
+function stepAsk(id: string, question: string): RenderedToolCall {
+  return {
+    id,
+    name: "ask_user",
+    input: { question },
+    running: false,
+    hooks: [],
+  };
 }
 
 describe("questions break out of a work group", () => {
-  it("gives a step's `conclude` ask its own segment", () => {
+  it("gives a step's ask its own segment", () => {
     const segments = buildSegments([
       assistant({
         id: "m1",
-        toolCalls: [
-          tool("t1", 4_000),
-          conclude("t2", { kind: "ask", question: "p0 or p2?" }),
-        ],
+        toolCalls: [tool("t1", 4_000), stepAsk("t2", "p0 or p2?")],
         startedAtMs: 1_000,
         createdAtMs: 2_000,
       }),
@@ -129,7 +151,7 @@ describe("questions break out of a work group", () => {
    * human's reply are both hung on the call, and a collapsed "ran 2 tools" row
    * is the only trace left that anyone was asked at all. */
   it("keeps an answered step ask standalone", () => {
-    const answered = conclude("t2", { kind: "ask", question: "p0 or p2?" });
+    const answered = stepAsk("t2", "p0 or p2?");
     answered.output = "p0";
     const segments = buildSegments([
       assistant({
@@ -147,15 +169,21 @@ describe("questions break out of a work group", () => {
     expect(work.items).toHaveLength(1);
   });
 
-  /** `conclude` is also how a step submits its result. That call is not a
-   * question and must stay grouped, or every step ends in a bare row. */
-  it("leaves a submitting `conclude` in the group", () => {
+  /** Submitting a result is not a question: it stays inside the work group,
+   * or every step would end in a bare row of its own. */
+  it("leaves a submitted result in the group", () => {
     const segments = buildSegments([
       assistant({
         id: "m1",
         toolCalls: [
           tool("t1", 4_000),
-          conclude("t2", { kind: "submit", output: { severity: "p0" } }),
+          {
+            id: "t2",
+            name: "submit_result",
+            input: { outcome: "p0", description: "did it" },
+            running: false,
+            hooks: [],
+          },
         ],
         startedAtMs: 1_000,
         createdAtMs: 2_000,
@@ -167,16 +195,16 @@ describe("questions break out of a work group", () => {
   it("breaks out a live ask too", () => {
     const segments = buildSegments([], {
       text: "",
-      orphanTools: [
-        tool("t1"),
-        conclude("t2", { kind: "ask", question: "which branch?" }),
-      ],
+      orphanTools: [tool("t1"), stepAsk("t2", "which branch?")],
     });
     expect(segments.map((s) => s.kind)).toEqual(["work", "ask"]);
   });
 });
 
-function sub(label: string, over: Partial<RenderedSubAgent> = {}): RenderedSubAgent {
+function sub(
+  label: string,
+  over: Partial<RenderedSubAgent> = {},
+): RenderedSubAgent {
   return {
     subagentId: `id-${label}`,
     label,
@@ -230,7 +258,8 @@ describe("subagent results in a turn", () => {
     ]);
     expect(turns.map((t) => t.kind)).toEqual(["assistant", "user"]);
     const first = turns[0];
-    if (first.kind !== "assistant") throw new Error("expected an assistant turn");
+    if (first.kind !== "assistant")
+      throw new Error("expected an assistant turn");
     // The synthetic message carries the results and nothing else: with text on
     // it, `buildSegments` would emit the user's words into the agent's thread.
     expect(first.msgs.at(-1)?.subagentResults).toHaveLength(1);
