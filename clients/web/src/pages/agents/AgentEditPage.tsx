@@ -159,6 +159,25 @@ function AgentForm({ initial }: { initial?: AgentView }) {
               </p>
               <ConfigFields draft={draft} />
             </div>
+
+            <div className="border-t pt-4">
+              <h2 className="section-title">Control plane access</h2>
+              <label className="mt-2 flex items-center gap-2 text-sm text-dim">
+                <input
+                  type="checkbox"
+                  checked={draft.controlPlane}
+                  onChange={(e) => draft.setControlPlane(e.target.checked)}
+                  data-testid="agent-control-plane-toggle"
+                />
+                Let this agent manage this horsie server
+              </label>
+              <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+                Sessions from this preset can create, change and delete agents,
+                routines and environments. Changes apply immediately and are
+                not confirmed first, so turning this on is the whole
+                authorisation.
+              </p>
+            </div>
           </section>
 
           {error && (

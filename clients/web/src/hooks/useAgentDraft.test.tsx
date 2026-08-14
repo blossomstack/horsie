@@ -120,6 +120,30 @@ describe("useAgentDraft", () => {
     });
   });
 
+  // Absent is off. A preset saved before the control plane existed, or by an
+  // API caller who never mentioned it, must not come back granted.
+  it("leaves control-plane access off unless the preset carries it", () => {
+    const { result } = render(preset);
+    expect(result.current.controlPlane).toBe(false);
+    expect(
+      result.current.buildAgentInput("reviewer", "", "").controlPlane,
+    ).toBeUndefined();
+  });
+
+  it("carries an existing grant, and a newly ticked one", () => {
+    const { result } = render({ ...preset, controlPlane: true });
+    expect(result.current.controlPlane).toBe(true);
+    expect(result.current.buildAgentInput("reviewer", "", "").controlPlane).toBe(
+      true,
+    );
+
+    const fresh = render(preset);
+    act(() => fresh.result.current.setControlPlane(true));
+    expect(
+      fresh.result.current.buildAgentInput("reviewer", "", "").controlPlane,
+    ).toBe(true);
+  });
+
   // A preset is saved with `PUT`, which is a full replace: anything the form
   // omits is deleted.
   it("keeps every channel it does carry", () => {
