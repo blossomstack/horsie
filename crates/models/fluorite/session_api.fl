@@ -6,7 +6,7 @@ use session.AgentSettings;
 use session.AnnotationEntry;
 use session.SessionSummary;
 use session.SessionDetail;
-use session.TaskItem;
+use agent.TaskItem;
 use session.UsageView;
 use session.SubAgentView;
 use agent.Usage;
