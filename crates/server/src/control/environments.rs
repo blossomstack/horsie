@@ -1,74 +1,78 @@
 //! The environments resource: reusable runtime + repos bundles.
 
-use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, op};
+use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
 use crate::users::UserServices;
 use horsie_models::environments::{EnvironmentInput, EnvironmentView};
 use std::sync::Arc;
 
-pub fn operations() -> Vec<Operation> {
-    vec![
-        op(
-            "environments",
-            "list",
-            Method::Get,
-            "/api/environments",
-            "Every saved environment.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, _i: NoInput| async move {
-                Ok::<Vec<EnvironmentView>, ControlError>(s.environments.list().await?)
-            },
-        ),
-        op(
-            "environments",
-            "get",
-            Method::Get,
-            "/api/environments/{name}",
-            "One environment by slug.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: NameRef| async move {
-                Ok::<EnvironmentView, ControlError>(s.environments.get(&i.name).await?)
-            },
-        ),
-        op(
-            "environments",
-            "create",
-            Method::Post,
-            "/api/environments",
-            "Save a new environment: the runtime vendor to run on and the repos \
+/// Reusable runtime + repos bundles.
+pub struct Environments;
+
+impl Resource for Environments {
+    fn name(&self) -> &'static str {
+        "environments"
+    }
+
+    fn operations(&self) -> Vec<Operation> {
+        vec![
+            op(
+                "list",
+                Method::Get,
+                "/api/environments",
+                "Every saved environment.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, _i: NoInput| async move {
+                    Ok::<Vec<EnvironmentView>, ControlError>(s.environments.list().await?)
+                },
+            ),
+            op(
+                "get",
+                Method::Get,
+                "/api/environments/{name}",
+                "One environment by slug.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: NameRef| async move {
+                    Ok::<EnvironmentView, ControlError>(s.environments.get(&i.name).await?)
+                },
+            ),
+            op(
+                "create",
+                Method::Post,
+                "/api/environments",
+                "Save a new environment: the runtime vendor to run on and the repos \
              to clone into its workspace.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: EnvironmentInput| async move {
-                Ok::<EnvironmentView, ControlError>(s.environments.create(i).await?)
-            },
-        )
-        .created(),
-        op(
-            "environments",
-            "replace",
-            Method::Put,
-            "/api/environments/{name}",
-            "Replace an environment wholesale. The name is immutable — it is the \
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: EnvironmentInput| async move {
+                    Ok::<EnvironmentView, ControlError>(s.environments.create(i).await?)
+                },
+            )
+            .created(),
+            op(
+                "replace",
+                Method::Put,
+                "/api/environments/{name}",
+                "Replace an environment wholesale. The name is immutable — it is the \
              id of record.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: EnvironmentInput| async move {
-                let name = i.name.clone();
-                Ok::<EnvironmentView, ControlError>(s.environments.replace(&name, i).await?)
-            },
-        ),
-        op(
-            "environments",
-            "delete",
-            Method::Delete,
-            "/api/environments/{name}",
-            "Delete an environment.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: NameRef| async move {
-                s.environments.delete(&i.name).await?;
-                Ok::<(), ControlError>(())
-            },
-        )
-        .no_content(),
-    ]
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: EnvironmentInput| async move {
+                    let name = i.name.clone();
+                    Ok::<EnvironmentView, ControlError>(s.environments.replace(&name, i).await?)
+                },
+            ),
+            op(
+                "delete",
+                Method::Delete,
+                "/api/environments/{name}",
+                "Delete an environment.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: NameRef| async move {
+                    s.environments.delete(&i.name).await?;
+                    Ok::<(), ControlError>(())
+                },
+            )
+            .no_content(),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -81,12 +85,16 @@ pub fn operations() -> Vec<Operation> {
 mod tests {
     use super::*;
 
+    fn operations() -> Vec<Operation> {
+        Environments.operations()
+    }
+
     #[test]
     fn every_action_is_declared_once_on_one_resource() {
         let mut actions: Vec<&str> = operations().iter().map(|o| o.action).collect();
         actions.sort_unstable();
         assert_eq!(actions, ["create", "delete", "get", "list", "replace"]);
-        assert!(operations().iter().all(|o| o.resource == "environments"));
+        assert_eq!(Environments.name(), "environments");
     }
 
     #[test]

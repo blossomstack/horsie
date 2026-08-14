@@ -20,14 +20,40 @@ pub mod environments;
 pub mod http;
 pub mod routines;
 
-/// The whole control plane. A new resource is one line here.
-pub fn operations() -> Vec<Operation> {
-    [
-        agents::operations(),
-        routines::operations(),
-        environments::operations(),
+/// One manageable noun and everything you can do to it.
+///
+/// The name lives here rather than on each operation, so a resource cannot end
+/// up with two spellings of itself — which would quietly split it across two
+/// tools and two sets of routes.
+pub trait Resource: Send + Sync {
+    /// The noun. Becomes the tool `horsie_<name>` and groups the routes.
+    fn name(&self) -> &'static str;
+
+    /// Every operation on this resource, in any order.
+    fn operations(&self) -> Vec<Operation>;
+}
+
+/// Every resource the control plane manages. A new one is one line.
+pub fn resources() -> Vec<Box<dyn Resource>> {
+    vec![
+        Box::new(agents::Agents),
+        Box::new(routines::Routines),
+        Box::new(environments::Environments),
     ]
-    .concat()
+}
+
+/// The whole control plane, with every operation stamped with its resource.
+pub fn operations() -> Vec<Operation> {
+    resources()
+        .iter()
+        .flat_map(|resource| {
+            let name = resource.name();
+            resource
+                .operations()
+                .into_iter()
+                .map(move |operation| operation.on(name))
+        })
+        .collect()
 }
 
 /// Ask the session supervisor a question, mapping a closed mailbox to an
@@ -96,6 +122,10 @@ type Run = Arc<
 #[derive(Clone)]
 pub struct Operation {
     /// Groups operations into one tool: "agents", "workflows", …
+    ///
+    /// Empty until [`Resource`] stamps it in [`operations`], which is the only
+    /// way an operation reaches either surface. `resource_is_always_stamped`
+    /// is the guard.
     pub resource: &'static str,
     /// The `action` value within that tool: "list", "create", "invoke", …
     pub action: &'static str,
@@ -134,13 +164,19 @@ impl Operation {
         self.success = Success::NoContent;
         self
     }
+
+    /// Name the resource this belongs to. Called once, by [`operations`].
+    #[must_use]
+    fn on(mut self, resource: &'static str) -> Self {
+        self.resource = resource;
+        self
+    }
 }
 
 /// Declare an operation. `f` is the whole implementation; the HTTP handler is a
 /// fold over the table rather than a second copy of it.
 #[allow(clippy::too_many_arguments)]
 pub fn op<I, O, F, Fut>(
-    resource: &'static str,
     action: &'static str,
     method: Method,
     path: &'static str,
@@ -155,7 +191,8 @@ where
     Fut: Future<Output = Result<O, ControlError>> + Send + 'static,
 {
     Operation {
-        resource,
+        // Stamped by `Resource`, which is where the name is written once.
+        resource: "",
         action,
         method,
         path,
@@ -315,6 +352,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn resource_is_always_stamped() {
+        // `op` cannot know its resource, so nothing may reach a surface with
+        // the placeholder still on it.
+        for operation in operations() {
+            assert!(
+                !operation.resource.is_empty(),
+                "{} escaped `Resource` unstamped",
+                operation.action
+            );
+        }
+    }
+
+    #[test]
     fn every_resource_declares_a_distinct_action_set() {
         // Two operations answering to one (resource, action) would make the
         // toolbox's dispatch map silently drop one of them.
@@ -394,7 +444,6 @@ pub(crate) mod tests {
 
     fn greet() -> Operation {
         op(
-            "greetings",
             "say",
             Method::Post,
             "/api/greetings",
@@ -409,7 +458,6 @@ pub(crate) mod tests {
     #[test]
     fn op_derives_its_schema_from_the_input_type() {
         let operation = greet();
-        assert_eq!(operation.resource, "greetings");
         assert_eq!(operation.schema["properties"]["who"]["type"], "string");
         assert_eq!(operation.schema["required"][0], "who");
         assert!(

@@ -1,6 +1,8 @@
 //! The agents resource: named agent presets, and invoking one into a session.
 
-use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, ask, op};
+use crate::control::{
+    ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, ask, op,
+};
 use crate::http::handlers;
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
@@ -24,78 +26,81 @@ pub struct InvokeAgent {
     pub request: AgentInvokeRequest,
 }
 
-pub fn operations() -> Vec<Operation> {
-    vec![
-        op(
-            "agents",
-            "list",
-            Method::Get,
-            "/api/agents",
-            "Every saved agent preset.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, _i: NoInput| async move {
-                Ok::<Vec<AgentView>, ControlError>(s.agents.list().await?)
-            },
-        ),
-        op(
-            "agents",
-            "get",
-            Method::Get,
-            "/api/agents/{name}",
-            "One agent preset by slug.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: NameRef| async move {
-                Ok::<AgentView, ControlError>(s.agents.get(&i.name).await?)
-            },
-        ),
-        op(
-            "agents",
-            "create",
-            Method::Post,
-            "/api/agents",
-            "Save a new agent preset. `model` must be a configured alias — list \
+/// Named agent presets, and invoking one into a session.
+pub struct Agents;
+
+impl Resource for Agents {
+    fn name(&self) -> &'static str {
+        "agents"
+    }
+
+    fn operations(&self) -> Vec<Operation> {
+        vec![
+            op(
+                "list",
+                Method::Get,
+                "/api/agents",
+                "Every saved agent preset.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, _i: NoInput| async move {
+                    Ok::<Vec<AgentView>, ControlError>(s.agents.list().await?)
+                },
+            ),
+            op(
+                "get",
+                Method::Get,
+                "/api/agents/{name}",
+                "One agent preset by slug.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: NameRef| async move {
+                    Ok::<AgentView, ControlError>(s.agents.get(&i.name).await?)
+                },
+            ),
+            op(
+                "create",
+                Method::Post,
+                "/api/agents",
+                "Save a new agent preset. `model` must be a configured alias — list \
              the models first if you are unsure.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: AgentPresetInput| async move {
-                Ok::<AgentView, ControlError>(s.agents.create(i).await?)
-            },
-        )
-        .created(),
-        op(
-            "agents",
-            "replace",
-            Method::Put,
-            "/api/agents/{name}",
-            "Replace a preset wholesale. Omitted fields are reset, not kept. The \
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: AgentPresetInput| async move {
+                    Ok::<AgentView, ControlError>(s.agents.create(i).await?)
+                },
+            )
+            .created(),
+            op(
+                "replace",
+                Method::Put,
+                "/api/agents/{name}",
+                "Replace a preset wholesale. Omitted fields are reset, not kept. The \
              name is immutable — it is the id of record.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: AgentPresetInput| async move {
-                let name = i.name.clone();
-                Ok::<AgentView, ControlError>(s.agents.replace(&name, i).await?)
-            },
-        ),
-        op(
-            "agents",
-            "delete",
-            Method::Delete,
-            "/api/agents/{name}",
-            "Delete a preset. Refused while a routine still names it.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: NameRef| async move { delete(&s, &i.name).await },
-        )
-        .no_content(),
-        op(
-            "agents",
-            "invoke",
-            Method::Post,
-            "/api/agents/{name}/invoke",
-            "Create a session from a preset and queue its first message. Returns \
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: AgentPresetInput| async move {
+                    let name = i.name.clone();
+                    Ok::<AgentView, ControlError>(s.agents.replace(&name, i).await?)
+                },
+            ),
+            op(
+                "delete",
+                Method::Delete,
+                "/api/agents/{name}",
+                "Delete a preset. Refused while a routine still names it.",
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: NameRef| async move { delete(&s, &i.name).await },
+            )
+            .no_content(),
+            op(
+                "invoke",
+                Method::Post,
+                "/api/agents/{name}/invoke",
+                "Create a session from a preset and queue its first message. Returns \
              as soon as both are accepted; the turn runs in the background.",
-            Expose::ApiAndTool,
-            |s: Arc<UserServices>, i: InvokeAgent| async move { invoke(&s, i).await },
-        )
-        .created(),
-    ]
+                Expose::ApiAndTool,
+                |s: Arc<UserServices>, i: InvokeAgent| async move { invoke(&s, i).await },
+            )
+            .created(),
+        ]
+    }
 }
 
 /// Refused while a routine names this preset: a routine's whole configuration
@@ -224,6 +229,10 @@ async fn invoke(
 mod tests {
     use super::*;
 
+    fn operations() -> Vec<Operation> {
+        Agents.operations()
+    }
+
     fn find(action: &str) -> Operation {
         operations()
             .into_iter()
@@ -239,7 +248,7 @@ mod tests {
             actions,
             ["create", "delete", "get", "invoke", "list", "replace"]
         );
-        assert!(operations().iter().all(|o| o.resource == "agents"));
+        assert_eq!(Agents.name(), "agents");
     }
 
     /// An account with one provider and one model alias, so a preset can be

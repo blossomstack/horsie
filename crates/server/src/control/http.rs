@@ -182,7 +182,6 @@ mod tests {
     fn fixture() -> Vec<Operation> {
         vec![
             op(
-                "ghosts",
                 "list",
                 Method::Get,
                 "/api/ghosts",
@@ -191,7 +190,6 @@ mod tests {
                 |_s, _i: NoInput| async move { Ok::<Value, ControlError>(json!(["casper"])) },
             ),
             op(
-                "ghosts",
                 "create",
                 Method::Post,
                 "/api/ghosts",
@@ -200,7 +198,6 @@ mod tests {
                 |_s, i: NameRef| async move { Ok::<Value, ControlError>(json!({"name": i.name})) },
             ),
             op(
-                "ghosts",
                 "peek",
                 Method::Get,
                 "/api/ghosts/hidden",
