@@ -171,15 +171,29 @@ fn render_detail(w: &WorkflowView) -> String {
     out.push_str(&format!("  starts at: {}\n\n", w.start));
     for step in &w.steps {
         out.push_str(&format!("  {} (agent {})\n", step.name, step.agent));
-        let outputs = step
-            .output_schema
+        let outcomes = step
+            .outcomes
             .as_ref()
-            .and_then(|s| s.get("properties"))
-            .and_then(|p| p.as_object())
-            .map(|p| p.keys().cloned().collect::<Vec<_>>().join(", "))
+            .map(|o| {
+                o.iter()
+                    .map(|v| v.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_else(|| "success, failure".to_string());
+        out.push_str(&format!("    outcomes: {outcomes}\n"));
+        let fields = step
+            .fields
+            .as_ref()
+            .map(|f| {
+                f.iter()
+                    .map(|v| v.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .unwrap_or_default();
-        if !outputs.is_empty() {
-            out.push_str(&format!("    outputs: {outputs}\n"));
+        if !fields.is_empty() {
+            out.push_str(&format!("    fields: {fields}\n"));
         }
         for t in step.transitions.iter().flatten() {
             match &t.condition {
@@ -305,10 +319,18 @@ mod tests {
             name: name.into(),
             agent: "coder".into(),
             prompt: "do it".into(),
-            output_schema: Some(serde_json::json!({
-                "type": "object",
-                "properties": {"severity": {"type": "string"}}
-            })),
+            outcomes: Some(vec![
+                horsie_models::workflow::StepOutcome {
+                    value: "p0".into(),
+                    description: "drop everything".into(),
+                },
+                horsie_models::workflow::StepOutcome {
+                    value: "p2".into(),
+                    description: "file it".into(),
+                },
+            ]),
+            fields: None,
+            interactive: None,
             transitions: to.map(|(target, cond)| {
                 vec![WorkflowTransition {
                     to: target.into(),
@@ -345,7 +367,7 @@ mod tests {
             out.contains("→ fix when output.severity == \"p0\""),
             "{out}"
         );
-        assert!(out.contains("outputs: severity"), "{out}");
+        assert!(out.contains("outcomes: p0, p2"), "{out}");
         // A step with nowhere to go is where the run ends — worth saying, since
         // an empty line reads like missing information.
         assert!(out.contains("→ ends the run"), "{out}");
@@ -459,7 +481,7 @@ mod tests {
         // document that a user edits and applies has to be in the wire's casing
         // or the edit vanishes.
         assert!(json.contains("\"maxSteps\""), "{json}");
-        assert!(json.contains("\"outputSchema\""), "{json}");
+        assert!(json.contains("\"outcomes\""), "{json}");
         assert!(!json.contains("max_steps"), "{json}");
     }
 

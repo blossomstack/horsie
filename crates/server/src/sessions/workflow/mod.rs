@@ -11,15 +11,20 @@
 //! entry records where it came from (`from`, `via`).
 
 mod driver;
+mod result_schema;
 pub mod spec;
 mod toolbox;
 
 pub use driver::{WorkflowOrchestrator, eval_condition, next_transition};
+pub use result_schema::{
+    DESCRIPTION_FIELD, OUTCOME_FIELD, SUBMIT_RESULT_TOOL, default_outcomes, outcomes_or_default,
+    render_result, result_schema, validate_result,
+};
 pub use spec::{
     DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec, compose_step_input,
     output_as_input,
 };
-pub use toolbox::StepConcludeToolbox;
+pub use toolbox::StepResultToolbox;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

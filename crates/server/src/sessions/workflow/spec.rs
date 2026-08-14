@@ -12,6 +12,7 @@
 //! store.
 
 use crate::sessions::spec::AgentSettings;
+use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -37,7 +38,21 @@ pub struct WorkflowStepSpec {
     /// is in `settings`; this is not re-read.
     pub agent: String,
     pub prompt: String,
-    pub output_schema: Option<Value>,
+    /// The values this step's `outcome` may take, already defaulted at run
+    /// creation — a snapshot answers for itself rather than re-deriving.
+    ///
+    /// `serde(default)` for the same reason every field of a persisted state is:
+    /// a run snapshotted before this field existed must still load. It comes
+    /// back with no declared outcomes, which is honest — that run's steps had
+    /// none — and such a run is finished or suspended, never resumable.
+    #[serde(default)]
+    pub outcomes: Vec<StepOutcome>,
+    /// Extra result fields beyond `outcome` and `description`.
+    #[serde(default)]
+    pub fields: Vec<StepField>,
+    /// Whether this step may ask the person a question.
+    #[serde(default)]
+    pub interactive: bool,
     #[serde(default)]
     pub transitions: Vec<TransitionSpec>,
     /// The preset flattened at run creation: model, MCP servers, memory
@@ -92,13 +107,17 @@ pub fn compose_step_input(prompt: &str, from_step: Option<&str>, incoming: &str)
     format!("{}\n\n{header}\n{incoming}", prompt.trim_end())
 }
 
-/// A structured output rendered as the next step's incoming text. A JSON string
-/// is passed through unquoted; anything else is its JSON form.
+/// A step's result rendered as the next step's incoming text.
+///
+/// Markdown rather than JSON: `description` exists precisely to be read by
+/// whoever comes next, and burying it in punctuation wastes the one field the
+/// contract guarantees. A plain string — the run's own input — passes through
+/// unquoted.
 pub fn output_as_input(output: &Value) -> String {
-    output
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| output.to_string())
+    match output.as_str() {
+        Some(text) => text.to_string(),
+        None => crate::sessions::workflow::render_result(output),
+    }
 }
 
 #[cfg(test)]
@@ -120,12 +139,20 @@ mod tests {
         assert_eq!(got, "Review it.\n\n## Input from step `fix`\n{\"files\":3}");
     }
 
+    /// The run's own input is a plain string and reaches the start step as
+    /// typed. A step's result is an object, and is rendered as markdown — the
+    /// `description` is the thing the next step is meant to read, and JSON
+    /// buries it.
     #[test]
-    fn a_string_output_is_passed_through_unquoted() {
+    fn a_string_input_passes_through_and_a_result_is_rendered() {
         assert_eq!(output_as_input(&Value::String("done".into())), "done");
         assert_eq!(
-            output_as_input(&serde_json::json!({"ok": true})),
-            "{\"ok\":true}"
+            output_as_input(&serde_json::json!({
+                "outcome": "success",
+                "description": "Fixed the flake.",
+                "files": ["a.rs"],
+            })),
+            "**outcome:** success\n\nFixed the flake.\n\n- **files:** a.rs"
         );
     }
 

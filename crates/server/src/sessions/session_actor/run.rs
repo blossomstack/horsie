@@ -249,17 +249,13 @@ impl SessionActor {
                 }],
                 false,
             ),
-            TurnEnd::Parked => {
-                let error = "step parked; timers are not supported in workflows".to_string();
-                (
-                    vec![SessionDomainEvent::StepFailed {
-                        at_ms: now_ms(),
-                        index,
-                        error,
-                    }],
-                    false,
-                )
-            }
+            // A step that armed a timer, or is waiting on subagents it spawned,
+            // ends its turn without finishing — and that is not the step
+            // ending. It stays running until whatever it is waiting for wakes
+            // it, exactly as a parked question does. This used to fail the run
+            // outright, which made a step that suspended itself deliberately
+            // indistinguishable from one that crashed.
+            TurnEnd::Parked => (Vec::new(), false),
             // A step the process died inside is suspended by
             // `WorkflowRun::on_load`, which is the state a retry can move.
             // Recording it a second time from the step agent's own recovery
@@ -294,7 +290,11 @@ impl SessionActor {
                 kind: SessionAgentKind::Step(agent_id),
                 // A step runs under its own preset, not the session's.
                 settings: step.settings.clone(),
-                step_output_schema: step.output_schema.clone(),
+                step_result: crate::sessions::session_actor::context::StepResultDef {
+                    outcomes: step.outcomes.clone(),
+                    fields: step.fields.clone(),
+                    interactive: step.interactive,
+                },
                 agent_type: None,
             },
         )
@@ -459,17 +459,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
@@ -493,17 +486,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
@@ -547,19 +533,8 @@ mod tests {
     async fn a_non_matching_condition_takes_the_catch_all() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "filed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let run = wait_for_run(&journal, id, |r| {
@@ -571,6 +546,190 @@ mod tests {
         assert!(run.steps[1].via.is_none());
     }
 
+    /// A step ends when it calls `submit_result` — a turn ending is not a step
+    /// ending. When nothing would wake the agent, the model is nudged rather
+    /// than the step failed outright: one forgetful turn should not kill a run
+    /// fifteen steps deep with real changes on the shared workspace.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_with_text_is_nudged_and_then_submits() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let text = || {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "I think that's everything.".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        };
+        let provider = MockProvider::scripted(
+            Script::of([
+                // The step believes it is done but says so in prose.
+                text(),
+                // Nudged, it submits.
+                Ok(concludes(serde_json::json!({"severity": "p2"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Concluded,
+            "the nudged step still concluded: {:?}",
+            run.steps[0]
+        );
+        assert_eq!(
+            run.steps[0].output.as_ref().and_then(|o| o.get("severity")),
+            Some(&serde_json::json!("p2")),
+            "and the result it submitted after the nudge is the one that routed"
+        );
+    }
+
+    /// A step that armed a timer and then stopped talking is *parked*, not
+    /// stuck: the timer will wake it. Nudging here would push a model that
+    /// deliberately suspended itself into submitting a result it does not have
+    /// yet, and failing the step would end a run that was working correctly.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_holding_a_timer_is_parked_not_nudged() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                        horsie_agentcore::ToolCallPart {
+                            id: "t-1".into(),
+                            name: "set_timer".into(),
+                            input: serde_json::json!({
+                                "kind": "one_shot",
+                                "after_secs": 3600,
+                                "label": "check back",
+                                "message": "see whether CI went green",
+                            }),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::ToolUse,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+                // Then it stops talking, holding the timer.
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "I'll pick this up when the timer fires.".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+            ])
+            // Anything past this is the bug: a parked step must not run again
+            // until its timer fires.
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"outcome": "p0"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+        let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
+        assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
+        assert_eq!(step.timers.len(), 1, "and the timer is still armed");
+        let run = crate::sessions::events::fold_session_state(&journal, id)
+            .await
+            .run
+            .expect("the run exists");
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Running,
+            "the step is still running, waiting on its timer"
+        );
+    }
+
+    /// Submitting says the work is done, which makes an armed timer moot. Left
+    /// armed it would fire an hour later into a step the run has long moved
+    /// past, waking an agent with nothing left to do.
+    #[tokio::test]
+    async fn submitting_cancels_the_timers_the_step_had_armed() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let arm = || {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "t-1".into(),
+                        name: "set_timer".into(),
+                        input: serde_json::json!({
+                            "kind": "one_shot",
+                            "after_secs": 3600,
+                            "label": "check back",
+                            "message": "see whether CI went green",
+                        }),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        };
+        let provider = MockProvider::scripted(
+            Script::of([arm(), Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let step = crate::sessions::events::fold_agent_state(&journal, run.steps[0].agent).await;
+        // The timer really was armed — otherwise this test passes by testing
+        // nothing, which is exactly what it did the first time it was written.
+        assert!(
+            step.log.iter().any(|e| matches!(
+                &e.body,
+                horsie_agentcore::AgentLogBody::Llm(m)
+                    if m.parts.iter().any(|p| matches!(
+                        p,
+                        horsie_agentcore::ContentPart::ToolCall(c) if c.name == "set_timer"
+                    ))
+            )),
+            "the step never armed a timer, so cancelling one proves nothing"
+        );
+        assert!(
+            step.timers.is_empty(),
+            "the concluded step still holds {} armed timer(s)",
+            step.timers.len()
+        );
+    }
+
+    /// A model that never submits fails its step rather than looping for ever.
+    /// The second nudge forces `submit_result` in `tool_choice`, so reaching
+    /// this means the provider ignored a constraint it is required to honour.
+    #[tokio::test]
+    async fn a_step_that_never_submits_fails_the_run() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(Script::of([]).then_repeating_with(|| {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "done I think".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }));
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Failed
+        })
+        .await;
+        let error = run.error.unwrap_or_default();
+        assert!(
+            error.contains("submit_result"),
+            "the failure has to name what was missing: {error}"
+        );
+    }
+
     /// Retrying appends an attempt rather than replacing one, so the earlier
     /// attempt stays readable and the graph can stack them.
     #[tokio::test]
@@ -578,17 +737,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
@@ -671,17 +823,7 @@ mod tests {
                 Ok(asks("p0 or p2?")),
                 Ok(concludes(serde_json::json!({"severity": "p0"}))),
             ])
-            .then_repeating_with(|| {
-                Ok(horsie_agentcore::CompletionResponse {
-                    parts: vec![horsie_agentcore::ContentPart::Text(
-                        horsie_agentcore::TextPart {
-                            text: "fixed".to_string(),
-                        },
-                    )],
-                    stop_reason: horsie_agentcore::StopReason::EndTurn,
-                    usage: horsie_agentcore::Usage::without_cache(1, 1),
-                })
-            }),
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
 
@@ -819,17 +961,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (f, _session, id, journal) = spawn_run_with_provider(provider).await;

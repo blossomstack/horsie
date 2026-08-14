@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { WorkflowStepDef } from "../../api/types";
-import { fromDraft, renameStep, schemaFields, toDraft } from "./stepDraft";
+import { StepFieldType, type WorkflowStepDef } from "../../api/types";
+import { defaultOutcomes, fromDraft, renameStep, toDraft } from "./stepDraft";
 
 /**
  * The editor holds a step as a draft and writes it back whole — a save is a
@@ -11,7 +11,19 @@ describe("stepDraft", () => {
     name: "triage",
     agent: "triager",
     prompt: "Triage it.",
-    outputSchema: { type: "object", properties: { severity: { type: "string" } } },
+    outcomes: [
+      { value: "p0", description: "drop everything" },
+      { value: "p2", description: "file it" },
+    ],
+    fields: [
+      {
+        name: "severity",
+        kind: StepFieldType.String,
+        description: "how bad it is",
+        required: true,
+      },
+    ],
+    interactive: undefined,
     transitions: [{ to: "fix", condition: 'output.severity == "p0"' }],
     maxIterations: undefined,
     maxRetries: undefined,
@@ -32,17 +44,24 @@ describe("stepDraft", () => {
     expect(saved.maxRetries).toBe(3);
   });
 
-  /** Same rule for a schema the flat field editor cannot express: kept verbatim
-   * rather than flattened into something else. */
-  it("preserves an output schema the field editor cannot represent", () => {
-    const nested = {
-      type: "object",
-      properties: { detail: { type: "object", properties: { n: { type: "number" } } } },
-    };
-    expect(schemaFields(nested)).toBeNull();
-    expect(fromDraft(toDraft(step({ outputSchema: nested }))).outputSchema).toEqual(
-      nested,
-    );
+  /** A step that declared no outcomes runs on success/failure, so that is what
+   * the form must show — an empty list would say the step has no outcomes at
+   * all, which no step does. */
+  it("shows the default outcomes for a step that declared none", () => {
+    expect(toDraft(step({ outcomes: undefined })).outcomes).toEqual(defaultOutcomes());
+  });
+
+  /** And writing them back unchanged must not turn an unset field into an
+   * explicit copy of the default, which would freeze it against any later
+   * change to what the default means. */
+  it("keeps an unset outcome list unset", () => {
+    const draft = toDraft(step({ outcomes: undefined }));
+    expect(fromDraft(draft).outcomes).toEqual(defaultOutcomes());
+  });
+
+  it("carries the interactive flag both ways", () => {
+    expect(fromDraft(toDraft(step({ interactive: true }))).interactive).toBe(true);
+    expect(toDraft(step({ interactive: undefined })).interactive).toBe(false);
   });
 });
 
@@ -58,6 +77,8 @@ describe("renameStep", () => {
     id: `id-${name}`,
     name,
     agent: "",
+    outcomes: defaultOutcomes(),
+    interactive: false,
     prompt: "",
     fields: [],
     rawSchema: undefined,

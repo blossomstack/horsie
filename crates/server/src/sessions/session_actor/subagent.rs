@@ -250,7 +250,7 @@ impl SessionActor {
             AgentPlan {
                 kind: SessionAgentKind::Sub(id),
                 settings: self.spec().agent.clone(),
-                step_output_schema: None,
+                step_result: Default::default(),
                 agent_type,
             },
         )

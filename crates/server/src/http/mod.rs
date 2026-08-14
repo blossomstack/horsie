@@ -2720,10 +2720,10 @@ mod tests {
             serde_json::json!({"name": "b", "start": "a",
                                "steps": [{"name": "a", "agent": "reviewer", "prompt": "x",
                                           "transitions": [{"to": "ghost"}]}]}),
-            // a condition with nothing to read
+            // an outcome value with no description
             serde_json::json!({"name": "b", "start": "a",
                                "steps": [{"name": "a", "agent": "reviewer", "prompt": "x",
-                                          "transitions": [{"to": "a", "condition": "output.ok"}]}]}),
+                                          "outcomes": [{"value": "ok", "description": ""}]}]}),
             // unknown preset
             serde_json::json!({"name": "b", "start": "a",
                                "steps": [{"name": "a", "agent": "ghost", "prompt": "x"}]}),

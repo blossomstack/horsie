@@ -348,10 +348,12 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 name: "triage".into(),
                 agent: "triager".into(),
                 prompt: "Triage it.".into(),
-                output_schema: Some(serde_json::json!({
-                    "type": "object",
-                    "properties": {"severity": {"type": "string"}}
-                })),
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                // The fixture's steps may ask: one test parks a step on a
+                // question, and a step that is not interactive has no
+                // `ask_user` tool to call at all.
+                interactive: true,
                 transitions: vec![
                     TransitionSpec {
                         to: "fix".into(),
@@ -368,7 +370,12 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 name: "fix".into(),
                 agent: "coder".into(),
                 prompt: "Fix it.".into(),
-                output_schema: None,
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                // The fixture's steps may ask: one test parks a step on a
+                // question, and a step that is not interactive has no
+                // `ask_user` tool to call at all.
+                interactive: true,
                 transitions: vec![],
                 settings: settings(()),
             },
@@ -376,7 +383,12 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 name: "file".into(),
                 agent: "writer".into(),
                 prompt: "File it.".into(),
-                output_schema: None,
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                // The fixture's steps may ask: one test parks a step on a
+                // question, and a step that is not interactive has no
+                // `ask_user` tool to call at all.
+                interactive: true,
                 transitions: vec![],
                 settings: settings(()),
             },
@@ -416,6 +428,31 @@ pub(super) async fn spawn_run_with_provider(
     (f, session, id, journal)
 }
 
+/// Poll one agent's folded state until `pred` holds (2s cap).
+///
+/// A step's timers, asks and nudge budget live on its own journal, so a test
+/// asserting on how a *turn* ended has to wait on this rather than on the run.
+pub(super) async fn wait_for_agent(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    agent_id: Uuid,
+    pred: impl Fn(&crate::agent_loop::AgentState) -> bool,
+) -> crate::agent_loop::AgentState {
+    for _ in 0..200 {
+        let state = crate::sessions::events::fold_agent_state(journal, agent_id).await;
+        if pred(&state) {
+            return state;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let state = crate::sessions::events::fold_agent_state(journal, agent_id).await;
+    panic!(
+        "agent never satisfied the predicate: parked={} timers={} nudges={}",
+        state.parked,
+        state.timers.len(),
+        state.nudges
+    );
+}
+
 /// Poll the folded run until `pred` holds (2s cap).
 pub(super) async fn wait_for_run(
     journal: &Arc<dyn horsie_actor::Journal>,
@@ -438,19 +475,27 @@ pub(super) async fn wait_for_run(
     );
 }
 
-/// A scripted `conclude` call carrying this output.
+/// A scripted `submit_result` call carrying this result.
 ///
-/// A step that has an output schema *and* may ask gets the kind-tagged
-/// conclude schema, so the output nests under `output` rather than being
-/// the payload — sending it bare submits `null`, and every condition reads
-/// false.
+/// `outcome` and `description` are added when the caller has not named them, so
+/// a test that only cares about routing says `json!({"outcome": "p0"})` and the
+/// payload still passes the step's own validation.
 pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::CompletionResponse {
+    let mut input = output;
+    if let Some(object) = input.as_object_mut() {
+        object
+            .entry("outcome")
+            .or_insert_with(|| serde_json::json!("success"));
+        object
+            .entry("description")
+            .or_insert_with(|| serde_json::json!("did it"));
+    }
     horsie_agentcore::CompletionResponse {
         parts: vec![horsie_agentcore::ContentPart::ToolCall(
             horsie_agentcore::ToolCallPart {
                 id: "c-1".into(),
-                name: "conclude".into(),
-                input: serde_json::json!({"kind": "submit", "output": output}),
+                name: "submit_result".into(),
+                input,
             },
         )],
         stop_reason: horsie_agentcore::StopReason::ToolUse,
@@ -458,19 +503,17 @@ pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::Completi
     }
 }
 
-/// A scripted `conclude` call that asks rather than submitting.
+/// A scripted `ask_user` call.
 ///
-/// A step asks through `conclude`, not `ask_user`: naming `ask_user` beside it
-/// would stop the loop treating `conclude` as terminal. With an output schema
-/// and asking allowed, the payload is kind-tagged, so the question rides under
-/// `kind: "ask"`.
+/// A step asks with the same tool a conversation does, and parks the same way:
+/// the call ends the run and stays dangling until an answer arrives against it.
 pub(super) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
     horsie_agentcore::CompletionResponse {
         parts: vec![horsie_agentcore::ContentPart::ToolCall(
             horsie_agentcore::ToolCallPart {
                 id: ASK_CALL_ID.into(),
-                name: "conclude".into(),
-                input: serde_json::json!({"kind": "ask", "question": question}),
+                name: "ask_user".into(),
+                input: serde_json::json!({"question": question}),
             },
         )],
         stop_reason: horsie_agentcore::StopReason::ToolUse,
@@ -1156,7 +1199,7 @@ pub(super) fn catalog_provider(
         mcp: None,
         memory: None,
         settings: actor_spec_fixture().agent,
-        step_output_schema: None,
+        step_result: Default::default(),
         session_id: id,
         kind: SessionAgentKind::Main,
         agent_type: None,
@@ -1258,7 +1301,7 @@ pub(super) fn typed_provider(
         mcp: None,
         memory: None,
         settings,
-        step_output_schema: None,
+        step_result: Default::default(),
         session_id: id,
         kind: SessionAgentKind::Sub(sub),
         agent_type: Some("code-reviewer".to_string()),

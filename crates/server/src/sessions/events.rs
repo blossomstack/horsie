@@ -50,6 +50,44 @@ pub(in crate::sessions) async fn fold_session_state(
     state
 }
 
+/// One agent's folded state — **tests only**.
+///
+/// A step's timers, asks and queue live on the *agent's* journal, not the
+/// session's, so a test asserting on any of them has to read this one.
+#[cfg(test)]
+pub(in crate::sessions) async fn fold_agent_state(
+    journal: &std::sync::Arc<dyn horsie_actor::Journal>,
+    agent_id: uuid::Uuid,
+) -> crate::agent_loop::AgentState {
+    use futures_util::StreamExt;
+    use horsie_actor::EventSourcedActor;
+
+    let pid = crate::agent_loop::AgentActor::persistence_id_for(agent_id);
+    // From the snapshot, not from zero: an agent snapshots at every park, and a
+    // snapshot compacts the events behind it — so replaying from 0 answers
+    // "nothing ever happened" for exactly the agents a test most wants to read.
+    let (mut state, from) = match journal.latest_snapshot(&pid).await {
+        Ok(Some((bytes, seq))) => (
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| crate::agent_loop::AgentActor::initial_state()),
+            seq + 1,
+        ),
+        _ => (crate::agent_loop::AgentActor::initial_state(), 0),
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test-only inspection of a journal, with no actor running to ask"
+    )]
+    let mut stream = journal.replay(&pid, from).await;
+    while let Some(item) = stream.next().await {
+        let Ok((_seq, bytes)) = item else { break };
+        if let Ok(event) = serde_json::from_slice::<crate::agent_loop::AgentDomainEvent>(&bytes) {
+            state = crate::agent_loop::AgentActor::apply_event(state, event);
+        }
+    }
+    state
+}
+
 /// A session's own journal, decoded — **tests only**.
 ///
 /// The fold answers "where is this session now"; this answers "what happened to
