@@ -88,11 +88,15 @@ export function MenuItem({
   onSelect,
   danger,
   testId,
+  keepOpen,
   children,
 }: {
   onSelect: () => void;
   danger?: boolean;
   testId?: string;
+  /** Leave the menu open after selecting. For a checklist, where editing two
+   * entries is one edit and not two trips back through the trigger. */
+  keepOpen?: boolean;
   children: ReactNode;
 }) {
   const close = useContext(CloseContext);
@@ -108,7 +112,7 @@ export function MenuItem({
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        close();
+        if (!keepOpen) close();
         onSelect();
       }}
     >
