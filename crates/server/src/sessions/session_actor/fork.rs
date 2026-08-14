@@ -843,6 +843,11 @@ mod tests {
     async fn a_forks_turn_ends_in_its_own_log() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "the original question").await;
+        // The source's turn has to be *closed* before forking, because this
+        // test's premise is that the copy carries a closed turn over. A fork
+        // taken between the source's answer and its `TurnEnded` seeds an
+        // unmatched `TurnBegan` — a real hazard, and not the one under test.
+        wait_for_turn_end(&session, None, 1).await;
 
         let fork = fork_via(&session, None, "/fork try the other migration")
             .await
@@ -872,6 +877,10 @@ mod tests {
     async fn a_forks_turn_moves_the_forks_status_and_not_the_sessions() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "the original question").await;
+        // Closed before forking: a fork taken between the source's answer and
+        // its `TurnEnded` seeds an unmatched `TurnBegan`, which is a real
+        // hazard but not the one under test.
+        wait_for_turn_end(&session, None, 1).await;
 
         let fork = fork_via(&session, None, "/fork try the other migration")
             .await
@@ -902,6 +911,10 @@ mod tests {
         };
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
         send(&session, "the original question").await;
+        // Closed before forking: a fork taken between the source's answer and
+        // its `TurnEnded` seeds an unmatched `TurnBegan`, which is a real
+        // hazard but not the one under test.
+        wait_for_turn_end(&session, None, 1).await;
 
         let fork = fork_via(&session, None, "/fork the doomed branch")
             .await
@@ -1019,6 +1032,10 @@ mod tests {
     async fn a_fork_carries_the_conversation_and_answers_its_own_message() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         send(&session, "the original question").await;
+        // Closed before forking: a fork taken between the source's answer and
+        // its `TurnEnded` seeds an unmatched `TurnBegan`, which is a real
+        // hazard but not the one under test.
+        wait_for_turn_end(&session, None, 1).await;
 
         let fork = fork_via(&session, None, "/fork try the other migration")
             .await

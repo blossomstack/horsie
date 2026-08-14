@@ -1520,9 +1520,32 @@ pub(super) struct StubHandle;
 impl horsie_runtime_host::RuntimeTransport for StubHandle {
     async fn relay(
         &self,
-        _: horsie_models::runtime::RuntimeInboundMessage,
+        message: horsie_models::runtime::RuntimeInboundMessage,
     ) -> Result<horsie_models::runtime::RuntimeOutboundMessage, horsie_runtime_host::TransportError>
     {
+        // Agent provisioning is answered; everything else still reports a dead
+        // link, which is what these tests are about.
+        //
+        // Not politeness. Provisioning is the one preparation step that fails
+        // the turn rather than degrading it — an agent whose plugins did not
+        // install would otherwise run with a silently reduced skill set. A stub
+        // that refused it would fail every turn before the thing under test ran,
+        // which is a property of the double rather than of the code.
+        if let horsie_models::runtime::RuntimeInboundMessage::ProvisionAgent(req) = message {
+            return Ok(
+                horsie_models::runtime::RuntimeOutboundMessage::AgentProvisioned(
+                    horsie_models::runtime::ProvisionAgentResponse {
+                        call_id: req.call_id,
+                        root: "/stub/plugins/agents/x".to_string(),
+                        result: horsie_models::runtime::ProvisionResult::Ok(
+                            horsie_models::runtime::ProvisionOk {
+                                applied: Vec::new(),
+                            },
+                        ),
+                    },
+                ),
+            );
+        }
         Err(horsie_runtime_host::TransportError::Disconnected)
     }
     async fn send_oneway(
