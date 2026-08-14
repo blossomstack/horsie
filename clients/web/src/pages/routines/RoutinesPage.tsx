@@ -22,7 +22,7 @@ export function RoutinesPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
-      <div className="flex items-center gap-3 border-b px-6 py-4">
+      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button

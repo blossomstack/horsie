@@ -6,8 +6,6 @@ import type {
   AgentTokenCreated,
   AgentTokenView,
   AuthStatus,
-  CreateGroupRequest,
-  CreateGroupResponse,
   DeviceApprovalRequest,
   CreateSessionRequest,
   EnvironmentInput,
@@ -21,7 +19,6 @@ import type {
   GitHubBranchList,
   GitHubRepoList,
   GitHubStatus,
-  ListGroupsResponse,
   ListSessionsResponse,
   LoginRequest,
   InstallOutcome,
@@ -48,7 +45,6 @@ import type {
   PasswordChangeRequest,
   CatalogEntryView,
   PluginView,
-  RenameGroupRequest,
   RoutineInput,
   RoutineRunResponse,
   RoutineView,
@@ -319,25 +315,6 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(body),
       }),
-  },
-
-  sessionGroups: {
-    list: (): Promise<ListGroupsResponse> => request("/session-groups"),
-
-    create: (name: string): Promise<CreateGroupResponse> =>
-      request("/session-groups", {
-        method: "POST",
-        body: JSON.stringify({ name } satisfies CreateGroupRequest),
-      }),
-
-    rename: (oldName: string, name: string): Promise<Ack> =>
-      request(`/session-groups/${encodeURIComponent(oldName)}`, {
-        method: "PUT",
-        body: JSON.stringify({ name } satisfies RenameGroupRequest),
-      }),
-
-    remove: (name: string): Promise<Ack> =>
-      request(`/session-groups/${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 
   agents: {

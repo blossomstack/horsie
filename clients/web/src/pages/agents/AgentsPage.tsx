@@ -11,16 +11,9 @@ export function AgentsPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="agents-page">
-      <div className="flex items-center gap-2 border-b bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
+      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
-        <div className="min-w-0 flex-1">
-          <h1 className="page-title">
-            Agents
-          </h1>
-          <p className="mt-0.5 text-xs text-faint">
-            Saved session setups you invoke from the CLI.
-          </p>
-        </div>
+        <h1 className="page-title min-w-0 flex-1 truncate">Agents</h1>
         <button
           className="key key-go shrink-0"
           onClick={() => navigate("/agents/new")}
