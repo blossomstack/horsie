@@ -944,10 +944,16 @@ impl SessionActor {
                 None => self.on_sub_agent_outcome(state, who, end, ctx).await,
             };
         }
-        match who == self.id {
-            true => self.on_main_outcome(state, end, ctx).await,
-            false => self.on_sub_agent_outcome(state, who, end, ctx).await,
+        if who == self.id {
+            return self.on_main_outcome(state, end, ctx).await;
         }
+        // Before the subagent forest, because a fork is not in it: asked last,
+        // every one of a fork's turns would be dropped as an outcome from an
+        // agent nothing recognises.
+        if state.forks.contains(who) {
+            return self.on_fork_outcome(state, who, end, ctx).await;
+        }
+        self.on_sub_agent_outcome(state, who, end, ctx).await
     }
 
     /// One of this session's agents drained its queue into a turn.
@@ -969,6 +975,16 @@ impl SessionActor {
             return CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
                 at_ms: now_ms(),
                 id: who,
+            }]);
+        }
+        // A fork's own status, and only its own: the session's belongs to the
+        // main agent, and a fork answering a question is not the session
+        // working.
+        if state.forks.contains(who) {
+            return CommandEffect::persist(vec![SessionDomainEvent::ForkStatusChanged {
+                at_ms: now_ms(),
+                id: who,
+                status: AgentStatus::Running,
             }]);
         }
         CommandEffect::none()
@@ -1040,6 +1056,7 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::ForkSeeded { .. }
             | SessionDomainEvent::ForkTitled { .. }
             | SessionDomainEvent::ForkStatusChanged { .. }
+            | SessionDomainEvent::ForkTurnEnded { .. }
             | SessionDomainEvent::ForkDeleted { .. } => ForkedAgents::apply(&mut state, &event),
             SessionDomainEvent::UsageRecorded { .. }
             | SessionDomainEvent::SpecRecorded { .. }

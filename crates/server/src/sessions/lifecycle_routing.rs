@@ -136,8 +136,8 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         // On the parent too, and for the same reason the spawn is: the parent is
         // what a person has open while it waits. It used to reach only the
         // child, whose own log already ends with the report.
-        E::SubAgentCompleted { id, .. } => terminal_subagent(*id, "completed", state),
-        E::SubAgentFailed { id, .. } => terminal_subagent(*id, "failed", state),
+        E::SubAgentCompleted { id, .. } => terminal_subagent(*id, None, state),
+        E::SubAgentFailed { id, error, .. } => terminal_subagent(*id, Some(error), state),
         // A step's own log, which for a run is the only one there is. These used
         // to route to `Main`, which a run does not have, so every one of them was
         // dropped with a warning.
@@ -198,6 +198,17 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         | E::ForkTitled { .. }
         | E::ForkStatusChanged { .. }
         | E::ForkDeleted { .. } => Vec::new(),
+        // On the fork itself, not on the conversation it branched from: this is
+        // the boundary of the fork's *own* turn, and a page folds a `TurnBegan`
+        // as `Running` until it sees the matching end. Left out, a fork read
+        // `RUNNING` for ever — through reloads and restarts, because the status
+        // is derived from the journal.
+        E::ForkTurnEnded { id, outcome, .. } => vec![(
+            AgentKey::Fork(*id),
+            LifecycleEvent::TurnEnded(TurnEndedLifecycle {
+                outcome: outcome.clone(),
+            }),
+        )],
         // Recorded by the agent itself, in its own log, because the agent is
         // what decided them. Routing them from here as well would render the
         // same fact twice. The session keeps its own copy only to move
@@ -217,25 +228,52 @@ fn every_agent(state: &SessionState, ev: LifecycleEvent) -> Vec<Entry> {
     session_wide
         .into_iter()
         .chain(state.subagents.ids().into_iter().map(AgentKey::Sub))
+        // Forks too. `runtime_readiness` is what reads a `SessionFailed` off an
+        // agent's log and stops it starting another turn; a fork that never
+        // heard would go on believing it may run, on a runtime that is gone.
+        .chain(state.forks.ids().into_iter().map(AgentKey::Fork))
         .map(|key| (key, ev.clone()))
         .collect()
 }
 
-/// A finished subagent, on its parent. The label comes off the forest — the
-/// event carries only the id, and a bare uuid is not something a reader can
-/// place.
-fn terminal_subagent(id: uuid::Uuid, status: &str, state: &SessionState) -> Vec<Entry> {
+/// A finished subagent, on its parent *and* on itself.
+///
+/// On the parent because that is what a person has open while it waits, and the
+/// label comes off the forest — the event carries only the id, and a bare uuid
+/// is not something a reader can place.
+///
+/// On the child because a subagent has a page of its own, and a page folds
+/// `TurnBegan` as `Running` until the matching end. The child's log used to get
+/// nothing, so a finished subagent read `RUNNING` for ever there while the
+/// forest beside it said `completed` — the same defect a step had before its
+/// `Step` entries were folded, and a fork had before `ForkTurnEnded`.
+fn terminal_subagent(id: uuid::Uuid, error: Option<&String>, state: &SessionState) -> Vec<Entry> {
     let Some(record) = state.subagents.node(id) else {
         return Vec::new();
     };
-    vec![(
-        parent_key(&record.parent, state),
-        LifecycleEvent::SubAgent(SubAgentLifecycle {
-            id: id.to_string(),
-            label: record.label.clone(),
-            status: status.into(),
+    let outcome = match error {
+        Some(error) => TurnOutcome::Failed(FailedOutcome {
+            error: error.clone(),
         }),
-    )]
+        None => TurnOutcome::Ended(EmptyOutcome {}),
+    };
+    vec![
+        (
+            parent_key(&record.parent, state),
+            LifecycleEvent::SubAgent(SubAgentLifecycle {
+                id: id.to_string(),
+                label: record.label.clone(),
+                status: match error {
+                    Some(_) => "failed".into(),
+                    None => "completed".into(),
+                },
+            }),
+        ),
+        (
+            AgentKey::Sub(id),
+            LifecycleEvent::TurnEnded(TurnEndedLifecycle { outcome }),
+        ),
+    ]
 }
 
 /// One step execution's entry, on that step's own agent. The agent and the name
@@ -533,8 +571,12 @@ mod tests {
     }
 
     /// A spawn and a terminal result both land on the *parent*: that is the log
-    /// a person has open while a child is working. The child's own log already
-    /// ends with its report.
+    /// a person has open while a child is working. A nested child's parent is
+    /// the subagent above it, not the main agent.
+    ///
+    /// The terminal result *also* lands on the child — see
+    /// [`a_finished_subagent_is_recorded_on_its_parent_and_on_itself`] — which
+    /// is why only the parent's entry is asserted on here.
     #[test]
     fn a_subagents_news_is_recorded_on_its_parent() {
         let parent = Uuid::new_v4();
@@ -556,7 +598,6 @@ mod tests {
         let state = fold(vec![spawn.clone(), done.clone()]);
         for event in [spawn, done] {
             let entries = route(&event, &state);
-            assert_eq!(entries.len(), 1, "{event:?} routes once");
             assert_eq!(
                 entries[0].0,
                 AgentKey::Sub(parent),
@@ -678,6 +719,119 @@ mod tests {
         assert!(matches!(outcomes[1], TurnOutcome::Failed(_)));
         assert!(matches!(outcomes[2], TurnOutcome::Stopped(_)));
         assert!(matches!(outcomes[3], TurnOutcome::Interrupted(_)));
+    }
+
+    /// A fork's boundary belongs to the fork, never to the conversation it
+    /// branched from: routed session-wide it would close the *main* agent's
+    /// turn and leave the fork reading `RUNNING`.
+    #[test]
+    fn a_forks_turn_boundary_lands_on_that_fork() {
+        let fork = Uuid::new_v4();
+        let state = fold(vec![fork_context_for(fork)]);
+        let entries = route(
+            &SessionDomainEvent::ForkTurnEnded {
+                at_ms: 2,
+                id: fork,
+                outcome: TurnOutcome::Ended(EmptyOutcome {}),
+            },
+            &state,
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, AgentKey::Fork(fork));
+        assert!(matches!(entries[0].1, LifecycleEvent::TurnEnded(_)));
+    }
+
+    /// A fork's turn can fail, and the reason has to survive the trip: its own
+    /// page is the only place a reader will look for it.
+    #[test]
+    fn a_forks_failed_turn_carries_its_error() {
+        let fork = Uuid::new_v4();
+        let state = fold(vec![fork_context_for(fork)]);
+        let entries = route(
+            &SessionDomainEvent::ForkTurnEnded {
+                at_ms: 2,
+                id: fork,
+                outcome: TurnOutcome::Failed(FailedOutcome {
+                    error: "the provider said no".into(),
+                }),
+            },
+            &state,
+        );
+        let LifecycleEvent::TurnEnded(ended) = &entries[0].1 else {
+            panic!("expected a TurnEnded entry, got {:?}", entries[0].1);
+        };
+        let TurnOutcome::Failed(failed) = &ended.outcome else {
+            panic!("expected a failed outcome, got {:?}", ended.outcome);
+        };
+        assert_eq!(failed.error, "the provider said no");
+    }
+
+    /// A terminal runtime failure takes every conversation in the session with
+    /// it. A fork that never heard would go on believing it may start a turn,
+    /// on a runtime that is gone for good.
+    #[test]
+    fn a_session_failure_reaches_the_forks_too() {
+        let fork = Uuid::new_v4();
+        let state = fold(vec![fork_context_for(fork)]);
+        let keys: Vec<AgentKey> = route(
+            &SessionDomainEvent::SessionFailed {
+                at_ms: 3,
+                reason: "the sandbox is gone".into(),
+            },
+            &state,
+        )
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+        assert!(keys.contains(&AgentKey::Main), "{keys:?}");
+        assert!(keys.contains(&AgentKey::Fork(fork)), "{keys:?}");
+    }
+
+    /// A finished subagent is news in two places: the parent that is waiting on
+    /// it, and its own page, which reads `RUNNING` until its turn is closed.
+    #[test]
+    fn a_finished_subagent_is_recorded_on_its_parent_and_on_itself() {
+        let child = Uuid::new_v4();
+        let state = fold(vec![
+            SessionDomainEvent::SubAgentSpawned {
+                at_ms: 1,
+                id: child,
+                parent: SubAgentParent::Main,
+                label: "helper".into(),
+                task: "t".into(),
+                depth: 1,
+                agent_type: None,
+            },
+            SessionDomainEvent::SubAgentCompleted {
+                at_ms: 2,
+                id: child,
+                output: "done".into(),
+            },
+        ]);
+        let entries = route(
+            &SessionDomainEvent::SubAgentCompleted {
+                at_ms: 2,
+                id: child,
+                output: "done".into(),
+            },
+            &state,
+        );
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].0, AgentKey::Main);
+        assert!(matches!(entries[0].1, LifecycleEvent::SubAgent(_)));
+        assert_eq!(entries[1].0, AgentKey::Sub(child));
+        assert!(matches!(entries[1].1, LifecycleEvent::TurnEnded(_)));
+    }
+
+    fn fork_context_for(fork: Uuid) -> SessionDomainEvent {
+        SessionDomainEvent::ForkCreated {
+            at_ms: 1,
+            id: fork,
+            parent: ForkParent::Main,
+            source_seq: 0,
+            mode: crate::sessions::forks::ForkMode::Copy,
+            message: "go".into(),
+        }
     }
 
     fn step_context_for(agent: Uuid) -> SessionDomainEvent {

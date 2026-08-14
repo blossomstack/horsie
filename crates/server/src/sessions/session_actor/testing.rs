@@ -728,6 +728,40 @@ pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> 
         .unwrap()
 }
 
+/// How each turn in one agent's log ended, in order.
+///
+/// A page folds `TurnBegan` as `Running` and clears it only on the matching
+/// `TurnEnded`, so this is what "is that agent still working" is read off.
+pub(super) fn turn_outcomes(
+    page: &crate::agent_loop::LogPage,
+) -> Vec<horsie_agentcore::TurnOutcome> {
+    page.entries
+        .iter()
+        .filter_map(|e| match &e.body {
+            horsie_agentcore::AgentLogBody::Lifecycle(
+                horsie_agentcore::LifecycleEvent::TurnEnded(t),
+            ) => Some(t.outcome.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many turns began in one agent's log — the other half of
+/// [`turn_outcomes`], and what an unmatched `TurnBegan` is counted against.
+pub(super) fn turns_begun(page: &crate::agent_loop::LogPage) -> usize {
+    page.entries
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.body,
+                horsie_agentcore::AgentLogBody::Lifecycle(
+                    horsie_agentcore::LifecycleEvent::TurnBegan(_)
+                )
+            )
+        })
+        .count()
+}
+
 pub(super) fn user_texts(page: &crate::agent_loop::LogPage) -> Vec<String> {
     page.messages()
         .filter(|m| m.role == horsie_agentcore::Role::User)

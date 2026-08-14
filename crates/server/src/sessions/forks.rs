@@ -150,6 +150,13 @@ impl ForkRoster {
         self.forks.iter()
     }
 
+    /// Every fork this session holds. What a fact addressed to all of them —
+    /// the runtime going away for good — is delivered over.
+    #[must_use]
+    pub fn ids(&self) -> Vec<Uuid> {
+        self.forks.keys().copied().collect()
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.forks.is_empty()
