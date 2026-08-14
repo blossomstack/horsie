@@ -221,6 +221,15 @@ pub enum ForkCommand {
     /// Internal: the detached seeding task wrote the fork's initial state, so
     /// the fork may run and the message waiting in its queue is released.
     Seeded { id: Uuid },
+    /// Internal: the source agent's `/summary-n-fork` turn produced the summary
+    /// these forks were waiting on.
+    ///
+    /// A list because forks queued into one turn share a branch point, so one
+    /// provider call serves all of them.
+    Summarised {
+        forks: Vec<Uuid>,
+        result: Result<String, String>,
+    },
     /// Internal: the detached seeding task could not. Carries the reason
     /// verbatim, because that string is what the user is shown.
     SeedFailed { id: Uuid, error: String },
@@ -637,6 +646,11 @@ impl TurnEnd {
                 Err((agent, NotAnEnd::Usage(usage_total)))
             }
             AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
+            AgentOutcome::ForkSummary {
+                agent,
+                forks,
+                result,
+            } => Err((agent, NotAnEnd::ForkSummary { forks, result })),
         }
     }
 }
@@ -647,6 +661,12 @@ pub(super) enum NotAnEnd {
     Started,
     /// Tokens to bank. The turn they were spent on is a separate report.
     Usage(UsageTotal),
+    /// The summary a `/summary-n-fork` turn was asked for. Nothing about how
+    /// that turn ended — it is still running, or it ended some other way.
+    ForkSummary {
+        forks: Vec<Uuid>,
+        result: Result<String, String>,
+    },
 }
 
 /// Persisted session state — purely a function of the event log.

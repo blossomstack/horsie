@@ -2,6 +2,7 @@ import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
+import { forkReadyToOpen } from "../lib/forkTree";
 import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
@@ -251,6 +252,17 @@ export function SessionView() {
   // before the prepend so we can restore the viewport position after it lands.
   const loadAnchor = useRef<number | null>(null);
 
+  // A fork this conversation just branched, not yet opened. Held rather than
+  // navigated to at once, because a fork is `provisioning` until its history
+  // has been handed over.
+  const [pendingFork, setPendingFork] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingFork || !id) return;
+    if (!forkReadyToOpen(detail?.forks, pendingFork)) return;
+    setPendingFork(null);
+    navigate(`/sessions/${id}/agents/${pendingFork}`);
+  }, [pendingFork, detail?.forks, id, navigate]);
+
   const handleSend = async (sessionId: string, text: string) => {
     setSendError(null);
     // Echo the message immediately — a live session's SSE push for this same
@@ -267,9 +279,14 @@ export function SessionView() {
       // The message belongs to that conversation, not this one, so the echo
       // goes with it — leaving it here would show the command as something
       // said in the conversation it branched away from.
+      // Not navigated yet: a `/summary-n-fork` is a turn on *this* conversation,
+      // and the fork has no history until that turn produces the summary.
+      // Landing there now would open a blank transcript for as long as a
+      // provider call takes. The effect below moves us when it is ready — for a
+      // `/fork`, whose seed is a local copy, that is the very next frame.
       if (ack.forkedAgent) {
         removeOptimisticUser(optimisticId);
-        navigate(`/sessions/${sessionId}/agents/${ack.forkedAgent}`);
+        setPendingFork(ack.forkedAgent);
       }
     } catch (e) {
       removeOptimisticUser(optimisticId);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { forkTree } from "./forkTree";
+import { forkReadyToOpen, forkTree } from "./forkTree";
 import type { ForkView } from "../api/types";
 
 function fork(id: string, parent?: string, createdAtMs = 1): ForkView {
@@ -82,5 +82,34 @@ describe("forkTree", () => {
 
   it("is empty for a session nobody forked", () => {
     expect(forkTree([])).toEqual([]);
+  });
+});
+
+describe("forkReadyToOpen", () => {
+  const row = (id: string, status: string): ForkView => ({
+    id,
+    status,
+    createdAtMs: 1,
+    lastActivityMs: 1,
+  });
+
+  it("holds while the fork is still provisioning", () => {
+    expect(forkReadyToOpen([row("f1", "provisioning")], "f1")).toBe(false);
+  });
+
+  it("holds when the roster has not reached us yet", () => {
+    expect(forkReadyToOpen([], "f1")).toBe(false);
+    expect(forkReadyToOpen(undefined, "f1")).toBe(false);
+  });
+
+  it("opens once the fork has a history", () => {
+    expect(forkReadyToOpen([row("f1", "idle")], "f1")).toBe(true);
+  });
+
+  // A seed that failed is still worth opening: the fork's own page is where
+  // the failure is reported, and holding would strand the user on the source
+  // with no sign anything went wrong.
+  it("opens a fork whose seed failed", () => {
+    expect(forkReadyToOpen([row("f1", "failed")], "f1")).toBe(true);
   });
 });

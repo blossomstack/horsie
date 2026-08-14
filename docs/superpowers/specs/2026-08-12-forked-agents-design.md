@@ -202,20 +202,86 @@ also on the record, so a re-seed after a crash cuts in the same place.
 
 ### `/summary-n-fork` — summarise
 
-The roster row is created immediately at `Provisioning` and the id returns at
-once, so the redirect is instant. A spawned task then summarises the source's
-whole history out of band, writes the seed, and flips the row to `Idle`, which
-releases the message waiting in the fork's queue.
+The summary is **the source agent's own turn**, queued on its inbox like
+`/compact` is.
 
-The summariser is the existing one: `summary_prompt()` and the policy's
-`carried_state()`. The new piece is a `summarise_all()` on `Agent` that returns
-the text and **rewrites nothing** — the source conversation is not touched.
-Folding the summary back into the source would make `/summary-n-fork` do two
-things, only one of which was asked for.
+The first version ran it as a detached task the session owned, with the source
+left `Idle` throughout and the client redirected into the fork at once. Both
+halves were wrong. The source stayed interactive while a summary of it was being
+taken, so a reply sent in that window landed *after* the `Forked` marker in the
+source's transcript but *inside* the fork's summary — `SummariseAll` read
+`prompt_messages()` whenever the mailbox reached it and cut at nothing, while
+`/fork`'s copy had been cutting at `source_seq` since the branch-point fix. And
+the fork the user was dropped into was empty for as long as the provider call
+took, with nothing saying why.
 
-`Provisioning` already means "nothing may run yet, the message waits in the
-queue", and a failure lands the row in `Failed`, which is retryable. A
-summariser that falls over leaves the fork somewhere honest.
+Queueing it fixes both at once, and reuses machinery that already exists:
+
+- `Incoming::Fork` is a fifth queue item. `Turns` enqueues it on the source in
+  the same breath as journaling `ForkCreated`, so "the command was accepted" and
+  "the source is busy" are one event. Nothing can slip between them.
+- The source drains it as an ordinary turn: `begin_turn` journals `TurnBegan`,
+  the session hears `AgentOutcome::Started` and marks it `Running`, and anything
+  typed meanwhile queues behind it. The status is truthful because the agent
+  genuinely is running a turn — no second way for an agent to be busy, and no
+  fourth classifier branch of the kind that once left a fork reading `RUNNING`
+  for ever.
+- **The branch point is enforced by the queue, not by an argument.** A turn in
+  flight cannot append, so there is no `at_seq` to remember to pass.
+
+A turn carries `Option<Summarise>` rather than `/compact`'s old
+`Option<Option<String>>`, because there are now two things a summary can be for:
+
+```rust
+enum Summarise {
+    /// `/compact`: fold it back behind a boundary in this agent's own history.
+    Compact(Option<String>),
+    /// `/summary-n-fork`: not this conversation's to keep — it seeds `fork`,
+    /// and this history is left exactly as it was.
+    Fork(Uuid),
+}
+```
+
+The summary reaches the session on `RunReport`, beside the run's outcome, and is
+delivered as a **non-terminal** `AgentOutcome::ForkSummary` — the shape `Started`
+and `UsageRecorded` already have, and skipped by both "how did the turn end"
+reads for the same reason. Carrying it on the report rather than in the outcome
+is what lets `drain` stay total: a turn that also carries a typed message still
+summarises first and answers second, exactly as a queued `/compact` does.
+
+The summariser itself is unchanged — `summary_prompt()` and the policy's
+`carried_state()` — and still **rewrites nothing**. Folding it back into the
+source would make `/summary-n-fork` do two things, only one of which was asked
+for.
+
+`Provisioning` still means "nothing may run yet, the message waits in the
+queue", and a failure still lands the row in `Failed`, which is retryable. A
+re-seed after a crash re-enqueues the same item, so the first attempt and the
+retry go down one path rather than two.
+
+`/fork` keeps its instant seed: it copies, makes no provider call, and never
+queues anything on the source. The redirect below is shared, which for a copy
+resolves on the next frame.
+
+### Where the user waits
+
+On the source, which is visibly `Running`, until the fork is ready.
+
+`SessionAck.forked_agent` still carries the id at once — the record is journaled
+up front, so the `Forked` marker appears in the source's transcript immediately
+and a crash mid-summary has a `Provisioning` row to re-drive. But the composer no
+longer navigates on the ack. It holds the id and navigates when that fork leaves
+`Provisioning` on the global feed, so the transcript it opens is already there.
+
+Creating the row up front is the one place this departs from "create the fork
+once the summary is done". The cost is a sidebar row that is not ready yet; the
+alternative loses the branch marker and loses the whole command on a crash.
+
+**Still open:** clicking that row before it is ready opens the ordinary
+empty-transcript state, which renders the hint for the *session's* status rather
+than the fork's — so it says nothing useful about a summary in progress. Making
+that panel agent-aware is its own change; the redirect gate above means nobody
+reaches it by following a fork command.
 
 ### The seed message
 

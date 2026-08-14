@@ -51,6 +51,15 @@ pub enum Incoming {
         id: String,
         instructions: Option<String>,
     },
+    /// Someone typed `/summary-n-fork`, and `fork` is the conversation waiting
+    /// on the summary.
+    ///
+    /// Queued rather than run out of band so that accepting the command and
+    /// this agent becoming busy are the same event: a summary taken while the
+    /// conversation it summarises is still answering describes a history the
+    /// branch marker does not. Nothing here is ever said to the model — this
+    /// agent produces the summary and keeps its own history exactly as it was.
+    Fork { id: String, fork: uuid::Uuid },
 }
 
 impl Incoming {
@@ -62,7 +71,8 @@ impl Incoming {
             | Self::SubAgent { id, .. }
             | Self::Timer { id, .. }
             | Self::Continue { id, .. }
-            | Self::Compact { id, .. } => id,
+            | Self::Compact { id, .. }
+            | Self::Fork { id, .. } => id,
         }
     }
 
@@ -91,10 +101,31 @@ impl Incoming {
             Self::SubAgent { .. } => None,
             // `/compact` is an instruction to the *server*. Merging it into the
             // turn's text would send the model the word "compact" and compact
-            // nothing.
-            Self::Compact { .. } => None,
+            // nothing. `/summary-n-fork` is the same, and its message was never
+            // addressed to this agent — it belongs to the fork.
+            Self::Compact { .. } | Self::Fork { .. } => None,
         }
     }
+}
+
+/// A summary a turn was asked for, and what becomes of it.
+///
+/// One type rather than two turn fields because the two are mutually exclusive
+/// by nature: both spend a provider call reading the same history, and running
+/// both in one turn would summarise a summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Summarise {
+    /// `/compact`: fold the summary back into this agent's own history behind a
+    /// boundary. The `Option` is the focus instructions — `None` is a bare
+    /// `/compact`.
+    Compact(Option<String>),
+    /// `/summary-n-fork`: the summary is not this conversation's to keep. It
+    /// seeds these forks, and this history is left exactly as it was.
+    ///
+    /// A list, not one id, because forks queued into the same turn share a
+    /// branch point — nothing can append between them — so they are entitled to
+    /// the same summary rather than to a provider call each.
+    Fork(Vec<uuid::Uuid>),
 }
 
 /// Everything an agent is about to be resumed with, and what that consumes.
@@ -105,12 +136,12 @@ impl Incoming {
 pub struct Turn {
     /// Ids of the queue items this turn carries.
     pub consumed: Vec<String>,
-    /// A `/compact` this turn carries, and the focus instructions it was given.
+    /// A summarisation this turn carries, and what becomes of the summary.
     ///
-    /// `Some(None)` is a bare `/compact`; `None` is no compaction at all. It
-    /// rides on the turn rather than being acted on at enqueue so it happens in
-    /// order — a turn in flight finishes first.
-    pub compact: Option<Option<String>>,
+    /// It rides on the turn rather than being acted on at enqueue so it happens
+    /// in order — a turn in flight finishes first, and the summary describes the
+    /// history a reader sees it taken from.
+    pub summarise: Option<Summarise>,
     /// Tool-call ids of the questions this turn *answered*. Empty when the turn
     /// abandoned them instead — the two are deliberately not the same thing.
     pub answered: Vec<String>,
@@ -235,6 +266,42 @@ pub fn answered_turn(
 
 /// Fold the whole queue into one turn's input. Never partial: an agent that is
 /// starting a turn at all is starting it on everything it has been told.
+/// The one summary this turn takes, out of everything that asked for one.
+///
+/// A turn takes at most one: they all read the same history for the same
+/// provider call, and running two back to back would summarise a summary.
+///
+/// Forks win over a queued `/compact`, and every fork in the drain shares the
+/// result. The asymmetry is deliberate and about what a loss costs — a dropped
+/// compaction is an optimisation that did not happen, and the automatic check
+/// runs again on the very next iteration, while a dropped fork leaves a
+/// conversation stuck in `Provisioning` with nobody left to finish it.
+fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
+    let forks: Vec<uuid::Uuid> = inbox
+        .iter()
+        .filter_map(|i| match i {
+            Incoming::Fork { fork, .. } => Some(*fork),
+            Incoming::User { .. }
+            | Incoming::SubAgent { .. }
+            | Incoming::Timer { .. }
+            | Incoming::Continue { .. }
+            | Incoming::Compact { .. } => None,
+        })
+        .collect();
+    if !forks.is_empty() {
+        return Some(Summarise::Fork(forks));
+    }
+    // The newest `/compact` wins: they ask for the same thing.
+    inbox.iter().rev().find_map(|i| match i {
+        Incoming::Compact { instructions, .. } => Some(Summarise::Compact(instructions.clone())),
+        Incoming::User { .. }
+        | Incoming::SubAgent { .. }
+        | Incoming::Timer { .. }
+        | Incoming::Continue { .. }
+        | Incoming::Fork { .. } => None,
+    })
+}
+
 fn drain(inbox: &[Incoming]) -> Turn {
     let texts: Vec<&str> = inbox.iter().filter_map(Incoming::text).collect();
     Turn {
@@ -251,20 +318,12 @@ fn drain(inbox: &[Incoming]) -> Turn {
                 Incoming::User { .. }
                 | Incoming::Timer { .. }
                 | Incoming::Continue { .. }
-                | Incoming::Compact { .. } => None,
+                | Incoming::Compact { .. }
+                | Incoming::Fork { .. } => None,
             })
             .collect(),
         results: Vec::new(),
-        // The newest `/compact` wins when several were queued together: they
-        // ask for the same thing, and running two compactions back to back
-        // would summarise a summary.
-        compact: inbox.iter().rev().find_map(|i| match i {
-            Incoming::Compact { instructions, .. } => Some(instructions.clone()),
-            Incoming::User { .. }
-            | Incoming::SubAgent { .. }
-            | Incoming::Timer { .. }
-            | Incoming::Continue { .. } => None,
-        }),
+        summarise: summarise(inbox),
     }
 }
 
@@ -297,8 +356,10 @@ mod tests {
         let turn = drain(&[compact("c1", Some("keep the migration details"))]);
         assert_eq!(turn.message, None);
         assert_eq!(
-            turn.compact,
-            Some(Some("keep the migration details".to_string()))
+            turn.summarise,
+            Some(Summarise::Compact(Some(
+                "keep the migration details".to_string()
+            )))
         );
         assert_eq!(turn.consumed, vec!["c1".to_string()]);
     }
@@ -307,10 +368,10 @@ mod tests {
     fn a_bare_compact_is_some_none_not_none() {
         let turn = drain(&[compact("c1", None)]);
         assert_eq!(
-            turn.compact,
-            Some(None),
-            "`Some(None)` is a compaction with no focus; `None` is no \
-             compaction at all, and the two decide different things"
+            turn.summarise,
+            Some(Summarise::Compact(None)),
+            "`Compact(None)` is a compaction with no focus; `None` is no \
+             summarisation at all, and the two decide different things"
         );
     }
 
@@ -320,7 +381,7 @@ mod tests {
     fn a_compact_queued_beside_a_message_keeps_both() {
         let turn = drain(&[compact("c1", None), user("u1", "and now do this")]);
         assert_eq!(turn.message.as_deref(), Some("and now do this"));
-        assert_eq!(turn.compact, Some(None));
+        assert_eq!(turn.summarise, Some(Summarise::Compact(None)));
         assert_eq!(turn.consumed, vec!["c1".to_string(), "u1".to_string()]);
     }
 
@@ -332,7 +393,10 @@ mod tests {
             compact("c1", Some("first ask")),
             compact("c2", Some("second ask")),
         ]);
-        assert_eq!(turn.compact, Some(Some("second ask".to_string())));
+        assert_eq!(
+            turn.summarise,
+            Some(Summarise::Compact(Some("second ask".to_string())))
+        );
         assert_eq!(
             turn.consumed,
             vec!["c1".to_string(), "c2".to_string()],
@@ -342,7 +406,55 @@ mod tests {
 
     #[test]
     fn a_turn_with_no_compact_says_so() {
-        assert_eq!(drain(&[user("u1", "hello")]).compact, None);
+        assert_eq!(drain(&[user("u1", "hello")]).summarise, None);
+    }
+
+    fn fork_item(id: &str, fork: uuid::Uuid) -> Incoming {
+        Incoming::Fork {
+            id: id.to_string(),
+            fork,
+        }
+    }
+
+    /// A `/summary-n-fork` is an instruction to the server, exactly as
+    /// `/compact` is. Merged into the turn's text it would read as the person
+    /// saying "summary-n-fork" to the model.
+    #[test]
+    fn a_fork_contributes_no_text_to_the_turn() {
+        let fork = uuid::Uuid::from_bytes([3; 16]);
+        let turn = drain(&[fork_item("f1", fork)]);
+        assert_eq!(turn.message, None);
+        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![fork])));
+        assert_eq!(turn.consumed, vec!["f1".to_string()]);
+    }
+
+    /// Forks queued into the same turn cannot have anything between them, so
+    /// they branch from the same history and are entitled to one provider call
+    /// rather than one each.
+    #[test]
+    fn forks_queued_together_share_one_summary() {
+        let (a, b) = (
+            uuid::Uuid::from_bytes([1; 16]),
+            uuid::Uuid::from_bytes([2; 16]),
+        );
+        let turn = drain(&[fork_item("f1", a), fork_item("f2", b)]);
+        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![a, b])));
+    }
+
+    /// The asymmetry is about what a loss costs. A dropped compaction is an
+    /// optimisation that did not happen and the automatic check runs again
+    /// immediately; a dropped fork leaves a conversation stuck in
+    /// `Provisioning` with nobody left to finish it.
+    #[test]
+    fn a_fork_wins_over_a_compaction_queued_after_it() {
+        let fork = uuid::Uuid::from_bytes([4; 16]);
+        let turn = drain(&[fork_item("f1", fork), compact("c1", None)]);
+        assert_eq!(turn.summarise, Some(Summarise::Fork(vec![fork])));
+        assert_eq!(
+            turn.consumed,
+            vec!["f1".to_string(), "c1".to_string()],
+            "both are still consumed — the queue is drained whole"
+        );
     }
 
     fn report(id: &str, label: &str, text: &str) -> Incoming {

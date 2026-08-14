@@ -104,6 +104,29 @@ impl ForkedAgents {
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }
+            ForkCommand::Summarised { forks, result } => {
+                for id in forks {
+                    // Dropped rather than reported: a fork deleted while its
+                    // summary was being taken is not a failure, it is the user
+                    // having changed their mind.
+                    if !state.forks.contains(id) {
+                        continue;
+                    }
+                    match &result {
+                        Ok(summary) => actor.finish_seeding(ctx, state, id, summary.clone()),
+                        Err(error) => {
+                            let _ = actor
+                                .me(ctx)
+                                .tell(SessionCommand::Fork(ForkCommand::SeedFailed {
+                                    id,
+                                    error: error.clone(),
+                                }))
+                                .await;
+                        }
+                    }
+                }
+                CommandEffect::none()
+            }
             ForkCommand::Seeded { id } => {
                 if !state.forks.contains(id) {
                     return CommandEffect::none();
@@ -387,16 +410,92 @@ impl SessionActor {
             .ok()
     }
 
-    /// Build a fork's initial state and hand it over, off the mailbox.
+    /// Start whatever this fork's mode needs before it can be seeded.
     ///
-    /// Detached because a `Summary` seed is a provider call: holding the
-    /// session's mailbox for it would stall every other agent in the session.
-    /// [`ForkedAgents::busy`] is what keeps the session loaded meanwhile.
+    /// A `Copy` has everything already and goes straight to the handover. A
+    /// `Summary` needs a provider call over the source's history, and that call
+    /// is *the source's own turn*: queued on its inbox, so accepting the command
+    /// and the source becoming busy are one event. Nothing can append to the
+    /// history between the branch marker and the summary, which is what makes
+    /// the two describe the same conversation.
+    ///
+    /// Running it out of band instead — the first version — left the source
+    /// `Idle` and answering, so a reply sent in that window landed after the
+    /// marker and inside the summary.
     pub(super) fn start_seeding(
         &mut self,
         ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         id: Uuid,
+    ) {
+        let Some(rec) = state.forks.get(id) else {
+            tracing::warn!(fork = %id, "no record to seed a fork from");
+            return;
+        };
+        match rec.mode {
+            ForkMode::Copy => self.copy_into_fork(ctx, state, id),
+            ForkMode::Summary => self.ask_source_to_summarise(ctx, state, id, rec.parent),
+        }
+    }
+
+    /// Queue the summary as a turn on the conversation being forked.
+    ///
+    /// The item id is derived from the fork's, not generated: a re-seed after a
+    /// crash must ask for the same thing rather than queue a second summary.
+    fn ask_source_to_summarise(
+        &mut self,
+        ctx: &ActorContext<SessionInbox>,
+        state: &SessionState,
+        id: Uuid,
+        parent: ForkParent,
+    ) {
+        let Some(source) = self.fork_source(state, ctx, parent) else {
+            tracing::warn!(fork = %id, "no conversation to summarise for a fork");
+            return;
+        };
+        tokio::spawn(async move {
+            let _ = source
+                .tell(AgentCommand::Enqueue {
+                    item: Incoming::Fork {
+                        id: format!("fork-summarise:{id}"),
+                        fork: id,
+                    },
+                    ack: None,
+                })
+                .await;
+        });
+    }
+
+    /// Hand a fork the summary its source's turn produced.
+    pub(super) fn finish_seeding(
+        &mut self,
+        ctx: &ActorContext<SessionInbox>,
+        state: &SessionState,
+        id: Uuid,
+        summary: String,
+    ) {
+        self.seed_fork_with(ctx, state, id, Some(summary));
+    }
+
+    fn copy_into_fork(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState, id: Uuid) {
+        self.seed_fork_with(ctx, state, id, None);
+    }
+
+    /// Build a fork's initial state and hand it over, off the mailbox.
+    ///
+    /// Detached because a `Copy` seed reads the source's whole history: holding
+    /// the session's mailbox for it would stall every other agent in the
+    /// session. [`ForkedAgents::busy`] is what keeps the session loaded
+    /// meanwhile.
+    ///
+    /// `summary` present means the history is not copied at all — a summary fork
+    /// starts small, which is the entire point of asking for one.
+    fn seed_fork_with(
+        &mut self,
+        ctx: &ActorContext<SessionInbox>,
+        state: &SessionState,
+        id: Uuid,
+        summary: Option<String>,
     ) {
         // Everything this needs is on the record, and the record is what a
         // re-seed after a crash reads too — so taking it from there is what
@@ -406,8 +505,7 @@ impl SessionActor {
             tracing::warn!(fork = %id, "no record to seed a fork from");
             return;
         };
-        let (parent, mode, source_seq, message) =
-            (rec.parent, rec.mode, rec.source_seq, rec.message);
+        let (parent, source_seq, message) = (rec.parent, rec.source_seq, rec.message);
         let (Some(source), Some(fork)) = (
             self.fork_source(state, ctx, parent),
             self.agents
@@ -427,11 +525,11 @@ impl SessionActor {
                 id: format!("fork-message:{id}"),
                 text: message,
             };
-            let cmd = match seed_fork(&source, &fork, mode, source_seq, &source_title, queued).await
-            {
-                Ok(()) => ForkCommand::Seeded { id },
-                Err(error) => ForkCommand::SeedFailed { id, error },
-            };
+            let cmd =
+                match seed_fork(&source, &fork, summary, source_seq, &source_title, queued).await {
+                    Ok(()) => ForkCommand::Seeded { id },
+                    Err(error) => ForkCommand::SeedFailed { id, error },
+                };
             let _ = self_ref.tell(SessionCommand::Fork(cmd)).await;
         });
     }
@@ -468,13 +566,18 @@ impl SessionActor {
 async fn seed_fork(
     source: &ActorRef<AgentCommand>,
     fork: &ActorRef<AgentCommand>,
-    mode: ForkMode,
+    summary: Option<String>,
     source_seq: u64,
     source_title: &str,
     message: Incoming,
 ) -> Result<(), String> {
-    let (state, summary) = match mode {
-        ForkMode::Copy => {
+    // A summary fork copies nothing: it starts small, which is the entire point
+    // of asking for one. Only a copy reads the source, and only at the branch
+    // point — the source goes on appending while this runs, and a copy to the
+    // log's end would hand the fork its own creation marker.
+    let (state, summary) = match summary {
+        Some(summary) => (Box::new(AgentState::default()), summary),
+        None => {
             let state = source
                 .ask(|reply| AgentCommand::ForkSeed {
                     at_seq: source_seq,
@@ -483,16 +586,6 @@ async fn seed_fork(
                 .await
                 .map_err(|e| format!("read the conversation to fork: {e}"))?;
             (state, String::new())
-        }
-        // Nothing is read from the source but the summary: a summary fork
-        // starts small, which is the entire point of asking for one.
-        ForkMode::Summary => {
-            let summary = source
-                .ask(|reply| AgentCommand::SummariseAll { reply })
-                .await
-                .map_err(|e| format!("summarise the conversation to fork: {e}"))?
-                .map_err(|e| format!("summarise the conversation to fork: {e}"))?;
-            (Box::new(AgentState::default()), summary)
         }
     };
     let seed = Message {
@@ -869,6 +962,45 @@ mod tests {
             forked.contains("forked from"),
             "but is still told where it came from: {forked}"
         );
+    }
+
+    /// The summary is the source's **own turn**, not a detached read of it.
+    ///
+    /// This is the whole point of the redesign. Run out of band, the summariser
+    /// left the source `Idle` and answering, so a reply sent while it ran landed
+    /// after the `Forked` marker in the source's transcript and inside the
+    /// fork's summary — the two described different conversations. Queued, the
+    /// source cannot append while the summary is taken, and the proof that it
+    /// is a turn is that the source's own log carries one.
+    #[tokio::test]
+    async fn summarising_for_a_fork_is_a_turn_on_the_conversation_it_branches() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "the original question").await;
+        let before = main_turns_begun(&session).await;
+
+        let fork = fork_via(&session, None, "/summary-n-fork now do the other thing")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the summary fork is seeded", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+        })
+        .await;
+
+        assert!(
+            main_turns_begun(&session).await > before,
+            "the source ran a turn to produce the summary; its log holds only \
+             {before} turn(s), which is what an out-of-band summariser leaves \
+             behind:\n{}",
+            transcript(&session, None).await
+        );
+    }
+
+    /// How many turns the session's main agent has begun, from its own log.
+    async fn main_turns_begun(session: &SessionRef) -> usize {
+        turns_begun(&agent_history(session, None).await)
     }
 
     /// The branch point is visible where it happened, so scrolling the source
