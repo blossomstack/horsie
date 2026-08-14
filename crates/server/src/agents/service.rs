@@ -309,7 +309,10 @@ mod tests {
 
         let mut asked = input("ops", "sonnet");
         asked.control_plane = Some(true);
-        assert_eq!(service.create(asked).await.unwrap().control_plane, Some(true));
+        assert_eq!(
+            service.create(asked).await.unwrap().control_plane,
+            Some(true)
+        );
         assert_eq!(
             service.get("ops").await.unwrap().control_plane,
             Some(true),

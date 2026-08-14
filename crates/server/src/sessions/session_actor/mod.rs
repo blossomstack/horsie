@@ -501,6 +501,7 @@ impl SessionActor {
             registry: self.deps().provider_registry.clone(),
             mcp: self.deps().mcp.clone(),
             memory: self.deps().memory.clone(),
+            services: Some(self.services().clone()),
             step_result: plan.step_result.clone(),
             session_id: self.id,
             kind: plan.kind,
