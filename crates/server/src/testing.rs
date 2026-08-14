@@ -195,7 +195,7 @@ impl TestStateBuilder {
 
         let shared = Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
-            system: crate::users::node_system(&db),
+            system: crate::users::node_system(&db, None),
             db,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
             info: info(),

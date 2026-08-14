@@ -40,9 +40,16 @@ const GLOBAL_EVENT_CAPACITY: usize = 256;
 /// a log became findable by `(kind, id)` alone, so there is no second reason for
 /// the split either. Accounts stay apart because their actors sit at different
 /// paths, which is what a path was always for.
+///
+/// `cluster` is `None` on a single-node deployment, which is the default: every
+/// address is then local and this node owns everything.
 #[must_use]
-pub fn node_system(db: &Db) -> ActorSystem {
-    ActorSystem::new(Arc::new(SqlJournal::new(db.clone())) as Arc<dyn Journal>)
+pub fn node_system(db: &Db, cluster: Option<Arc<horsie_actor::ClusterNode>>) -> ActorSystem {
+    let journal = Arc::new(SqlJournal::new(db.clone())) as Arc<dyn Journal>;
+    match cluster {
+        Some(node) => ActorSystem::clustered(journal, node),
+        None => ActorSystem::new(journal),
+    }
 }
 
 /// Everything one deployment owns, whatever accounts it serves.
@@ -481,7 +488,7 @@ mod tests {
         let db = crate::db::testing::db().await;
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
-            system: node_system(&db),
+            system: node_system(&db, None),
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: test_info(),
