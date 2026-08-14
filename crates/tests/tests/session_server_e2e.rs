@@ -2923,6 +2923,12 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
 
     // An ordinary conversation, so the filter has something to leave out.
     let plain = create_session(&client, &server.addr, &agent, "hello").await;
+    // Waited out before the run starts, because the mock answers one shared
+    // queue in order and the two want different answers: a conversation wants
+    // prose, a step wants a `submit_result` call. `create_session` returns as
+    // soon as the runtime exists, so without this the run's first step and this
+    // turn race for whichever response is at the head.
+    wait_turns(&client, &server.addr, &plain, 1).await;
 
     let res = client
         .post(format!("{base}/api/workflows/e2e-flow/runs"))
