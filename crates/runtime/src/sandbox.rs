@@ -87,6 +87,18 @@ fn build_capability_set(
                         .map_err(|e| e.to_string())?;
                 }
             }
+            // Resolved here rather than named in the spec: on macOS `TMPDIR` is a
+            // per-user `/var/folders/…/T` that no static path can write down. It
+            // reaches this process through the runtime-host env allowlist, so
+            // `std::env::temp_dir` reads the same directory the agent's tools will.
+            Grant::TempDir(g) => {
+                let dir = std::env::temp_dir();
+                if dir.is_dir() {
+                    caps = caps
+                        .allow_path(&dir, access_mode(&g.access))
+                        .map_err(|e| e.to_string())?;
+                }
+            }
         }
     }
 
@@ -161,7 +173,7 @@ fn access_mode(access: &Access) -> nono::AccessMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horsie_models::capabilities::{AllowNetwork, BlockNetwork, ProxyOnlyNetwork};
+    use horsie_models::capabilities::{AllowNetwork, BlockNetwork, ProxyOnlyNetwork, TempDirGrant};
     use nono::NetworkMode;
 
     fn spec(network: NetworkPolicy) -> CapabilitySpec {
@@ -170,6 +182,33 @@ mod tests {
             grants: vec![],
             unsafe_seatbelt_rules: None,
         }
+    }
+
+    /// A `TempDir` grant carries no path — it has to resolve to the temp dir
+    /// this process actually inherited, or `git` and `cc` write nowhere.
+    #[test]
+    fn temp_dir_grant_resolves_to_the_inherited_temp_dir() {
+        let mut spec = spec(NetworkPolicy::Allow(AllowNetwork {}));
+        spec.grants.push(Grant::TempDir(TempDirGrant {
+            access: Access::ReadWrite,
+        }));
+        let caps = build_capability_set(&spec, &[], None).expect("build");
+
+        // nono canonicalizes the grant path, so compare against the same form.
+        let expected = std::env::temp_dir()
+            .canonicalize()
+            .expect("temp dir must exist");
+        let granted = caps
+            .fs_capabilities()
+            .iter()
+            .find(|c| c.resolved == expected)
+            .expect("temp dir must be granted");
+        assert_eq!(
+            granted.access,
+            nono::AccessMode::ReadWrite,
+            "the temp dir must be writable, not merely readable"
+        );
+        assert!(!granted.is_file, "the temp dir grant must be a subtree");
     }
 
     #[test]

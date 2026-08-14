@@ -28,6 +28,7 @@ pub mod tools;
 mod transport;
 mod vendor;
 
+pub use baseline::baseline_capabilities;
 pub use client::{HookSink, RuntimeCallError, RuntimeClient};
 pub use connected_registry::ConnectedRuntimeRegistry;
 pub use env_scrub::{SANDBOX_ENV_ALLOWLIST, scrubbed_env};
