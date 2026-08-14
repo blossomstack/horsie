@@ -1,5 +1,6 @@
 
 import { AnnotationEntry } from './annotationEntry';
+import { ForkView } from './forkView';
 import { SessionStatusKind } from './sessionStatusKind';
 import { SubAgentView } from './subAgentView';
 import { UsageView } from './usageView';
@@ -61,6 +62,17 @@ export interface SessionDetail {
    * labelled with the step that ran.
    */
   agents: SubAgentView[];
+  /**
+   * The conversations forked out of this session, so one read tells a client
+   * everything the session hosts.
+   *
+   * Its own field rather than more entries in `agents`, because a fork is
+   * not a delegated task: it owes nobody a result and it never ends, so it
+   * has no end stamp for a `SubAgentView` to carry and no honest way to
+   * share the shape. The server keeps the two apart for the same reason —
+   * `ForkRoster` is deliberately not a `SubAgentTree`.
+   */
+  forks: ForkView[];
   /**
    * The workflow this session is a run of, if it is one. Decides which view
    * the page renders: a run has a graph rather than a conversation.

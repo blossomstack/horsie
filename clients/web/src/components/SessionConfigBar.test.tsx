@@ -27,6 +27,7 @@ function detail(overrides: Partial<SessionDetail> = {}): SessionDetail {
     usePlugins: false,
     usageTotal: { inputTokens: 0, outputTokens: 0 },
     agents: [],
+    forks: [],
     ...overrides,
   };
 }

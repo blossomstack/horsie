@@ -107,6 +107,14 @@ struct ForkView {
     /// is a conversation, so it never reads "completed".
     status: String,
     created_at_ms: u64,
+    /// When this fork last did anything: the moment of its most recent status
+    /// change, which is the end of its last turn once it is idle again.
+    ///
+    /// A conversation has no *end* — nothing closes it — so this is not one.
+    /// It is how far along the fork got, which is what a reader looking at the
+    /// session's shape actually needs; without it a fork can only be drawn as
+    /// running forever. Zero before the fork has moved at all.
+    last_activity_ms: u64,
 }
 
 /// Answers to every question one agent is parked on, delivered together
@@ -157,6 +165,15 @@ struct SessionDetail {
     /// *is* its steps — so it lists one entry per execution in its run log,
     /// labelled with the step that ran.
     agents: Vec<SubAgentView>,
+    /// The conversations forked out of this session, so one read tells a client
+    /// everything the session hosts.
+    ///
+    /// Its own field rather than more entries in `agents`, because a fork is
+    /// not a delegated task: it owes nobody a result and it never ends, so it
+    /// has no end stamp for a `SubAgentView` to carry and no honest way to
+    /// share the shape. The server keeps the two apart for the same reason —
+    /// `ForkRoster` is deliberately not a `SubAgentTree`.
+    forks: Vec<ForkView>,
     /// The workflow this session is a run of, if it is one. Decides which view
     /// the page renders: a run has a graph rather than a conversation.
     workflow: Option<String>,

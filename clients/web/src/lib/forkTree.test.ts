@@ -3,7 +3,7 @@ import { forkTree } from "./forkTree";
 import type { ForkView } from "../api/types";
 
 function fork(id: string, parent?: string, createdAtMs = 1): ForkView {
-  return { id, parent, title: undefined, status: "idle", createdAtMs };
+  return { id, parent, title: undefined, status: "idle", createdAtMs, lastActivityMs: createdAtMs };
 }
 
 describe("forkTree", () => {

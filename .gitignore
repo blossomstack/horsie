@@ -5,5 +5,8 @@
 
 # impeccable design-review scratch (reference images, critique snapshots).
 # The DESIGN.md sidecar is part of the design record and IS tracked.
-.impeccable/*
-!.impeccable/design.json
+# Globbed rather than anchored: a pattern containing a slash is relative to this
+# file, so the un-globbed form ignored the repo root's copy and silently tracked
+# `clients/web/.impeccable/`.
+**/.impeccable/*
+!**/.impeccable/design.json

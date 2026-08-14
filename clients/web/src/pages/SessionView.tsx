@@ -1,13 +1,14 @@
-import { CircleAlert, ListTodo, Trash2 } from "lucide-react";
+import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { ApiRequestError, MAIN_AGENT } from "../api/client";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { ContextGauge } from "../components/ContextGauge";
 import { SessionConfigBar } from "../components/SessionConfigBar";
+import { SessionTimeline } from "../components/SessionTimeline";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
@@ -16,7 +17,8 @@ import { TranscriptSpine } from "../components/TranscriptSpine";
 import { WorkflowRunView } from "./workflows/WorkflowRunView";
 import { askConfirm } from "../lib/confirm";
 import { usePersistentState } from "../hooks/usePersistentState";
-import { useSessionStream } from "../hooks/useSessionStream";
+import { transcriptItems, useSessionStream } from "../hooks/useSessionStream";
+import type { TranscriptItem } from "../hooks/useSessionStream";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
@@ -30,6 +32,7 @@ import {
 } from "../hooks/useSessions";
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
+import { buildTimeline } from "../lib/timeline";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
 /** The session's name, and the only way a person can change it.
@@ -188,6 +191,60 @@ export function SessionView() {
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
 
+  // Which view this page is showing, kept in the URL rather than in component
+  // state: a view of a session is a thing you send someone, and it should
+  // survive a reload.
+  const [searchParams, setSearchParams] = useSearchParams();
+  // Only on the session's own page. Scoped to one agent — a subagent, a fork, a
+  // workflow step — the transcript below is that agent's, while the roster is
+  // still the whole session's: the map would label the open agent "main agent"
+  // and draw its siblings hanging off it. A run already has its graph, which is
+  // the structural view for a run.
+  const timelineOpen = !agentId && searchParams.get("view") === "timeline";
+  const showTimeline = (on: boolean) =>
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (on) next.set("view", "timeline");
+        else next.delete("view");
+        return next;
+      },
+      { replace: true },
+    );
+  /** An entry the timeline asked for, held until the transcript is on screen
+   * again — its anchors do not exist while the timeline has the pane. */
+  const [pendingSeek, setPendingSeek] = useState<string | null>(null);
+
+  /** Agents whose own work is being drawn on their lane, and the histories
+   * fetched for them.
+   *
+   * On demand rather than up front: a session with a dozen subagents would be a
+   * dozen requests on open, to draw detail nobody had asked to see yet. One
+   * read per lane, the first time it is opened, kept for as long as the page
+   * lives. */
+  const [expanded, setExpanded] = useState<string[]>([]);
+  /** Agents whose children are folded away. */
+  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [histories, setHistories] = useState<Record<string, TranscriptItem[]>>({});
+
+  const toggleExpand = async (agentId: string) => {
+    if (expanded.includes(agentId)) {
+      setExpanded((prev) => prev.filter((a) => a !== agentId));
+      return;
+    }
+    setExpanded((prev) => [...prev, agentId]);
+    if (histories[agentId] || !id) return;
+    try {
+      const page = await api.sessions.messages(id, agentId, { max: 200 });
+      // `false, false`: a fetched history is a finished read, so nothing in it
+      // is still in flight, and it is the whole of what there is to page.
+      setHistories((prev) => ({ ...prev, [agentId]: transcriptItems(page.entries, false, false) }));
+    } catch {
+      // The lane stays a span. A failed read must not take the view with it.
+      setExpanded((prev) => prev.filter((a) => a !== agentId));
+    }
+  };
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   // When a scroll-back page is loading, holds the scroll height captured just
@@ -289,8 +346,22 @@ export function SessionView() {
     .filter((i) => i.kind === "compaction")
     .map((i) => i.value);
 
-  /** Scroll to a boundary by seq, or to either end. */
-  const seek = (target: number | "start" | "end") => {
+  // `Date.now()` is read here rather than inside the builder so one layout pass
+  // measures every still-running bar against the same instant.
+  const timeline = useMemo(
+    () =>
+      buildTimeline(
+        stream.items,
+        detail?.agents ?? [],
+        detail?.forks ?? [],
+        Date.now(),
+        histories,
+      ),
+    [stream.items, detail?.agents, detail?.forks, histories],
+  );
+
+  /** Scroll to a transcript entry by id, to a boundary by seq, or to either end. */
+  const seek = (target: number | string) => {
     const el = scrollRef.current;
     if (!el) return;
     if (target === "start") {
@@ -305,8 +376,26 @@ export function SessionView() {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
       return;
     }
-    el.querySelector(`[data-testid="compaction-divider"][data-seq="${target}"]`)
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // A compaction boundary is addressed by its seq, and the spine has always
+    // sought it that way. Both a spine tick and a timeline tick arrive here.
+    const divider = el.querySelector(
+      `[data-testid="compaction-divider"][data-seq="${target}"]`,
+    );
+    if (divider) {
+      divider.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    // Otherwise a message id, from a timeline bar. A turn declares every
+    // message it folded together, so `~=` finds the block holding this one.
+    const entry = el.querySelector(`[data-entry-ids~="${CSS.escape(String(target))}"]`);
+    if (entry) {
+      entry.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    // Neither: the entry has been paged out. `seek("start")` has the same
+    // limitation and answers it the same way — go as far back as has loaded and
+    // let the scroll-back handler fetch the rest.
+    el.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const onScroll = () => {
@@ -320,7 +409,11 @@ export function SessionView() {
   };
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    // Not while the timeline has the pane: the transcript is `display: none`
+    // there, so every measurement below reads zero and would leave it parked at
+    // the top. Re-running when the pane comes back is what restores it, which
+    // is why `timelineOpen` is a dependency rather than just a guard.
+    if (!el || timelineOpen) return;
     // A just-completed scroll-back prepend: keep the viewport where it was by
     // pushing down by exactly the height the older messages added.
     if (loadAnchor.current != null) {
@@ -329,7 +422,16 @@ export function SessionView() {
       return;
     }
     if (stick.current) el.scrollTop = el.scrollHeight;
-  }, [stream.items, stream.streaming, stream.orphanTools.length]);
+  }, [stream.items, stream.streaming, stream.orphanTools.length, timelineOpen]);
+
+  // A bar was clicked. Runs after the layout effect above has put the
+  // transcript back where it was, so this lands on top of it rather than
+  // fighting it.
+  useEffect(() => {
+    if (timelineOpen || pendingSeek === null) return;
+    seek(pendingSeek);
+    setPendingSeek(null);
+  }, [timelineOpen, pendingSeek]);
 
   // Reset scroll intent when switching sessions.
   useEffect(() => {
@@ -406,6 +508,21 @@ export function SessionView() {
           <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
             <RailToggle />
             <SessionTitle id={id} name={detail?.name} editable={!agentId} />
+            {/* Beside the title rather than in the key cluster on the right:
+                this changes *what you are looking at*, and that cluster is for
+                acting on what you are already looking at. */}
+            {!agentId && (
+              <button
+                className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
+                onClick={() => showTimeline(!timelineOpen)}
+                aria-pressed={timelineOpen}
+                title={timelineOpen ? "Show the transcript" : "Show the timeline"}
+                aria-label="Toggle the session timeline"
+                data-testid="timeline-toggle"
+              >
+                <ChartNoAxesGantt size={15} aria-hidden />
+              </button>
+            )}
             {status && <StatusBadge status={status} />}
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript
@@ -479,12 +596,39 @@ export function SessionView() {
             </div>
           </header>
 
+          {/* The session's shape instead of its prose. The composer and the
+              config bar below stay put, so a session can still be driven while
+              the map is up. */}
+          {timelineOpen && (
+            <div className="min-h-0 flex-1">
+              <SessionTimeline
+                timeline={timeline}
+                expanded={expanded}
+                collapsed={collapsed}
+                onToggleCollapse={(agent) =>
+                  setCollapsed((prev) =>
+                    prev.includes(agent) ? prev.filter((a) => a !== agent) : [...prev, agent],
+                  )
+                }
+                onToggleExpand={(agent) => void toggleExpand(agent)}
+                onSelectEntry={(entryId) => {
+                  // Reading an entry means reading the transcript. Switch back
+                  // and record where to go; the effect above seeks once the
+                  // transcript has actually rendered its anchors.
+                  setPendingSeek(entryId);
+                  showTimeline(false);
+                }}
+                onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+              />
+            </div>
+          )}
+
           {/* Transcript */}
           <div
             ref={scrollRef}
             onScroll={onScroll}
             data-testid="transcript-scroll"
-            className="relative flex-1 overflow-y-auto"
+            className={cn("relative flex-1 overflow-y-auto", timelineOpen && "hidden")}
           >
             {/* Inside the scroller so the spine's own `sticky` keeps it in
                 view; outside it there would be nothing to stick to. */}

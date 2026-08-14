@@ -21,4 +21,14 @@ export interface ForkView {
    */
   status: string;
   createdAtMs: number;
+  /**
+   * When this fork last did anything: the moment of its most recent status
+   * change, which is the end of its last turn once it is idle again.
+   *
+   * A conversation has no *end* — nothing closes it — so this is not one.
+   * It is how far along the fork got, which is what a reader looking at the
+   * session's shape actually needs; without it a fork can only be drawn as
+   * running forever. Zero before the fork has moved at all.
+   */
+  lastActivityMs: number;
 }

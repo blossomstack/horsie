@@ -1,6 +1,6 @@
 import { NavLink, useMatch, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
-import { relativeTime, sessionTitle } from "../lib/format";
+import { sessionTitle } from "../lib/format";
 import { askConfirm } from "../lib/confirm";
 import { cn } from "../lib/cn";
 import { statusMeta } from "../lib/status";
@@ -80,13 +80,16 @@ export function SessionRow({
           <span className="block truncate text-[0.8125rem] leading-5">
             {title}
           </span>
-          <span className="legend mt-0.5 block truncate">
-            {/* A run says which workflow it came from: the rail holds runs and
-                ordinary sessions together, so the row has to say which it is. */}
-            {s.workflow ? `${s.workflow} · ` : ""}
-            {meta.label} ·{" "}
-            {relativeTime(s.createdAt)}
-          </span>
+          {/* A run says which workflow it came from: the rail holds runs and
+              ordinary sessions together, so the row has to say which it is.
+              Nothing else does — the status is already the dot beside the
+              title, and the age is on the session itself for anyone who wants
+              it. Spelling both out under every row gave a list of "Idle · just
+              now" that said the same thing on every line and cost a second
+              line of height to do it. */}
+          {s.workflow && (
+            <span className="legend mt-0.5 block truncate">{s.workflow}</span>
+          )}
         </span>
       </NavLink>
       {/* Revealed on row hover; focus-within keeps it visible while its menu is

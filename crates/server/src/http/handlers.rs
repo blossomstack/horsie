@@ -76,6 +76,7 @@ fn wire_fork(row: &crate::sessions::supervisor::ForkRow) -> horsie_models::sessi
         title: row.title.clone(),
         status: wire_agent_status(row.status).to_string(),
         created_at_ms: row.created_at_ms,
+        last_activity_ms: row.last_activity_ms,
     }
 }
 
@@ -191,15 +192,29 @@ pub async fn get_session(
     })
     .await?
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
+    Ok(Json(GetSessionResponse {
+        session: detail(&id, &rec, snapshot.as_ref()),
+    }))
+}
+
+/// Project one session onto its detail document.
+///
+/// Pure, and beside [`summary`] rather than inline in the handler, for the
+/// reason that module's tests give: this layer's job is one projection and no
+/// derivation, and a projection that cannot be called without a running
+/// supervisor cannot be tested at the level it is written.
+fn detail(
+    id: &str,
+    rec: &SessionRecord,
+    snapshot: Option<&crate::sessions::session_actor::SessionSnapshot>,
+) -> SessionDetail {
     // The actor's own status when it answered, the registry's copy otherwise —
     // and the registry always has one, so this document never has to say it
     // does not know. They agree except in the window where the actor has folded
     // a transition it has not reported yet, and there the actor is right.
-    let status = snapshot
-        .as_ref()
-        .map_or_else(|| rec.status.clone(), |s| s.status.clone());
-    let detail = SessionDetail {
-        id: id.clone(),
+    let status = snapshot.map_or_else(|| rec.status.clone(), |s| s.status.clone());
+    SessionDetail {
+        id: id.to_string(),
         name: rec.spec.name.clone(),
         status: status_kind(&status),
         created_at: rec.created_at,
@@ -231,12 +246,16 @@ pub async fn get_session(
         // knows any of it, and it answers all of it at once.
         usage_total: to_wire_usage(snapshot.as_ref().map(|s| s.usage_total).unwrap_or_default()),
         agents: snapshot
-            .as_ref()
             .map(|s| s.agents.iter().map(to_wire_agent).collect())
             .unwrap_or_default(),
+        // The same rows a list entry carries, through the same helper. The
+        // supervisor keeps them current whether or not the session actor is
+        // loaded, so this costs no extra read — and reading them from `rec`
+        // rather than the snapshot is what makes them available on a session
+        // that is not resident.
+        forks: rec.forks.iter().map(wire_fork).collect(),
         workflow: rec.spec.workflow_name().map(str::to_string),
-    };
-    Ok(Json(GetSessionResponse { session: detail }))
+    }
 }
 
 /// Which agent a write is addressed to. Absent or `"main"` for the session's
@@ -485,6 +504,18 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// A registry row for a session that has never been forked. The two
+    /// documents below are projections of this and nothing else.
+    fn record_with_no_forks() -> SessionRecord {
+        SessionRecord {
+            spec: crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            created_at: 1_699_000_000_000,
+            annotations: BTreeMap::new(),
+            status: SessionStatus::Idle,
+            forks: Vec::new(),
+        }
+    }
+
     /// This layer's whole job with an agent: one projection, no derivation. The
     /// roster it projects, and what each entry's status means, are tested where
     /// they are decided — [`crate::sessions::session_actor`].
@@ -511,6 +542,64 @@ mod tests {
         assert_eq!(view.status, "failed");
         assert_eq!(view.error.as_deref(), Some("boom"));
         assert_eq!((view.spawned_at_ms, view.ended_at_ms), (100, 400));
+    }
+
+    /// A session's forks belong on its own document, not only on the list row.
+    ///
+    /// A client reading one session — a deep link straight to it, which is the
+    /// normal case — otherwise has to fetch the entire session list to find out
+    /// what branched off the thing it is already looking at.
+    #[test]
+    fn a_sessions_forks_are_on_its_detail_document() {
+        let fork = Uuid::new_v4();
+        let mut rec = record_with_no_forks();
+        rec.forks = vec![crate::sessions::supervisor::ForkRow {
+            id: fork,
+            parent: None,
+            title: Some("Other migration".into()),
+            status: AgentStatus::Idle,
+            created_at_ms: 1_700_000_000_000,
+            last_activity_ms: 1_700_000_000_000,
+        }];
+
+        let view = detail("s1", &rec, None);
+
+        assert_eq!(view.forks.len(), 1);
+        assert_eq!(view.forks[0].id, fork.to_string());
+        assert_eq!(view.forks[0].title.as_deref(), Some("Other migration"));
+        assert_eq!(view.forks[0].status, "idle");
+        assert_eq!(view.forks[0].created_at_ms, 1_700_000_000_000);
+    }
+
+    /// The two documents that carry a session's forks must not drift: a list
+    /// row and a detail read are the same fact, and a client that sees one
+    /// nesting in the sidebar and another on the page has no way to tell which
+    /// is wrong.
+    #[test]
+    fn the_list_row_and_the_detail_agree_about_forks() {
+        let child = Uuid::new_v4();
+        let parent = Uuid::new_v4();
+        let mut rec = record_with_no_forks();
+        rec.forks = vec![
+            crate::sessions::supervisor::ForkRow {
+                id: parent,
+                parent: None,
+                title: None,
+                status: AgentStatus::Running,
+                created_at_ms: 10,
+                last_activity_ms: 10,
+            },
+            crate::sessions::supervisor::ForkRow {
+                id: child,
+                parent: Some(parent),
+                title: Some("deeper".into()),
+                status: AgentStatus::Idle,
+                created_at_ms: 20,
+                last_activity_ms: 20,
+            },
+        ];
+
+        assert_eq!(detail("s1", &rec, None).forks, summary("s1", &rec).forks);
     }
 
     /// Every state has a spelling, and one spelling: a `_ =>` arm here is how

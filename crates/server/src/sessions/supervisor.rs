@@ -418,6 +418,10 @@ pub struct ForkRow {
     pub title: Option<String>,
     pub status: crate::sessions::session_actor::AgentStatus,
     pub created_at_ms: u64,
+    /// The moment of this fork's last status change — the end of its last turn
+    /// once it is idle again. Zero before it has moved at all.
+    #[serde(default)]
+    pub last_activity_ms: u64,
 }
 
 /// One registry row.
@@ -1814,6 +1818,7 @@ mod tests {
                 title: Some("Other migration".into()),
                 status: crate::sessions::session_actor::AgentStatus::Idle,
                 created_at_ms: 5,
+                last_activity_ms: 5,
             }],
         })
         .await
@@ -1846,6 +1851,7 @@ mod tests {
             title: None,
             status: crate::sessions::session_actor::AgentStatus::Idle,
             created_at_ms: 5,
+            last_activity_ms: 5,
         }];
 
         sup.tell(SessionSupervisorCommand::ForksChanged {

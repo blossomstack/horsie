@@ -2,7 +2,6 @@ import { NavLink, useMatch, useNavigate } from "react-router-dom";
 import type { ForkView } from "../api/types";
 import { askConfirm } from "../lib/confirm";
 import { cn } from "../lib/cn";
-import { relativeTime } from "../lib/format";
 import { agentStatusMeta, statusMeta } from "../lib/status";
 import { useDeleteFork } from "../hooks/useSessions";
 import { Menu, MenuItem } from "./Menu";
@@ -111,12 +110,12 @@ export function ForkRow({
         }
       >
         <StatusDot status={kind} className="mt-[5px]" />
+        {/* Title only, as a session row is: the dot beside it already carries
+            the status, and a fork sitting under the conversation it came from
+            does not need to repeat "Idle · just now" on a second line. */}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[0.8125rem] leading-5">
             {title}
-          </span>
-          <span className="legend mt-0.5 block truncate">
-            {meta.label} · {relativeTime(fork.createdAtMs)}
           </span>
         </span>
       </NavLink>

@@ -128,6 +128,11 @@ function AssistantTurn({
     <Turn
       data-testid="message"
       data-role="Assistant"
+      // Every message this turn folded together, so the timeline can scroll to
+      // any of them. A list rather than one id because an assistant turn is a
+      // run of provider calls collapsed into one block, and a bar exists per
+      // call — `[data-entry-ids~="…"]` is what makes that seekable.
+      data-entry-ids={msgs.map((m) => m.id).join(" ")}
       actions={
         markdown ? (
           <TurnActions atMs={atMs} markdown={markdown} renderedRef={bodyRef} />
@@ -156,6 +161,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
       className={cn((msg.optimistic || msg.queued) && "opacity-60")}
       data-testid="message"
       data-role={msg.role}
+      data-entry-ids={msg.id}
       data-queued={msg.queued ? "true" : undefined}
       actions={
         settled ? (

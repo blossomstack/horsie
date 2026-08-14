@@ -325,7 +325,7 @@ describe("Sidebar groups", () => {
 
 describe("forks in the rail", () => {
   function fork(id: string, parent?: string, status = "idle", title?: string) {
-    return { id, parent, title, status, createdAtMs: 1 };
+    return { id, parent, title, status, createdAtMs: 1, lastActivityMs: 1 };
   }
 
   it("nests a fork of a fork under the fork it came from", async () => {
