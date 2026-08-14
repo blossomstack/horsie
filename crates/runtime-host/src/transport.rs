@@ -17,6 +17,13 @@ pub enum TransportError {
     Serialization(String),
     #[error("disconnected")]
     Disconnected,
+    /// The runtime abandoned this call because somebody asked it to — a user
+    /// hitting Stop, or a reconciler cancelling what it read as an orphan.
+    ///
+    /// Distinct from a failure: nothing went wrong, and a caller that reports it
+    /// as one tells the user their session broke when they cancelled it.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// A pipe to one runtime, carrying `runtime.fl` messages verbatim.
@@ -72,6 +79,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -104,6 +112,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -148,6 +157,7 @@ pub trait RuntimeTransport: Send + Sync {
             ))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::ProvisionResult(resp) => Ok(resp.result),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -182,6 +192,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -210,6 +221,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -232,6 +244,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::McpTools(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -258,6 +271,7 @@ pub trait RuntimeTransport: Send + Sync {
             }))
             .await?;
         match reply {
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
@@ -329,6 +343,10 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::McpResult(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Pong(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::ProvisionResult(resp) => Some(&resp.call_id),
+        // A cancellation answers the call it names, so it resolves that waiter
+        // like any other reply — which is what lets the caller learn it was
+        // cancelled instead of waiting out a reply that will never come.
+        RuntimeOutboundMessage::Cancelled(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_) => None,
     }
 }

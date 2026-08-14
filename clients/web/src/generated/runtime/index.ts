@@ -43,6 +43,7 @@ export * from './provisionOk';
 export * from './provisionError';
 export * from './provisionResult';
 export * from './provisionWorkspaceResponse';
+export * from './cancelledResponse';
 export * from './pingRequest';
 export * from './runtimeInboundMessage';
 export * from './toolOutput';
