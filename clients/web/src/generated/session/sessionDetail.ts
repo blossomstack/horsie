@@ -14,7 +14,6 @@ export interface SessionDetail {
    * User-set key-value metadata (e.g. `group=<name>`). Empty when none.
    */
   annotations: AnnotationEntry[];
-  model: string;
   /**
    * The predefined environment this session was created from; absent when it
    * was created from an ad-hoc runtime. `vendor` and `repos` are what it
@@ -30,24 +29,6 @@ export interface SessionDetail {
    * Selected skill-bundle names (empty when none).
    */
   plugins: string[];
-  /**
-   * Enabled MCP server names (empty when none).
-   */
-  mcpServers: string[];
-  /**
-   * Selected memory space names (empty when none).
-   */
-  memorySpaces: string[];
-  /**
-   * Whether the runtime's plugin/skill machinery is enabled for this session.
-   */
-  usePlugins: boolean;
-  /**
-   * The session's frozen thinking effort, chosen at creation or inherited
-   * from the model's default. Absent → the model exposes no thinking
-   * control.
-   */
-  thinkingEffort?: string;
   /**
    * Token usage summed across every agent this session hosts. Per-agent
    * numbers (and context size, which is never summed) are on the agent

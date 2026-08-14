@@ -36,8 +36,8 @@ pub async fn get_run_graph(
     .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
     let spec = rec
         .spec
-        .workflow
-        .clone()
+        .workflow_run()
+        .cloned()
         .ok_or_else(|| Api::not_found("this session is not a workflow run"))?;
     let run = handlers::ask(&state, |reply| SessionSupervisorCommand::RunState {
         id: id.clone(),

@@ -13,8 +13,8 @@
 use super::component::{ActionCx, Component};
 use super::context::SessionAgentKind;
 use super::{
-    AgentAction, AgentPlan, CommandEffect, SessionActor, SessionCommand, SessionDomainEvent,
-    SessionState, SubAgentCommand, TurnEnd,
+    AgentAction, AgentKey, AgentPlan, CommandEffect, SessionActor, SessionCommand,
+    SessionDomainEvent, SessionState, SubAgentCommand, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
@@ -65,7 +65,14 @@ impl SubAgents {
                     )));
                     return CommandEffect::none();
                 }
-                let max = actor.spec().agent.max_subagents();
+                // The cap is the *caller's* settings' cap: a workflow step's
+                // spawns are counted against the step's preset, never against a
+                // session-wide value that nothing in a run owns.
+                let Some(settings) = actor.effective_settings_for_parent(state, caller) else {
+                    let _ = reply.send(Err("caller is not a known agent".to_string()));
+                    return CommandEffect::none();
+                };
+                let max = settings.max_subagents();
                 if state.subagents.active_count() >= max {
                     let _ = reply.send(Err(format!("{max} subagents already active")));
                     return CommandEffect::none();
@@ -244,12 +251,17 @@ impl SessionActor {
         id: Uuid,
         agent_type: Option<String>,
     ) -> Option<ActorRef<AgentCommand>> {
+        // Derived from the node's stored parent: a cold node woken to run must
+        // run under the same settings its tree root ran under — a workflow
+        // step's spawns under the step's preset, a conversation's under the
+        // main agent's — never a fabricated session-wide value.
+        let settings = self.effective_settings(state, AgentKey::Sub(id)).cloned()?;
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Sub(id),
-                settings: self.spec().agent.clone(),
+                settings,
                 step_result: Default::default(),
                 agent_type,
             },

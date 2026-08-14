@@ -3,8 +3,14 @@ import { TaskItem } from '../agent';
 import { Usage } from '../agent';
 import { UsageView } from '../session';
 /**
- * One agent's current values. The subagent-only fields (`parent`, `label`,
+ * One agent's current values: what it is, what became of it, what it runs
+ * under, and its live numbers. The subagent-only fields (`parent`, `label`,
  * `task`, `output`, `error`) are absent for a session's main agent.
+ *
+ * The configuration fields — `model`, `mcp_servers`, `memory_spaces`,
+ * `use_plugins`, `thinking_effort` — are this agent's own, resolved from
+ * what it runs under: a workflow step's are its preset's, never the
+ * session's. The session document deliberately carries no session-wide model.
  */
 export interface AgentDocument {
   id: string;
@@ -30,6 +36,28 @@ export interface AgentDocument {
   status: string;
   output?: string;
   error?: string;
+  /**
+   * The model this agent runs under: the main agent's, a step's own
+   * preset, or a subagent's inherited tree root.
+   */
+  model: string;
+  /**
+   * Names of the MCP servers this agent may call (empty when none).
+   */
+  mcpServers: string[];
+  /**
+   * Memory spaces this agent may read and write (empty when none).
+   */
+  memorySpaces: string[];
+  /**
+   * Whether the runtime's plugin/skill machinery is enabled for this agent.
+   */
+  usePlugins: boolean;
+  /**
+   * This agent's thinking effort, frozen at creation or inherited from the
+   * model's default. Absent → the model exposes no thinking control.
+   */
+  thinkingEffort?: string;
   /**
    * The agent's `task_list` tool state.
    */

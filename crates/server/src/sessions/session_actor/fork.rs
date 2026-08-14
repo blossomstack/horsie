@@ -15,7 +15,7 @@
 use super::component::{ActionCx, Component};
 use super::context::SessionAgentKind;
 use super::{
-    AgentPlan, AgentStatus, CommandEffect, ForkCommand, SessionActor, SessionCommand,
+    AgentKey, AgentPlan, AgentStatus, CommandEffect, ForkCommand, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
@@ -369,12 +369,18 @@ impl SessionActor {
         if let Some(resident) = self.agents.as_ref().and_then(|a| a.sub(id)) {
             return Some(resident.actor.clone());
         }
+        // A fork runs under the agent session's own settings — forks exist only
+        // under an agent session, so a run answers `None` here rather than
+        // inventing settings nothing owns.
+        let settings = self
+            .effective_settings(state, AgentKey::Fork(id))
+            .cloned()?;
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Fork(id),
-                settings: self.spec().agent.clone(),
+                settings,
                 step_result: Default::default(),
                 agent_type: None,
             },

@@ -53,7 +53,8 @@ use crate::agent_loop::{
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
     orchestrator::{AgentAction, Delivery},
-    spec::{ServerDeps, SessionSpec, SessionStatus},
+    spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
+    subagents::{SubAgentParent, TreeOwner},
     supervisor::{ForkRow, SessionSupervisorCommand},
     workflow::WorkflowRunState,
 };
@@ -329,13 +330,14 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
     ) {
         self.spec = Some(spec);
-        if self.spec().workflow.is_some() {
-            // A run has no main agent. Step actors, like subagent actors, stay
-            // cold: they spawn on demand for a history read, a retry, or the
-            // next step a boundary picks.
-            self.agents = Some(SessionAgents::workflow());
-        } else {
-            self.spawn_main_agent(ctx, state);
+        match &self.spec().kind {
+            SessionKind::Workflow { .. } => {
+                // A run has no main agent. Step actors, like subagent actors,
+                // stay cold: they spawn on demand for a history read, a retry,
+                // or the next step a boundary picks.
+                self.agents = Some(SessionAgents::workflow());
+            }
+            SessionKind::Agent { .. } => self.spawn_main_agent(ctx, state),
         }
         // Each component repairs itself. A self-send rather than direct work,
         // because neither caller may write here — recovery must not persist at
@@ -567,12 +569,17 @@ impl SessionActor {
 
     /// The session's primary agent, spawned once at load.
     fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState) {
+        let Some(settings) = self.spec().agent_settings() else {
+            // Only an agent session has a main agent; `adopt` gates this call
+            // on the kind.
+            return;
+        };
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Main,
-                settings: self.spec().agent.clone(),
+                settings: settings.clone(),
                 step_result: Default::default(),
                 agent_type: None,
             },
@@ -664,6 +671,48 @@ impl SessionActor {
             .as_ref()
             .and_then(SessionAgents::main)
             .map(|a| a.actor.clone())
+    }
+
+    /// The settings an agent runs under, resolved from what this session is
+    /// and where the agent sits in it: the main agent and forks use the agent
+    /// session's settings, a step uses its own preset, and a subagent inherits
+    /// its tree's root. `None` when the key names no agent this session hosts.
+    pub(super) fn effective_settings(
+        &self,
+        state: &SessionState,
+        key: AgentKey,
+    ) -> Option<&AgentSettings> {
+        match key {
+            AgentKey::Main | AgentKey::Fork(_) => self.spec().agent_settings(),
+            AgentKey::Step(id) => {
+                let run = self.spec().workflow_run()?;
+                let execution = state.run.as_ref()?.index_of_agent(id)?;
+                let name = &state.run.as_ref()?.get(execution)?.step;
+                run.step(name).map(|step| &step.settings)
+            }
+            AgentKey::Sub(id) => match state.subagents.owner_of(id)? {
+                TreeOwner::Main => self.spec().agent_settings(),
+                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
+            },
+        }
+    }
+
+    /// The settings a subagent *spawn* runs under: the caller's own, so a
+    /// step's spawns inherit the step's settings and its cap. Resolved from
+    /// the caller's tree root, exactly as [`Self::effective_settings`] reads a
+    /// cold node.
+    pub(super) fn effective_settings_for_parent(
+        &self,
+        state: &SessionState,
+        caller: SubAgentParent,
+    ) -> Option<&AgentSettings> {
+        match caller {
+            SubAgentParent::Main => match state.root_owner() {
+                TreeOwner::Main => self.effective_settings(state, AgentKey::Main),
+                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
+            },
+            SubAgentParent::SubAgent(id) => self.effective_settings(state, AgentKey::Sub(id)),
+        }
     }
 
     /// Cancel one agent's run and wait for it to actually be over.

@@ -287,11 +287,15 @@ pub async fn list(server: &str) -> Result<(), CliError> {
 /// `horsie session status <id>` — a point-in-time snapshot (live progress is
 /// `session tail`'s job).
 pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let detail = ServerClient::new(server)
-        .await?
-        .get_session(session_id)
-        .await?;
-    print!("{}", render_session_detail(&detail, now_ms()));
+    let client = ServerClient::new(server).await?;
+    let detail = client.get_session(session_id).await?;
+    // The model and configuration are the *agent's*, not the session's, so the
+    // primary agent's document supplies them.
+    let agent = client.get_agent_document(session_id, "main").await.ok();
+    print!(
+        "{}",
+        render_session_detail(&detail, agent.as_ref(), now_ms())
+    );
     Ok(())
 }
 
@@ -334,30 +338,38 @@ fn render_session_table(sessions: &[SessionSummary], now: u64) -> String {
     out
 }
 
-fn render_session_detail(d: &SessionDetail, now: u64) -> String {
+fn render_session_detail(
+    d: &SessionDetail,
+    agent: Option<&horsie_models::session_api::AgentDocument>,
+    now: u64,
+) -> String {
+    // The model and configuration are the agent's, resolved from what it runs
+    // under; the session document deliberately carries no session-wide model.
     let mut out = format!(
-        "session     {}\nname        {}\nstatus      {}\ncreated     {}\nmodel       {}\nvendor      {}\n",
+        "session     {}\nname        {}\nstatus      {}\ncreated     {}\nvendor      {}\n",
         d.id,
         d.name.as_deref().unwrap_or("-"),
         status_label(&d.status),
         relative(now, d.created_at),
-        d.model,
         d.vendor,
     );
-    if let Some(e) = d.thinking_effort.as_deref() {
-        out.push_str(&format!("thinking    {e}\n"));
+    if let Some(a) = agent {
+        out.push_str(&format!("model       {}\n", a.model));
+        if let Some(e) = a.thinking_effort.as_deref() {
+            out.push_str(&format!("thinking    {e}\n"));
+        }
+        if !a.mcp_servers.is_empty() {
+            out.push_str(&format!("mcp         {}\n", a.mcp_servers.join(", ")));
+        }
+        if !a.memory_spaces.is_empty() {
+            out.push_str(&format!("memory      {}\n", a.memory_spaces.join(", ")));
+        }
     }
     for r in &d.repos {
         out.push_str(&format!("repo        {r}\n"));
     }
     if !d.plugins.is_empty() {
         out.push_str(&format!("skills      {}\n", d.plugins.join(", ")));
-    }
-    if !d.mcp_servers.is_empty() {
-        out.push_str(&format!("mcp         {}\n", d.mcp_servers.join(", ")));
-    }
-    if !d.memory_spaces.is_empty() {
-        out.push_str(&format!("memory      {}\n", d.memory_spaces.join(", ")));
     }
     if let Some(err) = d.last_error.as_deref() {
         out.push_str(&format!("error       {err}\n"));

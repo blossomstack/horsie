@@ -3098,7 +3098,7 @@ mod tests {
     #[tokio::test]
     async fn invoke_creates_a_session_and_queues_the_message() {
         use horsie_models::agents::AgentInvokeResponse;
-        use horsie_models::session_api::GetSessionResponse;
+        use horsie_models::session_api::{GetAgentResponse, GetSessionResponse};
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
         put_mock_model(&app).await;
@@ -3138,9 +3138,17 @@ mod tests {
             .await
             .unwrap();
         let detail: GetSessionResponse = read_json(res).await;
-        assert_eq!(detail.session.model, "mock");
         assert_eq!(detail.session.vendor, "mock");
-        assert_eq!(detail.session.memory_spaces, vec!["default".to_string()]);
+        // The model and memory spaces are the *agent's* configuration, not the
+        // session's: they read off the main agent's document.
+        let res = app
+            .clone()
+            .oneshot(get(&format!("/api/sessions/{id}/agents/main")))
+            .await
+            .unwrap();
+        let agent: GetAgentResponse = read_json(res).await;
+        assert_eq!(agent.agent.model, "mock");
+        assert_eq!(agent.agent.memory_spaces, vec!["default".to_string()]);
 
         // Unknown agent -> 404; empty message -> 422.
         let res = app

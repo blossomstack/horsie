@@ -18,7 +18,7 @@ pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
     forks::{ForkMode, ForkParent, ForkRoster},
-    spec::{SessionSpec, SessionStatus},
+    spec::{AgentSettings, SessionSpec, SessionStatus},
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
 };
@@ -868,8 +868,10 @@ pub struct AgentEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDetail {
     pub entry: AgentEntry,
-    /// The model this agent runs under: a step's own preset, or the session's.
-    pub model: String,
+    /// The settings this agent runs under, resolved from what this session is
+    /// and where the agent sits in it: a step's own preset, a subagent's
+    /// inherited tree root, or the session's main settings.
+    pub settings: AgentSettings,
     /// What a subagent was asked to do. A main agent is asked things one turn
     /// at a time, and a step's brief is its definition's.
     pub task: Option<String>,
@@ -886,7 +888,9 @@ pub struct AgentDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionUsageStats {
     pub session_total: UsageTotal,
-    pub main_agent: AgentUsageEntry,
+    /// The main agent's usage, for the session kinds that have one. A run has
+    /// no main agent, so it is `None` there.
+    pub main_agent: Option<AgentUsageEntry>,
     /// Every agent's banked total, keyed as `agent_usage` keys it: `"main"` for
     /// the primary agent, the agent's uuid for a subagent or a workflow step.
     ///

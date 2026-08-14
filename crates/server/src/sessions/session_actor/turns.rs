@@ -410,7 +410,7 @@ impl SessionActor {
         // A run works from its definition and has no main agent, so an
         // unaddressed message has nobody to reach. Naming a step is fine — that
         // agent exists and can be spoken to like any other.
-        if self.spec().workflow.is_some()
+        if self.spec().workflow_run().is_some()
             && agent_id.as_deref().unwrap_or(super::MAIN_AGENT_ID) == super::MAIN_AGENT_ID
         {
             let _ = reply.send(Err(UserMessageError::Rejected(

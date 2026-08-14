@@ -39,23 +39,29 @@ pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<Agent
     actor.next_actions(state)
 }
 
+pub(super) fn agent_settings_fixture() -> AgentSettings {
+    AgentSettings {
+        model: "mock".into(),
+        instructions: None,
+        allowed_tools: None,
+        use_plugins: None,
+        max_iterations: None,
+        max_retries: 0,
+        mcp_servers: vec![],
+        memory_spaces: vec![],
+        thinking_effort: None,
+        max_concurrent_subagents: None,
+        auto_compact: None,
+        control_plane: None,
+    }
+}
+
 pub(super) fn actor_spec_fixture() -> SessionSpec {
-    use crate::sessions::spec::WorkspaceDef;
+    use crate::sessions::spec::{SessionKind, WorkspaceDef};
     SessionSpec {
         name: Some("test".into()),
-        agent: AgentSettings {
-            model: "mock".into(),
-            instructions: None,
-            allowed_tools: None,
-            use_plugins: None,
-            max_iterations: None,
-            max_retries: 0,
-            mcp_servers: vec![],
-            memory_spaces: vec![],
-            thinking_effort: None,
-            max_concurrent_subagents: None,
-            auto_compact: None,
-            control_plane: None,
+        kind: SessionKind::Agent {
+            settings: agent_settings_fixture(),
         },
         workspaces: vec![WorkspaceDef {
             name: "main".into(),
@@ -64,7 +70,6 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
         vendor: "mock".into(),
         plugins: vec![],
         origin: crate::sessions::spec::SessionOrigin::User,
-        workflow: None,
         environment: None,
         env_vars: vec![],
     }
@@ -328,20 +333,7 @@ pub(super) async fn spawn_session_with_provider(
 /// A two-step run: `triage` branches on its output to `fix` or `file`.
 pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::WorkflowRunSpec {
     use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
-    let settings = |()| AgentSettings {
-        model: "mock".into(),
-        instructions: None,
-        allowed_tools: None,
-        use_plugins: None,
-        max_iterations: None,
-        max_retries: 0,
-        mcp_servers: vec![],
-        memory_spaces: vec![],
-        thinking_effort: None,
-        max_concurrent_subagents: None,
-        auto_compact: None,
-        control_plane: None,
-    };
+    let settings = || agent_settings_fixture();
     WorkflowRunSpec {
         workflow: "fix-bug".into(),
         start: "triage".into(),
@@ -380,7 +372,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                         when: None,
                     },
                 ],
-                settings: settings(()),
+                settings: settings(),
             },
             WorkflowStepSpec {
                 name: "fix".into(),
@@ -393,7 +385,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 // `ask_user` tool to call at all.
                 interactive: true,
                 transitions: vec![],
-                settings: settings(()),
+                settings: settings(),
             },
             WorkflowStepSpec {
                 name: "file".into(),
@@ -406,7 +398,57 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 // `ask_user` tool to call at all.
                 interactive: true,
                 transitions: vec![],
-                settings: settings(()),
+                settings: settings(),
+            },
+        ],
+        input: input.to_string(),
+        max_steps: 100,
+    }
+}
+
+/// A two-step run where each step carries its own settings, so a test can
+/// prove a document reports the step it was asked about and not some
+/// session-wide value: `plan` runs `gpt-5.6-terra`, `code` runs
+/// `deepseek-v4-flash` with a concurrency cap of one. Plan routes to code
+/// unconditionally.
+pub(super) fn two_model_run_spec_fixture(
+    input: &str,
+) -> crate::sessions::workflow::WorkflowRunSpec {
+    use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
+    let mut plan_settings = agent_settings_fixture();
+    plan_settings.model = "gpt-5.6-terra".into();
+    plan_settings.mcp_servers = vec!["planner-mcp".into()];
+    let mut code_settings = agent_settings_fixture();
+    code_settings.model = "deepseek-v4-flash".into();
+    code_settings.thinking_effort = Some("high".into());
+    code_settings.memory_spaces = vec!["codebase".into()];
+    code_settings.max_concurrent_subagents = Some(1);
+    WorkflowRunSpec {
+        workflow: "two-model".into(),
+        start: "plan".into(),
+        steps: vec![
+            WorkflowStepSpec {
+                name: "plan".into(),
+                agent: "planner".into(),
+                prompt: "Plan it.".into(),
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                interactive: false,
+                transitions: vec![TransitionSpec {
+                    to: "code".into(),
+                    when: None,
+                }],
+                settings: plan_settings,
+            },
+            WorkflowStepSpec {
+                name: "code".into(),
+                agent: "coder".into(),
+                prompt: "Code it.".into(),
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                interactive: false,
+                transitions: vec![],
+                settings: code_settings,
             },
         ],
         input: input.to_string(),
@@ -426,10 +468,9 @@ pub(super) async fn spawn_run_with_provider(
     let f = actor_fixture().await;
     let id = Uuid::new_v4();
     let mut spec = actor_spec_fixture();
-    spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
-        workflow: "fix-bug".into(),
+    spec.kind = crate::sessions::spec::SessionKind::Workflow {
+        run: Arc::new(run_spec_fixture("the build is red")),
     };
-    spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
     f.deps
         .runtimes
         .create(&id.to_string(), "i1", "mock", &spec)
@@ -1216,7 +1257,7 @@ pub(super) fn catalog_provider(
         mcp: None,
         memory: None,
         services: None,
-        settings: actor_spec_fixture().agent,
+        settings: agent_settings_fixture(),
         step_result: Default::default(),
         session_id: id,
         kind: SessionAgentKind::Main,
@@ -1306,7 +1347,7 @@ pub(super) fn typed_provider(
     sub: Uuid,
     allowed_tools: Option<Vec<String>>,
 ) -> SessionContextProvider {
-    let mut settings = actor_spec_fixture().agent;
+    let mut settings = agent_settings_fixture();
     settings.allowed_tools = allowed_tools;
     SessionContextProvider {
         runtimes: f.deps.runtimes.provider(

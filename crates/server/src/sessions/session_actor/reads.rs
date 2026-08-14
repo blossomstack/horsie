@@ -243,8 +243,8 @@ impl SessionActor {
     /// [`SessionAgents::Workflow`](super::SessionAgents) records about the live
     /// actors, asked of the durable state instead.
     pub(super) fn agent_roster(&self, state: &SessionState) -> Vec<AgentEntry> {
-        let mut agents: Vec<AgentEntry> = match self.spec().workflow.is_some() {
-            true => state
+        let mut agents: Vec<AgentEntry> = match self.spec().workflow_run() {
+            Some(_) => state
                 .run
                 .iter()
                 .flat_map(|run| run.steps.iter())
@@ -252,7 +252,7 @@ impl SessionActor {
                 .collect(),
             // Listed even though nothing spawned it, so that every agent is
             // reachable at one shape.
-            false => vec![main_entry(&state.status)],
+            None => vec![main_entry(&state.status)],
         };
         agents.extend(
             state
@@ -297,12 +297,11 @@ impl SessionActor {
         };
         Some(AgentDetail {
             entry,
-            // A step runs under its own preset, so the session's model — which
-            // is the *first* step's — is the wrong one for any other step.
-            model: match execution.and_then(|e| self.step_spec(&e.step)) {
-                Some(step) => step.settings.model.clone(),
-                None => self.spec().agent.model.clone(),
-            },
+            // Resolved from the key, never from the session's own settings: a
+            // step runs under its own preset, and a subagent under its tree's
+            // root — the session's `AgentSettings` is the *first* step's, and
+            // the wrong answer for any other agent.
+            settings: self.effective_settings(state, key).cloned()?,
             task: node.map(|node| node.task.clone()),
             output: match (node, execution) {
                 (Some(node), _) => node.output.clone(),
@@ -317,11 +316,6 @@ impl SessionActor {
                 .await
                 .ok()?,
         })
-    }
-
-    /// The definition of one of this run's steps.
-    fn step_spec(&self, name: &str) -> Option<&crate::sessions::workflow::WorkflowStepSpec> {
-        self.spec().workflow.as_ref()?.step(name)
     }
 
     /// Aggregated usage. Totals come from this session's own durable record;
@@ -342,14 +336,18 @@ impl SessionActor {
         SessionUsageStats {
             session_total: state.session_usage_total(),
             agents: state.agent_usage.clone(),
-            main_agent: AgentUsageEntry {
-                model: self.spec().agent.model.clone(),
-                snapshot: AgentUsageSnapshot {
-                    usage_total: main_usage_total,
-                    last_turn_usage: snapshot.last_turn_usage,
-                    context_tokens: snapshot.context_tokens,
-                },
-            },
+            // A run has no main agent to report; only an agent session's does.
+            main_agent: self
+                .spec()
+                .agent_settings()
+                .map(|settings| AgentUsageEntry {
+                    model: settings.model.clone(),
+                    snapshot: AgentUsageSnapshot {
+                        usage_total: main_usage_total,
+                        last_turn_usage: snapshot.last_turn_usage,
+                        context_tokens: snapshot.context_tokens,
+                    },
+                }),
         }
     }
 }
@@ -505,6 +503,112 @@ mod tests {
         );
         // And the roster agrees, because it is the same projection.
         assert_eq!(roster(&session).await[0].status, AgentStatus::Completed);
+    }
+
+    /// The defect this change exists to close: opening a workflow step used to
+    /// show the *start* step's settings, because the session carried the first
+    /// step's preset as its own `agent`. Here `plan` runs terra and `code` runs
+    /// flash, and the code step's document — and the subagents it spawns —
+    /// must report flash, not terra.
+    #[tokio::test]
+    async fn a_workflow_step_and_its_subagents_carry_the_steps_own_settings() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.kind = crate::sessions::spec::SessionKind::Workflow {
+            run: Arc::new(two_model_run_spec_fixture("build the fix")),
+        };
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &spec)
+            .await
+            .expect("create");
+        // The plan step concludes and routes to code; code stays in flight on
+        // the blocking provider so it is the current agent while we read it.
+        let plan_provider = MockProvider::scripted(Script::of([Ok(concludes(
+            serde_json::json!({"outcome": "success"}),
+        ))]));
+        let code_gate = BlockingProvider::new();
+        {
+            let mut registry = f.deps.provider_registry.write().unwrap();
+            registry.insert(
+                "gpt-5.6-terra".to_string(),
+                crate::sessions::spec::ModelEntry::provider_only(
+                    plan_provider as Arc<dyn LlmProvider>,
+                ),
+            );
+            registry.insert(
+                "deepseek-v4-flash".to_string(),
+                crate::sessions::spec::ModelEntry::provider_only(code_gate.clone()),
+            );
+        }
+        let journal = f.journal();
+        let session = f.start(id, spec).await;
+
+        let run = wait_for_run(&journal, id, |r| {
+            r.current()
+                .is_some_and(|i| r.get(i).is_some_and(|s| s.step == "code"))
+        })
+        .await;
+        let code_agent = run.current_agent().expect("the code step is in flight");
+
+        // The step's own document reports flash — never the start step's terra.
+        let detail = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: Some(code_agent.to_string()),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the code step is an agent of its run");
+        assert_eq!(detail.settings.model, "deepseek-v4-flash");
+        assert_eq!(
+            detail.settings.thinking_effort.as_deref(),
+            Some("high"),
+            "the code step's own effort, not the planner's"
+        );
+        assert_eq!(
+            detail.settings.memory_spaces,
+            vec!["codebase".to_string()],
+            "the code step's own memory spaces"
+        );
+
+        // A subagent spawned under the code step inherits its settings — the
+        // model it runs, and the cap its spawn is counted against.
+        let sub = spawn_sub(&session, "helper", "dig").await;
+        wait_for_tree(&journal, id, |t| t.node(sub).is_some()).await;
+        let sub_detail = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: Some(sub.to_string()),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a subagent is an agent of its run");
+        assert_eq!(sub_detail.settings.model, "deepseek-v4-flash");
+        assert_eq!(sub_detail.settings.max_concurrent_subagents, Some(1));
+
+        // And the concurrency cap is the code step's cap, not a session-wide
+        // value: the step's budget of one is already spent.
+        let res = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: crate::sessions::subagents::SubAgentParent::Main,
+                    label: "second".into(),
+                    task: "more".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.unwrap_err(), "1 subagents already active");
+        code_gate.release();
     }
 
     /// This session's agents, read the way `GET /api/sessions/:id` reads them.

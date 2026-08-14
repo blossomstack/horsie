@@ -729,19 +729,21 @@ mod tests {
     fn session_spec(vendor: &str) -> SessionSpec {
         SessionSpec {
             name: None,
-            agent: AgentSettings {
-                model: "mock".into(),
-                instructions: None,
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: vec![],
-                memory_spaces: vec![],
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                auto_compact: None,
-                control_plane: None,
+            kind: crate::sessions::spec::SessionKind::Agent {
+                settings: AgentSettings {
+                    model: "mock".into(),
+                    instructions: None,
+                    allowed_tools: None,
+                    use_plugins: None,
+                    max_iterations: None,
+                    max_retries: 0,
+                    mcp_servers: vec![],
+                    memory_spaces: vec![],
+                    thinking_effort: None,
+                    max_concurrent_subagents: None,
+                    auto_compact: None,
+                    control_plane: None,
+                },
             },
             workspaces: vec![WorkspaceDef {
                 name: "main".into(),
@@ -750,7 +752,6 @@ mod tests {
             vendor: vendor.into(),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
-            workflow: None,
             environment: None,
             env_vars: vec![],
         }

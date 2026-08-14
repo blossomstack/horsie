@@ -5,7 +5,9 @@ use crate::error::CliError;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentView};
 use horsie_models::routines::{RoutineRunResponse, RoutineView};
 use horsie_models::session::{SessionDetail, SessionSummary};
-use horsie_models::session_api::{ApiError, GetSessionResponse, ListSessionsResponse};
+use horsie_models::session_api::{
+    AgentDocument, ApiError, GetAgentResponse, GetSessionResponse, ListSessionsResponse,
+};
 use horsie_models::workflow::{
     WorkflowInput, WorkflowRetryRequest, WorkflowRunGraph, WorkflowRunRequest, WorkflowRunResponse,
     WorkflowView,
@@ -231,6 +233,21 @@ impl ServerClient {
             )
             .await?;
         Ok(resp.session)
+    }
+
+    pub async fn get_agent_document(
+        &self,
+        id: &str,
+        agent_id: &str,
+    ) -> Result<AgentDocument, CliError> {
+        let resp: GetAgentResponse = self
+            .send(
+                reqwest::Method::GET,
+                &format!("/api/sessions/{id}/agents/{agent_id}"),
+                None::<&str>,
+            )
+            .await?;
+        Ok(resp.agent)
     }
 
     pub async fn list_routines(&self) -> Result<Vec<RoutineView>, CliError> {

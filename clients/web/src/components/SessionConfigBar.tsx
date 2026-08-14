@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
-import type { SessionDetail } from "../api/types";
+import type { AgentDocument, SessionDetail } from "../api/types";
 import type { ConfigDraft } from "../hooks/useSessionDraft";
 import { useConfigPickers, useLockedChannels } from "./configPickers";
 import { PopoverMenu } from "./PopoverMenu";
 
 type Props =
   | { mode: "draft"; draft: ConfigDraft }
-  | { mode: "locked"; detail: SessionDetail };
+  | { mode: "locked"; detail: SessionDetail; agent: AgentDocument };
 
 /** The row of channel keys, in the one place it lives on both surfaces. */
 function KeyRow({
@@ -42,7 +42,7 @@ export function SessionConfigBar(props: Props) {
   if (props.mode === "locked") {
     return (
       <KeyRow mode="locked">
-        <LockedControls detail={props.detail} />
+        <LockedControls detail={props.detail} agent={props.agent} />
       </KeyRow>
     );
   }
@@ -124,8 +124,14 @@ export function ConfigFields({ draft }: { draft: ConfigDraft }) {
 }
 
 /** The frozen channels, as keys that open a readout instead of a picker. */
-function LockedControls({ detail }: { detail: SessionDetail }) {
-  const channels = useLockedChannels(detail);
+function LockedControls({
+  detail,
+  agent,
+}: {
+  detail: SessionDetail;
+  agent: AgentDocument;
+}) {
+  const channels = useLockedChannels(detail, agent);
   return (
     <>
       {channels.map((c) => (

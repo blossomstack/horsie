@@ -173,7 +173,6 @@ pub(crate) fn detail(
         created_at: rec.created_at,
         last_error: status_reason(&status),
         annotations: wire_annotations(&rec.annotations),
-        model: rec.spec.agent.model.clone(),
         environment: rec.spec.environment.clone(),
         vendor: rec.spec.vendor.clone(),
         repos: rec
@@ -189,10 +188,6 @@ pub(crate) fn detail(
             })
             .collect(),
         plugins: rec.spec.plugins.clone(),
-        mcp_servers: rec.spec.agent.mcp_servers.clone(),
-        memory_spaces: rec.spec.agent.memory_spaces.clone(),
-        use_plugins: rec.spec.agent.use_plugins.unwrap_or(false),
-        thinking_effort: rec.spec.agent.thinking_effort.clone(),
         // Session-scoped current values, so they belong on this document rather
         // than on a history page or a separate endpoint. Both come off the same
         // snapshot as `status` — the session's actor is the only thing that
@@ -299,14 +294,16 @@ pub async fn get_agent(
     .await?
     .ok_or_else(|| Api::not_found(format!("no such agent: {agent_id}")))?;
 
-    // `context_window` is the one field on this document that is not the
-    // session's to answer: an agent does not know which models are configured,
-    // so the HTTP layer looks up the window for the model it reports running.
+    // The agent's own configuration — model, MCP, memory, plugins, thinking —
+    // rides on its document, because it is per-agent: a workflow step's is its
+    // own preset's, never the session's. `context_window` is the one field the
+    // actor cannot answer (it does not know which models are configured), so
+    // the HTTP layer looks up the window for the model the document reports.
     let settings = state.config_store.view().await.map_err(Api::internal)?;
     let context_window = settings
         .models
         .iter()
-        .find(|m| m.alias == detail.model)
+        .find(|m| m.alias == detail.settings.model)
         .and_then(|m| m.context_window);
 
     let agent = AgentDocument {
@@ -318,6 +315,11 @@ pub async fn get_agent(
         status: detail.entry.status.as_wire().to_string(),
         output: detail.output,
         error: detail.entry.error,
+        model: detail.settings.model,
+        mcp_servers: detail.settings.mcp_servers,
+        memory_spaces: detail.settings.memory_spaces,
+        use_plugins: detail.settings.use_plugins.unwrap_or(false),
+        thinking_effort: detail.settings.thinking_effort,
         tasks: detail
             .state
             .tasks
@@ -496,5 +498,27 @@ mod tests {
         ];
 
         assert_eq!(detail("s1", &rec, None).forks, summary("s1", &rec).forks);
+    }
+
+    /// The session document makes no session-wide model claim any more: the
+    /// model and per-agent configuration live on the agent document, because a
+    /// workflow run's steps each carry their own. Asserted on the JSON shape,
+    /// which is the contract a client reads.
+    #[test]
+    fn the_detail_document_carries_no_session_wide_agent_configuration() {
+        let view = detail("s1", &record_with_no_forks(), None);
+        let json = serde_json::to_value(&view).unwrap();
+        for key in [
+            "model",
+            "mcp_servers",
+            "memory_spaces",
+            "use_plugins",
+            "thinking_effort",
+        ] {
+            assert!(
+                json.get(key).is_none(),
+                "the session document must not claim a session-wide {key}"
+            );
+        }
     }
 }
