@@ -1,7 +1,13 @@
-//! Provision steps: setup the runtime executes inside its sandbox before the
-//! agent message loop. Steps arrive as JSON in the `HORSIE_PROVISION` env var
-//! (vendor-injected). Fail closed: malformed JSON, an unknown step kind, or a
-//! failed command aborts provisioning with a human-readable error.
+//! Provision steps: setup the runtime executes inside its sandbox to bring a
+//! workspace to the state the session asked for. Steps arrive on a
+//! `ProvisionWorkspace` request, which the server sends on every acquisition.
+//! Fail closed: an unknown step kind or a failed command aborts provisioning
+//! with a human-readable error, reported on the response.
+//!
+//! **Every step must be idempotent.** The server sends the same steps on every
+//! acquisition rather than remembering whether it already did, because only the
+//! runtime can know whether a hibernated workspace survived. `git_checkout`
+//! honours this by doing nothing when the target already holds a checkout.
 //!
 //! **Nothing here handles credentials.** A `git_checkout` of a private
 //! repository authenticates through the credential helper this binary
@@ -15,20 +21,6 @@ use horsie_models::executor::ProvisionStep;
 
 use crate::workspace::WorkspaceRegistry;
 use std::path::{Component, Path};
-
-/// Parse the provision steps from the raw `HORSIE_PROVISION` value.
-/// `None`/empty → no steps.
-pub fn steps_from_env(raw: Option<String>) -> Result<Vec<ProvisionStep>, String> {
-    match raw.filter(|s| !s.is_empty()) {
-        None => Ok(vec![]),
-        Some(json) => serde_json::from_str(&json).map_err(|e| {
-            format!(
-                "{} is not valid provision-steps JSON: {e}",
-                horsie_models::ENV_PROVISION
-            )
-        }),
-    }
-}
 
 /// Run all steps in order, failing on the first error.
 pub async fn run_steps(
@@ -204,26 +196,6 @@ mod tests {
             name: "main".into(),
             path: PathBuf::from(ws),
         }])
-    }
-
-    #[test]
-    fn steps_from_env_none_and_empty_are_no_steps() {
-        assert_eq!(steps_from_env(None).unwrap(), vec![]);
-        assert_eq!(steps_from_env(Some(String::new())).unwrap(), vec![]);
-    }
-
-    #[test]
-    fn steps_from_env_rejects_malformed_json() {
-        let err = steps_from_env(Some("not-json".into())).unwrap_err();
-        assert!(err.contains("HORSIE_PROVISION"), "{err}");
-    }
-
-    #[test]
-    fn steps_from_env_parses_steps() {
-        let json = r#"[{"name":"co","uses":"git_checkout","with":[{"key":"url","value":"u"}]}]"#;
-        let steps = steps_from_env(Some(json.into())).unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].uses, "git_checkout");
     }
 
     #[tokio::test]

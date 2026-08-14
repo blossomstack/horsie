@@ -11,9 +11,10 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, PongResponse, RunHooksResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning, RuntimeReady,
-    ScanResponse, ToolCallResponse, ToolError, ToolOutput, ToolResult,
+    McpDiscoverResponse, McpInvokeResponse, PongResponse, ProvisionError, ProvisionOk,
+    ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolOutput,
+    ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -296,19 +297,6 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     // Taken before `cli` is partially moved into the workspace registry below.
     let state_file = cli.state_file.clone();
 
-    // Provision steps (vendor-injected JSON). Parsed before connecting so a
-    // malformed payload fails fast; executed after connecting so failures are
-    // reported over the wire instead of as a silent death.
-    let steps = match horsie_runtime::steps::steps_from_env(
-        std::env::var(horsie_models::ENV_PROVISION).ok(),
-    ) {
-        Ok(steps) => steps,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(5);
-        }
-    };
-
     // The session's selected bundles, fetched by this runtime over its own
     // outbound connection. The only source of skills there is.
     let plugins_dir = horsie_runtime::plugins_fetch::provision_plugins().await;
@@ -367,7 +355,6 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
                 },
                 registry,
                 runtime_id,
-                steps,
                 state,
             )
             .await;
@@ -390,7 +377,6 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
                 },
                 registry,
                 runtime_id,
-                steps,
                 state,
             )
             .await;
@@ -413,16 +399,12 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
 /// Otherwise only two things end this: a dial refused with a 4xx, which no
 /// retry can change, and a connect budget exhausted. Both are reported and exit
 /// non-zero, so a supervisor sees a failure rather than a silent stop.
-///
-/// `steps` is drained by the first connection. Provisioning built the workspace
-/// once; re-running a `git_checkout` over it would fail or clone a second copy.
 async fn serve_until_disconnected<S, C, Fut>(
     label: &str,
     reconnect: bool,
     connect: C,
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
-    steps: Vec<horsie_models::executor::ProvisionStep>,
     state: Arc<horsie_runtime::state::RuntimeState>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -437,7 +419,6 @@ async fn serve_until_disconnected<S, C, Fut>(
         >,
     >,
 {
-    let mut steps = steps;
     let mut first = true;
     loop {
         let connected = retry(
@@ -460,14 +441,7 @@ async fn serve_until_disconnected<S, C, Fut>(
         }
         first = false;
 
-        run_loop(
-            ws,
-            registry.clone(),
-            runtime_id.clone(),
-            std::mem::take(&mut steps),
-            state.clone(),
-        )
-        .await;
+        run_loop(ws, registry.clone(), runtime_id.clone(), state.clone()).await;
         if !reconnect {
             eprintln!("link closed; the vendor that owns this runtime is gone");
             return;
@@ -523,55 +497,26 @@ where
 }
 
 /// The runtime message loop, generic over the underlying socket so TCP and unix
-/// share one implementation. Announces `RuntimeReady`, then services tool calls.
+/// share one implementation. Announces `RuntimeReady`, then services requests.
 ///
-/// `steps` is empty on every connection after the first: provisioning built the
-/// workspace once, and re-running a `git_checkout` over it would fail or clone
-/// a second copy. `state` outlives the connection for the same reason — it is
-/// the per-agent working directory and environment, which a dropped socket has
-/// no business resetting.
+/// `Ready` goes out immediately and unconditionally. It used to be preceded by a
+/// provisioning phase whose only way to report a failure was to exit — so the
+/// one thing most likely to have gone wrong was the one thing no caller could
+/// see. Provisioning is a request now, answered from the loop below like any
+/// other.
+///
+/// `state` outlives the connection: it is the per-agent working directory and
+/// environment, which a dropped socket has no business resetting.
 async fn run_loop<S>(
     ws: WebSocketStream<S>,
     registry: Arc<horsie_runtime::workspace::WorkspaceRegistry>,
     runtime_id: String,
-    steps: Vec<horsie_models::executor::ProvisionStep>,
     state: Arc<horsie_runtime::state::RuntimeState>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sink_raw, mut stream) = ws.split();
     let sink = Arc::new(Mutex::new(sink_raw));
-
-    if !steps.is_empty() {
-        let announce = match serde_json::to_string(&RuntimeOutboundMessage::Provisioning(
-            RuntimeProvisioning {
-                runtime_id: runtime_id.clone(),
-            },
-        )) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("serialization error: {e}");
-                std::process::exit(1);
-            }
-        };
-        if let Err(e) = sink.lock().await.send(Message::Text(announce.into())).await {
-            eprintln!("failed to send Provisioning: {e}");
-            std::process::exit(1);
-        }
-        if let Err(message) = horsie_runtime::steps::run_steps(&registry, &steps).await {
-            eprintln!("provisioning failed: {message}");
-            if let Ok(json) = serde_json::to_string(&RuntimeOutboundMessage::ProvisionFailed(
-                RuntimeProvisionFailed {
-                    runtime_id: runtime_id.clone(),
-                    message,
-                },
-            )) {
-                let _ = sink.lock().await.send(Message::Text(json.into())).await;
-                let _ = sink.lock().await.flush().await;
-            }
-            std::process::exit(5);
-        }
-    }
 
     let ready = match serde_json::to_string(&RuntimeOutboundMessage::Ready(RuntimeReady {
         runtime_id: runtime_id.clone(),
@@ -710,6 +655,50 @@ async fn run_loop<S>(
                                     .await;
                             }
                         });
+                    }
+                    RuntimeInboundMessage::ProvisionWorkspace(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        // Registered in `in_flight` like a tool call, and for the
+                        // same two reasons: a clone of a large repository is
+                        // exactly the long work the caller's reconciler must see
+                        // as running rather than cancel as an orphan, and exactly
+                        // the work a user hitting Stop must be able to abandon.
+                        let handle = tokio::spawn(async move {
+                            // Named before the run, so a failure still reports
+                            // the steps that were asked for. `run_steps` is
+                            // fail-fast, so anything after the failing step did
+                            // not run — the reason names which one it was.
+                            let applied: Vec<String> =
+                                req.steps.iter().map(|s| s.name.clone()).collect();
+                            let result =
+                                match horsie_runtime::steps::run_steps(&registry, &req.steps).await
+                                {
+                                    Ok(()) => ProvisionResult::Ok(ProvisionOk { applied }),
+                                    Err(reason) => ProvisionResult::Err(ProvisionError { reason }),
+                                };
+                            let response =
+                                serde_json::to_string(&RuntimeOutboundMessage::ProvisionResult(
+                                    ProvisionWorkspaceResponse {
+                                        call_id: call_id.clone(),
+                                        result,
+                                    },
+                                ));
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::CancelCall(req) => {
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {
