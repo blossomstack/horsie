@@ -1,4 +1,7 @@
 
+export * from './outcomeFilter';
+export * from './outcomeIn';
+export * from './outcomeNotIn';
 export * from './workflowTransition';
 export * from './stepOutcome';
 export * from './stepFieldType';

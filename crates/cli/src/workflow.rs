@@ -196,8 +196,8 @@ fn render_detail(w: &WorkflowView) -> String {
             out.push_str(&format!("    fields: {fields}\n"));
         }
         for t in step.transitions.iter().flatten() {
-            match &t.condition {
-                Some(c) => out.push_str(&format!("    → {} when {}\n", t.to, c)),
+            match &t.when {
+                Some(f) => out.push_str(&format!("    → {} when {}\n", t.to, f.render())),
                 None => out.push_str(&format!("    → {} otherwise\n", t.to)),
             }
         }
@@ -311,10 +311,11 @@ fn step_word(r: &StepRunView) -> &'static str {
 mod tests {
     use super::*;
     use horsie_models::workflow::{
-        RunNode, StepConcluded, StepRunStatus, WorkflowStepDef, WorkflowTransition,
+        OutcomeFilter, OutcomeIn, RunNode, StepConcluded, StepRunStatus, WorkflowStepDef,
+        WorkflowTransition,
     };
 
-    fn step(name: &str, to: Option<(&str, Option<&str>)>) -> WorkflowStepDef {
+    fn step(name: &str, to: Option<(&str, Option<&[&str]>)>) -> WorkflowStepDef {
         WorkflowStepDef {
             name: name.into(),
             agent: "coder".into(),
@@ -331,10 +332,14 @@ mod tests {
             ]),
             fields: None,
             interactive: None,
-            transitions: to.map(|(target, cond)| {
+            transitions: to.map(|(target, values)| {
                 vec![WorkflowTransition {
                     to: target.into(),
-                    condition: cond.map(str::to_string),
+                    when: values.map(|v: &[&str]| {
+                        OutcomeFilter::In(OutcomeIn {
+                            values: v.iter().map(|x| (*x).to_string()).collect(),
+                        })
+                    }),
                 }]
             }),
             max_iterations: None,
@@ -354,7 +359,7 @@ mod tests {
             description: "triage then fix".into(),
             start: "triage".into(),
             steps: vec![
-                step("triage", Some(("fix", Some("output.severity == \"p0\"")))),
+                step("triage", Some(("fix", Some(&["p0"])))),
                 step("fix", None),
             ],
             max_steps: None,
@@ -363,10 +368,7 @@ mod tests {
         };
         let out = render_detail(&w);
         assert!(out.contains("starts at: triage"), "{out}");
-        assert!(
-            out.contains("→ fix when output.severity == \"p0\""),
-            "{out}"
-        );
+        assert!(out.contains("→ fix when outcome in [p0]"), "{out}");
         assert!(out.contains("outcomes: p0, p2"), "{out}");
         // A step with nowhere to go is where the run ends — worth saying, since
         // an empty line reads like missing information.
@@ -458,7 +460,7 @@ mod tests {
             description: "triage then fix".into(),
             start: "triage".into(),
             steps: vec![
-                step("triage", Some(("fix", Some("output.severity == \"p0\"")))),
+                step("triage", Some(("fix", Some(&["p0"])))),
                 step("fix", None),
             ],
             max_steps: Some(40),

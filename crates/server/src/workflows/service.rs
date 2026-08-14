@@ -209,16 +209,38 @@ impl WorkflowService {
                         step.name, t.to
                     )));
                 }
-                // Parseability only: whether it is *true* depends on output
-                // this workflow has not produced yet. Worth checking here
-                // because an unparseable expression unwinds the evaluator, and
-                // catching it at save beats failing a run halfway.
-                if let Some(condition) = &t.condition
-                    && let Err(e) =
-                        crate::sessions::workflow::eval_condition(condition, &serde_json::json!({}))
-                    && e.contains("not a valid expression")
-                {
-                    return Err(WorkflowError::Invalid(format!("step '{}': {e}", step.name)));
+                // Every value a filter names must be one this step can
+                // actually report. Checked here because it is the last moment
+                // anyone can be told: at run time an unmatched filter is
+                // indistinguishable from a step that deliberately ended the
+                // graph, which is how a typo used to pass for success.
+                if let Some(filter) = &t.when {
+                    let declared =
+                        crate::sessions::workflow::outcomes_or_default(step.outcomes.as_ref());
+                    let values = match filter {
+                        horsie_models::workflow::OutcomeFilter::In(f) => &f.values,
+                        horsie_models::workflow::OutcomeFilter::NotIn(f) => &f.values,
+                    };
+                    if values.is_empty() {
+                        return Err(WorkflowError::Invalid(format!(
+                            "step '{}': a transition filter names no outcomes",
+                            step.name
+                        )));
+                    }
+                    for v in values {
+                        if !declared.iter().any(|o| &o.value == v) {
+                            return Err(WorkflowError::Invalid(format!(
+                                "step '{}' transitions on outcome '{v}', which it does not \
+                                 declare; it reports: {}",
+                                step.name,
+                                declared
+                                    .iter()
+                                    .map(|o| o.value.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )));
+                        }
+                    }
                 }
             }
             // Checked here so a workflow cannot be saved broken; resolved
@@ -464,7 +486,7 @@ mod tests {
         let mut i = input("a");
         i.steps[0].transitions = Some(vec![WorkflowTransition {
             to: "reviw".into(),
-            condition: None,
+            when: None,
         }]);
         assert!(matches!(
             s.create(i, 1).await,
@@ -472,36 +494,64 @@ mod tests {
         ));
     }
 
-    /// A condition reads `output`. Without a schema the step ends its turn with
-    /// plain text, so the condition could only ever fail to evaluate — which is
-    /// a run failure, and much better caught here.
-    /// An unparseable expression unwinds the evaluator at run time. Catching
-    /// it at save turns a run that dies halfway into a 422 on the form.
+    /// A filter may only name outcomes the step actually reports. At run time
+    /// an unmatched filter is indistinguishable from a step that deliberately
+    /// ended the graph, which is exactly how a typo used to pass for success.
     #[tokio::test]
-    async fn an_unparseable_condition_is_refused() {
+    async fn a_filter_naming_an_undeclared_outcome_is_refused() {
         let s = service().await;
         let mut i = input("a");
+        i.steps[0].outcomes = Some(vec![horsie_models::workflow::StepOutcome {
+            value: "p0".into(),
+            description: "drop everything".into(),
+        }]);
         i.steps[0].transitions = Some(vec![WorkflowTransition {
             to: "fix".into(),
-            condition: Some("!!!".into()),
+            when: Some(horsie_models::workflow::OutcomeFilter::In(
+                horsie_models::workflow::OutcomeIn {
+                    values: vec!["p1".into()],
+                },
+            )),
         }]);
         assert!(matches!(
             s.create(i, 1).await,
-            Err(WorkflowError::Invalid(m)) if m.contains("not a valid expression")
+            Err(WorkflowError::Invalid(m)) if m.contains("'p1'") && m.contains("p0")
         ));
     }
 
-    /// A condition that merely reads a field the probe has no value for is
-    /// fine: whether it holds depends on output no run has produced yet.
+    /// A step that declared no outcomes still reports success/failure, so a
+    /// filter naming those is fine — the default is what it will actually send.
     #[tokio::test]
-    async fn a_condition_reading_an_absent_field_is_allowed() {
+    async fn a_filter_on_the_default_outcomes_is_allowed() {
         let s = service().await;
         let mut i = input("a");
         i.steps[0].transitions = Some(vec![WorkflowTransition {
             to: "fix".into(),
-            condition: Some("output.severity == \"p0\"".into()),
+            when: Some(horsie_models::workflow::OutcomeFilter::In(
+                horsie_models::workflow::OutcomeIn {
+                    values: vec!["success".into()],
+                },
+            )),
         }]);
         assert!(s.create(i, 1).await.is_ok());
+    }
+
+    /// An empty filter matches nothing and can only be a mistake — the way to
+    /// say "always" is to leave `when` unset.
+    #[tokio::test]
+    async fn a_filter_naming_no_outcomes_is_refused() {
+        let s = service().await;
+        let mut i = input("a");
+        i.steps[0].transitions = Some(vec![WorkflowTransition {
+            to: "fix".into(),
+            when: Some(horsie_models::workflow::OutcomeFilter::In(
+                horsie_models::workflow::OutcomeIn { values: Vec::new() },
+            )),
+        }]);
+        assert!(matches!(
+            s.create(i, 1).await,
+            Err(WorkflowError::Invalid(m)) if m.contains("names no outcomes")
+        ));
     }
 
     /// The budget is what stops a loop whose condition never flips, and it is a

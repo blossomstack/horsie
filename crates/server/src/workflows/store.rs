@@ -175,11 +175,15 @@ mod tests {
                     transitions: Some(vec![
                         WorkflowTransition {
                             to: "fix".into(),
-                            condition: Some("output.severity == \"p0\"".into()),
+                            when: Some(horsie_models::workflow::OutcomeFilter::In(
+                                horsie_models::workflow::OutcomeIn {
+                                    values: vec!["p0".into()],
+                                },
+                            )),
                         },
                         WorkflowTransition {
                             to: "file".into(),
-                            condition: None,
+                            when: None,
                         },
                     ]),
                     max_iterations: Some(20),
@@ -231,11 +235,14 @@ mod tests {
         s.insert(&row("fix-bug")).await.unwrap();
         let got = s.get("fix-bug").await.unwrap().unwrap();
         assert_eq!(got, row("fix-bug"));
-        // Transition order decides which condition wins, so it has to survive
-        // the round trip.
+        // Transition order decides which filter wins, so it has to survive the
+        // round trip.
         let t = got.steps[0].transitions.as_ref().unwrap();
         assert_eq!(t[0].to, "fix");
-        assert!(t[1].condition.is_none());
+        assert!(
+            t[1].when.is_none(),
+            "the catch-all stays last and unfiltered"
+        );
         assert_eq!(s.list().await.unwrap().len(), 1);
         assert!(s.get("ghost").await.unwrap().is_none());
     }

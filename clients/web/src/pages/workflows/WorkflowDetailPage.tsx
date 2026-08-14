@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
 import { relativeTime } from "../../lib/format";
+import { renderFilter } from "./stepDraft";
 import { RailToggle } from "../../components/rail";
 import { ReadError } from "../../components/ReadError";
 import { useWorkflow, useWorkflowRuns } from "../../hooks/useWorkflows";
@@ -34,7 +35,7 @@ export function WorkflowDetailPage() {
     (s.transitions ?? []).map((t) => ({
       from: s.name,
       to: t.to,
-      condition: t.condition,
+      condition: renderFilter(t.when),
     })),
   );
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { StepFieldType, type WorkflowStepDef } from "../../api/types";
-import { defaultOutcomes, fromDraft, renameStep, toDraft } from "./stepDraft";
+import {
+  defaultOutcomes,
+  fromDraft,
+  makeFilter,
+  renameStep,
+  renderFilter,
+  toDraft,
+} from "./stepDraft";
 
 /**
  * The editor holds a step as a draft and writes it back whole — a save is a
@@ -24,7 +31,7 @@ describe("stepDraft", () => {
       },
     ],
     interactive: undefined,
-    transitions: [{ to: "fix", condition: 'output.severity == "p0"' }],
+    transitions: [{ to: "fix", when: { op: "In", value: { values: ["p0"] } } }],
     maxIterations: undefined,
     maxRetries: undefined,
     ...over,
@@ -72,6 +79,22 @@ describe("stepDraft", () => {
  * and since the seeded first step is called `start`, renaming it is the first
  * thing anyone does.
  */
+/**
+ * The label an edge carries, in the browser and in the run log. The server
+ * renders the same string, so a definition's graph and a run's graph must not
+ * disagree about what an edge says.
+ */
+describe("renderFilter", () => {
+  it("names the operator and the outcomes", () => {
+    expect(renderFilter(makeFilter("In", ["p0", "p1"]))).toBe("outcome in [p0, p1]");
+    expect(renderFilter(makeFilter("NotIn", ["p2"]))).toBe("outcome not in [p2]");
+  });
+
+  it("labels a catch-all with nothing at all", () => {
+    expect(renderFilter(undefined)).toBeUndefined();
+  });
+});
+
 describe("renameStep", () => {
   const draft = (name: string, to: string[] = []) => ({
     id: `id-${name}`,
@@ -82,7 +105,7 @@ describe("renameStep", () => {
     prompt: "",
     fields: [],
     rawSchema: undefined,
-    transitions: to.map((t) => ({ to: t, condition: "" })),
+    transitions: to.map((t) => ({ to: t, when: undefined })),
     maxIterations: undefined,
     maxRetries: undefined,
   });

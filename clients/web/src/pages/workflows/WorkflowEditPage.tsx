@@ -16,8 +16,7 @@ import {
   fromDraft,
   renameStep,
   toDraft,
-  type StepDraft,
-} from "./stepDraft";
+  type StepDraft, renderFilter } from "./stepDraft";
 import {
   afterRemoval,
   DEFINITION,
@@ -95,7 +94,7 @@ function WorkflowEditor() {
         .map((t) => ({
           from: s.name.trim(),
           to: t.to.trim(),
-          condition: t.condition,
+          condition: renderFilter(t.when),
         })),
     );
     return { nodes, edges };

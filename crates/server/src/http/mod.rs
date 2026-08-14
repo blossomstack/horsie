@@ -2764,7 +2764,7 @@ mod tests {
         assert_eq!(v.steps.len(), 2);
         let t = v.steps[0].transitions.as_ref().unwrap();
         assert_eq!(t.len(), 2);
-        assert!(t[1].condition.is_none());
+        assert!(t[1].when.is_none());
     }
 
     crud_over_http! {

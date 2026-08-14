@@ -1,5 +1,5 @@
 /// Workflows: a named graph of steps, each step an agent preset with a fixed
-/// prompt, wired together by conditions over the step's structured output.
+/// prompt, wired together by the outcome each step reports.
 ///
 /// A definition is only the graph. The environment it runs in is a property of
 /// the invocation, not of the saved configuration — a pinned vendor is
@@ -12,16 +12,30 @@ package workflow;
 use environments.EnvironmentSpec;
 use session.SessionSummary;
 
-/// A directed edge out of a step, optionally gated by a condition.
+/// Which outcomes an edge is taken for.
 ///
-/// `condition` is an expression evaluated against the producing step's
-/// structured output, bound to `output`; it must evaluate to a boolean. A
-/// `None` condition is an unconditional catch-all. Transitions are tried in
-/// order and the first match wins. A step whose transitions all fail to match
-/// ends the run, carrying that step's output as the run's.
+/// Two operators, not four: equality is a one-element `in`, and inequality a
+/// one-element `not_in`. Every value must be one the producing step declares,
+/// which is checked when the workflow is saved — so a mistyped outcome is a
+/// rejected form rather than a run that ends halfway.
+#[type_tag = "op"]
+union OutcomeFilter {
+    In(OutcomeIn),
+    NotIn(OutcomeNotIn),
+}
+
+struct OutcomeIn { values: Vec<String> }
+struct OutcomeNotIn { values: Vec<String> }
+
+/// A directed edge out of a step, optionally gated by the outcome it produced.
+///
+/// `when` is matched against the producing step's `outcome`. Absent is an
+/// unconditional catch-all. Transitions are tried in order and the first match
+/// wins. A step whose transitions all fail to match ends the run, carrying that
+/// step's result as the run's.
 struct WorkflowTransition {
     to: String,
-    condition: Option<String>,
+    when: Option<OutcomeFilter>,
 }
 
 /// One value a step's `outcome` may take, and what choosing it means.
@@ -175,6 +189,8 @@ struct RunNode {
 struct RunEdge {
     from: String,
     to: String,
+    /// The filter this edge is taken for, rendered for display — `outcome in
+    /// [p0, p1]`. Absent on a catch-all.
     condition: Option<String>,
     traversals: Vec<u32>,
 }
