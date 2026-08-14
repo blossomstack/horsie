@@ -15,7 +15,7 @@ import { useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
-import type { SessionDetail } from "../api/types";
+import type { AgentDocument, SessionDetail } from "../api/types";
 import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import { ReadError } from "./ReadError";
@@ -781,7 +781,10 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
  * position, and each key opens a readout instead of a picker. Nothing here is
  * editable; `marked` means "this session has one", not "you chose one".
  */
-export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
+export function useLockedChannels(
+  detail: SessionDetail,
+  agent: AgentDocument,
+): PickerSpec[] {
   const { data: settings } = useSettings();
   // A model alias can be renamed or deleted out from under a live session, and
   // the next turn then fails `no provider registered for model '…'`. The row
@@ -790,7 +793,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
   // there is no API to repoint an existing session — but it can at least stop
   // being a surprise.
   const modelGone =
-    !!settings && !settings.models.some((m) => m.alias === detail.model);
+    !!settings && !settings.models.some((m) => m.alias === agent.model);
 
   const value = (items: string[]) =>
     items.length ? items.join(", ") : "None";
@@ -855,16 +858,20 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
     ]),
   };
 
+  // Model, MCP, memory and thinking read the *selected agent's* document:
+  // a workflow step's configuration is its own preset's, and the session
+  // document deliberately carries no session-wide model. Skills remain
+  // session-wide — the bundle union is provisioned for the whole run.
   const channels: PickerSpec[] = [
     environment,
     ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
-    ...optional("mcp", "MCP", <Plug size={15} />, "w-72", detail.mcpServers),
-    ...optional("memory", "Memory", <Brain size={15} />, "w-72", detail.memorySpaces),
+    ...optional("mcp", "MCP", <Plug size={15} />, "w-72", agent.mcpServers),
+    ...optional("memory", "Memory", <Brain size={15} />, "w-72", agent.memorySpaces),
     {
       key: "model",
       legend: "Model",
       icon: <Cpu size={15} />,
-      label: modelGone ? `${detail.model} — missing` : detail.model,
+      label: modelGone ? `${agent.model} — missing` : agent.model,
       marked: true,
       warn: modelGone,
       width: "w-72",
@@ -873,7 +880,7 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
         ? () => (
             <div className="space-y-1.5 px-1 py-0.5">
               <p className="font-mono text-[0.8125rem] break-words text-legend">
-                {detail.model}
+                {agent.model}
               </p>
               <p className="text-sm leading-relaxed text-red-ink">
                 This model is no longer configured, so the next turn in this
@@ -882,20 +889,20 @@ export function useLockedChannels(detail: SessionDetail): PickerSpec[] {
               </p>
             </div>
           )
-        : readout([detail.model]),
+        : readout([agent.model]),
     },
   ];
 
-  if (detail.thinkingEffort) {
+  if (agent.thinkingEffort) {
     channels.push({
       key: "thinking",
       legend: "Thinking",
       icon: <Lightbulb size={15} />,
-      label: detail.thinkingEffort,
+      label: agent.thinkingEffort,
       marked: true,
       width: "w-52",
       testId: "config-thinking",
-      body: readout([detail.thinkingEffort]),
+      body: readout([agent.thinkingEffort]),
     });
   }
 

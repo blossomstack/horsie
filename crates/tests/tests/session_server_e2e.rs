@@ -1720,9 +1720,22 @@ async fn session_detail_echoes_full_config() {
         .json()
         .await
         .unwrap();
-    assert_eq!(detail["session"]["usePlugins"], serde_json::json!(true));
-    assert_eq!(detail["session"]["mcpServers"], serde_json::json!(["gh"]));
     assert_eq!(detail["session"]["plugins"], serde_json::json!([]));
+    // Plugin enablement and MCP servers are the *agent's* configuration, read
+    // off its own document — the session carries only the bundle union.
+    let agent: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["agent"]["usePlugins"], serde_json::json!(true));
+    assert_eq!(agent["agent"]["mcpServers"], serde_json::json!(["gh"]));
 
     server.shutdown().await;
 }
@@ -1799,8 +1812,25 @@ async fn session_detail_echoes_thinking_effort() {
         .unwrap();
     assert_eq!(
         detail["session"]["thinkingEffort"],
+        serde_json::Value::Null,
+        "the session document carries no session-wide effort"
+    );
+    // The effort is the *agent's*: it reads off the main agent's document.
+    let agent: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        agent["agent"]["thinkingEffort"],
         serde_json::json!("low"),
-        "explicit choice must appear on the session detail"
+        "explicit choice must appear on the agent document"
     );
 
     // ...and an omitted choice freezes the model's configured default.
@@ -1821,8 +1851,11 @@ async fn session_detail_echoes_thinking_effort() {
         .unwrap()
         .to_string();
 
-    let detail: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}", server.addr))
+    let agent: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
         .send()
         .await
         .unwrap()
@@ -1830,9 +1863,9 @@ async fn session_detail_echoes_thinking_effort() {
         .await
         .unwrap();
     assert_eq!(
-        detail["session"]["thinkingEffort"],
+        agent["agent"]["thinkingEffort"],
         serde_json::json!("high"),
-        "model default must be frozen onto the session detail"
+        "model default must be frozen onto the agent document"
     );
 
     server.shutdown().await;

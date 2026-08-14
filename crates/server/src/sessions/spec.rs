@@ -138,6 +138,10 @@ pub struct EnvVarSpec {
 /// instead, and — because a routine's runs have nobody watching them — whether
 /// the agent is offered the `ask_user` tool at all. Keeping all three answers
 /// on one value is what stops them disagreeing.
+///
+/// A workflow run is not an origin: it is what the session *is*, which
+/// [`SessionKind::Workflow`] says structurally, so it carries `User` here and
+/// stays in the ordinary session list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SessionOrigin {
     /// Created by a person, through the UI or the sessions API.
@@ -145,9 +149,22 @@ pub enum SessionOrigin {
     User,
     /// Created by a routine trigger — timer, run endpoint, or the UI button.
     Routine { routine: String },
-    /// A run of a workflow. Unlike a routine's, these sessions stay in the
-    /// ordinary session list, annotated with the workflow they came from.
-    Workflow { workflow: String },
+}
+
+/// What a session is. A sum type rather than an `agent` field plus an
+/// optional `workflow`: the old pairing let a run carry a session-wide
+/// `AgentSettings` that nothing in it used — the steps own their own — and
+/// every session-shaped reader then reported the start step's model as the
+/// session's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SessionKind {
+    /// A conversation: one main agent under these settings, and its forks.
+    Agent { settings: AgentSettings },
+    /// A run of a workflow. No main agent — the definition decides who runs —
+    /// and each step carries its own settings in the snapshot.
+    Workflow {
+        run: Arc<crate::sessions::workflow::WorkflowRunSpec>,
+    },
 }
 
 /// Persisted, self-contained description of one session (lives in the
@@ -155,7 +172,7 @@ pub enum SessionOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
     pub name: Option<String>,
-    pub agent: AgentSettings,
+    pub kind: SessionKind,
     pub workspaces: Vec<WorkspaceDef>,
     /// Setup steps run by the runtime at every create/attach (idempotent).
     #[serde(default)]
@@ -171,11 +188,6 @@ pub struct SessionSpec {
     /// journal row loads as [`SessionOrigin::User`].
     #[serde(default)]
     pub origin: SessionOrigin,
-    /// The workflow this session is a run of, snapshotted at creation:
-    /// the graph and each step's resolved preset. `None` for every ordinary
-    /// session, which is what makes the field additive.
-    #[serde(default)]
-    pub workflow: Option<Arc<crate::sessions::workflow::WorkflowRunSpec>>,
     /// The predefined environment this session was created from. Provenance
     /// only — everything it contributed is resolved into the fields above, so
     /// nothing re-reads it. `None` for an ad-hoc environment.
@@ -195,26 +207,27 @@ impl SessionSpec {
     pub(crate) fn for_vendor(vendor: &str) -> Self {
         Self {
             name: None,
-            agent: AgentSettings {
-                instructions: None,
-                model: "m".into(),
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: vec![],
-                memory_spaces: vec![],
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                auto_compact: None,
-                control_plane: None,
+            kind: SessionKind::Agent {
+                settings: AgentSettings {
+                    instructions: None,
+                    model: "m".into(),
+                    allowed_tools: None,
+                    use_plugins: None,
+                    max_iterations: None,
+                    max_retries: 0,
+                    mcp_servers: vec![],
+                    memory_spaces: vec![],
+                    thinking_effort: None,
+                    max_concurrent_subagents: None,
+                    auto_compact: None,
+                    control_plane: None,
+                },
             },
             workspaces: vec![],
             provision: vec![],
             vendor: vendor.to_string(),
             plugins: vec![],
             origin: SessionOrigin::User,
-            workflow: None,
             environment: None,
             env_vars: vec![],
         }
@@ -223,17 +236,31 @@ impl SessionSpec {
     /// The routine this session is a run of, if any.
     pub fn routine(&self) -> Option<&str> {
         match &self.origin {
-            SessionOrigin::User | SessionOrigin::Workflow { .. } => None,
+            SessionOrigin::User => None,
             SessionOrigin::Routine { routine } => Some(routine),
+        }
+    }
+
+    /// The main agent's settings, for the session kinds that have one.
+    pub fn agent_settings(&self) -> Option<&AgentSettings> {
+        match &self.kind {
+            SessionKind::Agent { settings } => Some(settings),
+            SessionKind::Workflow { .. } => None,
+        }
+    }
+
+    /// The workflow this session is a run of, snapshotted at creation: the
+    /// graph and each step's resolved preset. `None` for every conversation.
+    pub fn workflow_run(&self) -> Option<&Arc<crate::sessions::workflow::WorkflowRunSpec>> {
+        match &self.kind {
+            SessionKind::Agent { .. } => None,
+            SessionKind::Workflow { run } => Some(run),
         }
     }
 
     /// The workflow this session is a run of, if any.
     pub fn workflow_name(&self) -> Option<&str> {
-        match &self.origin {
-            SessionOrigin::User | SessionOrigin::Routine { .. } => None,
-            SessionOrigin::Workflow { workflow } => Some(workflow),
-        }
+        self.workflow_run().map(|run| run.workflow.as_str())
     }
 
     /// Whether nobody is watching this session. An unattended session is not
@@ -358,6 +385,7 @@ pub struct ServerDeps {
 
 #[cfg(test)]
 #[allow(
+    dead_code,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -365,6 +393,61 @@ pub struct ServerDeps {
 )]
 mod tests {
     use super::*;
+
+    pub(super) fn agent_settings() -> AgentSettings {
+        AgentSettings {
+            instructions: None,
+            model: "m".into(),
+            allowed_tools: None,
+            use_plugins: None,
+            max_iterations: None,
+            max_retries: 0,
+            mcp_servers: vec![],
+            memory_spaces: vec![],
+            thinking_effort: None,
+            max_concurrent_subagents: None,
+            auto_compact: None,
+            control_plane: None,
+        }
+    }
+
+    pub(super) fn agent_spec(vendor: &str, origin: SessionOrigin) -> SessionSpec {
+        SessionSpec {
+            name: None,
+            kind: SessionKind::Agent {
+                settings: agent_settings(),
+            },
+            workspaces: vec![],
+            provision: vec![],
+            vendor: vendor.into(),
+            plugins: vec![],
+            origin,
+            environment: None,
+            env_vars: vec![],
+        }
+    }
+
+    pub(super) fn workflow_spec(vendor: &str, workflow: &str) -> SessionSpec {
+        SessionSpec {
+            name: None,
+            kind: SessionKind::Workflow {
+                run: Arc::new(crate::sessions::workflow::WorkflowRunSpec {
+                    workflow: workflow.into(),
+                    start: "triage".into(),
+                    steps: vec![],
+                    input: "in".into(),
+                    max_steps: 10,
+                }),
+            },
+            workspaces: vec![],
+            provision: vec![],
+            vendor: vendor.into(),
+            plugins: vec![],
+            origin: SessionOrigin::User,
+            environment: None,
+            env_vars: vec![],
+        }
+    }
 
     #[test]
     fn workspace_def_reads_old_journal_shape() {
@@ -382,31 +465,7 @@ mod tests {
         // Old rows carried now-removed `plugins_dir`/`hook_path` (the legacy
         // filesystem plugin library) and `capabilities` (the server-authored
         // sandbox spec); they must still load (ignored).
-        let spec = SessionSpec {
-            name: None,
-            agent: AgentSettings {
-                instructions: None,
-                model: "m".into(),
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: vec![],
-                memory_spaces: vec![],
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                auto_compact: None,
-                control_plane: None,
-            },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: "mock".into(),
-            plugins: vec![],
-            origin: SessionOrigin::User,
-            workflow: None,
-            environment: None,
-            env_vars: vec![],
-        };
+        let spec = agent_spec("mock", SessionOrigin::User);
         let mut row = serde_json::to_value(&spec).unwrap();
         row["plugins_dir"] = serde_json::json!("/home/u/.local/share/horsie/plugins");
         row["hook_path"] = serde_json::json!(["/usr/local/bin"]);
@@ -423,8 +482,11 @@ mod tests {
         // Every session journaled before routines existed carries no origin.
         // It must load as a user session — the alternative is a restart that
         // hides every pre-existing session from the session list.
-        let row = r#"{"name":null,"agent":{"model":"m","allowed_tools":null,
-            "use_plugins":null,"max_iterations":null,"max_retries":0},
+        let row = r#"{"name":null,"kind":{"Agent":{"settings":{"model":"m",
+            "allowed_tools":null,"use_plugins":null,"max_iterations":null,
+            "max_retries":0,"mcp_servers":[],"memory_spaces":[],
+            "thinking_effort":null,"max_concurrent_subagents":null,
+            "instructions":null,"auto_compact":null,"control_plane":null}}},
             "workspaces":[],"vendor":"mock"}"#;
         let spec: SessionSpec = serde_json::from_str(row).unwrap();
         assert_eq!(spec.origin, SessionOrigin::User);
@@ -434,38 +496,50 @@ mod tests {
 
     #[test]
     fn a_routine_origin_round_trips_and_reads_unattended() {
-        let spec = SessionSpec {
-            name: None,
-            agent: AgentSettings {
-                instructions: None,
-                model: "m".into(),
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: vec![],
-                memory_spaces: vec![],
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                auto_compact: None,
-                control_plane: None,
-            },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: "mock".into(),
-            plugins: vec![],
-            origin: SessionOrigin::Routine {
+        let spec = agent_spec(
+            "mock",
+            SessionOrigin::Routine {
                 routine: "nightly".into(),
             },
-            workflow: None,
-            environment: None,
-            env_vars: vec![],
-        };
+        );
         let loaded: SessionSpec =
             serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
         assert_eq!(loaded, spec);
         assert_eq!(loaded.routine(), Some("nightly"));
         assert!(loaded.is_unattended());
+    }
+
+    /// The kind is the whole of what differs between a conversation and a run:
+    /// the shared fields are identical, and neither shape fabricates the
+    /// other's. In particular there is no workflow constructor that also
+    /// carries an `AgentSettings`.
+    #[test]
+    fn each_kind_projects_only_its_own_settings() {
+        let agent = agent_spec("mock", SessionOrigin::User);
+        assert_eq!(agent.agent_settings().map(|s| s.model.as_str()), Some("m"));
+        assert!(agent.workflow_run().is_none());
+        assert_eq!(agent.workflow_name(), None);
+
+        let run = workflow_spec("mock", "fix-bug");
+        assert!(run.agent_settings().is_none(), "a run has no session agent");
+        assert_eq!(
+            run.workflow_run().map(|r| r.workflow.as_str()),
+            Some("fix-bug")
+        );
+        assert_eq!(run.workflow_name(), Some("fix-bug"));
+        assert!(!run.is_unattended(), "a run may ask the person");
+    }
+
+    #[test]
+    fn both_kinds_round_trip() {
+        for spec in [
+            agent_spec("mock", SessionOrigin::User),
+            workflow_spec("mock", "fix-bug"),
+        ] {
+            let loaded: SessionSpec =
+                serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+            assert_eq!(loaded, spec);
+        }
     }
 
     #[test]

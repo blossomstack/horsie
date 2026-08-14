@@ -281,15 +281,21 @@ impl SessionActor {
         agent_id: Uuid,
         step_name: &str,
     ) -> Option<ActorRef<AgentCommand>> {
-        let run_spec = self.spec().workflow.clone()?;
+        let run_spec = self.spec().workflow_run().cloned()?;
         let step = run_spec.step(step_name)?.clone();
+        // A step runs under its own preset. Resolved here from the run
+        // snapshot rather than through [`SessionActor::effective_settings`]:
+        // at spawn the execution is not in the run log yet (the event that
+        // records it persists after the agent exists), so the id cannot be
+        // looked up — the step's own spec is the same settings a later read
+        // resolves by id.
+        let settings = step.settings.clone();
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Step(agent_id),
-                // A step runs under its own preset, not the session's.
-                settings: step.settings.clone(),
+                settings,
                 step_result: crate::sessions::session_actor::context::StepResultDef {
                     outcomes: step.outcomes.clone(),
                     fields: step.fields.clone(),
@@ -307,7 +313,7 @@ impl Component for WorkflowRun {
     /// not a run — that check, and not a branch chosen at construction, is what
     /// makes this component inert in a conversation.
     fn actions(cx: &ActionCx<'_>, state: &SessionState) -> Vec<AgentAction> {
-        let Some(run_spec) = cx.spec.workflow.clone() else {
+        let Some(run_spec) = cx.spec.workflow_run().cloned() else {
             return Vec::new();
         };
         crate::sessions::workflow::WorkflowOrchestrator::new(cx.id, run_spec).step_actions(state)
@@ -326,7 +332,7 @@ impl Component for WorkflowRun {
     /// the person's decision. Without this the entry stayed `Running`, so
     /// `current()` never cleared and the run started nothing ever again.
     fn on_load(cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        cx.spec.workflow.as_ref()?;
+        cx.spec.workflow_run()?;
         match &state.run {
             None => Some(SessionCommand::Run(RunCommand::Advance)),
             Some(run) if run.current().is_some() => {
@@ -779,10 +785,9 @@ mod tests {
         );
         let id = Uuid::new_v4();
         let mut spec = actor_spec_fixture();
-        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
-            workflow: "fix-bug".into(),
+        spec.kind = crate::sessions::spec::SessionKind::Workflow {
+            run: Arc::new(run_spec_fixture("the build is red")),
         };
-        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
         let journal = f.journal();
         let session = f.start(id, spec).await;
         session
@@ -908,10 +913,9 @@ mod tests {
         let f = actor_fixture().await;
         let id = Uuid::new_v4();
         let mut spec = actor_spec_fixture();
-        spec.origin = crate::sessions::spec::SessionOrigin::Workflow {
-            workflow: "fix-bug".into(),
+        spec.kind = crate::sessions::spec::SessionKind::Workflow {
+            run: Arc::new(run_spec_fixture("the build is red")),
         };
-        spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
         f.deps
             .runtimes
             .create(&id.to_string(), "i1", "mock", &spec)

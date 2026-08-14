@@ -142,7 +142,6 @@ struct SessionDetail {
     last_error: Option<String>,
     /// User-set key-value metadata (e.g. `group=<name>`). Empty when none.
     annotations: Vec<AnnotationEntry>,
-    model: String,
     /// The predefined environment this session was created from; absent when it
     /// was created from an ad-hoc runtime. `vendor` and `repos` are what it
     /// resolved to, and stay the answer to what the session actually got.
@@ -152,16 +151,6 @@ struct SessionDetail {
     repos: Vec<String>,
     /// Selected skill-bundle names (empty when none).
     plugins: Vec<String>,
-    /// Enabled MCP server names (empty when none).
-    mcp_servers: Vec<String>,
-    /// Selected memory space names (empty when none).
-    memory_spaces: Vec<String>,
-    /// Whether the runtime's plugin/skill machinery is enabled for this session.
-    use_plugins: bool,
-    /// The session's frozen thinking effort, chosen at creation or inherited
-    /// from the model's default. Absent → the model exposes no thinking
-    /// control.
-    thinking_effort: Option<String>,
     /// Token usage summed across every agent this session hosts. Per-agent
     /// numbers (and context size, which is never summed) are on the agent
     /// document instead.

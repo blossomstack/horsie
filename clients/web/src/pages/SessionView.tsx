@@ -768,7 +768,9 @@ export function SessionView() {
           {/* The channels this session runs on, in the same place the draft
               row occupied before it existed. Read-only — each key opens its
               value rather than a picker. */}
-          {detail && <SessionConfigBar mode="locked" detail={detail} />}
+          {detail && mainAgent && (
+            <SessionConfigBar mode="locked" detail={detail} agent={mainAgent} />
+          )}
           {/* A workflow step takes no messages — the definition drives it — so
               it gets the stop control without the send one. */}
           {agentId && detail?.workflow ? (

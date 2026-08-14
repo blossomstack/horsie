@@ -1006,7 +1006,7 @@ mod tests {
             mcp: None,
             memory: None,
             services: None,
-            settings: actor_spec_fixture().agent,
+            settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
             session_id: id,
             kind,
@@ -1056,7 +1056,7 @@ mod tests {
     #[tokio::test]
     async fn a_zero_subagent_cap_hides_the_spawn_tools() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let mut settings = actor_spec_fixture().agent;
+        let mut settings = agent_settings_fixture();
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
             runtimes: f.deps.runtimes.provider(
@@ -1115,7 +1115,7 @@ mod tests {
             mcp: None,
             memory: None,
             services: None,
-            settings: actor_spec_fixture().agent,
+            settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
             session_id: id,
             kind: SessionAgentKind::Main,
@@ -1440,7 +1440,7 @@ mod tests {
             mcp: None,
             memory: None,
             services: None,
-            settings: actor_spec_fixture().agent,
+            settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
             session_id: id,
             kind: SessionAgentKind::Sub(Uuid::new_v4()),
@@ -1643,7 +1643,7 @@ mod tests {
             mcp: None,
             memory: None,
             services: None,
-            settings: actor_spec_fixture().agent,
+            settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
             session_id: id,
             kind,

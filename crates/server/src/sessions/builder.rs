@@ -9,7 +9,8 @@
 use crate::config::ConfigStore;
 use crate::environments::{EnvironmentError, EnvironmentService};
 use crate::sessions::spec::{
-    AgentSettings, EnvVarSpec, ProvisionStepSpec, SessionOrigin, SessionSpec, WorkspaceDef,
+    AgentSettings, EnvVarSpec, ProvisionStepSpec, SessionKind, SessionOrigin, SessionSpec,
+    WorkspaceDef,
 };
 use horsie_models::environments::EnvironmentSpec;
 use horsie_models::session::AgentSettings as WireAgentSettings;
@@ -51,21 +52,32 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
     }
 }
 
-/// Assemble a [`SessionSpec`], resolving defaults and validating everything
-/// that is knowable before the session exists.
-pub async fn build_session_spec(
-    config: &Arc<dyn ConfigStore>,
+/// The session-shaped half of a spec, shared by every creation path: the
+/// environment/provision facts and provenance, with nothing about which agent
+/// or workflow runs in it.
+struct CommonSpec {
+    name: Option<String>,
+    workspaces: Vec<WorkspaceDef>,
+    provision: Vec<ProvisionStepSpec>,
+    vendor: String,
+    plugins: Vec<String>,
+    origin: SessionOrigin,
+    environment: Option<String>,
+    env_vars: Vec<EnvVarSpec>,
+}
+
+/// Resolve the environment and provenance facts every spec carries, once,
+/// snapshotted into the spec below. `RuntimeManager::runtime_spec` re-reads
+/// that snapshot on every create *and* every revive, so a session revived next
+/// week gets what it was created with rather than what a since-edited
+/// environment now says.
+async fn resolve_common(
     environments: &EnvironmentService,
     name: Option<String>,
-    agent: WireAgentSettings,
     environment: EnvironmentSpec,
     plugins: Option<Vec<String>>,
     origin: SessionOrigin,
-) -> Result<SessionSpec, SpecError> {
-    // Resolved once, here, and snapshotted into the spec below.
-    // `RuntimeManager::runtime_spec` re-reads that snapshot on every create
-    // *and* every revive, so a session revived next week gets what it was
-    // created with rather than what a since-edited environment now says.
+) -> Result<CommonSpec, SpecError> {
     let environment_name = match &environment {
         EnvironmentSpec::Named(n) => Some(n.name.clone()),
         EnvironmentSpec::Runtime(_) => None,
@@ -118,12 +130,35 @@ pub async fn build_session_spec(
     let workspaces = vec![WorkspaceDef {
         name: "main".into(),
     }];
+    Ok(CommonSpec {
+        name,
+        workspaces,
+        provision,
+        vendor,
+        plugins: plugins.unwrap_or_default(),
+        origin,
+        environment: environment_name,
+        env_vars,
+    })
+}
+
+/// Assemble an agent session's [`SessionSpec`], resolving defaults and
+/// validating everything that is knowable before the session exists.
+pub async fn build_session_spec(
+    config: &Arc<dyn ConfigStore>,
+    environments: &EnvironmentService,
+    name: Option<String>,
+    agent: WireAgentSettings,
+    environment: EnvironmentSpec,
+    plugins: Option<Vec<String>>,
+    origin: SessionOrigin,
+) -> Result<SessionSpec, SpecError> {
+    let common = resolve_common(environments, name, environment, plugins, origin).await?;
+    let mut agent = settings_from_wire(agent);
     // Selected bundle names (empty → the provisioner falls back to the
     // default-enabled set). Selecting bundles implies plugins are surfaced, so
     // force the agent's opt-in when any are chosen.
-    let plugins = plugins.unwrap_or_default();
-    let mut agent = settings_from_wire(agent);
-    if !plugins.is_empty() {
+    if !common.plugins.is_empty() {
         agent.use_plugins = Some(true);
     }
     // Resolve the effective thinking effort once, here: session choice wins,
@@ -163,16 +198,46 @@ pub async fn build_session_spec(
         }
     }
     Ok(SessionSpec {
+        kind: SessionKind::Agent { settings: agent },
+        workspaces: common.workspaces,
+        provision: common.provision,
+        vendor: common.vendor,
+        plugins: common.plugins,
+        origin: common.origin,
+        name: common.name,
+        environment: common.environment,
+        env_vars: common.env_vars,
+    })
+}
+
+/// Assemble a workflow run's [`SessionSpec`]: the same shared environment and
+/// provision facts, with the run snapshot as its kind. No `AgentSettings` is
+/// fabricated — the steps own their own, and nothing session-shaped needs one.
+pub async fn build_workflow_spec(
+    environments: &EnvironmentService,
+    name: Option<String>,
+    environment: EnvironmentSpec,
+    plugins: Vec<String>,
+    run: Arc<crate::sessions::workflow::WorkflowRunSpec>,
+) -> Result<SessionSpec, SpecError> {
+    let common = resolve_common(
+        environments,
         name,
-        agent,
-        workspaces,
-        provision,
-        vendor,
-        plugins,
-        origin,
-        workflow: None,
-        environment: environment_name,
-        env_vars,
+        environment,
+        Some(plugins),
+        SessionOrigin::User,
+    )
+    .await?;
+    Ok(SessionSpec {
+        kind: SessionKind::Workflow { run },
+        workspaces: common.workspaces,
+        provision: common.provision,
+        vendor: common.vendor,
+        plugins: common.plugins,
+        origin: common.origin,
+        name: common.name,
+        environment: common.environment,
+        env_vars: common.env_vars,
     })
 }
 

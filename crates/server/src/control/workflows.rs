@@ -9,15 +9,14 @@ use crate::control::{
     ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, ask, op,
 };
 use crate::http::handlers;
-use crate::sessions::builder::build_session_spec;
-use crate::sessions::spec::{AgentSettings, SessionOrigin, SessionStatus};
+use crate::sessions::builder::build_workflow_spec;
+use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use crate::sessions::workflow::{
     DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec,
 };
 use crate::users::UserServices;
 use horsie_models::now_ms;
-use horsie_models::session::AgentSettings as WireAgentSettings;
 use horsie_models::workflow::{
     WorkflowInput, WorkflowRunRequest, WorkflowRunResponse, WorkflowView,
 };
@@ -200,7 +199,6 @@ async fn run_workflow(
             },
         });
     }
-
     let run = Arc::new(WorkflowRunSpec {
         workflow: name.clone(),
         start: row.start.clone(),
@@ -210,38 +208,14 @@ async fn run_workflow(
         // change a run already under way.
         max_steps: row.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
     });
-    // The session's own `agent` settings are the first step's: they are what a
-    // session-shaped reader (usage, the detail document) reports. Each step
-    // still runs with its own.
-    let first = run
-        .step(&row.start)
-        .ok_or_else(|| ControlError::Invalid(format!("start step '{}' is missing", row.start)))?;
-    let wire = WireAgentSettings {
-        model: first.settings.model.clone(),
-        allowed_tools: None,
-        use_plugins: None,
-        max_iterations: None,
-        max_retries: None,
-        mcp_servers: Some(first.settings.mcp_servers.clone()),
-        memory_spaces: Some(first.settings.memory_spaces.clone()),
-        thinking_effort: first.settings.thinking_effort.clone(),
-        max_concurrent_subagents: None,
-        instructions: first.settings.instructions.clone(),
-        auto_compact: first.settings.auto_compact,
-        // A workflow run's agents are steps, and only a main agent gets the
-        // control-plane tools.
-        control_plane: None,
-    };
-    let mut spec = build_session_spec(
-        &services.config_store,
+    // No `AgentSettings` is fabricated for the session: a run's agents are its
+    // steps, each with its own settings, and nothing session-shaped needs one.
+    let spec = build_workflow_spec(
         &services.environments,
         req.name.or_else(|| Some(name.clone())),
-        wire,
         req.environment,
-        Some(plugins),
-        SessionOrigin::Workflow {
-            workflow: name.clone(),
-        },
+        plugins,
+        run,
     )
     .await?;
     // Checked on the *resolved* vendor: a named environment carries its own,
@@ -256,7 +230,6 @@ async fn run_workflow(
             spec.vendor
         )));
     }
-    spec.workflow = Some(run);
 
     let created_at = now_ms();
     // Creating it is enough to start it: the session actor asks the
