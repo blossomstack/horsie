@@ -47,6 +47,7 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         max_concurrent_subagents: w.max_concurrent_subagents,
         instructions: w.instructions,
         auto_compact: w.auto_compact,
+        control_plane: w.control_plane,
     }
 }
 
@@ -248,6 +249,7 @@ mod tests {
             thinking_effort: None,
             max_concurrent_subagents: None,
             auto_compact: None,
+            control_plane: None,
         }
     }
 

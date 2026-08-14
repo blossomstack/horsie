@@ -1,0 +1,11 @@
+-- Whether sessions from this preset may manage the horsie server itself: its
+-- agents, workflows, routines, environments and runtimes.
+--
+-- NULL means no. The opposite default to `auto_compact`, deliberately: that
+-- flag exists to turn a behaviour off, this one exists to grant authority, and
+-- authority is never acquired by a row predating the column.
+--
+-- INTEGER, not BOOLEAN: the `sqlx::Any` driver cannot decode SQLite's BOOLEAN,
+-- and every other flag in this schema is stored the same way for the same
+-- reason.
+ALTER TABLE agents ADD COLUMN control_plane INTEGER;

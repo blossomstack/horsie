@@ -179,6 +179,9 @@ pub async fn start_run(
                 max_concurrent_subagents: None,
                 instructions: preset.instructions.clone(),
                 auto_compact: preset.auto_compact,
+                // A workflow step is not a main agent, and only a main
+                // agent gets the control-plane tools.
+                control_plane: None,
             },
         });
     }
@@ -210,6 +213,9 @@ pub async fn start_run(
         max_concurrent_subagents: None,
         instructions: first.settings.instructions.clone(),
         auto_compact: first.settings.auto_compact,
+        // A workflow run's agents are steps, and only a main agent gets the
+        // control-plane tools.
+        control_plane: None,
     };
     let mut spec = build_session_spec(
         &state.config_store,

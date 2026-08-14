@@ -159,6 +159,7 @@ async fn invoke(
         // What the preset says about *behaviour*, as opposed to what it gates.
         instructions: agent.instructions.clone(),
         auto_compact: agent.auto_compact,
+        control_plane: agent.control_plane,
     };
     let spec = build_session_spec(
         &services.config_store,

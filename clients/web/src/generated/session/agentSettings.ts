@@ -46,4 +46,13 @@ export interface AgentSettings {
    * then nothing to be a share of.
    */
   autoCompact?: boolean;
+  /**
+   * Whether this session's main agent may manage the horsie server itself.
+   *
+   * Absent is off, unlike `auto_compact`: authority over the server is
+   * granted explicitly or not at all. Only the main agent gets it —
+   * subagents, forks and workflow steps inherit the setting but not the
+   * tools, the same rule that keeps session-metadata tools off them.
+   */
+  controlPlane?: boolean;
 }

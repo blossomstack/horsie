@@ -21,4 +21,10 @@ export interface AgentPresetInput {
    * preset; absent → yes.
    */
   autoCompact?: boolean;
+  /**
+   * Seeds `AgentSettings.control_plane`; absent → no. Enabling this is the
+   * whole authorisation — a session from this preset can then change or
+   * delete anything this account owns, without confirming first.
+   */
+  controlPlane?: boolean;
 }

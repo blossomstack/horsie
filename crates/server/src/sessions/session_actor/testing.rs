@@ -55,6 +55,7 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
             thinking_effort: None,
             max_concurrent_subagents: None,
             auto_compact: None,
+            control_plane: None,
         },
         workspaces: vec![WorkspaceDef {
             name: "main".into(),
@@ -339,6 +340,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
         thinking_effort: None,
         max_concurrent_subagents: None,
         auto_compact: None,
+            control_plane: None,
     };
     WorkflowRunSpec {
         workflow: "fix-bug".into(),

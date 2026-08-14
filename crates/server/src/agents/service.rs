@@ -177,6 +177,7 @@ fn row_from_input(input: AgentPresetInput, created_at: String, updated_at: Strin
         memory_spaces: input.memory_spaces.unwrap_or_default(),
         thinking_effort: input.thinking_effort,
         auto_compact: input.auto_compact,
+        control_plane: input.control_plane,
         created_at,
         updated_at,
     }
@@ -193,6 +194,7 @@ fn agent_view(row: &AgentRow) -> AgentView {
         memory_spaces: row.memory_spaces.clone(),
         thinking_effort: row.thinking_effort.clone(),
         auto_compact: row.auto_compact,
+        control_plane: row.control_plane,
         created_at: row.created_at.clone(),
         updated_at: row.updated_at.clone(),
     }
@@ -290,7 +292,29 @@ mod tests {
             memory_spaces: None,
             thinking_effort: None,
             auto_compact: None,
+            control_plane: None,
         }
+    }
+
+    #[tokio::test]
+    async fn control_plane_is_off_unless_asked_for_and_survives_the_store() {
+        let (service, _tmp) = service().await;
+
+        let view = service.create(input("plain", "sonnet")).await.unwrap();
+        assert_ne!(
+            view.control_plane,
+            Some(true),
+            "a preset must never gain authority over the server by omission"
+        );
+
+        let mut asked = input("ops", "sonnet");
+        asked.control_plane = Some(true);
+        assert_eq!(service.create(asked).await.unwrap().control_plane, Some(true));
+        assert_eq!(
+            service.get("ops").await.unwrap().control_plane,
+            Some(true),
+            "the grant must survive a round trip through the store"
+        );
     }
 
     #[tokio::test]

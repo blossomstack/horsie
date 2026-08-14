@@ -44,6 +44,12 @@ export interface AgentView {
    */
   autoCompact?: boolean;
   /**
+   * Whether sessions from this preset may manage this horsie server — its
+   * agents, workflows, routines, environments and runtimes. Granted, never
+   * inherited: absent is off.
+   */
+  controlPlane?: boolean;
+  /**
    * Unix epoch seconds.
    */
   createdAt: string;
