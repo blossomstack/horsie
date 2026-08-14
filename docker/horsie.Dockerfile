@@ -83,17 +83,28 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home --home-dir /home/horsie --shell /usr/sbin/nologin horsie \
- && install -d -o horsie -g horsie /data
+ && install -d -o horsie -g horsie /data /raft
 COPY --from=build /usr/local/bin/horsie-server /usr/local/bin/horsie-server
 # Web UI assets served via `--web`.
 COPY --from=web /web/dist /usr/local/share/horsie/web
 USER horsie
 # /data holds the session journal + state (mount a volume here); config is
 # bind-mounted at /etc/horsie/config.json by the deploy stack.
+#
+# /raft is empty and unused on a single node. A clustered node points
+# `cluster.raft_dir` here and mounts its **own** volume: it holds that node's
+# vote, which has to survive a restart of that node and must never be shared
+# with another. Two nodes over one volume is two nodes voting as one, which
+# consensus has no defence against.
 WORKDIR /data
-# 3789 is the only port: HTTP API, web UI, and the WebSocket routes agents and
-# clients dial. The reverse-dial listeners moved out with the vendor processes.
+# 3789 is the only port for clients: HTTP API, web UI, and the WebSocket routes
+# agents and clients dial. A clustered node also listens on `cluster.bind` for
+# its peers — deliberately not exposed here, because that port authenticates but
+# does not encrypt and belongs on a private network rather than published.
 EXPOSE 3789
+# On a clustered node this also reports readiness: a node that has lost quorum
+# answers 503 here, so an orchestrator stops sending it traffic rather than
+# discovering the problem one request at a time.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3789/api/health || exit 1
 ENTRYPOINT ["horsie-server"]
