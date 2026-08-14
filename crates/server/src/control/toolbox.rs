@@ -240,8 +240,21 @@ mod tests {
     async fn specs_extend_the_inner_box_rather_than_replacing_it() {
         // A session that sets `allowed_tools` must not lose these, which is why
         // this wraps instead of composing.
+        //
+        // Counted against the table rather than a literal: a new resource is
+        // meant to appear here, and a magic number would fail every time one
+        // does while saying nothing about what actually broke.
         let (tb, _services, _dir) = toolbox().await;
-        assert_eq!(tb.specs().len(), 3, "EmptyToolbox contributes nothing");
+        let resources: std::collections::BTreeSet<&str> = crate::control::operations()
+            .iter()
+            .filter(|o| o.expose != Expose::Api)
+            .map(|o| o.resource)
+            .collect();
+        assert_eq!(
+            tb.specs().len(),
+            resources.len(),
+            "one tool per resource, and EmptyToolbox contributes nothing"
+        );
     }
 
     #[tokio::test]

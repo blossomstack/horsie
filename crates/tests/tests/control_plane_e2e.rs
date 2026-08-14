@@ -254,3 +254,39 @@ async fn a_session_without_the_grant_never_gets_the_tools() {
          reach it, even when the model calls the tool by name"
     );
 }
+
+#[tokio::test]
+async fn the_workflows_tool_creates_a_definition() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call(
+        "horsie_workflows",
+        serde_json::json!({
+            "action": "create",
+            "name": "nightly",
+            "start": "review",
+            "steps": [{
+                "name": "review",
+                "agent": "reviewer",
+                "prompt": "review the diff",
+            }],
+        }),
+    );
+    mock.queue_response("saved the workflow");
+    let h = Harness::start(&mock).await;
+    // A workflow's steps name presets, and the service resolves them at save.
+    let res = h
+        .client
+        .post(format!("http://{}/api/agents", h.addr))
+        .json(&serde_json::json!({"name": "reviewer", "model": "sonnet"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "{:?}", res.text().await);
+
+    let id = h.session(true, "make me a workflow").await;
+    h.wait_for_reply(&id, "saved the workflow").await;
+
+    let (status, workflow) = h.get("/api/workflows/nightly").await;
+    assert_eq!(status, 200, "the tool call must have reached the service");
+    assert_eq!(workflow["start"], "review");
+}

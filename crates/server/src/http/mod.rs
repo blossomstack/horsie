@@ -302,23 +302,6 @@ pub fn app(state: AppState) -> Router {
             "/api/runtime-vendors/{name}/test",
             post(runtime_vendors::test_runtime_vendor),
         )
-        .route(
-            "/api/workflows",
-            get(workflows::list_workflows).post(workflows::create_workflow),
-        )
-        .route(
-            "/api/workflows/{name}",
-            get(workflows::get_workflow)
-                .put(workflows::replace_workflow)
-                .delete(workflows::delete_workflow),
-        )
-        .route(
-            // A run's *list* is `GET /api/sessions?workflow=<name>`: a run is
-            // an ordinary session, and a second endpoint would re-derive the
-            // same row from the same registry read.
-            "/api/workflows/{name}/runs",
-            post(workflows::start_run),
-        )
         .route("/api/sessions/{id}/workflow", get(workflows::get_run_graph))
         .route(
             "/api/sessions/{id}/workflow/retry",
