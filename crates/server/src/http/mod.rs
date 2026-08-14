@@ -2693,12 +2693,12 @@ mod tests {
                     "name": "triage",
                     "agent": "reviewer",
                     "prompt": "Triage it.",
-                    "outputSchema": {
-                        "type": "object",
-                        "properties": {"severity": {"type": "string"}}
-                    },
+                    "outcomes": [
+                        {"value": "p0", "description": "drop everything"},
+                        {"value": "p2", "description": "file it"}
+                    ],
                     "transitions": [
-                        {"to": "fix", "condition": "output.severity == \"p0\""},
+                        {"to": "fix", "when": {"op": "In", "value": {"values": ["p0"]}}},
                         {"to": "fix"}
                     ]
                 },

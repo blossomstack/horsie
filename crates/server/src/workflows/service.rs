@@ -202,6 +202,26 @@ impl WorkflowService {
             )));
         }
         for step in &input.steps {
+            // A catch-all takes every outcome, so anything after it can never
+            // be reached. Silent at run time — the run simply always takes the
+            // earlier edge — which makes the later row look like a rule that
+            // does not work rather than one that was never consulted.
+            if let Some(transitions) = &step.transitions
+                && let Some(first) = transitions.iter().position(|t| t.when.is_none())
+                && first + 1 < transitions.len()
+            {
+                return Err(WorkflowError::Invalid(format!(
+                    "step '{}': the transition to '{}' has no outcome filter, so it is the \
+                     catch-all and must come last — the {} after it can never be reached",
+                    step.name,
+                    transitions[first].to,
+                    if transitions.len() - first == 2 {
+                        "one".to_string()
+                    } else {
+                        format!("{}", transitions.len() - first - 1)
+                    }
+                )));
+            }
             for t in step.transitions.iter().flatten() {
                 if !seen.contains(t.to.as_str()) {
                     return Err(WorkflowError::Invalid(format!(
@@ -533,6 +553,56 @@ mod tests {
                 },
             )),
         }]);
+        assert!(s.create(i, 1).await.is_ok());
+    }
+
+    /// A catch-all takes every outcome, so a row after it is never consulted.
+    /// At run time that is silent: the run always takes the earlier edge, and
+    /// the later rule looks broken rather than unreachable.
+    #[tokio::test]
+    async fn a_catch_all_before_another_transition_is_refused() {
+        let s = service().await;
+        let mut i = input("a");
+        i.steps[0].transitions = Some(vec![
+            WorkflowTransition {
+                to: "fix".into(),
+                when: None,
+            },
+            WorkflowTransition {
+                to: "fix".into(),
+                when: Some(horsie_models::workflow::OutcomeFilter::In(
+                    horsie_models::workflow::OutcomeIn {
+                        values: vec!["success".into()],
+                    },
+                )),
+            },
+        ]);
+        assert!(matches!(
+            s.create(i, 1).await,
+            Err(WorkflowError::Invalid(m)) if m.contains("must come last")
+        ));
+    }
+
+    /// A catch-all *last* is the ordinary shape, and a lone one is a plain
+    /// unconditional edge.
+    #[tokio::test]
+    async fn a_catch_all_last_is_allowed() {
+        let s = service().await;
+        let mut i = input("a");
+        i.steps[0].transitions = Some(vec![
+            WorkflowTransition {
+                to: "fix".into(),
+                when: Some(horsie_models::workflow::OutcomeFilter::In(
+                    horsie_models::workflow::OutcomeIn {
+                        values: vec!["success".into()],
+                    },
+                )),
+            },
+            WorkflowTransition {
+                to: "fix".into(),
+                when: None,
+            },
+        ]);
         assert!(s.create(i, 1).await.is_ok());
     }
 
