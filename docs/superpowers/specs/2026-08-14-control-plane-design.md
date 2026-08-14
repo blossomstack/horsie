@@ -342,9 +342,9 @@ Whichever is picked, it is what permanently closes the missing
 
 | PR | Contents |
 |---|---|
-| 1 | `control/` module, `Operation`, `ControlError`, the router fold. Migrate agents, workflows, routines, environments. Lift the `invoke_agent` (`http/agents.rs:102`) and `start_run` (`http/workflows.rs:112`) bodies out of axum — the only real lift in the whole change, and one the repo's own "handlers are adapters" rule already wants. |
+| 1 | `control/` module, `Operation`, `ControlError`, the router fold. Migrate agents, routines, environments. Lift the `invoke_agent` body (`http/agents.rs:102`) out of axum. |
 | 2 | `ControlToolbox`, the `control_plane` field and migration, the system-prompt index, the web UI checkbox. End-to-end usable over those four resources. |
-| 3 | Remaining resources, including `ToolOnly` `sessions.read`. `NON_OPERATIONS` shrinks to the named exceptions and the classification test lands. |
+| 3 | Remaining resources, including `ToolOnly` `sessions.read`. `NON_OPERATIONS` shrinks to the named exceptions and the classification test lands. **Workflows land here rather than in PR 1**: `start_run` (`http/workflows.rs:112`) is 155 lines that *create a session*, and its two siblings — `get_run_graph` and `retry_step` — are mounted under `/api/sessions/{id}/workflow`. All three belong with sessions, and moving a body that long is safest done beside the code it talks to rather than alone. |
 | 4 | CLI generation. Optional, and only worth doing if PRs 1–3 leave the metadata split feeling cheap. |
 
 PR 2 delivers a working ops agent over the four resources that motivated the
