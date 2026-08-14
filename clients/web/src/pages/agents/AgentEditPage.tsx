@@ -82,6 +82,21 @@ function AgentForm({ initial }: { initial?: AgentView }) {
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New agent"}
         </h1>
+        <button
+          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          onClick={() => navigate("/agents")}
+          data-testid="cancel-agent-button"
+        >
+          Cancel
+        </button>
+        <button
+          className="key key-go !px-2.5 !py-1.5 text-xs"
+          disabled={!canSave}
+          onClick={handleSave}
+          data-testid="save-agent-button"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
@@ -155,27 +170,14 @@ function AgentForm({ initial }: { initial?: AgentView }) {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className="key key-go"
-              disabled={!canSave}
-              onClick={handleSave}
-              data-testid="save-agent-button"
+          {blockedReason && (
+            <p
+              className="text-xs leading-relaxed text-dim"
+              data-testid="agent-blocked-hint"
             >
-              {busy ? "Saving…" : "Save agent"}
-            </button>
-            <button className="key key-blank" onClick={() => navigate("/agents")}>
-              Cancel
-            </button>
-            {blockedReason && (
-              <p
-                className="text-xs leading-relaxed text-dim"
-                data-testid="agent-blocked-hint"
-              >
-                {blockedReason}
-              </p>
-            )}
-          </div>
+              {blockedReason}
+            </p>
+          )}
         </div>
       </div>
     </div>

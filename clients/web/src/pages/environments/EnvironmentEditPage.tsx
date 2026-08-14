@@ -132,6 +132,21 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New environment"}
         </h1>
+        <button
+          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          onClick={() => navigate("/environments")}
+          data-testid="cancel-environment-button"
+        >
+          Cancel
+        </button>
+        <button
+          className="key key-go !px-2.5 !py-1.5 text-xs"
+          disabled={!canSave}
+          onClick={handleSave}
+          data-testid="save-environment-button"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
@@ -275,30 +290,14 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
             </div>
           )}
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              className="key key-go"
-              disabled={!canSave}
-              onClick={handleSave}
-              data-testid="save-environment-button"
+          {blockedReason && (
+            <p
+              className="text-xs leading-relaxed text-dim"
+              data-testid="environment-blocked-hint"
             >
-              {busy ? "Saving…" : "Save environment"}
-            </button>
-            <button
-              className="key key-blank"
-              onClick={() => navigate("/environments")}
-            >
-              Cancel
-            </button>
-            {blockedReason && (
-              <p
-                className="text-xs leading-relaxed text-dim"
-                data-testid="environment-blocked-hint"
-              >
-                {blockedReason}
-              </p>
-            )}
-          </div>
+              {blockedReason}
+            </p>
+          )}
         </div>
       </div>
     </div>
