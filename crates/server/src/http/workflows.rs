@@ -164,7 +164,7 @@ pub async fn start_run(
                 .into_iter()
                 .map(|t| TransitionSpec {
                     to: t.to,
-                    condition: t.condition,
+                    when: t.when,
                 })
                 .collect(),
             settings: AgentSettings {
@@ -348,7 +348,12 @@ fn project_run(
             step.transitions.iter().map(move |t| RunEdge {
                 from: step.name.clone(),
                 to: t.to.clone(),
-                condition: t.condition.clone(),
+                // Rendered, not stored: the log records the label a reader
+                // sees, and the definition holds the filter itself.
+                condition: t
+                    .when
+                    .as_ref()
+                    .map(horsie_models::workflow::OutcomeFilter::render),
                 traversals: run
                     .steps
                     .iter()
@@ -358,7 +363,10 @@ fn project_run(
                             && r.from
                                 .and_then(|f| run.get(f))
                                 .is_some_and(|src| src.step == step.name)
-                            && r.via == t.condition
+                            && r.via
+                                == t.when
+                                    .as_ref()
+                                    .map(horsie_models::workflow::OutcomeFilter::render)
                     })
                     .map(|(i, _)| i as u32)
                     .collect(),

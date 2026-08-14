@@ -1,5 +1,6 @@
 import {
   StepFieldType,
+  type OutcomeFilter,
   type StepField,
   type StepOutcome,
   type WorkflowStepDef,
@@ -13,6 +14,27 @@ export const defaultOutcomes = (): StepOutcome[] => [
 ];
 
 export const emptyOutcome = (): StepOutcome => ({ value: "", description: "" });
+
+/**
+ * The label an edge carries — `outcome in [p0, p1]`.
+ *
+ * The same string the server renders into the run log, so the definition graph
+ * and a run's graph label an edge identically. Two renderings of one filter
+ * would drift, and nobody would see it.
+ */
+export function renderFilter(when: OutcomeFilter | undefined): string | undefined {
+  if (when === undefined) return undefined;
+  const op = when.op === "In" ? "in" : "not in";
+  return `outcome ${op} [${when.value.values.join(", ")}]`;
+}
+
+/** The outcomes a filter names, whichever way round it is. */
+export const filterValues = (when: OutcomeFilter | undefined): string[] =>
+  when === undefined ? [] : when.value.values;
+
+/** A filter of `op` naming `values`, in the wire's adjacently-tagged shape. */
+export const makeFilter = (op: "In" | "NotIn", values: string[]): OutcomeFilter =>
+  op === "In" ? { op: "In", value: { values } } : { op: "NotIn", value: { values } };
 
 export const emptyField = (): StepField => ({
   name: "",

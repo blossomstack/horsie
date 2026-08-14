@@ -348,7 +348,17 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 name: "triage".into(),
                 agent: "triager".into(),
                 prompt: "Triage it.".into(),
-                outcomes: crate::sessions::workflow::default_outcomes(),
+                // Triage reports a severity, and the graph routes on it.
+                outcomes: vec![
+                    horsie_models::workflow::StepOutcome {
+                        value: "p0".into(),
+                        description: "drop everything".into(),
+                    },
+                    horsie_models::workflow::StepOutcome {
+                        value: "p2".into(),
+                        description: "file it".into(),
+                    },
+                ],
                 fields: Vec::new(),
                 // The fixture's steps may ask: one test parks a step on a
                 // question, and a step that is not interactive has no
@@ -357,11 +367,15 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
                 transitions: vec![
                     TransitionSpec {
                         to: "fix".into(),
-                        condition: Some("output.severity == \"p0\"".into()),
+                        when: Some(horsie_models::workflow::OutcomeFilter::In(
+                            horsie_models::workflow::OutcomeIn {
+                                values: vec!["p0".into()],
+                            },
+                        )),
                     },
                     TransitionSpec {
                         to: "file".into(),
-                        condition: None,
+                        when: None,
                     },
                 ],
                 settings: settings(()),

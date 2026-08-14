@@ -1,6 +1,12 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { AgentView, StepFieldType } from "../../api/types";
-import { emptyField, emptyOutcome, type StepDraft } from "./stepDraft";
+import type { AgentView, StepFieldType, WorkflowTransition } from "../../api/types";
+import {
+  emptyField,
+  emptyOutcome,
+  filterValues,
+  makeFilter,
+  type StepDraft,
+} from "./stepDraft";
 
 /**
  * One step's editor, as the right panel shows it.
@@ -8,6 +14,31 @@ import { emptyField, emptyOutcome, type StepDraft } from "./stepDraft";
  * Everything a step has, unfolded — the sidebar already answers "which step",
  * so nothing here is behind a disclosure.
  */
+/** Switch a transition between "always" and one of the two filters, keeping
+ * whichever outcomes were already ticked. */
+function setOp(step: StepDraft, ti: number, op: string): WorkflowTransition[] {
+  return step.transitions.map((x, j) => {
+    if (j !== ti) return x;
+    if (op === "any") return { to: x.to, when: undefined };
+    return { to: x.to, when: makeFilter(op as "In" | "NotIn", filterValues(x.when)) };
+  });
+}
+
+function toggleValue(
+  step: StepDraft,
+  ti: number,
+  value: string,
+  on: boolean,
+): WorkflowTransition[] {
+  return step.transitions.map((x, j) => {
+    if (j !== ti || x.when === undefined) return x;
+    const values = on
+      ? [...filterValues(x.when), value]
+      : filterValues(x.when).filter((v) => v !== value);
+    return { to: x.to, when: makeFilter(x.when.op, values) };
+  });
+}
+
 export function StepForm({
   step,
   agents,
@@ -250,25 +281,52 @@ export function StepForm({
       <section className="panel p-4">
         <h2 className="legend">Goes to</h2>
         <p className="mt-1 text-xs text-faint">
-          Tried in order; the first match wins. A row with no condition is the
-          catch-all. No match ends the run.
+          Tried in order; the first match wins. A row that names no outcome is
+          the catch-all. No match ends the run.
         </p>
         <div className="mt-3 space-y-2">
           {step.transitions.map((t, ti) => (
             <div key={ti} className="flex items-center gap-2">
-              <input
-                className="field field-mono flex-1"
-                value={t.condition ?? ""}
-                placeholder='output.severity == "p0"  (blank = always)'
-                onChange={(e) =>
-                  onChange({
-                    transitions: step.transitions.map((x, j) =>
-                      j === ti ? { ...x, condition: e.target.value || undefined } : x,
-                    ),
-                  })
-                }
-                data-testid="transition-condition"
-              />
+              <select
+                className="field w-24"
+                value={t.when?.op ?? "any"}
+                onChange={(e) => onChange({ transitions: setOp(step, ti, e.target.value) })}
+                data-testid="transition-op"
+              >
+                <option value="any">always</option>
+                <option value="In">outcome in</option>
+                <option value="NotIn">outcome not in</option>
+              </select>
+              {/* Checkboxes over the step's own outcomes, not free text: a
+                  filter may only name outcomes this step reports, and offering
+                  the list is what makes that unmissable rather than a save
+                  error. */}
+              <div
+                className="flex flex-1 flex-wrap items-center gap-2"
+                data-testid="transition-outcomes"
+              >
+                {t.when === undefined
+                  ? null
+                  : step.outcomes
+                      .filter((o) => o.value.trim() !== "")
+                      .map((o) => (
+                        <label
+                          key={o.value}
+                          className="flex items-center gap-1 text-xs text-faint"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={filterValues(t.when).includes(o.value)}
+                            onChange={(e) =>
+                              onChange({
+                                transitions: toggleValue(step, ti, o.value, e.target.checked),
+                              })
+                            }
+                          />
+                          <span className="font-mono">{o.value}</span>
+                        </label>
+                      ))}
+              </div>
               <select
                 className="field w-40"
                 value={t.to}
@@ -305,7 +363,7 @@ export function StepForm({
             className="key !px-2 !py-1 text-xs"
             onClick={() =>
               onChange({
-                transitions: [...step.transitions, { to: "", condition: undefined }],
+                transitions: [...step.transitions, { to: "", when: undefined }],
               })
             }
             data-testid="add-transition"

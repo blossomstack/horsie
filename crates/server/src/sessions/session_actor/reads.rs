@@ -473,8 +473,9 @@ mod tests {
     #[tokio::test]
     async fn a_concluded_step_reports_that_it_concluded() {
         use horsie_agentcore::testkit::{MockProvider, Script};
-        let provider =
-            MockProvider::scripted(Script::of([Ok(concludes(serde_json::json!({"ok": true})))]));
+        let provider = MockProvider::scripted(Script::of([Ok(concludes(
+            serde_json::json!({"outcome": "p0"}),
+        ))]));
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
         let run = wait_for_run(&journal, id, |r| {
             r.steps.iter().any(|s| s.status == StepStatus::Concluded)

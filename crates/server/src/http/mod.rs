@@ -2693,12 +2693,12 @@ mod tests {
                     "name": "triage",
                     "agent": "reviewer",
                     "prompt": "Triage it.",
-                    "outputSchema": {
-                        "type": "object",
-                        "properties": {"severity": {"type": "string"}}
-                    },
+                    "outcomes": [
+                        {"value": "p0", "description": "drop everything"},
+                        {"value": "p2", "description": "file it"}
+                    ],
                     "transitions": [
-                        {"to": "fix", "condition": "output.severity == \"p0\""},
+                        {"to": "fix", "when": {"op": "In", "value": {"values": ["p0"]}}},
                         {"to": "fix"}
                     ]
                 },
@@ -2764,7 +2764,7 @@ mod tests {
         assert_eq!(v.steps.len(), 2);
         let t = v.steps[0].transitions.as_ref().unwrap();
         assert_eq!(t.len(), 2);
-        assert!(t[1].condition.is_none());
+        assert!(t[1].when.is_none());
     }
 
     crud_over_http! {

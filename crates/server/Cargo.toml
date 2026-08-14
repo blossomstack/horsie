@@ -34,7 +34,6 @@ serde_json        = { workspace = true }
 reqwest           = { workspace = true }
 tracing           = { workspace = true }
 uuid              = { workspace = true }
-eval              = { workspace = true }
 thiserror         = { workspace = true }
 async-trait       = { workspace = true }
 jsonwebtoken      = { workspace = true }

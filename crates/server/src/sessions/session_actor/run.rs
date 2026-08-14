@@ -458,7 +458,7 @@ mod tests {
     async fn a_completed_run_reports_finished() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
                 // Every later step submits too: a step ends by calling
                 // `submit_result`, and a turn of plain text with nothing to
                 // wake it is now a mistake the actor nudges.
@@ -485,7 +485,7 @@ mod tests {
     async fn a_run_starts_itself_and_routes_on_its_first_steps_output() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
                 // Every later step submits too: a step ends by calling
                 // `submit_result`, and a turn of plain text with nothing to
                 // wake it is now a mistake the actor nudges.
@@ -508,10 +508,7 @@ mod tests {
             run.steps[0].output
         );
         // The condition that matched is recorded, which is what draws the edge.
-        assert_eq!(
-            run.steps[1].via.as_deref(),
-            Some("output.severity == \"p0\"")
-        );
+        assert_eq!(run.steps[1].via.as_deref(), Some("outcome in [p0]"));
         assert_eq!(run.steps[1].from, Some(0));
         // Each step is its own agent, derived from the session and the index.
         assert_eq!(
@@ -533,7 +530,7 @@ mod tests {
     async fn a_non_matching_condition_takes_the_catch_all() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))])
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p2"})))])
                 .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
@@ -569,7 +566,7 @@ mod tests {
                 // The step believes it is done but says so in prose.
                 text(),
                 // Nudged, it submits.
-                Ok(concludes(serde_json::json!({"severity": "p2"}))),
+                Ok(concludes(serde_json::json!({"outcome": "p2"}))),
             ])
             .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
         );
@@ -585,7 +582,7 @@ mod tests {
             run.steps[0]
         );
         assert_eq!(
-            run.steps[0].output.as_ref().and_then(|o| o.get("severity")),
+            run.steps[0].output.as_ref().and_then(|o| o.get("outcome")),
             Some(&serde_json::json!("p2")),
             "and the result it submitted after the nudge is the one that routed"
         );
@@ -736,7 +733,7 @@ mod tests {
     async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
                 // Every later step submits too: a step ends by calling
                 // `submit_result`, and a turn of plain text with nothing to
                 // wake it is now a mistake the actor nudges.
@@ -821,7 +818,7 @@ mod tests {
         let provider = MockProvider::scripted(
             Script::of([
                 Ok(asks("p0 or p2?")),
-                Ok(concludes(serde_json::json!({"severity": "p0"}))),
+                Ok(concludes(serde_json::json!({"outcome": "p0"}))),
             ])
             .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
@@ -960,7 +957,7 @@ mod tests {
     async fn a_cold_steps_transcript_is_still_readable_after_a_reload() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
                 // Every later step submits too: a step ends by calling
                 // `submit_result`, and a turn of plain text with nothing to
                 // wake it is now a mistake the actor nudges.

@@ -12,7 +12,7 @@
 //! store.
 
 use crate::sessions::spec::AgentSettings;
-use horsie_models::workflow::{StepField, StepOutcome};
+use horsie_models::workflow::{OutcomeFilter, StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -25,9 +25,10 @@ pub const DEFAULT_MAX_STEPS: u32 = 100;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransitionSpec {
     pub to: String,
-    /// Expression over the producing step's output, bound to `output`. `None`
-    /// is an unconditional catch-all.
-    pub condition: Option<String>,
+    /// Which outcomes this edge is taken for. `None` is an unconditional
+    /// catch-all.
+    #[serde(default)]
+    pub when: Option<OutcomeFilter>,
 }
 
 /// One step of the graph, with its preset already resolved.

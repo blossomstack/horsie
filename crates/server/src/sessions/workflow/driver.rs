@@ -107,16 +107,16 @@ impl WorkflowOrchestrator {
                 error: format!("step '{}' is no longer in this workflow", last.step),
             }];
         };
-        match next_transition(&step.transitions, &output) {
-            // A condition that cannot be evaluated fails the run rather than
-            // falling through. Falling through is what the old engine did, and
-            // it turned a typo in `output.severty` into a run that quietly
-            // ended as though it had succeeded.
-            Err(error) => vec![AgentAction::Fail { error }],
-            // No transition matched: this step is terminal, and its output is
+        let outcome = output
+            .get(crate::sessions::workflow::OUTCOME_FIELD)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match next_transition(&step.transitions, &outcome) {
+            // No transition matched: this step is terminal, and its result is
             // the run's.
-            Ok(None) => vec![AgentAction::Finish { output }],
-            Ok(Some((to, via))) => {
+            None => vec![AgentAction::Finish { output }],
+            Some((to, via)) => {
                 if self.spec.step(&to).is_none() {
                     return vec![AgentAction::Fail {
                         error: format!(
@@ -138,48 +138,27 @@ impl WorkflowOrchestrator {
     }
 }
 
-/// Evaluate one condition against a step's output.
+/// The first transition whose filter admits `outcome`.
 ///
-/// `eval` **panics** on some malformed expressions rather than returning an
-/// error — `!!!` unwinds inside its parser. Conditions are typed into a form by
-/// a person, so that would be a user input able to kill the session actor. The
-/// call is caught and reported as an ordinary evaluation failure. It is a pure
-/// computation over owned values, which is what makes asserting unwind safety
-/// sound here.
-pub fn eval_condition(condition: &str, output: &Value) -> Result<bool, String> {
-    let condition_owned = condition.to_string();
-    let output_owned = output.clone();
-    let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        eval::Expr::new(&condition_owned)
-            .value("output", output_owned)
-            .exec()
-    }))
-    .map_err(|_| format!("condition '{condition}' is not a valid expression"))?;
-    let value =
-        evaluated.map_err(|e| format!("condition '{condition}' failed to evaluate: {e}"))?;
-    value.as_bool().ok_or_else(|| {
-        format!("condition '{condition}' evaluated to {value}, which is not true or false")
-    })
-}
-
-/// The first transition whose condition holds.
-///
-/// `Ok(None)` means none matched and the step is terminal. `Err` means a
-/// condition could not be evaluated at all, which is a defect in the
-/// definition and fails the run.
+/// `None` means none matched and the step is terminal. There is no error case:
+/// a filter can only name outcomes the producing step declares — checked when
+/// the workflow is saved — so there is nothing left to fail on at run time.
+/// That is the whole of what replaced an expression evaluator that could panic
+/// on a typo, and could turn one into a run that quietly ended as if it had
+/// succeeded.
 pub fn next_transition(
     transitions: &[crate::sessions::workflow::TransitionSpec],
-    output: &Value,
-) -> Result<Option<(String, Option<String>)>, String> {
+    outcome: &str,
+) -> Option<(String, Option<String>)> {
     for t in transitions {
-        let Some(condition) = &t.condition else {
-            return Ok(Some((t.to.clone(), None)));
+        let Some(filter) = &t.when else {
+            return Some((t.to.clone(), None));
         };
-        if eval_condition(condition, output)? {
-            return Ok(Some((t.to.clone(), Some(condition.clone()))));
+        if filter.matches(outcome) {
+            return Some((t.to.clone(), Some(filter.render())));
         }
     }
-    Ok(None)
+    None
 }
 
 #[cfg(test)]
@@ -189,6 +168,7 @@ mod tests {
     use crate::sessions::spec::AgentSettings;
     use crate::sessions::workflow::WorkflowRunStatus;
     use crate::sessions::workflow::spec::{TransitionSpec, WorkflowStepSpec};
+    use horsie_models::workflow::OutcomeFilter;
 
     fn settings() -> AgentSettings {
         AgentSettings {
@@ -219,10 +199,26 @@ mod tests {
         }
     }
 
-    fn to(target: &str, condition: Option<&str>) -> TransitionSpec {
+    /// A transition taken for any of `values`, or a catch-all when empty.
+    fn to(target: &str, values: &[&str]) -> TransitionSpec {
         TransitionSpec {
             to: target.into(),
-            condition: condition.map(str::to_string),
+            when: (!values.is_empty()).then(|| {
+                OutcomeFilter::In(horsie_models::workflow::OutcomeIn {
+                    values: values.iter().map(|v| (*v).to_string()).collect(),
+                })
+            }),
+        }
+    }
+
+    fn not_in(target: &str, values: &[&str]) -> TransitionSpec {
+        TransitionSpec {
+            to: target.into(),
+            when: Some(OutcomeFilter::NotIn(
+                horsie_models::workflow::OutcomeNotIn {
+                    values: values.iter().map(|v| (*v).to_string()).collect(),
+                },
+            )),
         }
     }
 
@@ -232,14 +228,8 @@ mod tests {
             workflow: "fix-bug".into(),
             start: "triage".into(),
             steps: vec![
-                step(
-                    "triage",
-                    vec![
-                        to("fix", Some("output.severity == \"p0\"")),
-                        to("file", None),
-                    ],
-                ),
-                step("fix", vec![to("review", None)]),
+                step("triage", vec![to("fix", &["p0"]), to("file", &[])]),
+                step("fix", vec![to("review", &[])]),
                 step("review", vec![]),
                 step("file", vec![]),
             ],
@@ -322,7 +312,7 @@ mod tests {
     fn a_matching_condition_picks_its_branch_and_records_which() {
         let (d, _) = driver();
         let mut run = WorkflowRunState::default();
-        advance(&d, &mut run, serde_json::json!({"severity": "p0"}));
+        advance(&d, &mut run, serde_json::json!({"outcome": "p0"}));
         let action = advance(&d, &mut run, serde_json::json!({}));
         let AgentAction::StartStep(StepStart {
             step, via, from, ..
@@ -332,14 +322,14 @@ mod tests {
         };
         assert_eq!(step, "fix");
         assert_eq!(*from, Some(0));
-        assert_eq!(via.as_deref(), Some("output.severity == \"p0\""));
+        assert_eq!(via.as_deref(), Some("outcome in [p0]"));
     }
 
     #[test]
     fn a_failing_condition_falls_through_to_the_catch_all() {
         let (d, _) = driver();
         let mut run = WorkflowRunState::default();
-        advance(&d, &mut run, serde_json::json!({"severity": "p2"}));
+        advance(&d, &mut run, serde_json::json!({"outcome": "p2"}));
         let action = advance(&d, &mut run, serde_json::json!({}));
         let AgentAction::StartStep(StepStart { step, via, .. }) = &action else {
             panic!("expected a step, got {action:?}");
@@ -352,7 +342,7 @@ mod tests {
     fn a_step_with_no_transitions_finishes_the_run_with_its_output() {
         let (d, _) = driver();
         let mut run = WorkflowRunState::default();
-        advance(&d, &mut run, serde_json::json!({"severity": "p2"}));
+        advance(&d, &mut run, serde_json::json!({"outcome": "p2"}));
         advance(&d, &mut run, serde_json::json!({"filed": 12}));
         let action = advance(&d, &mut run, serde_json::json!({}));
         let AgentAction::Finish { output } = &action else {
@@ -360,36 +350,6 @@ mod tests {
         };
         assert_eq!(output, &serde_json::json!({"filed": 12}));
         assert_eq!(run.status, WorkflowRunStatus::Finished);
-    }
-
-    /// The old engine logged a warning and treated an unevaluatable condition
-    /// as non-matching, so a typo silently ended the run as if it had
-    /// succeeded. For a condition a person typed into a form, that is the
-    /// wrong default.
-    #[test]
-    fn a_condition_that_cannot_be_evaluated_fails_the_run() {
-        let d = WorkflowOrchestrator::new(
-            Uuid::new_v4(),
-            Arc::new(WorkflowRunSpec {
-                workflow: "w".into(),
-                start: "a".into(),
-                steps: vec![step("a", vec![to("b", Some("!!!"))]), step("b", vec![])],
-                input: "x".into(),
-                max_steps: 100,
-            }),
-        );
-        let mut run = WorkflowRunState::default();
-        // The first call starts step `a`; the second is where its transition is
-        // evaluated.
-        advance(&d, &mut run, serde_json::json!({}));
-        let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::Fail { error } = &action else {
-            panic!("expected a failure, got {action:?}");
-        };
-        assert!(
-            error.contains("not a valid expression") || error.contains("failed to evaluate"),
-            "{error}"
-        );
     }
 
     /// Nothing else bounds a graph with a loop.
@@ -400,7 +360,7 @@ mod tests {
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
-                steps: vec![step("a", vec![to("a", None)])],
+                steps: vec![step("a", vec![to("a", &[])])],
                 input: "x".into(),
                 max_steps: 3,
             }),
@@ -481,7 +441,7 @@ mod tests {
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
-                steps: vec![step("a", vec![to("ghost", None)])],
+                steps: vec![step("a", vec![to("ghost", &[])])],
                 input: "x".into(),
                 max_steps: 100,
             }),
@@ -495,24 +455,78 @@ mod tests {
         assert!(error.contains("'ghost'"), "{error}");
     }
 
-    /// `eval` unwinds on some malformed expressions instead of returning an
-    /// error. A condition is user input, so that must not reach the actor.
     #[test]
-    fn a_condition_that_panics_the_evaluator_is_an_ordinary_error() {
-        let err = eval_condition("!!!", &serde_json::json!({})).unwrap_err();
-        assert!(err.contains("not a valid expression"), "{err}");
+    fn not_in_matches_everything_it_does_not_name() {
+        let d = WorkflowOrchestrator::new(
+            Uuid::new_v4(),
+            Arc::new(WorkflowRunSpec {
+                workflow: "w".into(),
+                start: "a".into(),
+                steps: vec![
+                    step("a", vec![not_in("b", &["p0"]), to("c", &[])]),
+                    step("b", vec![]),
+                    step("c", vec![]),
+                ],
+                input: "x".into(),
+                max_steps: 100,
+            }),
+        );
+        let mut run = WorkflowRunState::default();
+        advance(&d, &mut run, serde_json::json!({"outcome": "p2"}));
+        let action = advance(&d, &mut run, serde_json::json!({"outcome": "p2"}));
+        let AgentAction::StartStep(StepStart { step, via, .. }) = &action else {
+            panic!("expected a step, got {action:?}");
+        };
+        assert_eq!(step, "b", "p2 is not p0, so the negative filter admits it");
+        assert_eq!(via.as_deref(), Some("outcome not in [p0]"));
     }
 
     #[test]
-    fn a_condition_that_is_not_a_boolean_is_an_error() {
-        let err = eval_condition("output.n", &serde_json::json!({"n": 3})).unwrap_err();
-        assert!(err.contains("not true or false"), "{err}");
+    fn a_not_in_filter_that_names_the_outcome_falls_through() {
+        let d = WorkflowOrchestrator::new(
+            Uuid::new_v4(),
+            Arc::new(WorkflowRunSpec {
+                workflow: "w".into(),
+                start: "a".into(),
+                steps: vec![
+                    step("a", vec![not_in("b", &["p0"]), to("c", &[])]),
+                    step("b", vec![]),
+                    step("c", vec![]),
+                ],
+                input: "x".into(),
+                max_steps: 100,
+            }),
+        );
+        let mut run = WorkflowRunState::default();
+        advance(&d, &mut run, serde_json::json!({"outcome": "p0"}));
+        let action = advance(&d, &mut run, serde_json::json!({"outcome": "p0"}));
+        let AgentAction::StartStep(StepStart { step, .. }) = &action else {
+            panic!("expected a step, got {action:?}");
+        };
+        assert_eq!(step, "c");
+    }
+
+    /// An outcome the step never declared cannot reach here — `submit_result`
+    /// rejects it — but if one did, it must match nothing rather than match
+    /// everything.
+    #[test]
+    fn an_unrecognised_outcome_matches_no_filter() {
+        let filter = OutcomeFilter::In(horsie_models::workflow::OutcomeIn {
+            values: vec!["p0".into()],
+        });
+        assert!(!filter.matches("p9"));
     }
 
     #[test]
-    fn a_plain_boolean_condition_evaluates() {
-        assert!(eval_condition("output.ok == true", &serde_json::json!({"ok": true})).unwrap());
-        assert!(!eval_condition("output.ok == true", &serde_json::json!({"ok": false})).unwrap());
+    fn a_filter_renders_as_the_edge_label_a_reader_sees() {
+        let f = OutcomeFilter::In(horsie_models::workflow::OutcomeIn {
+            values: vec!["p0".into(), "p1".into()],
+        });
+        assert_eq!(f.render(), "outcome in [p0, p1]");
+        let f = OutcomeFilter::NotIn(horsie_models::workflow::OutcomeNotIn {
+            values: vec!["p2".into()],
+        });
+        assert_eq!(f.render(), "outcome not in [p2]");
     }
 
     /// The driver is installed only on a run, so a state that has folded no

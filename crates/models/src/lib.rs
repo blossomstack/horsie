@@ -128,6 +128,41 @@ pub mod runtime_vendor {
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod workflow {
     include!(concat!(env!("OUT_DIR"), "/workflow/mod.rs"));
+
+    impl OutcomeFilter {
+        /// Whether this filter admits `outcome`.
+        #[must_use]
+        pub fn matches(&self, outcome: &str) -> bool {
+            match self {
+                Self::In(f) => f.values.iter().any(|v| v == outcome),
+                Self::NotIn(f) => !f.values.iter().any(|v| v == outcome),
+            }
+        }
+
+        /// The label a reader sees on the edge — `outcome in [p0, p1]`.
+        ///
+        /// Here rather than in the server because the run log stores it, the
+        /// CLI prints it and the browser draws it: three renderings of one
+        /// filter would drift, and an edge labelled two different ways in two
+        /// places is a bug nobody can see.
+        #[must_use]
+        pub fn render(&self) -> String {
+            let (op, values) = match self {
+                Self::In(f) => ("in", &f.values),
+                Self::NotIn(f) => ("not in", &f.values),
+            };
+            format!("outcome {op} [{}]", values.join(", "))
+        }
+
+        /// The values this filter names, whichever way round it is.
+        #[must_use]
+        pub fn values(&self) -> &[String] {
+            match self {
+                Self::In(f) => &f.values,
+                Self::NotIn(f) => &f.values,
+            }
+        }
+    }
 }
 
 // `large_enum_variant`: `DaemonRequest::Submit` carries the full `SubmitRequest`
