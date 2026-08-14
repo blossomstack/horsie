@@ -6,8 +6,8 @@ use crate::{
     tool::Toolbox,
 };
 use horsie_models::agent::{
-    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, StoppedCall, StoppedOutput,
-    Message, Role, ToolResultPart, Usage,
+    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, Message, Role, StoppedCall,
+    StoppedOutput, ToolResultPart, Usage,
 };
 use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
@@ -510,7 +510,9 @@ impl Agent {
             // real work, and the run resumes on this same history — so a
             // dispatched call whose result was never recorded would leave a
             // `tool_use` with no `tool_result`, which every provider rejects.
-            let (messages, stopped) = self.execute_tool_calls(&tool_calls, events, &cancel).await?;
+            let (messages, stopped) = self
+                .execute_tool_calls(&tool_calls, events, &cancel)
+                .await?;
             for message in messages {
                 self.history.push(message);
             }
@@ -1085,11 +1087,7 @@ mod tests {
     /// call indistinguishable from a finished one on reload.
     #[tokio::test]
     async fn a_stopping_call_records_no_tool_result() {
-        let provider = MockProvider::new(vec![calls_response(vec![(
-            "hc1",
-            "stop",
-            json!({}),
-        )])]);
+        let provider = MockProvider::new(vec![calls_response(vec![("hc1", "stop", json!({}))])]);
         let mut agent = Agent::builder(
             provider,
             MockToolbox::with_stopper("stop"),
@@ -1872,7 +1870,11 @@ mod tests {
                 description: "cat".to_string(),
                 input_schema: json!({ "type": "object" }),
             }],
-            Arc::new(|_, _| Ok(ToolOutcome::Result(Value::String("line1\nline2".to_string())))),
+            Arc::new(|_, _| {
+                Ok(ToolOutcome::Result(Value::String(
+                    "line1\nline2".to_string(),
+                )))
+            }),
         );
         let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .build()

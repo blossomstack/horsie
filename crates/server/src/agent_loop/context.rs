@@ -1,7 +1,7 @@
 use crate::agent_loop::agent_actor::UsageTotal;
 use crate::agent_loop::mcp_toolbox::CompositeToolbox;
 use async_trait::async_trait;
-use horsie_agentcore::{LlmProvider, ToolCallError, ToolSpec, Toolbox, ToolboxImpl};
+use horsie_agentcore::{LlmProvider, ToolCallError, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -612,13 +612,11 @@ impl Toolbox for AgentToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if let Some(c) = &self.conclude
             && name == c.name
         {
-            return Err(ToolCallError::ExecutionFailed(
-                "the conclude tool is terminal and is not executed".to_string(),
-            ));
+            return Ok(ToolOutcome::StopRun);
         }
         if name == SKILL_TOOL {
             let requested = input
@@ -638,7 +636,7 @@ impl Toolbox for AgentToolbox {
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
                 return match shared.skills.get(requested) {
-                    Some(skill) => Ok(Value::String(skill_body(skill))),
+                    Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
                         "unknown shared skill '{requested}'; available: {}",
                         shared.skills.names().join(", ")
@@ -658,7 +656,7 @@ impl Toolbox for AgentToolbox {
                 )));
             };
             return match info.skills.get(requested) {
-                Some(skill) => Ok(Value::String(skill_body(skill))),
+                Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
                 None => Err(ToolCallError::InvalidInput(format!(
                     "unknown skill '{requested}' in workspace '{ws_name}'; available: {}",
                     info.skills.names().join(", ")
@@ -680,9 +678,11 @@ impl Toolbox for AgentToolbox {
                 }
                 let (_, shared) =
                     crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
-                return Ok(Value::String(crate::agent_loop::workspace::shared_inspect(
-                    &shared.skills,
-                    shared.root.as_deref(),
+                return Ok(ToolOutcome::Result(Value::String(
+                    crate::agent_loop::workspace::shared_inspect(
+                        &shared.skills,
+                        shared.root.as_deref(),
+                    ),
                 )));
             }
             let (ws, shared) = crate::agent_loop::workspace::scan(
@@ -700,7 +700,7 @@ impl Toolbox for AgentToolbox {
                     shared.root.as_deref(),
                 ));
             }
-            return Ok(Value::String(out));
+            return Ok(ToolOutcome::Result(Value::String(out)));
         }
         self.base.execute(name, input, tool_call_id).await
     }
@@ -749,7 +749,7 @@ impl Toolbox for FilteredToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if !self.allowed.contains(name) {
             return Err(ToolCallError::InvalidInput(format!(
                 "tool '{name}' is not permitted for this agent"
@@ -768,6 +768,15 @@ impl Toolbox for FilteredToolbox {
 )]
 mod tests {
     use super::*;
+
+    /// The value an ordinary tool answered with. Panics on a tool that ended the
+    /// run, which no test here calls.
+    fn value(outcome: ToolOutcome) -> Value {
+        match outcome {
+            ToolOutcome::Result(v) => v,
+            ToolOutcome::StopRun => panic!("expected a value, got a run-stopping call"),
+        }
+    }
     use horsie_runtime_host::MockTransport;
 
     fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> AgentRunDef {
@@ -878,7 +887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conclude_tool_is_not_executable() {
+    async fn the_conclude_tool_stops_the_run() {
         let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
         let out = json!({"type": "object"});
         let tb = DefaultToolboxFactory.for_agent(
@@ -888,11 +897,8 @@ mod tests {
             false,
             crate::agent_loop::McpToolboxes::default(),
         );
-        let err = tb
-            .execute(CONCLUDE_TOOL, json!({}), "tc1")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+        let outcome = tb.execute(CONCLUDE_TOOL, json!({}), "tc1").await.unwrap();
+        assert_eq!(outcome, ToolOutcome::StopRun);
     }
 
     #[tokio::test]
@@ -932,7 +938,7 @@ mod tests {
         // A workspace skill carries its directory too, so the agent can read
         // sibling resources without guessing the layout.
         assert_eq!(
-            body,
+            value(body),
             json!(
                 "Step 1...\n\n[resources] This skill's files are in \
                  /ws/october/.claude/skills/git-bisect/. Read one with \
@@ -950,6 +956,7 @@ mod tests {
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
             .await
             .unwrap();
+        let listed = value(listed);
         let text = listed.as_str().unwrap();
         assert!(text.contains("## october — /ws/october"));
         // Directory relative to the workspace root named in the header above.
@@ -1021,6 +1028,7 @@ mod tests {
             )
             .await
             .unwrap();
+        let body = value(body);
         let text = body.as_str().unwrap();
         assert!(text.contains("Do it."));
         // The library is not a workspace, so the hint must be an absolute path —
@@ -1073,6 +1081,7 @@ mod tests {
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
             .await
             .unwrap();
+        let out = value(out);
         let text = out.as_str().unwrap();
         assert!(text.contains("## horsie_shared"));
         assert!(text.contains("- brainstorming: explore first"));
@@ -1089,7 +1098,7 @@ mod tests {
             .execute(INSPECT_WORKSPACE_TOOL, json!({}), "tc1")
             .await
             .unwrap();
-        assert!(!out.as_str().unwrap().contains("horsie_shared"));
+        assert!(!value(out).as_str().unwrap().contains("horsie_shared"));
     }
 }
 

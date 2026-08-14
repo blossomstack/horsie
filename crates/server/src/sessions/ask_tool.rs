@@ -1,15 +1,17 @@
-//! A dedicated "ask the user" tool for interactive horsie sessions.
+//! A dedicated "ask the user" tool.
 //!
-//! Kept entirely separate from the workflow crate's `conclude` tool, which
-//! serves a different purpose (a workflow sub-agent's *forced* way to signal
-//! it's done, optionally carrying structured output). Horsie sessions always
-//! offer this tool, but never force it: the model may call it to pause for a
-//! clarifying question, or just answer normally, freely either way — see
-//! `AgentParams::optional_handoff_tool` in the workflow crate, which recognizes
-//! a call to it as a handoff without ever forcing `tool_choice`.
+//! Calling it ends the run — the tool answers [`ToolOutcome::StopRun`] — and no
+//! result is recorded for the call. That dangling `tool_use` is the parked
+//! agent: the person's answer arrives against it, possibly days later, on a
+//! process that has since rehydrated the session. Blocking inside `execute`
+//! instead would pin the run, and an agent with a run in flight can never be
+//! offloaded.
+//!
+//! Never forced. The model may call it to pause for a clarifying question, or
+//! just answer normally, freely either way.
 
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -51,10 +53,7 @@ fn ask_user_spec() -> ToolSpec {
     }
 }
 
-/// Wraps an inner toolbox, adding the always-present `ask_user` tool. Like the
-/// workflow crate's `conclude` tool, a call to it is terminal — the agent loop
-/// recognizes it as a handoff (via `with_handoff_tool_optional`) and it is never
-/// actually executed here.
+/// Wraps an inner toolbox, adding the always-present `ask_user` tool.
 pub struct AskUserToolbox {
     inner: Arc<dyn Toolbox>,
 }
@@ -78,11 +77,9 @@ impl Toolbox for AskUserToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if name == ASK_USER_TOOL {
-            return Err(ToolCallError::ExecutionFailed(
-                "the ask_user tool is terminal and is not executed".to_string(),
-            ));
+            return Ok(ToolOutcome::StopRun);
         }
         self.inner.execute(name, input, tool_call_id).await
     }
@@ -111,7 +108,7 @@ mod tests {
             name: &str,
             _input: Value,
             _tool_call_id: &str,
-        ) -> Result<Value, ToolCallError> {
+        ) -> Result<ToolOutcome, ToolCallError> {
             Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             )))
@@ -161,14 +158,13 @@ mod tests {
         );
     }
 
+    /// The whole point of the tool: calling it ends the run, leaving the call
+    /// dangling for an answer to arrive against.
     #[tokio::test]
-    async fn ask_user_is_not_executable() {
+    async fn ask_user_stops_the_run() {
         let tb = AskUserToolbox::new(Arc::new(EmptyToolbox));
-        let err = tb
-            .execute(ASK_USER_TOOL, json!({}), "tc1")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+        let outcome = tb.execute(ASK_USER_TOOL, json!({}), "tc1").await.unwrap();
+        assert_eq!(outcome, ToolOutcome::StopRun);
     }
 
     #[tokio::test]

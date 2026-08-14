@@ -13,7 +13,7 @@ use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::session_actor::SubAgentCommand;
 use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -175,7 +175,7 @@ impl Toolbox for SubAgentToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if name == SPAWN_AGENT_TOOL {
             let label = input
                 .get("label")
@@ -200,7 +200,9 @@ impl Toolbox for SubAgentToolbox {
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
                 .map_err(ToolCallError::ExecutionFailed)?;
-            return Ok(Value::String(format!("Subagent spawned: {id}")));
+            return Ok(ToolOutcome::Result(Value::String(format!(
+                "Subagent spawned: {id}"
+            ))));
         }
         if name == SUBAGENT_STATUS_TOOL {
             let id = input
@@ -224,7 +226,7 @@ impl Toolbox for SubAgentToolbox {
                 .await
                 .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
                 .map_err(ToolCallError::ExecutionFailed)?;
-            return Ok(Value::String(rendered));
+            return Ok(ToolOutcome::Result(Value::String(rendered)));
         }
         self.inner.execute(name, input, tool_call_id).await
     }
@@ -448,7 +450,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, Value::String(format!("Subagent spawned: {id}")));
+        assert_eq!(
+            out.expect_value(),
+            Value::String(format!("Subagent spawned: {id}"))
+        );
     }
 
     #[tokio::test]
@@ -480,12 +485,12 @@ mod tests {
             .execute(SUBAGENT_STATUS_TOOL, json!({"id": id.to_string()}), "tc1")
             .await
             .unwrap();
-        assert!(one.as_str().unwrap().contains("completed"));
+        assert!(one.expect_value().as_str().unwrap().contains("completed"));
         let all = tb
             .execute(SUBAGENT_STATUS_TOOL, json!({}), "tc1")
             .await
             .unwrap();
-        assert!(all.as_str().unwrap().contains("[running]"));
+        assert!(all.expect_value().as_str().unwrap().contains("[running]"));
         let err = tb
             .execute(SUBAGENT_STATUS_TOOL, json!({"id": "not-a-uuid"}), "tc1")
             .await

@@ -7,7 +7,7 @@ use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::CoreCommand;
 use crate::sessions::session_actor::SessionCommand;
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -127,7 +127,7 @@ impl Toolbox for SessionTitleToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if name != SET_SESSION_TITLE_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
@@ -153,7 +153,9 @@ impl Toolbox for SessionTitleToolbox {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
             .map_err(ToolCallError::ExecutionFailed)?;
-        Ok(Value::String(format!("Session title set to \"{title}\".")))
+        Ok(ToolOutcome::Result(Value::String(format!(
+            "Session title set to \"{title}\"."
+        ))))
     }
 }
 
@@ -250,7 +252,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            result,
+            result.expect_value(),
             serde_json::Value::String("Session title set to \"Improve session titles\".".into())
         );
     }

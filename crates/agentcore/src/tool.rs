@@ -29,6 +29,19 @@ pub enum ToolOutcome {
     StopRun,
 }
 
+#[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::panic)]
+impl ToolOutcome {
+    /// The value an ordinary call answered with, for tests that exercise tools
+    /// which never end a run. Panics on [`ToolOutcome::StopRun`].
+    pub fn expect_value(self) -> Value {
+        match self {
+            Self::Result(v) => v,
+            Self::StopRun => panic!("expected a value, got a call that ended the run"),
+        }
+    }
+}
+
 impl From<Value> for ToolOutcome {
     fn from(value: Value) -> Self {
         Self::Result(value)
@@ -101,7 +114,10 @@ impl Toolbox for ToolboxImpl {
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
         match self.tools.iter().find(|t| t.spec().name == name) {
-            Some(tool) => tool.execute(input, tool_call_id).await.map(ToolOutcome::from),
+            Some(tool) => tool
+                .execute(input, tool_call_id)
+                .await
+                .map(ToolOutcome::from),
             None => Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             ))),

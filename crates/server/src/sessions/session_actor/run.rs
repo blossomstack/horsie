@@ -296,13 +296,6 @@ impl SessionActor {
                 settings: step.settings.clone(),
                 step_output_schema: step.output_schema.clone(),
                 agent_type: None,
-                // Deliberately none. A step's terminal tool is `conclude`,
-                // synthesized from its output schema; naming `ask_user`
-                // beside it would stop the loop treating `conclude` as
-                // terminal, so it would try to *execute* it, get "the
-                // conclude tool is terminal and is not executed" back, and
-                // keep going. A step asks through `conclude(kind=ask)`.
-                handoff_tool: None,
             },
         )
         .map(|resident| resident.actor)

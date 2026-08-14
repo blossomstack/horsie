@@ -1,15 +1,17 @@
 use crate::agent_loop::context::{
-    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
+    AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion,
 };
 use crate::agent_loop::inbox::Summarise;
+use crate::sessions::ask_tool::ASK_USER_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
     ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
 };
+use horsie_agentcore::ToolOutcome;
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
     AgentResult, AskLifecycle, CompactionEntry, ContentPart, EventSink, EventSinkError,
-    HandoffCall, LifecycleEvent, LlmProvider, Message, QueuedLifecycle, Role, Toolbox,
+    LifecycleEvent, LlmProvider, Message, QueuedLifecycle, Role, StoppedCall, Toolbox,
     TurnBeganLifecycle, Usage,
 };
 use horsie_models::now_ms;
@@ -40,13 +42,6 @@ pub struct AgentParams {
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
     /// stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
-    /// An optional, never-forced handoff tool name, set by callers with their
-    /// own terminal tool that isn't the workflow `conclude` mechanism above
-    /// (e.g. the server crate's `ask_user` tool for interactive sessions). When
-    /// set, this takes over from `handoff_tool()`/forced `conclude`: `tool_choice`
-    /// stays `auto`, plain text is a perfectly normal reply, and a voluntary call
-    /// to this tool is still recognized as a handoff. `None` for workflow agents.
-    pub optional_handoff_tool: Option<String>,
 }
 
 impl AgentParams {
@@ -60,32 +55,7 @@ impl AgentParams {
             max_retries: def.max_retries.unwrap_or(0),
             thinking_effort: None,
             interactive: false,
-            optional_handoff_tool: None,
         }
-    }
-
-    /// The agent's handoff tool — the synthesized `conclude` tool when it has an
-    /// output schema, may ask, or may park on timers, else `None` (plain text end).
-    fn handoff_tool(&self) -> Option<String> {
-        if self.has_output_schema || self.allow_ask_user || self.allow_timers {
-            Some(CONCLUDE_TOOL.to_string())
-        } else {
-            None
-        }
-    }
-
-    /// Every tool name a call to which *parks* this agent rather than running.
-    ///
-    /// A handoff tool is never executed: the run ends on the call and its result
-    /// arrives later as an `InjectToolResult` (the user's answer to `ask_user`,
-    /// a timer firing). So a dangling call to one is the normal shape of a
-    /// parked agent, not the wreckage of an interrupted one — see
-    /// [`missing_tool_results`], which must not journal a repair for it.
-    fn handoff_tools(&self) -> Vec<String> {
-        self.handoff_tool()
-            .into_iter()
-            .chain(self.optional_handoff_tool.clone())
-            .collect()
     }
 }
 
@@ -1078,13 +1048,14 @@ struct RunHandle {
 
 #[derive(Debug)]
 enum RunOutcome {
-    /// Agent ended its turn with plain text (no `conclude` tool registered).
+    /// Agent ended its turn with plain text. Whether that is a park or a
+    /// mistake is decided by the actor, which alone knows what would wake it.
     Completed {
         text: String,
     },
-    /// Agent called its handoff tool; `calls` are the raw inputs, one per call.
-    Concluded {
-        calls: Vec<HandoffCall>,
+    /// A tool ended the run. One call per stopper the model issued.
+    Stopped {
+        calls: Vec<StoppedCall>,
     },
     Cancelled,
     Failed {
@@ -1144,6 +1115,12 @@ pub struct AgentActor {
     /// be holding a turn, and one that is respawned is built with the answer
     /// that was true at the time.
     ready: bool,
+    /// What the next run should tell the provider about tool use. Taken when a
+    /// run starts, so it applies to exactly one turn. Set only when re-running a
+    /// turn that ended without the result it owed — see the nudge in
+    /// `handle_finished`. In-memory: a process that died mid-nudge starts the
+    /// turn again from the queue, and a fresh attempt is the right default.
+    pending_tool_choice: Option<horsie_agentcore::ToolChoice>,
     /// A prepare step is in flight. Gates a second `Resume` exactly as `running`
     /// does: between `Resume` and `StartPrepared` no run exists yet, so
     /// `running` alone would let two turns through and land two runs on one
@@ -1190,6 +1167,7 @@ impl AgentActor {
             events_since_snapshot: 0,
             next_run_id: 0,
             ready,
+            pending_tool_choice: None,
             preparing: false,
             start_hook_fired: false,
             cancel_acks: Vec::new(),
@@ -1528,13 +1506,10 @@ impl AgentActor {
         let context_provider = self.ctx.context_provider.clone();
         let allow_timers = self.params.allow_timers;
         let configured_prompt = self.params.system_prompt.clone();
-        // An explicit optional handoff tool (e.g. the server crate's `ask_user`
-        // tool for interactive sessions) always wins over the workflow `conclude`
-        // mechanism and is never forced.
-        let (handoff_tool, force_handoff_choice) = match self.params.optional_handoff_tool.clone() {
-            Some(name) => (Some(name), false),
-            None => (self.params.handoff_tool(), true),
-        };
+        // Normally `None`, meaning `Auto`: a turn may end with text, and which
+        // tools end a run is the toolbox's business. Set only when this turn is
+        // re-running one that ended without the result it owed.
+        let tool_choice = self.pending_tool_choice.take();
         let max_iterations = self.params.max_iterations;
         let thinking_effort = self.params.thinking_effort;
         let max_retries = self.params.max_retries;
@@ -1640,8 +1615,7 @@ impl AgentActor {
                 sink,
                 conversation_id,
                 system_prompt,
-                handoff_tool,
-                force_handoff_choice,
+                tool_choice,
                 max_iterations,
                 max_retries,
                 thinking_effort,
@@ -1756,7 +1730,7 @@ impl AgentActor {
                 let drained = self.try_drain(state, ctx).await;
                 self.persist_maybe_snapshot(drained)
             }
-            RunOutcome::Concluded { calls } => {
+            RunOutcome::Stopped { calls } => {
                 match self.interpret(calls) {
                     Conclusion::Output(output) => {
                         parent
@@ -1823,7 +1797,7 @@ impl AgentActor {
                 // journal is then a faithful record of what the model was shown,
                 // and a mid-history dangle can no longer accumulate.
                 let mut events: Vec<AgentDomainEvent> =
-                    missing_tool_results(&state.prompt_messages(), &self.params.handoff_tools())
+                    missing_tool_results(&state.prompt_messages(), &parked_call_ids(state))
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
@@ -1888,15 +1862,15 @@ impl AgentActor {
     /// `has_output_schema`/`allow_ask_user`-based branching entirely, which
     /// exists only to disambiguate the workflow crate's multi-purpose `conclude`
     /// payload shape.
-    fn interpret(&self, calls: Vec<HandoffCall>) -> Conclusion {
-        if self.params.optional_handoff_tool.is_some() {
+    fn interpret(&self, calls: Vec<StoppedCall>) -> Conclusion {
+        if calls.iter().all(|c| c.tool == ASK_USER_TOOL) {
             return Conclusion::Ask(
                 calls
                     .into_iter()
                     .map(|call| AskedQuestion {
                         tool_call_id: Some(call.tool_call_id),
                         question: call
-                            .data
+                            .input
                             .get("question")
                             .and_then(Value::as_str)
                             .unwrap_or_default()
@@ -1905,8 +1879,6 @@ impl AgentActor {
                     .collect(),
             );
         }
-        // A forced handoff is one conclusion, and `validate_handoff` rejects a
-        // turn that calls it twice — so there is exactly one call here.
         let Some(call) = calls.into_iter().next() else {
             return Conclusion::Output(Value::Null);
         };
@@ -1914,7 +1886,7 @@ impl AgentActor {
             self.params.has_output_schema,
             self.params.allow_ask_user,
             self.params.allow_timers,
-            call.data,
+            call.input,
             Some(call.tool_call_id),
         )
     }
@@ -2610,7 +2582,7 @@ impl EventSourcedActor for AgentActor {
         // Record the repair once, here, where it still belongs at the end of the
         // transcript — recomputing it per turn instead is what let it drift into
         // the middle of a history nobody could then repair in place.
-        let repairs = missing_tool_results(&state.prompt_messages(), &self.params.handoff_tools());
+        let repairs = missing_tool_results(&state.prompt_messages(), &parked_call_ids(state));
         if !repairs.is_empty() {
             let (ack, _) = tokio::sync::oneshot::channel();
             let ack = ReplyTo::from_sender(ack);
@@ -2709,7 +2681,7 @@ impl Toolbox for TimerToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, horsie_agentcore::ToolCallError> {
+    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
         use crate::agent_loop::timers::{CancelSelector, TimerId, TimerKind};
         use horsie_agentcore::ToolCallError;
         match name {
@@ -2758,7 +2730,7 @@ impl Toolbox for TimerToolbox {
                     })
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-                Ok(serde_json::json!({ "timer_id": id.0 }))
+                Ok(ToolOutcome::Result(serde_json::json!({ "timer_id": id.0 })))
             }
             "list_timers" => {
                 let views = self
@@ -2767,6 +2739,7 @@ impl Toolbox for TimerToolbox {
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 serde_json::to_value(views)
+                    .map(ToolOutcome::Result)
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
             }
             "cancel_timer" => {
@@ -2785,7 +2758,7 @@ impl Toolbox for TimerToolbox {
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
-                Ok(serde_json::json!({ "cancelled": ids }))
+                Ok(ToolOutcome::Result(serde_json::json!({ "cancelled": ids })))
             }
             _ => self.inner.execute(name, input, tool_call_id).await,
         }
@@ -2814,7 +2787,7 @@ impl Toolbox for TaskListToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, horsie_agentcore::ToolCallError> {
+    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
         use horsie_agentcore::ToolCallError;
         if name != crate::agent_loop::task_list::TASK_LIST_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
@@ -2826,7 +2799,7 @@ impl Toolbox for TaskListToolbox {
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
         result
-            .map(Value::String)
+            .map(|text| ToolOutcome::Result(Value::String(text)))
             .map_err(ToolCallError::InvalidInput)
     }
 }
@@ -3011,7 +2984,20 @@ const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 /// the transcript as it stands. Nothing else needs to journal it: a call that is
 /// still in flight is not missing a result, it just does not have one yet.
 ///
-/// A call to one of `handoff_tools` is exempt. Those park the agent — the run
+/// Every tool call this agent is currently parked on.
+///
+/// The exemption `missing_tool_results` needs, taken from state rather than
+/// from tool names: these are the calls an answer will arrive against, so they
+/// are exactly the dangling calls that are not wreckage.
+fn parked_call_ids(state: &AgentState) -> Vec<String> {
+    state
+        .asks
+        .iter()
+        .filter_map(|a| a.tool_call_id.clone())
+        .collect()
+}
+
+/// A call the agent is parked on is exempt. Those park the agent — the run
 /// ends on the call and the result comes later via `InjectToolResult` — so from
 /// a journal alone a parked `ask_user` is indistinguishable from a call the dead
 /// process was running, and recovery used to "repair" it. The user's answer was
@@ -3022,7 +3008,7 @@ const INTERRUPTED_RESULT: &str = "interrupted, no result was recorded";
 /// Not journaling the repair is safe because [`repair_unanswered_tool_calls`]
 /// still patches the history put on the wire, so an abandoned park can never
 /// reach a provider dangling.
-fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<Message> {
+fn missing_tool_results(messages: &[Message], parked_on: &[String]) -> Vec<Message> {
     let answered: std::collections::HashSet<&str> = messages
         .iter()
         .flat_map(|m| m.parts.iter())
@@ -3040,7 +3026,7 @@ fn missing_tool_results(messages: &[Message], handoff_tools: &[String]) -> Vec<M
         .flat_map(|m| m.parts.iter())
         .filter_map(|p| match p {
             ContentPart::ToolCall(tc)
-                if !answered.contains(tc.id.as_str()) && !handoff_tools.contains(&tc.name) =>
+                if !answered.contains(tc.id.as_str()) && !parked_on.contains(&tc.id) =>
             {
                 Some(tc.id.clone())
             }
@@ -3210,8 +3196,7 @@ async fn run_with_retries(
     sink: Arc<dyn EventSink>,
     conversation_id: String,
     system_prompt: String,
-    handoff_tool: Option<String>,
-    force_handoff_choice: bool,
+    tool_choice: Option<horsie_agentcore::ToolChoice>,
     max_iterations: Option<u32>,
     max_retries: u32,
     thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
@@ -3263,8 +3248,7 @@ async fn run_with_retries(
             sink,
             conversation_id,
             system_prompt,
-            handoff_tool,
-            force_handoff_choice,
+            tool_choice,
             max_iterations,
             max_retries,
             thinking_effort,
@@ -3314,8 +3298,7 @@ async fn run_turn_attempts(
     sink: Arc<dyn EventSink>,
     conversation_id: String,
     system_prompt: String,
-    handoff_tool: Option<String>,
-    force_handoff_choice: bool,
+    tool_choice: Option<horsie_agentcore::ToolChoice>,
     max_iterations: Option<u32>,
     max_retries: u32,
     thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
@@ -3345,12 +3328,8 @@ async fn run_turn_attempts(
             .with_history(history.clone())
             .with_compaction(compaction_policy.clone())
             .with_context_tokens(context_tokens);
-        if let Some(name) = &handoff_tool {
-            builder = if force_handoff_choice {
-                builder.with_handoff_tool(name.clone())
-            } else {
-                builder.with_handoff_tool_optional(name.clone())
-            };
+        if let Some(choice) = tool_choice.clone() {
+            builder = builder.with_tool_choice(choice);
         }
 
         let mut agent = match builder.build() {
@@ -3385,7 +3364,7 @@ async fn run_turn_attempts(
             Ok(output) => {
                 return match output.result {
                     AgentResult::Completed(c) => RunOutcome::Completed { text: c.text },
-                    AgentResult::Handoff(h) => RunOutcome::Concluded { calls: h.calls },
+                    AgentResult::Stopped(s) => RunOutcome::Stopped { calls: s.calls },
                 };
             }
             Err(AgentError::Cancelled) => return RunOutcome::Cancelled,
@@ -3726,15 +3705,6 @@ mod tests {
             ids,
             vec![session_id.to_string()],
             "the provider must be told this agent's own id, not any other"
-        );
-    }
-
-    #[test]
-    fn from_def_defaults_optional_handoff_tool_to_none() {
-        assert!(
-            AgentParams::from_def(&def_fixture())
-                .optional_handoff_tool
-                .is_none()
         );
     }
 
@@ -5047,11 +5017,15 @@ mod tests {
         ]
     }
 
+    /// Keyed on the *calls* the agent is parked on, taken from `state.asks`,
+    /// rather than on tool names: these are exactly the ids an answer will
+    /// arrive against, so a call to the same tool in an earlier, finished turn
+    /// is still repaired.
     #[test]
     fn recovery_does_not_repair_the_ask_the_session_is_parked_on() {
-        let handoff = vec!["ask_user".to_string()];
+        let parked = vec!["ask1".to_string()];
         assert!(
-            missing_tool_results(&parked_on_ask(), &handoff).is_empty(),
+            missing_tool_results(&parked_on_ask(), &parked).is_empty(),
             "a parked ask is awaiting its answer, not interrupted"
         );
         // Without the exemption it *is* repaired — the bug this guards, which
@@ -5060,29 +5034,10 @@ mod tests {
     }
 
     #[test]
-    fn an_interactive_sessions_ask_tool_is_a_handoff_tool() {
-        // The wiring the recovery exemption depends on: the server sets
-        // `ask_user` here, and nothing else tells the agent that call parks it.
-        let mut params = AgentParams::from_def(&def_fixture());
-        params.optional_handoff_tool = Some("ask_user".to_string());
-        assert_eq!(params.handoff_tools(), vec!["ask_user".to_string()]);
-    }
-
-    #[test]
-    fn a_timer_parked_agent_exempts_its_conclude_call() {
-        let mut def = def_fixture();
-        def.allow_timers = Some(true);
-        assert_eq!(
-            AgentParams::from_def(&def).handoff_tools(),
-            vec![CONCLUDE_TOOL.to_string()]
-        );
-    }
-
-    #[test]
     fn recovery_still_repairs_a_real_tool_call_left_dangling_beside_a_park() {
         let mut history = parked_on_ask();
         history.insert(1, assistant_call("a0", "died"));
-        let repairs = missing_tool_results(&history, &["ask_user".to_string()]);
+        let repairs = missing_tool_results(&history, &["ask1".to_string()]);
         let ids: Vec<String> = repairs
             .iter()
             .flat_map(|m| m.parts.iter())
@@ -5103,7 +5058,7 @@ mod tests {
         // The safety net that makes not journaling the repair safe: an ask that
         // really is abandoned still reaches the provider well-formed.
         let history = parked_on_ask();
-        assert!(missing_tool_results(&history, &["ask_user".to_string()]).is_empty());
+        assert!(missing_tool_results(&history, &["ask1".to_string()]).is_empty());
         assert!(
             unmatched_tool_uses(&repair_unanswered_tool_calls(history)).is_empty(),
             "the wire history must never carry a dangling tool_use"
@@ -5641,7 +5596,7 @@ mod retry_tests {
                 description: "echo".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
-            Arc::new(|_, input| Ok(input)),
+            Arc::new(|_, input| Ok(ToolOutcome::Result(input))),
         )
     }
 
@@ -5658,7 +5613,6 @@ mod retry_tests {
             "test-conversation".to_string(),
             "sys".into(),
             None,
-            false,
             Some(10),
             max_retries,
             None,
@@ -5743,7 +5697,6 @@ mod retry_tests {
             "test-conversation".to_string(),
             "sys".into(),
             None,
-            false,
             Some(10),
             max_retries,
             None,

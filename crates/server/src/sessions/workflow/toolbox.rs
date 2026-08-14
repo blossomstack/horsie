@@ -11,7 +11,7 @@
 
 use crate::agent_loop::{CONCLUDE_TOOL, conclude_tool_spec};
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -63,11 +63,9 @@ impl Toolbox for StepConcludeToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if name == CONCLUDE_TOOL && self.conclude.is_some() {
-            return Err(ToolCallError::ExecutionFailed(
-                "the conclude tool is terminal and is not executed".to_string(),
-            ));
+            return Ok(ToolOutcome::StopRun);
         }
         self.inner.execute(name, input, tool_call_id).await
     }
@@ -140,12 +138,12 @@ mod tests {
                 _name: &str,
                 _input: Value,
                 tool_call_id: &str,
-            ) -> Result<Value, ToolCallError> {
+            ) -> Result<ToolOutcome, ToolCallError> {
                 self.0
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(tool_call_id.to_string());
-                Ok(Value::Null)
+                Ok(ToolOutcome::Result(Value::Null))
             }
         }
 
@@ -166,13 +164,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conclude_is_terminal_and_never_executes() {
+    async fn conclude_stops_the_run() {
         let schema = serde_json::json!({"type": "object"});
         let tb = StepConcludeToolbox::wrap(base(), Some(&schema), false);
-        let err = tb
+        let outcome = tb
             .execute(CONCLUDE_TOOL, serde_json::json!({}), "tc1")
             .await
-            .unwrap_err();
-        assert!(matches!(err, ToolCallError::ExecutionFailed(_)));
+            .unwrap();
+        assert_eq!(outcome, ToolOutcome::StopRun);
     }
 }

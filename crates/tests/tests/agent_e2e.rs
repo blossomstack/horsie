@@ -15,7 +15,7 @@ use async_llm::mock::MockLlmServer;
 use async_trait::async_trait;
 use horsie_agentcore::{
     Agent, AgentError, AgentEvent, AgentInput, AgentResult, CompletedOutput, ContentPart,
-    EventSink, EventSinkError, HandoffOutput, ToolCallError, ToolSpec, Toolbox,
+    EventSink, EventSinkError, StoppedOutput, ToolCallError, ToolOutcome, ToolSpec, Toolbox,
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use std::sync::{Arc, Mutex};
@@ -84,6 +84,8 @@ fn event_kinds(events: &[AgentEvent]) -> Vec<&'static str> {
 struct FixedToolbox {
     specs: Vec<ToolSpec>,
     output: serde_json::Value,
+    /// The tool that ends the run instead of returning a value.
+    stopper: Option<String>,
     calls: Mutex<Vec<(String, serde_json::Value)>>,
 }
 
@@ -96,6 +98,21 @@ impl FixedToolbox {
                 input_schema: serde_json::json!({"type": "object"}),
             }],
             output,
+            stopper: None,
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// One tool, which ends the run when called.
+    fn stopping(name: &str) -> Arc<Self> {
+        Arc::new(Self {
+            specs: vec![ToolSpec {
+                name: name.to_string(),
+                description: format!("{name} tool"),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            output: serde_json::Value::Null,
+            stopper: Some(name.to_string()),
             calls: Mutex::new(Vec::new()),
         })
     }
@@ -116,9 +133,12 @@ impl Toolbox for FixedToolbox {
         name: &str,
         input: serde_json::Value,
         _tool_call_id: &str,
-    ) -> Result<serde_json::Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         self.calls.lock().unwrap().push((name.to_string(), input));
-        Ok(self.output.clone())
+        if self.stopper.as_deref() == Some(name) {
+            return Ok(ToolOutcome::StopRun);
+        }
+        Ok(ToolOutcome::Result(self.output.clone()))
     }
 }
 
@@ -463,18 +483,17 @@ async fn run_complete_reports_the_iteration_count_and_the_usage() {
     assert!(rc.usage.output_tokens > 0);
 }
 
-/// Agent with a handoff tool returns Handoff result immediately without executing the tool.
+/// A tool answering `StopRun` ends the run, and the loop reports which tool it
+/// was and what it was called with.
 #[tokio::test]
-async fn a_handoff_ends_the_run_naming_the_tool_and_its_input() {
+async fn a_stopping_tool_ends_the_run_naming_the_tool_and_its_input() {
     let mock = MockLlmServer::builder()
         .tool_call("delegate", serde_json::json!({"task": "summarise"}))
         .build()
         .await;
     let provider = Arc::new(provider_at(&mock.url()));
-    // The handoff tool must be advertised in the toolbox.
-    let toolbox = FixedToolbox::new("delegate", serde_json::json!(null));
+    let toolbox = FixedToolbox::stopping("delegate");
     let mut agent = Agent::builder(provider, toolbox, "test-conversation")
-        .with_handoff_tool("delegate")
         .build()
         .unwrap();
     let sink = CollectSink::new();
@@ -489,20 +508,22 @@ async fn a_handoff_ends_the_run_naming_the_tool_and_its_input() {
         .unwrap();
 
     match output.result {
-        AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
-            assert_eq!(tool_name, "delegate");
+        AgentResult::Stopped(StoppedOutput { calls }) => {
             assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].data["task"], "summarise");
+            assert_eq!(calls[0].tool, "delegate");
+            assert_eq!(calls[0].input["task"], "summarise");
         }
-        other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+        other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
     }
 
-    // No ToolExecuting emitted for a handoff
+    // The call is dispatched, so it starts — but it records no result, which is
+    // what leaves the `tool_use` dangling for an answer to arrive against.
     assert!(
         !sink
             .events()
             .iter()
-            .any(|e| matches!(e, AgentEvent::ToolExecuting(_)))
+            .any(|e| matches!(e, AgentEvent::ToolComplete(_))),
+        "a stopping call records no result"
     );
 }
 

@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use horsie_actor::ReplyTo;
 use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
 use horsie_agentcore::{
-    ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolSpec, Toolbox,
+    ContentPart, LlmProvider, Message, Role, ToolCallError, ToolCallPart, ToolOutcome, ToolSpec,
+    Toolbox,
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
@@ -61,7 +62,7 @@ impl Toolbox for ReadFileToolbox {
         name: &str,
         _input: Value,
         _tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         Err(ToolCallError::ExecutionFailed(format!(
             "unexpected tool call: {name}"
         )))
@@ -298,7 +299,7 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             name: &str,
             _input: Value,
             _tool_call_id: &str,
-        ) -> Result<Value, ToolCallError> {
+        ) -> Result<ToolOutcome, ToolCallError> {
             Err(ToolCallError::ExecutionFailed(format!(
                 "unexpected tool call: {name}"
             )))
@@ -357,9 +358,6 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         allowed_tools: None,
     });
     params.interactive = true;
-    // What makes the call a park rather than an interruption, exactly as
-    // `SessionActor` configures its agent.
-    params.optional_handoff_tool = Some("ask_user".into());
 
     let agent = horsie_server::testing::spawn_detached(
         &ActorSystem::new(journal.clone()),

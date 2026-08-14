@@ -994,7 +994,7 @@ mod tests {
 
         let unattended = build(true).provide().await.unwrap();
         let tools = names(&unattended);
-        assert!(!tools.contains(&ASK_USER_TOOL.to_string()));
+        assert!(!tools.contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
         // Everything else the main agent has is untouched.
         assert!(tools.contains(&"set_session_title".to_string()));
         assert!(tools.contains(&"spawn_agent".to_string()));
@@ -1007,7 +1007,7 @@ mod tests {
         );
 
         let attended = build(false).provide().await.unwrap();
-        assert!(names(&attended).contains(&ASK_USER_TOOL.to_string()));
+        assert!(names(&attended).contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
         assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
     }
 
