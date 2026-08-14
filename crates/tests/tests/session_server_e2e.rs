@@ -1724,7 +1724,10 @@ async fn session_detail_echoes_full_config() {
     // Plugin enablement and MCP servers are the *agent's* configuration, read
     // off its own document — the session carries only the bundle union.
     let agent: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}/agents/main", server.addr))
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
         .send()
         .await
         .unwrap()
@@ -1814,7 +1817,10 @@ async fn session_detail_echoes_thinking_effort() {
     );
     // The effort is the *agent's*: it reads off the main agent's document.
     let agent: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}/agents/main", server.addr))
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
         .send()
         .await
         .unwrap()
@@ -1854,7 +1860,10 @@ async fn session_detail_echoes_thinking_effort() {
         .await
         .unwrap();
     let agent: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}/agents/main", server.addr))
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
         .send()
         .await
         .unwrap()
