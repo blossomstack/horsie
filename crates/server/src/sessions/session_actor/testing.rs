@@ -55,6 +55,7 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
             thinking_effort: None,
             max_concurrent_subagents: None,
             auto_compact: None,
+            control_plane: None,
         },
         workspaces: vec![WorkspaceDef {
             name: "main".into(),
@@ -339,6 +340,7 @@ pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::Workfl
         thinking_effort: None,
         max_concurrent_subagents: None,
         auto_compact: None,
+        control_plane: None,
     };
     WorkflowRunSpec {
         workflow: "fix-bug".into(),
@@ -1213,6 +1215,7 @@ pub(super) fn catalog_provider(
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,
+        services: None,
         settings: actor_spec_fixture().agent,
         step_result: Default::default(),
         session_id: id,
@@ -1316,6 +1319,7 @@ pub(super) fn typed_provider(
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,
+        services: None,
         settings,
         step_result: Default::default(),
         session_id: id,

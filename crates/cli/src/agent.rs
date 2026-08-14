@@ -124,6 +124,7 @@ mod tests {
             created_at: "1".into(),
             updated_at: "1".into(),
             auto_compact: None,
+            control_plane: None,
         }
     }
 

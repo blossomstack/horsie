@@ -85,3 +85,49 @@ test("N3: the agent form offers skills and MCP, and no runtime", async ({
 
   await page.request.delete(`${appBase}/api/agents/e2e-channels`);
 });
+
+test("N4: the control-plane toggle is off by default and persists when ticked", async ({
+  page,
+  appBase,
+}) => {
+  const cfg = (await (
+    await page.request.get(`${appBase}/api/config`)
+  ).json()) as { models: { alias: string }[] };
+  const res = await page.request.post(`${appBase}/api/agents`, {
+    data: { name: "e2e-control", model: cfg.models[0]?.alias },
+  });
+  expect(res.status()).toBe(201);
+
+  await page.goto(`${appBase}/agents/e2e-control/edit`);
+  const toggle = page.getByTestId("agent-control-plane-toggle");
+  await expect(toggle).toBeVisible();
+  // Absent is off: a preset created without mentioning it comes back ungranted.
+  await expect(toggle).not.toBeChecked();
+
+  await page.screenshot({
+    path: "test-results/agent-control-plane-toggle.png",
+    fullPage: true,
+  });
+
+  await toggle.check();
+  await page.getByTestId("save-agent-button").click();
+
+  // The grant is only real once the server has it.
+  await expect
+    .poll(async () =>
+      (
+        await (await page.request.get(`${appBase}/api/agents/e2e-control`)).json()
+      ).controlPlane,
+    )
+    .toBe(true);
+
+  // Navigate, never reload: saving sends the browser back to the agents list,
+  // so `reload()` re-fetches whichever page won the race — the list on a slow
+  // machine, the form on a fast one. Asking for the form by URL is the same
+  // assertion without the race.
+  await page.goto(`${appBase}/agents/e2e-control/edit`);
+  await expect(page.getByTestId("agent-edit-page")).toBeVisible();
+  await expect(page.getByTestId("agent-control-plane-toggle")).toBeChecked();
+
+  await page.request.delete(`${appBase}/api/agents/e2e-control`);
+});

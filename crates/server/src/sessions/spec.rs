@@ -93,6 +93,12 @@ pub struct AgentSettings {
     /// means yes, so every existing session gains the behaviour.
     #[serde(default)]
     pub auto_compact: Option<bool>,
+    /// Whether this session's main agent may manage the horsie server itself.
+    /// `#[serde(default)]` so journal rows written before the control plane
+    /// deserialize; `None` means no, because authority is granted and never
+    /// acquired by age.
+    #[serde(default)]
+    pub control_plane: Option<bool>,
 }
 
 impl AgentSettings {
@@ -201,6 +207,7 @@ impl SessionSpec {
                 thinking_effort: None,
                 max_concurrent_subagents: None,
                 auto_compact: None,
+                control_plane: None,
             },
             workspaces: vec![],
             provision: vec![],
@@ -389,6 +396,7 @@ mod tests {
                 thinking_effort: None,
                 max_concurrent_subagents: None,
                 auto_compact: None,
+                control_plane: None,
             },
             workspaces: vec![],
             provision: vec![],
@@ -440,6 +448,7 @@ mod tests {
                 thinking_effort: None,
                 max_concurrent_subagents: None,
                 auto_compact: None,
+                control_plane: None,
             },
             workspaces: vec![],
             provision: vec![],

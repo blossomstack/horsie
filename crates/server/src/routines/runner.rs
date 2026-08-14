@@ -109,6 +109,10 @@ impl RoutineRunner {
             max_concurrent_subagents: None,
             instructions: agent.instructions.clone(),
             auto_compact: agent.auto_compact,
+            // A routine is how you schedule control-plane work — "prune last
+            // week's sessions every Monday" — so the preset's grant carries
+            // into the sessions it fires, exactly as an interactive invoke does.
+            control_plane: agent.control_plane,
         };
         let spec = build_session_spec(
             &self.config,

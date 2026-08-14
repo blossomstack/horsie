@@ -158,6 +158,21 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                 What every session started from this preset runs with.
               </p>
               <ConfigFields draft={draft} />
+              {/* One more thing this preset runs with, so it lives with the
+                  rest rather than in a section of its own. */}
+              <label className="mt-4 flex items-center gap-2 text-sm text-dim">
+                <input
+                  type="checkbox"
+                  checked={draft.controlPlane}
+                  onChange={(e) => draft.setControlPlane(e.target.checked)}
+                  data-testid="agent-control-plane-toggle"
+                />
+                Let this agent manage this horsie server
+              </label>
+              <p className="mt-1 text-xs text-faint">
+                Creates, changes and deletes agents, routines and environments —
+                immediately, without asking first.
+              </p>
             </div>
           </section>
 

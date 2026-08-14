@@ -132,6 +132,41 @@ pub(crate) struct StepResultDef {
     pub(crate) interactive: bool,
 }
 
+/// Wrap `base` with the control-plane tools, and render the command index for
+/// the system prompt.
+///
+/// Main-agent only. A subagent, a workflow step and a fork all inherit the
+/// session's settings, but authority over the server is not a setting they
+/// should carry — the same rule that keeps session-metadata tools off them.
+fn build_control_layer(
+    base: Arc<dyn Toolbox>,
+    services: Option<&Arc<crate::users::UserServices>>,
+    settings: &AgentSettings,
+    kind: SessionAgentKind,
+) -> (Arc<dyn Toolbox>, String) {
+    if !matches!(kind, SessionAgentKind::Main) || settings.control_plane != Some(true) {
+        return (base, String::new());
+    }
+    let Some(services) = services else {
+        tracing::warn!("session asks for the control plane but no services are wired; ignoring");
+        return (base, String::new());
+    };
+    let toolbox = crate::control::toolbox::ControlToolbox::new(
+        base,
+        services.clone(),
+        crate::control::operations(),
+    );
+    let index = format!(
+        "## Managing this horsie server\n\n\
+         You can manage this server through the `horsie_*` tools: {}\n\n\
+         Call a resource's tool with an `action`. Changes take effect \
+         immediately and are not confirmed with the user first, so read before \
+         you write when you are unsure which row you mean.",
+        toolbox.command_index()
+    );
+    (Arc::new(toolbox), index)
+}
+
 /// Which of a session's agents a [`SessionContextProvider`] serves. The kind
 /// decides the toolbox layers (session-metadata tools are main-only) and
 /// whether preparation progress is broadcast (main-only — subagents are
@@ -244,6 +279,11 @@ pub(super) struct SessionContextProvider {
     pub(super) registry: crate::sessions::spec::SharedProviderRegistry,
     pub(super) mcp: Option<Arc<crate::mcp::McpService>>,
     pub(super) memory: Option<Arc<crate::memory::MemoryService>>,
+    /// The account's whole service bundle, for the control-plane tools — which
+    /// reach agents, routines and environments alike, so unlike `memory` there
+    /// is no single service to hold. `None` wherever the control plane is not
+    /// wired, which is every test that does not exercise it.
+    pub(super) services: Option<Arc<crate::users::UserServices>>,
     pub(super) settings: AgentSettings,
     /// What a workflow step promises to return, and whether it may ask. Empty
     /// and false for every other kind of agent, which never gets the
@@ -742,6 +782,8 @@ impl ContextProvider for SessionContextProvider {
         );
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
+        let (with_memory, control_index) =
+            build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
         let caller = match self.kind {
             // A step roots its own tree, so its spawns are that tree's `Main`.
             // A fork roots its own tree too, for the same reason a step does.
@@ -838,10 +880,14 @@ impl ContextProvider for SessionContextProvider {
                 None => suffix.trim_start().to_string(),
             }),
         };
-        let system_prompt = match (system_prompt, memory_index.is_empty()) {
-            (Some(p), false) => Some(format!("{p}\n\n{memory_index}")),
+        let sections: Vec<String> = [memory_index, control_index]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+        let system_prompt = match (system_prompt, sections.is_empty()) {
+            (Some(p), false) => Some(format!("{p}\n\n{}", sections.join("\n\n"))),
             (Some(p), true) => Some(p),
-            (None, false) => Some(memory_index),
+            (None, false) => Some(sections.join("\n\n")),
             (None, true) => None,
         };
         if broadcast {
@@ -879,6 +925,70 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// The gate, at the layer that applies it: off unless the preset says so,
+    /// and never for an agent that is not the session's main one.
+    #[tokio::test]
+    async fn control_tools_reach_only_a_main_agent_that_asked_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::testing::state(dir.path()).build().await;
+        let services = state.services().await;
+        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
+
+        let mut settings = AgentSettings {
+            model: "m".into(),
+            allowed_tools: None,
+            use_plugins: None,
+            max_iterations: None,
+            max_retries: 0,
+            mcp_servers: Vec::new(),
+            memory_spaces: Vec::new(),
+            thinking_effort: None,
+            max_concurrent_subagents: None,
+            instructions: None,
+            auto_compact: None,
+            control_plane: None,
+        };
+        let (toolbox, index) = build_control_layer(
+            base.clone(),
+            Some(&services),
+            &settings,
+            SessionAgentKind::Main,
+        );
+        assert!(
+            !toolbox
+                .specs()
+                .iter()
+                .any(|s| s.name.starts_with("horsie_")),
+            "a preset that never asked must not get them"
+        );
+        assert!(index.is_empty());
+
+        settings.control_plane = Some(true);
+        let (toolbox, index) = build_control_layer(
+            base.clone(),
+            Some(&services),
+            &settings,
+            SessionAgentKind::Main,
+        );
+        assert!(toolbox.specs().iter().any(|s| s.name == "horsie_agents"));
+        assert!(index.contains("agents {"), "{index}");
+
+        for kind in [
+            SessionAgentKind::Sub(Uuid::new_v4()),
+            SessionAgentKind::Step(Uuid::new_v4()),
+            SessionAgentKind::Fork(Uuid::new_v4()),
+        ] {
+            let (toolbox, _) = build_control_layer(base.clone(), Some(&services), &settings, kind);
+            assert!(
+                !toolbox
+                    .specs()
+                    .iter()
+                    .any(|s| s.name.starts_with("horsie_")),
+                "a non-main agent inherits the setting but must not inherit the authority"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn subagent_toolbox_strips_session_metadata_tools() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
@@ -895,6 +1005,7 @@ mod tests {
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
+            services: None,
             settings: actor_spec_fixture().agent,
             step_result: StepResultDef::default(),
             session_id: id,
@@ -958,6 +1069,7 @@ mod tests {
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
+            services: None,
             settings,
             step_result: StepResultDef::default(),
             session_id: id,
@@ -1002,6 +1114,7 @@ mod tests {
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
+            services: None,
             settings: actor_spec_fixture().agent,
             step_result: StepResultDef::default(),
             session_id: id,
@@ -1326,6 +1439,7 @@ mod tests {
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
+            services: None,
             settings: actor_spec_fixture().agent,
             step_result: StepResultDef::default(),
             session_id: id,
@@ -1522,6 +1636,7 @@ mod tests {
             registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             mcp: None,
             memory: None,
+            services: None,
             settings: actor_spec_fixture().agent,
             step_result: StepResultDef::default(),
             session_id: id,

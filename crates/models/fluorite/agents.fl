@@ -36,6 +36,10 @@ struct AgentView {
     /// Whether sessions from this preset compact automatically once their
     /// context fills; absent → yes.
     auto_compact: Option<bool>,
+    /// Whether sessions from this preset may manage this horsie server — its
+    /// agents, workflows, routines, environments and runtimes. Granted, never
+    /// inherited: absent is off.
+    control_plane: Option<bool>,
     /// Unix epoch seconds.
     created_at: String,
     updated_at: String,
@@ -59,6 +63,10 @@ struct AgentPresetInput {
     /// Seeds `AgentSettings.auto_compact` for sessions created from this
     /// preset; absent → yes.
     auto_compact: Option<bool>,
+    /// Seeds `AgentSettings.control_plane`; absent → no. Enabling this is the
+    /// whole authorisation — a session from this preset can then change or
+    /// delete anything this account owns, without confirming first.
+    control_plane: Option<bool>,
 }
 
 /// Invoke a preset: create a session from it and queue a first message.
