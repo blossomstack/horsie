@@ -18,12 +18,12 @@ pub use events::{EventSink, EventSinkError};
 pub use provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason, ToolChoice};
 pub use secret::Secret;
 pub use thinking::{ThinkingDialect, ThinkingEffort};
-pub use tool::{EmptyToolbox, Tool, ToolSpec, Toolbox, ToolboxImpl};
+pub use tool::{EmptyToolbox, Tool, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 
 pub use horsie_models::agent::{
     AgentInput, AgentLogBody, AgentLogEntry, AgentOutput, AgentResult, AskLifecycle,
     CompactionEntry, CompactionTrigger, CompletedOutput, ContentPart, EmptyOutcome, FailedOutcome,
-    ForkLifecycle, HandoffCall, HandoffOutput, HistoryEntry, HookEntry, LifecycleEvent, Message,
+    ForkLifecycle, HistoryEntry, HookEntry, LifecycleEvent, Message, StoppedCall, StoppedOutput,
     PreparingLifecycle, QueuedLifecycle, Role, RuntimeLifecycle, RuntimeStatus,
     SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TaskItem, TaskListLifecycle,
     TaskStatus, TextPart, ThinkingPart, ToolCallPart, ToolResultInput, ToolResultPart,

@@ -397,25 +397,28 @@ struct CompletedOutput {
     text: String,
 }
 
-/// One call to the handoff tool
-struct HandoffCall {
+/// One call to a tool that ended the run by returning `StopRun`. Nothing is
+/// recorded for it — no result, no completion event — so the `tool_use` stays
+/// dangling, which is what lets an answer arrive against it later, or never
+struct StoppedCall {
+    /// Which tool ended the run. The caller decides what that means; the agent
+    /// loop only reports it
+    tool: String,
     tool_call_id: String,
-    data: Any,
+    input: Any,
 }
 
-/// Agent handed off control. A conclusion is always one call; a park (an
-/// optional handoff, e.g. `ask_user`) may be several issued in the same turn,
-/// and all of them are answered together
-struct HandoffOutput {
-    tool_name: String,
-    calls: Vec<HandoffCall>,
+/// A tool ended the run. `submit_result` is always one call; `ask_user` may be
+/// several issued in the same turn, and all of them are answered together
+struct StoppedOutput {
+    calls: Vec<StoppedCall>,
 }
 
 /// The outcome of an agent run
 #[type_tag = "type"]
 union AgentResult {
     Completed(CompletedOutput),
-    Handoff(HandoffOutput),
+    Stopped(StoppedOutput),
 }
 
 /// The full output of Agent::run

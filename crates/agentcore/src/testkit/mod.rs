@@ -12,7 +12,7 @@ use crate::{
     error::{LlmError, ToolCallError},
     events::{EventSink, EventSinkError},
     provider::{CompletionRequest, CompletionResponse, LlmProvider, StopReason},
-    tool::{ToolSpec, Toolbox},
+    tool::{ToolOutcome, ToolSpec, Toolbox},
 };
 use async_trait::async_trait;
 use horsie_models::agent::{ContentPart, Message, Role, TextPart, ToolCallPart, Usage};
@@ -198,8 +198,9 @@ impl LlmProvider for MockProvider {
 }
 
 /// Executes a tool call by name. Returning `Err` exercises the loop's
-/// tool-failure path.
-pub type ToolHandler = Arc<dyn Fn(&str, Value) -> Result<Value, ToolCallError> + Send + Sync>;
+/// tool-failure path; returning [`ToolOutcome::StopRun`] exercises a tool that
+/// ends the run.
+pub type ToolHandler = Arc<dyn Fn(&str, Value) -> Result<ToolOutcome, ToolCallError> + Send + Sync>;
 
 /// A `Toolbox` backed by an arbitrary handler closure.
 pub struct MockToolbox {
@@ -222,7 +223,29 @@ impl MockToolbox {
         };
         Arc::new(Self {
             specs: vec![spec],
-            handler: Arc::new(|_, input| Ok(input)),
+            handler: Arc::new(|_, input| Ok(ToolOutcome::Result(input))),
+        })
+    }
+
+    /// Two tools: `work`, which echoes its input, and `stopper`, which ends the
+    /// run. The pair every terminal-tool test needs.
+    pub fn with_stopper(stopper: &str) -> Arc<Self> {
+        let stopper = stopper.to_string();
+        let spec = |name: &str| ToolSpec {
+            name: name.to_string(),
+            description: "mock tool".to_string(),
+            input_schema: json!({ "type": "object" }),
+        };
+        let stops = stopper.clone();
+        Arc::new(Self {
+            specs: vec![spec("work"), spec(&stopper)],
+            handler: Arc::new(move |name, input| {
+                if name == stops {
+                    Ok(ToolOutcome::StopRun)
+                } else {
+                    Ok(ToolOutcome::Result(input))
+                }
+            }),
         })
     }
 }
@@ -238,7 +261,7 @@ impl Toolbox for MockToolbox {
         name: &str,
         input: Value,
         _tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         (self.handler)(name, input)
     }
 }
