@@ -1,4 +1,5 @@
 
+import { GlobalSessionForksEvent } from './globalSessionForksEvent';
 import { GlobalSessionStatusEvent } from './globalSessionStatusEvent';
 import { GlobalSessionTitleEvent } from './globalSessionTitleEvent';
 /**
@@ -6,4 +7,5 @@ import { GlobalSessionTitleEvent } from './globalSessionTitleEvent';
  */
 export type GlobalSessionEvent =
   | { type: "StatusChanged"; value: GlobalSessionStatusEvent }
-  | { type: "TitleChanged"; value: GlobalSessionTitleEvent };
+  | { type: "TitleChanged"; value: GlobalSessionTitleEvent }
+  | { type: "ForksChanged"; value: GlobalSessionForksEvent };

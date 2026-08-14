@@ -14,4 +14,5 @@ export * from './messageDelta';
 export * from './usageView';
 export * from './globalSessionStatusEvent';
 export * from './globalSessionTitleEvent';
+export * from './globalSessionForksEvent';
 export * from './globalSessionEvent';

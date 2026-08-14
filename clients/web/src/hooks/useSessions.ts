@@ -114,13 +114,46 @@ function applyGlobalTitle(
   );
 }
 
-function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
+/**
+ * A session's fork roster changed — one appeared, renamed itself, or moved
+ * between statuses.
+ *
+ * Replaces the rows wholesale rather than merging, because the frame carries
+ * the whole roster: a client that had missed an earlier frame would otherwise
+ * keep a fork the server has already dropped.
+ */
+function applyGlobalForks(
+  client: QueryClient,
+  ev: Extract<GlobalSessionEvent, { type: "ForksChanged" }>["value"],
+) {
+  let matched = false;
+  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
+    if (!prev) return prev;
+    const sessions = prev.sessions.map((s) => {
+      if (s.id !== ev.sessionId) return s;
+      matched = true;
+      return { ...s, forks: ev.forks };
+    });
+    return { sessions };
+  });
+  // Forks for a session we don't know about yet → refetch the list.
+  if (!matched) client.invalidateQueries({ queryKey: qk.sessions });
+
+  client.setQueryData<GetSessionResponse>(qk.session(ev.sessionId), (prev) =>
+    prev ? { session: { ...prev.session, forks: ev.forks } } : prev,
+  );
+}
+
+export function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
   switch (ev.type) {
     case "StatusChanged":
       applyGlobalStatus(client, ev.value);
       return;
     case "TitleChanged":
       applyGlobalTitle(client, ev.value);
+      return;
+    case "ForksChanged":
+      applyGlobalForks(client, ev.value);
       return;
   }
 }
