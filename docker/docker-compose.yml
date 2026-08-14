@@ -41,6 +41,7 @@ configs:
       # below, and the boot refuses the configuration if any is missing or
       # wrong — a node that believes it is clustered and is not looks healthy
       # while losing everything meant to cross between nodes.
+      # Full guide: https://docs.horsie.dev/operating/clustering/
       #
       #   "database": { "url": "postgres://user:pass@host/horsie" },
       #   "bus":      { "url": "redis://host:6379" },
