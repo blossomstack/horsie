@@ -1851,14 +1851,6 @@ async fn session_detail_echoes_thinking_effort() {
         .unwrap()
         .to_string();
 
-    let detail: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}", server.addr))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
     let agent: serde_json::Value = client
         .get(format!(
             "http://{}/api/sessions/{id}/agents/main",
