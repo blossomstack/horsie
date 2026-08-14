@@ -47,6 +47,7 @@ export * from './bundleRef';
 export * from './provisionAgentRequest';
 export * from './provisionAgentResponse';
 export * from './cancelledResponse';
+export * from './requestRefused';
 export * from './pingRequest';
 export * from './runtimeInboundMessage';
 export * from './toolOutput';

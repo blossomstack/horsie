@@ -328,7 +328,7 @@ impl RuntimeClient {
     ) -> Result<Vec<HookRecord>, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
-        let outcome = self.inner.run_hooks(&call_id, &event).await;
+        let outcome = self.inner.run_hooks(&call_id, &self.agent_id, &event).await;
         self.untrack(&call_id);
         let records = outcome.map_err(RuntimeCallError::Transport)?;
         if let Some(sink) = &self.hook_sink
@@ -362,7 +362,10 @@ impl RuntimeClient {
         arguments: String,
     ) -> Result<String, RuntimeCallError> {
         self.track(call_id);
-        let outcome = self.inner.mcp_invoke(call_id, tool, arguments).await;
+        let outcome = self
+            .inner
+            .mcp_invoke(call_id, &self.agent_id, tool, arguments)
+            .await;
         self.untrack(call_id);
         match outcome.map_err(RuntimeCallError::Transport)? {
             ToolResult::Ok(output) => Ok(output.stdout),

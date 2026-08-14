@@ -2,11 +2,10 @@ use async_trait::async_trait;
 use horsie_models::executor::ProvisionStep;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, PingRequest,
-    BundleRef, ProvisionAgentRequest, ProvisionResult, ProvisionWorkspaceRequest,
-    RunHooksRequest, RuntimeInboundMessage,
-    RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent, ToolCall, ToolCallRequest,
-    ToolResult,
+    BundleRef, CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest,
+    PingRequest, ProvisionAgentRequest, ProvisionResult, ProvisionWorkspaceRequest,
+    RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -25,6 +24,11 @@ pub enum TransportError {
     /// as one tells the user their session broke when they cancelled it.
     #[error("cancelled")]
     Cancelled,
+    /// The runtime declined the request and said why — today, because it names
+    /// an agent nothing has provisioned. Distinct from a transport failure: the
+    /// message arrived and was understood, and the answer is no.
+    #[error("refused: {0}")]
+    Refused(String),
 }
 
 /// A pipe to one runtime, carrying `runtime.fl` messages verbatim.
@@ -81,8 +85,10 @@ pub trait RuntimeTransport: Send + Sync {
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ScanResult(_)
@@ -115,8 +121,10 @@ pub trait RuntimeTransport: Send + Sync {
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -161,6 +169,7 @@ pub trait RuntimeTransport: Send + Sync {
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::ProvisionResult(resp) => Ok(resp.result),
             RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::Ready(_)
@@ -196,7 +205,9 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::AgentProvisioned(resp) => Ok((resp.result, resp.root)),
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
@@ -231,8 +242,10 @@ pub trait RuntimeTransport: Send + Sync {
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -251,18 +264,22 @@ pub trait RuntimeTransport: Send + Sync {
     async fn run_hooks(
         &self,
         call_id: &str,
+        agent_id: &str,
         event: &ServerHookEvent,
     ) -> Result<Vec<HookRecord>, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::RunHooks(RunHooksRequest {
                 call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
                 event: event.clone(),
             }))
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -290,8 +307,10 @@ pub trait RuntimeTransport: Send + Sync {
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::McpTools(resp) => Ok(resp),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -306,20 +325,24 @@ pub trait RuntimeTransport: Send + Sync {
     async fn mcp_invoke(
         &self,
         call_id: &str,
+        agent_id: &str,
         tool: &str,
         arguments: String,
     ) -> Result<ToolResult, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::McpInvoke(McpInvokeRequest {
                 call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
                 tool: tool.to_string(),
                 arguments,
             }))
             .await?;
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::RequestRefused(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -396,6 +419,7 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         // like any other reply — which is what lets the caller learn it was
         // cancelled instead of waiting out a reply that will never come.
         RuntimeOutboundMessage::Cancelled(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::RequestRefused(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_) => None,
     }
 }

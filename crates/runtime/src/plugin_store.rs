@@ -62,6 +62,73 @@ pub trait BundleSource: Send + Sync {
     async fn fetch(&self, bundle: &BundleRef) -> Result<Vec<u8>, String>;
 }
 
+/// Fetches bundles from the server the runtime dialled, against the only
+/// credential it holds.
+///
+/// The dial token, not a bundle-scoped one. A short-lived credential minted
+/// beside it expired within the hour with nothing able to renew it, so a runtime
+/// that outlived it could never fetch again — and a runtime is expected to
+/// outlive an hour.
+pub struct HttpBundles {
+    client: reqwest::Client,
+    base: String,
+    token: Option<String>,
+}
+
+impl HttpBundles {
+    #[must_use]
+    pub fn new(base: String, token: Option<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base,
+            token,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BundleSource for HttpBundles {
+    async fn fetch(&self, bundle: &BundleRef) -> Result<Vec<u8>, String> {
+        let url = format!(
+            "{}/api/plugin-artifacts/{}.zip",
+            self.base.trim_end_matches('/'),
+            bundle.hash
+        );
+        let mut req = self.client.get(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.map_err(|e| chain(&e))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| chain(&e))
+    }
+}
+
+/// An error plus every `source()` behind it, joined.
+///
+/// `reqwest::Error`'s own `Display` is `error sending request for url (…)` and
+/// says nothing about *why*. Reporting only the top line cannot distinguish a
+/// DNS failure from a refused connection from an untrusted certificate, which
+/// are three completely different bugs.
+fn chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.ends_with(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
 /// The store rooted at one granted plugins directory.
 pub struct PluginStore {
     root: PathBuf,
@@ -396,7 +463,11 @@ mod tests {
         store.provision_agent("a1", &refs, &source).await.unwrap();
         store.provision_agent("a1", &refs, &source).await.unwrap();
 
-        assert_eq!(fetched.lock().unwrap().len(), 1, "the second call refetched");
+        assert_eq!(
+            fetched.lock().unwrap().len(),
+            1,
+            "the second call refetched"
+        );
     }
 
     /// A changed set rebuilds the tree rather than adding to it — otherwise a
@@ -450,7 +521,14 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent("a1", &[BundleRef { name: "pack".into(), hash }], &source)
+            .provision_agent(
+                "a1",
+                &[BundleRef {
+                    name: "pack".into(),
+                    hash,
+                }],
+                &source,
+            )
             .await
             .unwrap_err();
 

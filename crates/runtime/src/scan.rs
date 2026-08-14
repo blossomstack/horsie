@@ -1,41 +1,35 @@
 use crate::workspace::{WorkspaceRegistry, is_git_repo};
 use horsie_models::runtime::{PluginAgent, PluginSkill, ScanRequest, ScannedFile, WorkspaceScan};
 
-/// Discover the shared plugin library's skills when `include_shared` is set and a
-/// `plugins_dir` is configured. Best-effort and convention-aware (see [`crate::plugins`]).
-pub fn shared_skills(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<PluginSkill> {
-    if !include_shared {
-        return Vec::new();
-    }
-    match registry.plugins_dir() {
-        Some(dir) => crate::plugins::discover_skills(dir),
+/// The skills in `agent_id`'s own plugin tree. Best-effort and convention-aware
+/// (see [`crate::plugins`]).
+///
+/// No `include_shared` gate any more: an agent that loads no plugins is
+/// provisioned with an empty bundle set, so its tree is empty and there is
+/// nothing to gate. The gate and the empty set said the same thing twice.
+pub fn shared_skills(registry: &WorkspaceRegistry, agent_id: &str) -> Vec<PluginSkill> {
+    match registry.plugins_dir_for(agent_id) {
+        Some(dir) => crate::plugins::discover_skills(&dir),
         None => Vec::new(),
     }
 }
 
-/// The shared plugin library's agent definitions, behind the same gate its
-/// skills are: both are the library's contents, and a caller that did not opt in
-/// gets neither.
-pub fn shared_agents(registry: &WorkspaceRegistry, include_shared: bool) -> Vec<PluginAgent> {
-    if !include_shared {
-        return Vec::new();
-    }
-    match registry.plugins_dir() {
-        Some(dir) => crate::plugins::discover_agents(dir),
+/// The agent definitions in `agent_id`'s own plugin tree — the catalogue it may
+/// spawn from.
+pub fn shared_agents(registry: &WorkspaceRegistry, agent_id: &str) -> Vec<PluginAgent> {
+    match registry.plugins_dir_for(agent_id) {
+        Some(dir) => crate::plugins::discover_agents(&dir),
         None => Vec::new(),
     }
 }
 
-/// The shared plugin library's absolute root, reported alongside its skills so the
-/// client can turn each `PluginSkill::rel_dir` into a path the agent can pass to the
-/// filesystem tools. `None` when the caller did not ask for shared skills or no
-/// library is configured — the same gate `shared_skills` uses, so the two never
-/// disagree.
-pub fn shared_root(registry: &WorkspaceRegistry, include_shared: bool) -> Option<String> {
-    if !include_shared {
-        return None;
-    }
-    registry.plugins_dir().map(|dir| dir.display().to_string())
+/// The absolute root of `agent_id`'s tree, reported alongside its skills so the
+/// client can turn each `PluginSkill::rel_dir` into a path the agent can pass to
+/// the filesystem tools. `None` only when this runtime has no plugins root.
+pub fn shared_root(registry: &WorkspaceRegistry, agent_id: &str) -> Option<String> {
+    registry
+        .plugins_dir_for(agent_id)
+        .map(|dir| dir.display().to_string())
 }
 
 /// Scan the selected workspaces. `req.workspace` filters which roots to scan (`None`
@@ -133,16 +127,21 @@ mod tests {
         assert!(scans[1].instructions.is_none());
     }
 
+    /// The root a scan reports is the *agent's own* tree, not the runtime's
+    /// plugins root — that is what makes two agents in one session able to hold
+    /// different skills. A runtime with no plugins root at all reports nothing.
     #[test]
-    fn shared_root_tracks_the_include_shared_gate() {
+    fn the_reported_root_is_the_agents_own_tree() {
         let plugins = TempDir::new().unwrap();
         let registry = reg(&[]).with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
-        assert_eq!(
-            shared_root(&registry, true).as_deref(),
-            Some(plugins.path().display().to_string().as_str())
-        );
-        assert!(shared_root(&registry, false).is_none());
-        assert!(shared_root(&reg(&[]), true).is_none());
+
+        let a1 = shared_root(&registry, "a1").expect("an agent's tree has a root");
+        let a2 = shared_root(&registry, "a2").expect("an agent's tree has a root");
+        assert_ne!(a1, a2, "two agents must not share one tree");
+        assert!(a1.starts_with(&plugins.path().display().to_string()));
+        assert!(a1.ends_with("a1"), "{a1}");
+
+        assert!(shared_root(&reg(&[]), "a1").is_none());
     }
 
     #[test]

@@ -11,10 +11,11 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    CancelledResponse, McpDiscoverResponse, McpInvokeResponse, PongResponse, ProvisionError,
-    ProvisionOk, ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse,
-    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse,
-    ToolError, ToolOutput, ToolResult,
+    CancelledResponse, McpDiscoverResponse, McpInvokeResponse, PongResponse,
+    ProvisionAgentResponse, ProvisionError, ProvisionOk, ProvisionResult,
+    ProvisionWorkspaceResponse, RequestRefused, RunHooksResponse, RuntimeInboundMessage,
+    RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolOutput,
+    ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -496,6 +497,27 @@ where
     unreachable!("loop returns inside its branches")
 }
 
+/// Refuse a request naming an agent this runtime has never provisioned.
+///
+/// Fail-closed on purpose. Every request that carries an `agent_id` reads that
+/// agent's plugin tree, and an unprovisioned agent's tree is simply absent — so
+/// without this the scan returns no skills, the hook run matches nothing, and
+/// discovery finds no servers, all silently and all looking exactly like an
+/// agent that legitimately selected no bundles. A sequencing bug would then
+/// present as a model that has mysteriously forgotten how to do its job.
+///
+/// An agent that selected no bundles is still provisioned, with an empty set, so
+/// it passes here. "Nothing was asked for" and "nobody asked" stay distinct.
+fn refuse_unprovisioned(call_id: &str, agent_id: &str) -> RuntimeOutboundMessage {
+    RuntimeOutboundMessage::RequestRefused(RequestRefused {
+        call_id: call_id.to_string(),
+        reason: format!(
+            "agent '{agent_id}' has not been provisioned on this runtime; \
+             ProvisionAgent must precede any request that reads its plugins"
+        ),
+    })
+}
+
 /// The runtime message loop, generic over the underlying socket so TCP and unix
 /// share one implementation. Announces `RuntimeReady`, then services requests.
 ///
@@ -536,6 +558,15 @@ async fn run_loop<S>(
     // Plugin-declared MCP servers, live for as long as this connection: a stdio
     // child respawned per tool call would cost more than the call.
     let mcp = Arc::new(horsie_runtime::mcp::McpRegistry::default());
+    // Agents this runtime has installed a plugin tree for.
+    //
+    // "Provisioned" is an explicit state rather than something inferred from a
+    // directory existing, which is what lets a request naming an unprovisioned
+    // agent be refused. An agent with no bundles is still in here — it was
+    // provisioned, with nothing — so the empty case and the never-asked case
+    // stay distinguishable.
+    let provisioned: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let in_flight: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -548,6 +579,14 @@ async fn run_loop<S>(
                 };
                 match inbound {
                     RuntimeInboundMessage::ToolCall(req) => {
+                        if !provisioned.lock().await.contains(&req.agent_id) {
+                            let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                            continue;
+                        }
+
                         let call_id = req.call_id.clone();
                         let agent_id = req.agent_id.clone();
                         let registry = registry.clone();
@@ -587,6 +626,14 @@ async fn run_loop<S>(
                             .insert(req.call_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
+                        if !provisioned.lock().await.contains(&req.agent_id) {
+                            let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                            continue;
+                        }
+
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
                         let registry = registry.clone();
@@ -594,14 +641,14 @@ async fn run_loop<S>(
                         let in_flight_clone = in_flight.clone();
 
                         let handle = tokio::spawn(async move {
-                            let include_shared = req.include_shared;
+                            let agent_id = req.agent_id.clone();
                             let workspaces = horsie_runtime::scan::exec(&registry, req);
                             let shared_skills =
-                                horsie_runtime::scan::shared_skills(&registry, include_shared);
+                                horsie_runtime::scan::shared_skills(&registry, &agent_id);
                             let shared_root =
-                                horsie_runtime::scan::shared_root(&registry, include_shared);
+                                horsie_runtime::scan::shared_root(&registry, &agent_id);
                             let shared_agents =
-                                horsie_runtime::scan::shared_agents(&registry, include_shared);
+                                horsie_runtime::scan::shared_agents(&registry, &agent_id);
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::ScanResult(ScanResponse {
                                     call_id: call_id.clone(),
@@ -700,6 +747,83 @@ async fn run_loop<S>(
 
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
+                    RuntimeInboundMessage::ProvisionAgent(req) => {
+                        let call_id = req.call_id.clone();
+                        let map_id = req.call_id.clone();
+                        let registry = registry.clone();
+                        let provisioned = provisioned.clone();
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+
+                        // Tracked like every other command: installing a fleet
+                        // of bundles is a download, and a user hitting Stop must
+                        // be able to abandon it.
+                        let handle = tokio::spawn(async move {
+                            let agent_id = req.agent_id.clone();
+                            let bundles: Vec<horsie_runtime::plugin_store::BundleRef> =
+                                req.bundles.iter().map(Into::into).collect();
+                            let outcome = match registry.plugins_root() {
+                                Some(root) => {
+                                    let store = horsie_runtime::plugin_store::PluginStore::new(
+                                        root.to_path_buf(),
+                                    );
+                                    let source = horsie_runtime::plugin_store::HttpBundles::new(
+                                        std::env::var(horsie_models::ENV_SERVER_URL)
+                                            .unwrap_or_default(),
+                                        std::env::var(horsie_models::ENV_CONNECT_TOKEN).ok(),
+                                    );
+                                    store
+                                        .provision_agent(&agent_id, &bundles, &source)
+                                        .await
+                                        .map(|dir| dir.display().to_string())
+                                }
+                                // No plugins root at all. An empty set is still a
+                                // success — the agent asked for nothing and got
+                                // nothing — but anything else cannot be honoured
+                                // and must say so rather than come up bare.
+                                None if bundles.is_empty() => Ok(String::new()),
+                                None => {
+                                    Err("this runtime has nowhere to install plugins".to_string())
+                                }
+                            };
+                            let (result, root) = match outcome {
+                                Ok(root) => {
+                                    // Only a success marks the agent
+                                    // provisioned. A failed install must leave it
+                                    // refused rather than running with a tree
+                                    // that is not what was asked for.
+                                    provisioned.lock().await.insert(agent_id);
+                                    (
+                                        ProvisionResult::Ok(ProvisionOk {
+                                            applied: Vec::new(),
+                                        }),
+                                        root,
+                                    )
+                                }
+                                Err(reason) => (
+                                    ProvisionResult::Err(ProvisionError { reason }),
+                                    String::new(),
+                                ),
+                            };
+                            let response = serde_json::to_string(
+                                &RuntimeOutboundMessage::AgentProvisioned(ProvisionAgentResponse {
+                                    call_id: call_id.clone(),
+                                    root,
+                                    result,
+                                }),
+                            );
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                            in_flight_clone.lock().await.remove(&call_id);
+                        });
+
+                        in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
                     RuntimeInboundMessage::CancelCall(req) => {
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {
                             handle.abort();
@@ -720,9 +844,18 @@ async fn run_loop<S>(
                         }
                     }
                     RuntimeInboundMessage::RunHooks(req) => {
+                        if !provisioned.lock().await.contains(&req.agent_id) {
+                            let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                            continue;
+                        }
+
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
                         let event = req.event;
+                        let hook_agent = req.agent_id.clone();
                         let registry = registry.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
@@ -731,7 +864,9 @@ async fn run_loop<S>(
                         // call, so a slow hook stays cancellable: a user hitting
                         // Stop must not have to wait out a 30-second guard.
                         let handle = tokio::spawn(async move {
-                            let records = horsie_runtime::hooks::run_hooks(&registry, &event).await;
+                            let records =
+                                horsie_runtime::hooks::run_hooks(&registry, &hook_agent, &event)
+                                    .await;
                             let response = serde_json::to_string(
                                 &RuntimeOutboundMessage::HookRecords(RunHooksResponse {
                                     call_id: call_id.clone(),
@@ -751,8 +886,17 @@ async fn run_loop<S>(
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::McpDiscover(req) => {
+                        if !provisioned.lock().await.contains(&req.agent_id) {
+                            let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                            continue;
+                        }
+
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
+                        let mcp_agent = req.agent_id.clone();
                         let registry = registry.clone();
                         let mcp = mcp.clone();
                         let sink_clone = sink.clone();
@@ -762,8 +906,10 @@ async fn run_loop<S>(
                         // servers can take seconds, and a user hitting Stop must
                         // not wait them all out.
                         let handle = tokio::spawn(async move {
-                            let discovery = match registry.plugins_dir() {
-                                Some(dir) => mcp.discover(dir, registry.default_cwd()).await,
+                            let discovery = match registry.plugins_dir_for(&mcp_agent) {
+                                Some(dir) => {
+                                    mcp.discover(&mcp_agent, &dir, registry.default_cwd()).await
+                                }
                                 None => horsie_runtime::mcp::Discovery {
                                     tools: Vec::new(),
                                     failures: Vec::new(),
@@ -789,8 +935,17 @@ async fn run_loop<S>(
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::McpInvoke(req) => {
+                        if !provisioned.lock().await.contains(&req.agent_id) {
+                            let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
+                            if let Ok(json) = serde_json::to_string(&refusal) {
+                                let _ = sink.lock().await.send(Message::Text(json.into())).await;
+                            }
+                            continue;
+                        }
+
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
+                        let mcp_agent = req.agent_id.clone();
                         let tool = req.tool.clone();
                         let arguments = req.arguments.clone();
                         let registry = registry.clone();
@@ -801,9 +956,9 @@ async fn run_loop<S>(
                         let handle = tokio::spawn(async move {
                             let args: serde_json::Value =
                                 serde_json::from_str(&arguments).unwrap_or(serde_json::Value::Null);
-                            let result = match registry.plugins_dir() {
+                            let result = match registry.plugins_dir_for(&mcp_agent) {
                                 Some(dir) => mcp
-                                    .invoke(dir, registry.default_cwd(), &tool, args)
+                                    .invoke(&mcp_agent, &dir, registry.default_cwd(), &tool, args)
                                     .await
                                     .map(|stdout| {
                                         ToolResult::Ok(ToolOutput {

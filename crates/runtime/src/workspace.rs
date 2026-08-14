@@ -35,8 +35,24 @@ impl WorkspaceRegistry {
     }
 
     /// The shared plugin library root, if configured.
-    pub fn plugins_dir(&self) -> Option<&Path> {
+    /// The plugins root this runtime was granted, if any. The store and every
+    /// agent's tree live under it.
+    #[must_use]
+    pub fn plugins_root(&self) -> Option<&Path> {
         self.plugins_dir.as_deref()
+    }
+
+    /// The plugin tree `agent_id` reads — its own, never a shared one.
+    ///
+    /// `None` when this runtime has no plugins root at all. An agent that *has*
+    /// a root but was never provisioned gets a path that does not exist, and the
+    /// scanner reports nothing: that case is refused earlier, at dispatch, so it
+    /// surfaces as an error rather than as an agent silently missing its skills.
+    #[must_use]
+    pub fn plugins_dir_for(&self, agent_id: &str) -> Option<PathBuf> {
+        self.plugins_dir
+            .as_ref()
+            .map(|root| crate::plugin_store::PluginStore::new(root.clone()).agent_dir(agent_id))
     }
 
     /// The first workspace's path, which is where a process with no cwd of its

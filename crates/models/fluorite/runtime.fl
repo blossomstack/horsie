@@ -168,7 +168,10 @@ union McpServerFailure {
 
 /// Call one tool on a plugin-declared MCP server. `tool` is the namespaced name
 /// from discovery; the runtime splits it back into server and tool.
-struct McpInvokeRequest  { call_id: String, tool: String, arguments: String }
+/// `agent_id` names whose tree hosts the server. The same id the discovery that
+/// produced this tool name carried — a tool discovered in one agent's bundles
+/// cannot be invoked against another's.
+struct McpInvokeRequest  { call_id: String, agent_id: String, tool: String, arguments: String }
 struct McpInvokeResponse { call_id: String, result: ToolResult }
 
 // --- Server-initiated hooks ---
@@ -249,7 +252,11 @@ union ServerHookEvent {
 }
 
 /// Run every matching hook for one server-initiated event inside the sandbox.
-struct RunHooksRequest  { call_id: String, event: ServerHookEvent }
+///
+/// `agent_id` names whose plugin tree the hooks come from. A hook is a file in a
+/// bundle, so an agent that selected different bundles has different hooks — and
+/// an agent that selected none has none, rather than inheriting its siblings'.
+struct RunHooksRequest  { call_id: String, agent_id: String, event: ServerHookEvent }
 /// Every hook that ran, in execution order. Injected context is derived from
 /// these rather than carried beside them, so no event is recorded specially.
 struct RunHooksResponse { call_id: String, records: Vec<HookRecord> }
@@ -339,6 +346,25 @@ struct ProvisionAgentResponse {
 /// every server-initiated command became cancellable it was wrong five ways.
 struct CancelledResponse { call_id: String }
 
+/// The runtime refused this request outright.
+///
+/// A reply any waiter accepts, because several requests have no error shape of
+/// their own: a scan answers with skills, a hook run with records, a discovery
+/// with tools, and none of them can say "no". Without this the only ways to
+/// refuse one were to answer it wrongly — which reads as a protocol confusion —
+/// or to answer it emptily, which is indistinguishable from a legitimate empty
+/// result and is how a sequencing bug becomes a model that has quietly lost its
+/// skills.
+///
+/// Named for what it is rather than for its one caller: refusing a request that
+/// names an unprovisioned agent is the first reason, not the only possible one.
+///
+/// `RequestRefused`, not `RequestFailed`: fluorite resolves imported types by
+/// bare name across packages, and `runtime_vendor` already has a `RequestFailed`.
+/// A second one silently hijacks the union arm to the wrong type rather than
+/// erroring.
+struct RequestRefused { call_id: String, reason: String }
+
 /// Asks the runtime what it is currently executing.
 ///
 /// A liveness call, and the only request in this protocol with a bound the
@@ -401,6 +427,7 @@ union RuntimeOutboundMessage {
     ProvisionResult(ProvisionWorkspaceResponse),
     AgentProvisioned(ProvisionAgentResponse),
     Cancelled(CancelledResponse),
+    RequestRefused(RequestRefused),
     ScanResult(ScanResponse),
     HookRecords(RunHooksResponse),
     McpTools(McpDiscoverResponse),
