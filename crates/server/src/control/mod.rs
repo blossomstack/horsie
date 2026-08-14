@@ -19,6 +19,7 @@ pub mod agents;
 pub mod environments;
 pub mod http;
 pub mod routines;
+pub mod toolbox;
 
 /// One manageable noun and everything you can do to it.
 ///
