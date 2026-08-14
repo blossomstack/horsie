@@ -262,5 +262,4 @@ mod tests {
             .unwrap();
         assert_eq!(read.expose, Expose::ToolOnly);
     }
-
 }
