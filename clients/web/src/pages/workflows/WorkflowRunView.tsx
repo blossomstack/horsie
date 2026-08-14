@@ -10,6 +10,7 @@ import { useNavigate } from "react-router-dom";
 import { SessionStatusKind } from "../../api/types";
 import type { StepRunView, WorkflowRunGraph } from "../../api/types";
 import { WorkflowGraph, type NodeState } from "../../components/WorkflowGraph";
+import { askConfirm } from "../../lib/confirm";
 import { relativeTime } from "../../lib/format";
 import { TONE_TEXT, statusMeta } from "../../lib/status";
 import { useSession } from "../../hooks/useSessions";
@@ -120,6 +121,18 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   const navigate = useNavigate();
   const [selected, setSelected] = useState<string | undefined>();
 
+  const retryStep = async (index: number, step: string) => {
+    if (
+      !(await askConfirm(
+        `Retry ${step}? It runs again against the workspace as the previous attempt left it.`,
+        "Retry",
+      ))
+    ) {
+      return;
+    }
+    retry.mutate(index);
+  };
+
   if (isLoading || !graph || status === undefined) {
     return <p className="p-6 text-sm text-faint">Loading run…</p>;
   }
@@ -222,8 +235,8 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           </span>
           <button
             className="key key-go ml-auto !px-2 !py-1 text-xs"
-            onClick={() => retry.mutate(resume.index)}
-            disabled={retry.isPending}
+            onClick={() => void retryStep(resume.index, resume.step)}
+            disabled={retryUnavailable(status, retry.isPending)}
             data-testid="resume-run"
           >
             <RotateCcw size={12} />
@@ -313,10 +326,14 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                           </button>
                           <button
                             className="key !px-2 !py-1 text-xs"
-                            onClick={() => retry.mutate(r.index)}
-                            disabled={retry.isPending}
+                            onClick={() => void retryStep(r.index, selectedNode.step)}
+                            disabled={retryUnavailable(status, retry.isPending, r)}
                             data-testid="retry-step"
-                            title="Re-run this step. The workspace is not rolled back."
+                            title={
+                              retryUnavailable(status, retry.isPending, r)
+                                ? "A step is currently running."
+                                : "Re-run this step. The workspace is not rolled back."
+                            }
                           >
                             <RotateCcw size={12} />
                             Retry
@@ -331,6 +348,24 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
         </aside>
       </div>
     </div>
+  );
+}
+
+/** Whether retrying would race a step that is already writing the workspace.
+ *
+ * The server can make a retry safe by cancelling the active step first, but
+ * that is not what a Retry button should silently do. Keep it unavailable
+ * until the run settles, and cover a stale session document with the attempt's
+ * own live status. */
+export function retryUnavailable(
+  status: SessionStatusKind,
+  retryPending: boolean,
+  step?: StepRunView,
+): boolean {
+  return (
+    retryPending ||
+    status === SessionStatusKind.Running ||
+    step?.status.type === "Running"
   );
 }
 
