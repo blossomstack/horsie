@@ -121,10 +121,11 @@ test("N4: the control-plane toggle is off by default and persists when ticked", 
     )
     .toBe(true);
 
-  // Wait for the shell before the control: a reload in CI can be slow enough
-  // that the assertion runs against a page that has not rendered the form yet,
-  // which reads as "the toggle does not exist" rather than "not loaded".
-  await page.reload();
+  // Navigate, never reload: saving sends the browser back to the agents list,
+  // so `reload()` re-fetches whichever page won the race — the list on a slow
+  // machine, the form on a fast one. Asking for the form by URL is the same
+  // assertion without the race.
+  await page.goto(`${appBase}/agents/e2e-control/edit`);
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await expect(page.getByTestId("agent-control-plane-toggle")).toBeChecked();
 
