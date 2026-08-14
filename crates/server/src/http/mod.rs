@@ -2,7 +2,7 @@
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
 mod admin;
-mod agents;
+
 mod annotations;
 pub mod auth;
 mod chatgpt;
@@ -10,7 +10,7 @@ mod config;
 mod environments;
 pub mod error;
 pub(crate) mod github;
-mod handlers;
+pub(crate) mod handlers;
 mod marketplaces;
 mod mcp;
 mod memory;
@@ -289,17 +289,9 @@ pub fn app(state: AppState) -> Router {
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
         )
-        .route(
-            "/api/agents",
-            get(agents::list_agents).post(agents::create_agent),
-        )
-        .route(
-            "/api/agents/{name}",
-            get(agents::get_agent)
-                .put(agents::replace_agent)
-                .delete(agents::delete_agent),
-        )
-        .route("/api/agents/{name}/invoke", post(agents::invoke_agent))
+        // Every JSON management route is mounted from the operation table
+        // instead of listed here, so a new operation cannot exist without one.
+        .merge(crate::control::http::router(&crate::control::operations()))
         .route(
             "/api/runtime-vendors",
             get(runtime_vendors::list_runtime_vendors),

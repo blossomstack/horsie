@@ -15,7 +15,31 @@ use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod agents;
 pub mod http;
+
+/// The whole control plane. A new resource is one line here.
+pub fn operations() -> Vec<Operation> {
+    agents::operations()
+}
+
+/// Ask the session supervisor a question, mapping a closed mailbox to an
+/// internal error.
+///
+/// Lives here rather than in `http::handlers` because both surfaces need it and
+/// `ControlError` is the base vocabulary; `handlers::ask` is now a rendering of
+/// this into `Api`.
+pub(crate) async fn ask<T, F>(services: &UserServices, make: F) -> Result<T, ControlError>
+where
+    F: FnOnce(horsie_actor::ReplyTo<T>) -> crate::sessions::supervisor::SessionSupervisorCommand,
+    T: Send + 'static,
+{
+    services
+        .supervisor
+        .ask(make)
+        .await
+        .map_err(|_| ControlError::Internal("session supervisor unavailable".to_string()))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Method {
@@ -36,6 +60,23 @@ pub enum Expose {
     /// operation because it is a stream, but whose non-streaming half a tool
     /// still wants. Both then call one shared function.
     ToolOnly,
+}
+
+/// What a successful operation answers with over HTTP.
+///
+/// Declared per operation rather than inferred from the method: `POST` means
+/// 201 when it creates a preset and 200 when it runs a routine, and the
+/// difference is part of each route's contract.
+///
+/// A tool never sees this — it gets the JSON value either way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Success {
+    /// 200 with the JSON body.
+    Ok,
+    /// 201 with the JSON body.
+    Created,
+    /// 204 with no body.
+    NoContent,
 }
 
 type Run = Arc<
@@ -59,6 +100,7 @@ pub struct Operation {
     /// Written for the model, and the OpenAPI summary if we ever want one.
     pub summary: &'static str,
     pub expose: Expose,
+    pub success: Success,
     pub schema: Value,
     run: Run,
 }
@@ -70,6 +112,20 @@ impl Operation {
         input: Value,
     ) -> Result<Value, ControlError> {
         (self.run)(services, input).await
+    }
+
+    /// This operation answers 201 rather than 200.
+    #[must_use]
+    pub fn created(mut self) -> Self {
+        self.success = Success::Created;
+        self
+    }
+
+    /// This operation answers 204 with no body.
+    #[must_use]
+    pub fn no_content(mut self) -> Self {
+        self.success = Success::NoContent;
+        self
     }
 }
 
@@ -98,12 +154,13 @@ where
         path,
         summary,
         expose,
+        success: Success::Ok,
         schema: schema_for::<I>(),
         run: Arc::new(move |services, raw| {
             let f = f.clone();
             Box::pin(async move {
-                let input: I =
-                    serde_json::from_value(raw).map_err(|e| ControlError::Invalid(e.to_string()))?;
+                let input: I = serde_json::from_value(raw)
+                    .map_err(|e| ControlError::Invalid(e.to_string()))?;
                 let out = f(services, input).await?;
                 serde_json::to_value(out).map_err(|e| ControlError::Internal(e.to_string()))
             })
@@ -142,7 +199,10 @@ pub enum ControlError {
     /// `code` is the machine-readable envelope tag. The service errors carry no
     /// code of their own, so conversions default it to `duplicate`; a call site
     /// with a better one (`agent_in_use`) builds this variant directly.
-    Conflict { code: String, message: String },
+    Conflict {
+        code: String,
+        message: String,
+    },
     Invalid(String),
     Internal(String),
 }
@@ -224,7 +284,8 @@ mod tests {
 
     #[test]
     fn service_errors_keep_their_status() {
-        let api: Api = ControlError::from(crate::agents::AgentError::NotFound("nope".into())).into();
+        let api: Api =
+            ControlError::from(crate::agents::AgentError::NotFound("nope".into())).into();
         assert_eq!(api.0, axum::http::StatusCode::NOT_FOUND);
 
         let api: Api =
