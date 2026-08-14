@@ -13,6 +13,7 @@ import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { CompactionDivider } from "./CompactionDivider";
 import { CompactionNotice } from "./CompactionNotice";
 import { ForkMarker } from "./ForkMarker";
+import { CollapsibleText } from "./CollapsibleText";
 import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
 import { ToolCallCard } from "./ToolCallCard";
@@ -169,9 +170,13 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
         ) : undefined
       }
     >
-      <div className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
+      {/* Clamped, because a pasted log is a message that owns the whole
+          viewport and pushes the reply you came back for off screen. Only
+          when it actually overflows — a "More" under three lines would be
+          chrome advertising a job it does not have. */}
+      <CollapsibleText className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
         {msg.text}
-      </div>
+      </CollapsibleText>
       {msg.queued && (
         <div className="legend" data-testid="queued-marker">
           Unsent — goes in with the next turn
