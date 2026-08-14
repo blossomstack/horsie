@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ApiRequestError } from "../api/client";
 import type {
+  AgentView,
   EnvironmentView,
   GitHubStatus,
   MemorySpaceView,
@@ -16,6 +17,7 @@ import {
   type DraftPayload,
   type EnvironmentDraft,
 } from "./draftPersistence";
+import { agentKeys } from "./useAgents";
 import { environmentKeys } from "./useEnvironments";
 import { githubKeys } from "./useGithub";
 import { memorySpacesKey } from "./useMemory";
@@ -82,6 +84,11 @@ const memorySpaces: MemorySpaceView[] = [{ name: "horsie", description: "", memo
 
 const ghStatus: GitHubStatus = { connected: false, appConfigured: false, repoCount: 0 };
 
+const agents: AgentView[] = [{
+  name: "reviewer", description: "", model: "opus", plugins: [], mcpServers: [],
+  memorySpaces: [], createdAt: "1", updatedAt: "1",
+}];
+
 const environments: EnvironmentView[] = [
   {
     name: "staging",
@@ -119,6 +126,7 @@ function makeClient(): QueryClient {
   client.setQueryData(mcpKeys.servers, mcpServers);
   client.setQueryData(memorySpacesKey, memorySpaces);
   client.setQueryData(githubKeys.status, ghStatus);
+  client.setQueryData(agentKeys.all, agents);
   client.setQueryData(environmentKeys.all, environments);
   client.setQueryData(workflowKeys.all, [
     { name: "triage", description: "", start: "a", steps: [], createdAt: "0", updatedAt: "0" },
@@ -260,6 +268,26 @@ describe("useSessionDraft workflow channel", () => {
     const { result } = render(client, "triage");
     await waitFor(() => expect(result.current.workflow).toBe("triage"));
     expect(result.current.blockedReason).toBe("Select an environment to start.");
+  });
+
+  it("uses an agent preset without requiring a direct model", async () => {
+    storeDraft({ environment: runtime("local"), model: "" });
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.agents).toEqual(["reviewer"]));
+    act(() => result.current.setAgent("reviewer"));
+    expect(result.current.blockedReason).toBeNull();
+    expect(result.current.buildAgentRequest("review this")).toEqual({
+      message: "review this",
+      environment: { type: "Runtime", value: { vendor: "local", repos: undefined } },
+    });
+  });
+
+  it("clears an agent selection when starting a workflow", async () => {
+    const { result } = render(makeClient());
+    await waitFor(() => expect(result.current.agents).toEqual(["reviewer"]));
+    act(() => result.current.setAgent("reviewer"));
+    act(() => result.current.setWorkflow("triage"));
+    expect(result.current.agent).toBe("");
   });
 
   it("builds a run request carrying the input and the environment", async () => {

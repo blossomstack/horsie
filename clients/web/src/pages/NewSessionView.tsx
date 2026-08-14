@@ -5,6 +5,7 @@ import { SessionStatusKind } from "../api/types";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { SessionConfigBar } from "../components/SessionConfigBar";
+import { useInvokeAgent } from "../hooks/useAgents";
 import { useSessionDraft } from "../hooks/useSessionDraft";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useCreateSession } from "../hooks/useSessions";
@@ -19,6 +20,7 @@ export function NewSessionView() {
   // and no runtime in the picture.
   const entries = useEntryCatalog(draft.skills);
   const create = useCreateSession();
+  const invoke = useInvokeAgent();
   const run = useRunWorkflow();
   // Already fetched for the picker; this reads the same cache entry.
   const { data: workflows } = useWorkflows();
@@ -42,7 +44,9 @@ export function NewSessionView() {
   // be handed over in router state — and lost on a reload — is now simply
   // already there.
   const startSession = async (text: string) => {
-    const res = await create.mutateAsync(draft.buildRequest(text));
+    const res = draft.agent
+      ? await invoke.mutateAsync({ name: draft.agent, body: draft.buildAgentRequest(text) })
+      : await create.mutateAsync(draft.buildRequest(text));
     navigate(`/sessions/${res.session.id}`);
   };
 
@@ -126,7 +130,7 @@ export function NewSessionView() {
         <SessionConfigBar mode="draft" draft={draft} />
         <Composer
           status={SessionStatusKind.Idle}
-          busy={create.isPending || run.isPending}
+          busy={create.isPending || invoke.isPending || run.isPending}
           blockedReason={draft.blockedReason}
           entries={entries}
           idlePlaceholder={

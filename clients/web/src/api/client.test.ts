@@ -6,6 +6,36 @@ import { api, ApiRequestError } from "./client";
  * status line, because `request` called `res.json()` —
  * which *throws* on a non-JSON body — and kept the status line as the message.
  */
+describe("agent invocation", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    fetchMock.mockReset();
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("posts a first message and environment to the selected agent", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ session: { id: "s1" } }), { status: 200 }),
+    );
+
+    await api.agents.invoke("reviewer", {
+      message: "Review this change",
+      environment: { type: "Runtime", value: { vendor: "local" } },
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/agents/reviewer/invoke", {
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+      body: JSON.stringify({
+        message: "Review this change",
+        environment: { type: "Runtime", value: { vendor: "local" } },
+      }),
+    });
+  });
+});
+
 describe("request error reporting", () => {
   const fetchMock = vi.fn();
 
