@@ -262,15 +262,6 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
                 self.settings.workspace_root.trim_end_matches('/')
             ),
         ));
-        // Provision steps travel the same channel the process provider uses, so
-        // the runtime binary needs no Fly-specific path. Encoding cannot fail
-        // for this type, and a machine with no provision steps is a working
-        // machine — so a failure here drops the steps rather than the runtime.
-        if !spec.provision.is_empty()
-            && let Ok(json) = serde_json::to_string(&spec.provision)
-        {
-            env.push((horsie_models::ENV_PROVISION.to_string(), json));
-        }
         Ok(MachineSpec {
             name: machine_name(runtime_id),
             image: self.settings.image.clone(),
@@ -639,7 +630,6 @@ mod tests {
         RuntimeSpec {
             workspaces: vec!["main".to_string()],
             env: vec![],
-            provision: vec![],
         }
     }
 
@@ -819,30 +809,6 @@ mod tests {
         assert_eq!(volume_name("s1"), "horsie_s1");
         assert_eq!(volume_name("RT-9f.2"), "horsie_rt_9f_2");
         assert!(volume_name(&"x".repeat(60)).len() <= 30);
-    }
-
-    #[test]
-    fn provision_steps_ride_the_environment() {
-        // The same channel the process provider uses, so the runtime binary
-        // needs no Fly-specific path — and without it a provisioned session
-        // would come up with an empty workspace and no error.
-        let v = vendor(FakeFly::default(), false);
-        let spec = RuntimeSpec {
-            provision: vec![horsie_models::executor::ProvisionStep {
-                name: "checkout".to_string(),
-                uses: "git_checkout".to_string(),
-                with: vec![],
-            }],
-            ..spec()
-        };
-        let machine = v.spec_for("s1", &spec, None).unwrap();
-        let provision = machine
-            .env
-            .iter()
-            .find(|(k, _)| k == horsie_models::ENV_PROVISION)
-            .map(|(_, v)| v.clone())
-            .expect("provision steps must reach the machine");
-        assert!(provision.contains("git_checkout"), "{provision}");
     }
 
     /// Bundles never worked on this vendor: nothing ever told a machine what

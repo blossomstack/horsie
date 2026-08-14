@@ -265,7 +265,6 @@ mod tests {
         RuntimeSpec {
             workspaces: vec![],
             env: vec![],
-            provision: vec![],
         }
     }
 

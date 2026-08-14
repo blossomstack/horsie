@@ -1,8 +1,10 @@
 use crate::in_flight::InFlight;
 use crate::transport::{RuntimeTransport, TransportError};
+use horsie_models::executor::ProvisionStep;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    ScanResponse, ServerHookEvent, ToolCall, ToolError, ToolOutput, ToolResult,
+    ProvisionError, ProvisionResult, ScanResponse, ServerHookEvent, ToolCall, ToolError,
+    ToolOutput, ToolResult,
 };
 use std::sync::Arc;
 // Still minted for the calls that have no model tool_call_id to borrow —
@@ -190,6 +192,31 @@ impl RuntimeClient {
                 }
             }
             Err(e) => Err(RuntimeCallError::Transport(e)),
+        }
+    }
+
+    /// Bring the workspaces to the state `steps` describes.
+    ///
+    /// Tracked like a tool call, and for the same two reasons. A clone of a
+    /// large repository takes minutes, so the reconciler must see it as running
+    /// — an untracked call the runtime reports is cancelled as an orphan. And a
+    /// user hitting Stop during one must be able to abandon it.
+    ///
+    /// Mints its own `call_id`: unlike a tool call there is nothing the model
+    /// said to borrow one from.
+    pub async fn provision_workspace(
+        &self,
+        steps: Vec<ProvisionStep>,
+    ) -> Result<(), RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.track(&call_id);
+        let outcome = self.inner.provision_workspace(&call_id, steps).await;
+        self.untrack(&call_id);
+        match outcome.map_err(RuntimeCallError::Transport)? {
+            ProvisionResult::Ok(_) => Ok(()),
+            ProvisionResult::Err(ProvisionError { reason }) => {
+                Err(RuntimeCallError::ToolFailed(reason))
+            }
         }
     }
 

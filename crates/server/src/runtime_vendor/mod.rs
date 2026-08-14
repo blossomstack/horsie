@@ -60,7 +60,6 @@ pub struct WorkspaceSpec {
 #[derive(Debug, Clone)]
 pub struct RuntimeSpec {
     pub workspaces: Vec<WorkspaceSpec>,
-    pub provision: Vec<horsie_models::executor::ProvisionStep>,
     pub env: Vec<horsie_models::executor::EnvVar>,
 }
 
@@ -76,7 +75,6 @@ impl RuntimeSpec {
         horsie_models::runtime_vendor::RuntimeSpec {
             workspaces: self.workspaces.iter().map(|w| w.name.clone()).collect(),
             env: self.env.clone(),
-            provision: self.provision.clone(),
         }
     }
 }

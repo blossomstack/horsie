@@ -121,7 +121,6 @@ impl Agent {
             workspaces: vec![WorkspaceSpec {
                 name: "main".to_string(),
             }],
-            provision: vec![],
             env: vec![],
         }
     }
