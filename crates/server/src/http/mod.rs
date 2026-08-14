@@ -7,7 +7,6 @@ mod annotations;
 pub mod auth;
 mod chatgpt;
 mod config;
-mod environments;
 pub mod error;
 pub(crate) mod github;
 pub(crate) mod handlers;
@@ -17,7 +16,6 @@ mod memory;
 mod messages;
 mod model_cards;
 mod plugins;
-mod routines;
 pub mod runtime_connect;
 mod runtime_credentials;
 mod runtime_pump;
@@ -304,27 +302,6 @@ pub fn app(state: AppState) -> Router {
             "/api/runtime-vendors/{name}/test",
             post(runtime_vendors::test_runtime_vendor),
         )
-        .route(
-            "/api/environments",
-            get(environments::list_environments).post(environments::create_environment),
-        )
-        .route(
-            "/api/environments/{name}",
-            get(environments::get_environment)
-                .put(environments::replace_environment)
-                .delete(environments::delete_environment),
-        )
-        .route(
-            "/api/routines",
-            get(routines::list_routines).post(routines::create_routine),
-        )
-        .route(
-            "/api/routines/{name}",
-            get(routines::get_routine)
-                .put(routines::replace_routine)
-                .delete(routines::delete_routine),
-        )
-        .route("/api/routines/{name}/run", post(routines::run_routine))
         .route(
             "/api/workflows",
             get(workflows::list_workflows).post(workflows::create_workflow),

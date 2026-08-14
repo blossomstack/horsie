@@ -16,11 +16,18 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub mod agents;
+pub mod environments;
 pub mod http;
+pub mod routines;
 
 /// The whole control plane. A new resource is one line here.
 pub fn operations() -> Vec<Operation> {
-    agents::operations()
+    [
+        agents::operations(),
+        routines::operations(),
+        environments::operations(),
+    ]
+    .concat()
 }
 
 /// Ask the session supervisor a question, mapping a closed mailbox to an
@@ -41,7 +48,7 @@ where
         .map_err(|_| ControlError::Internal("session supervisor unavailable".to_string()))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Method {
     Get,
     Post,
@@ -233,8 +240,12 @@ impl From<ControlError> for ToolCallError {
 
 /// The four service error enums are structurally identical, so their
 /// conversions are too.
+/// The conflict code is per-resource because the routes already differ:
+/// agents and environments answer `duplicate`, routines and workflows answer
+/// `conflict`. Neither is better, but changing either silently would alter a
+/// wire contract for no reason.
 macro_rules! from_service_error {
-    ($($ty:path),+ $(,)?) => {$(
+    ($($ty:path => $code:literal),+ $(,)?) => {$(
         impl From<$ty> for ControlError {
             fn from(e: $ty) -> Self {
                 // Aliased because a `path` macro fragment cannot be followed by
@@ -243,7 +254,7 @@ macro_rules! from_service_error {
                 match e {
                     ServiceError::NotFound(m) => Self::NotFound(m),
                     ServiceError::Conflict(m) => Self::Conflict {
-                        code: "duplicate".to_string(),
+                        code: $code.to_string(),
                         message: m,
                     },
                     ServiceError::Invalid(m) => Self::Invalid(m),
@@ -255,10 +266,10 @@ macro_rules! from_service_error {
 }
 
 from_service_error!(
-    crate::agents::AgentError,
-    crate::workflows::WorkflowError,
-    crate::routines::RoutineError,
-    crate::environments::EnvironmentError,
+    crate::agents::AgentError => "duplicate",
+    crate::workflows::WorkflowError => "conflict",
+    crate::routines::RoutineError => "conflict",
+    crate::environments::EnvironmentError => "duplicate",
 );
 
 /// A spec that could not be assembled: the caller's fault is invalid, ours is
@@ -279,8 +290,59 @@ impl From<crate::sessions::builder::SpecError> for ControlError {
     clippy::panic,
     clippy::wildcard_enum_match_arm
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The merge in [`http`] can only fill a path param the input type
+    /// declares. A mismatch would 422 every call to that route, so every
+    /// resource asserts this over its own table.
+    pub(crate) fn assert_path_params_are_inputs(operations: &[Operation]) {
+        for operation in operations {
+            for param in operation
+                .path
+                .split('/')
+                .filter_map(|s| s.strip_prefix('{').and_then(|s| s.strip_suffix('}')))
+            {
+                assert!(
+                    operation.schema["properties"].get(param).is_some(),
+                    "{}.{} takes {{{}}} in its path but not in its input",
+                    operation.resource,
+                    operation.action,
+                    param
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_resource_declares_a_distinct_action_set() {
+        // Two operations answering to one (resource, action) would make the
+        // toolbox's dispatch map silently drop one of them.
+        let mut seen = std::collections::BTreeSet::new();
+        for operation in operations() {
+            assert!(
+                seen.insert((operation.resource, operation.action)),
+                "{}.{} is declared twice",
+                operation.resource,
+                operation.action
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_operations_claim_one_method_and_path() {
+        // The fold merges method routers per path; a genuine duplicate would
+        // panic axum at boot rather than fail a test, so catch it here.
+        let mut seen = std::collections::BTreeSet::new();
+        for operation in operations().iter().filter(|o| o.expose != Expose::ToolOnly) {
+            assert!(
+                seen.insert((operation.method, operation.path)),
+                "{:?} {} is claimed twice",
+                operation.method,
+                operation.path
+            );
+        }
+    }
 
     #[test]
     fn service_errors_keep_their_status() {
@@ -302,9 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn a_service_conflict_keeps_the_default_code() {
+    fn each_resource_keeps_the_conflict_code_its_route_already_answered() {
         let api: Api =
             ControlError::from(crate::routines::RoutineError::Conflict("taken".into())).into();
+        assert_eq!(api.1.code, "conflict");
+
+        let api: Api =
+            ControlError::from(crate::agents::AgentError::Conflict("taken".into())).into();
         assert_eq!(api.1.code, "duplicate");
     }
 
