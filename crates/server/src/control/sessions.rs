@@ -23,6 +23,12 @@ use std::sync::Arc;
 const TOOL_PAGE_DEFAULT: usize = 20;
 const TOOL_PAGE_MAX: usize = 100;
 
+/// Checked at compile time rather than in a test: the gap between what a model
+/// may read and what a browser may is the whole protection here, and raising
+/// either HTTP constant later must not be able to close it quietly.
+const _: () = assert!(TOOL_PAGE_MAX < crate::http::messages::PAGE_MAX);
+const _: () = assert!(TOOL_PAGE_DEFAULT < crate::http::messages::PAGE_DEFAULT);
+
 /// The main agent, when a caller names no other.
 const MAIN_AGENT: &str = "main";
 
@@ -257,11 +263,4 @@ mod tests {
         assert_eq!(read.expose, Expose::ToolOnly);
     }
 
-    #[test]
-    fn a_model_gets_a_far_smaller_page_than_a_browser() {
-        // The clamp is the whole protection: a model that asks for everything
-        // would spend its context on a transcript instead of the work.
-        assert!(TOOL_PAGE_MAX < 1000, "the HTTP cap is 1000");
-        assert!(TOOL_PAGE_DEFAULT < 50, "the HTTP default is 50");
-    }
 }

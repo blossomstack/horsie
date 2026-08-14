@@ -41,8 +41,8 @@ use uuid::Uuid;
 const STREAM_BUFFER: usize = 64;
 
 /// Default and maximum entries in one page.
-const PAGE_DEFAULT: usize = 50;
-const PAGE_MAX: usize = 1000;
+pub(crate) const PAGE_DEFAULT: usize = 50;
+pub(crate) const PAGE_MAX: usize = 1000;
 
 /// The agent every request means unless it names another.
 use crate::http::handlers::MAIN_AGENT;
