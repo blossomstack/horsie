@@ -220,8 +220,8 @@ impl Component for ForkedAgents {
                 .apply_created(id, parent, source_seq, mode, message, at_ms),
             SessionDomainEvent::ForkSeeded { id, .. } => state.forks.apply_seeded(id),
             SessionDomainEvent::ForkTitled { id, name, .. } => state.forks.apply_titled(id, name),
-            SessionDomainEvent::ForkStatusChanged { id, status, .. } => {
-                state.forks.apply_status(id, status);
+            SessionDomainEvent::ForkStatusChanged { at_ms, id, status } => {
+                state.forks.apply_status(id, status, at_ms);
             }
             SessionDomainEvent::ForkDeleted { id, .. } => state.forks.apply_deleted(id),
             other => unreachable!("ForkedAgents was handed {other:?}"),
@@ -452,7 +452,7 @@ mod tests {
             "go".into(),
             1,
         );
-        state.forks.apply_status(id(1), status);
+        state.forks.apply_status(id(1), status, 5_000);
         state
     }
 

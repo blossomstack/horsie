@@ -158,12 +158,19 @@ export interface Lane {
   label: string;
   status: string;
   depth: number;
-  /** Only the main lane has bars; the rest are spans you click through to. */
+  /** The main lane always has bars. Another lane has them once it has been
+   * expanded and its own history fetched; until then it is a span. */
   bars: Bar[];
   span?: { x: number; width: number; open: boolean };
   anchor?: { x: number; parentAgentId: string };
   /** False when nothing recorded about this agent could place it on the axis. */
   placed: boolean;
+  /** Whether any lane hangs off this one — what decides if it gets a
+   * disclosure control at all. */
+  hasChildren: boolean;
+  /** Status, how long it took and when it started, for the hover card. The
+   * sidebar can only ever show a truncated name. */
+  detail: string;
 }
 
 export interface Timeline {
@@ -192,6 +199,16 @@ function humanMs(ms: number): string {
   return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
 }
 
+/** What a lane says about itself beyond its name: what became of it, how long
+ * it took, and when it started. The sidebar can only show a truncated name, so
+ * this is what the hover card carries. */
+function describe(status: string, startMs: number, endMs: number): string {
+  const parts = [status.replace(/_/g, " ")];
+  if (startMs > 0 && endMs > startMs) parts.push(humanMs(endMs - startMs));
+  if (startMs > 0) parts.push(`started ${clockTime(startMs)}`);
+  return parts.join(" · ");
+}
+
 /** 24-hour, so a label is five characters wide however long the session ran. */
 function clockTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], {
@@ -203,6 +220,10 @@ function clockTime(ms: number): string {
 
 /** How close two turn-start labels may sit before the later one is dropped. */
 const TICK_MIN_GAP_PX = 56;
+
+/** Statuses that mean the agent has not stopped, so its lane runs to the edge
+ * rather than ending at whatever it last did. */
+const LIVE_STATUS = new Set(["running", "provisioning", "awaiting_input"]);
 
 /**
  * Flatten one message into the things the timeline draws.
@@ -299,6 +320,10 @@ export function buildTimeline(
   agents: SubAgentView[],
   forks: ForkView[],
   nowMs: number,
+  /** Histories already fetched for expanded lanes, keyed by agent id. Their
+   * bars are laid out on the *session's* scale, not one of their own, so a
+   * subagent's work lines up under the turn that spawned it. */
+  expanded: Record<string, TranscriptItem[]> = {},
 ): Timeline {
   const entries: Entry[] = [];
   for (const item of items) {
@@ -344,6 +369,39 @@ export function buildTimeline(
   // the same pixel, reading as one line of garbled digits), and a label that
   // repeats the one before it — several turns inside the same minute produced
   // `18:27 18:27 18:27`, three marks that say nothing.
+  /** Bars for an expanded lane, on the session's own scale.
+   *
+   * `fromMs` is where the agent began, and everything before it is dropped: a
+   * fork's log *starts as a copy of its parent's*, carrying the parent's
+   * original timestamps, so drawn unfiltered a fork claimed to have been
+   * working through turns that happened before it existed. A subagent's log is
+   * its own, so for one the filter is a no-op — but the rule is the same one:
+   * a lane shows what that agent did. */
+  const barsFor = (agentId: string, fromMs: number): Bar[] => {
+    const own = expanded[agentId];
+    if (!own) return [];
+    const es: Entry[] = [];
+    for (const item of own) {
+      if (item.kind === "message") es.push(...entriesOf(item.value, nowMs));
+    }
+    return es
+      .filter((e) => e.startMs >= fromMs)
+      .sort((a, b) => a.startMs - b.startMs)
+      .map((e, i) => {
+      const x = scale.toX(e.startMs);
+      return {
+        key: `${agentId}:${e.entryId}:${e.kind}:${i}`,
+        kind: e.kind,
+        x,
+        width: Math.max(MIN_BAR_PX, scale.toX(e.endMs) - x),
+        entryId: e.entryId,
+        title: e.title,
+        detail: e.endMs > e.startMs ? humanMs(e.endMs - e.startMs) : clockTime(e.startMs),
+        live: e.live || undefined,
+      };
+    });
+  };
+
   const ticks: { x: number; label: string }[] = [];
   for (const e of entries) {
     if (!e.turnStart) continue;
@@ -368,35 +426,76 @@ export function buildTimeline(
       depth: 0,
       bars,
       placed: true,
+      hasChildren: agents.length > 1 || forks.length > 0,
+      detail: main?.status ?? "idle",
     },
   ];
 
-  /** A span, or nothing when there is no stamp to place the agent by. */
-  const spanOf = (startMs: number, endMs: number) => {
+  /** A span, or nothing when there is no stamp to place the agent by.
+   *
+   * `open` is decided by the status, not by a missing end stamp: a fork always
+   * has a last-activity time, so "it has no end" and "it is still going" are
+   * two different questions and only the status answers the second. */
+  const spanOf = (startMs: number, endMs: number, status: string) => {
     if (startMs <= 0) return undefined;
     const x = scale.toX(startMs);
-    const open = endMs <= 0;
+    const open = LIVE_STATUS.has(status) || endMs <= 0;
     return { x, width: Math.max(MIN_BAR_PX, (open ? scale.width : scale.toX(endMs)) - x), open };
   };
 
+  // Render order is a walk of the tree, not the roster's own order: the roster
+  // is keyed by uuid, so a subagent's child could sort above it and the two
+  // read as siblings. The same two rules `forkTree` learned — an orphan roots
+  // at the top level, anything the walk cannot reach is appended flat — because
+  // this reads the same journal-derived data.
   const held = new Set(agents.map((a) => a.id));
+  const kids = new Map<string, SubAgentView[]>();
   for (const a of agents) {
     if (a.id === mainId) continue;
-    const span = spanOf(a.spawnedAtMs, a.endedAtMs);
-    // A parent nobody holds is the same as no parent: deleting one, or never
-    // having been told about it, must not hide the child. `forkTree` learned
-    // this on the same journal-derived data.
-    const rooted = a.parent !== undefined && held.has(a.parent);
+    const key = a.parent && held.has(a.parent) ? a.parent : "";
+    kids.set(key, [...(kids.get(key) ?? []), a]);
+  }
+  for (const level of kids.values()) {
+    level.sort((x, y) => x.spawnedAtMs - y.spawnedAtMs || x.id.localeCompare(y.id));
+  }
+  const seen = new Set<string>();
+  const walk = (parent: string, depth: number) => {
+    for (const a of kids.get(parent) ?? []) {
+      if (seen.has(a.id)) continue;
+      seen.add(a.id);
+      const span = spanOf(a.spawnedAtMs, a.endedAtMs, a.status);
+      lanes.push({
+        agentId: a.id,
+        kind: "subagent",
+        label: a.label ?? a.agentType ?? "subagent",
+        status: a.status,
+        bars: barsFor(a.id, a.spawnedAtMs),
+        depth,
+        span,
+        anchor: span ? { x: span.x, parentAgentId: parent || mainId } : undefined,
+        placed: span !== undefined,
+        hasChildren: (kids.get(a.id) ?? []).length > 0,
+        detail: describe(a.status, a.spawnedAtMs, a.endedAtMs),
+      });
+      walk(a.id, depth + 1);
+    }
+  };
+  walk("", 0);
+  for (const a of agents) {
+    if (a.id === mainId || seen.has(a.id)) continue;
+    const span = spanOf(a.spawnedAtMs, a.endedAtMs, a.status);
     lanes.push({
       agentId: a.id,
       kind: "subagent",
       label: a.label ?? a.agentType ?? "subagent",
       status: a.status,
-      depth: rooted ? a.depth : 0,
-      bars: [],
+      bars: barsFor(a.id, a.spawnedAtMs),
+      depth: 0,
       span,
-      anchor: span ? { x: span.x, parentAgentId: rooted ? (a.parent as string) : mainId } : undefined,
+      anchor: span ? { x: span.x, parentAgentId: mainId } : undefined,
       placed: span !== undefined,
+      hasChildren: false,
+      detail: describe(a.status, a.spawnedAtMs, a.endedAtMs),
     });
   }
 
@@ -405,19 +504,25 @@ export function buildTimeline(
   // cycle. All of that is the same problem here.
   for (const placed of forkTree(forks)) {
     const f = placed.fork;
-    const span = spanOf(f.createdAtMs, 0);
+    // A fork is drawn exactly like a subagent: from when it branched to when it
+    // last did anything. It has no *end* — nothing closes a conversation — but
+    // "still running, forever" was a worse lie than "this is how far it got",
+    // and it made every fork a bar running off the edge of the pane.
+    const span = spanOf(f.createdAtMs, f.lastActivityMs, f.status);
     lanes.push({
       agentId: f.id,
       kind: "fork",
       label: f.title ?? "untitled fork",
       status: f.status,
+      bars: barsFor(f.id, f.createdAtMs),
       depth: placed.depth,
-      bars: [],
       span,
       anchor: span
         ? { x: span.x, parentAgentId: placed.depth > 0 && f.parent ? f.parent : mainId }
         : undefined,
       placed: span !== undefined,
+      hasChildren: forks.some((o) => o.parent === f.id),
+      detail: describe(f.status, f.createdAtMs, f.lastActivityMs),
     });
   }
 

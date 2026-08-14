@@ -132,6 +132,7 @@ const agent = (o: Partial<SubAgentView> & { id: string }): SubAgentView => ({
 const fork = (o: Partial<ForkView> & { id: string }): ForkView => ({
   status: "idle",
   createdAtMs: 0,
+  lastActivityMs: 0,
   ...o,
 });
 
@@ -393,5 +394,114 @@ describe("parallel tool calls", () => {
     ];
     const bars = buildTimeline(parallel, MAIN, [], 10_000).lanes[0].bars;
     expect(new Set(bars.map((b) => b.key)).size).toBe(bars.length);
+  });
+});
+
+describe("nesting", () => {
+  it("puts a subagent's child under it, indented, not beside it", () => {
+    // The roster is keyed by uuid, so a child can sort above its parent and the
+    // two read as siblings. Only a screenshot showed it.
+    const t = buildTimeline(
+      SESSION,
+      [
+        agent({ id: "main", label: undefined }),
+        agent({ id: "zzz-child", label: "lockfile", parent: "aaa-parent", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+        agent({ id: "aaa-parent", label: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+      ],
+      [],
+      20_000,
+    );
+    const order = t.lanes.filter((l) => l.kind === "subagent").map((l) => [l.label, l.depth]);
+    expect(order).toEqual([
+      ["audit", 0],
+      ["lockfile", 1],
+    ]);
+  });
+
+  it("anchors a nested subagent to its parent, not to the main agent", () => {
+    const t = buildTimeline(
+      SESSION,
+      [
+        agent({ id: "main", label: undefined }),
+        agent({ id: "p", label: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+        agent({ id: "c", label: "lockfile", parent: "p", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+      ],
+      [],
+      20_000,
+    );
+    expect(t.lanes.find((l) => l.agentId === "c")?.anchor?.parentAgentId).toBe("p");
+  });
+
+  it("appends a subagent whose parent chain is a cycle rather than hanging", () => {
+    const t = buildTimeline(
+      SESSION,
+      [
+        agent({ id: "main", label: undefined }),
+        agent({ id: "a", parent: "b", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+        agent({ id: "b", parent: "a", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+      ],
+      [],
+      20_000,
+    );
+    expect(t.lanes.filter((l) => l.kind === "subagent")).toHaveLength(2);
+  });
+
+  it("ends a fork's lane at its last activity, not at the edge of the session", () => {
+    const t = buildTimeline(
+      SESSION,
+      MAIN,
+      [fork({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "idle" })],
+      20_000,
+    );
+    const lane = t.lanes.find((l) => l.agentId === "f1");
+    expect(lane?.span?.open).toBe(false);
+    expect(lane!.span!.width).toBeLessThan(t.width);
+  });
+
+  it("leaves a fork that is still running open", () => {
+    const t = buildTimeline(
+      SESSION,
+      MAIN,
+      [fork({ id: "f1", createdAtMs: 6_000, lastActivityMs: 8_000, status: "running" })],
+      20_000,
+    );
+    expect(t.lanes.find((l) => l.agentId === "f1")?.span?.open).toBe(true);
+  });
+
+  it("draws an expanded agent's own history on its lane, on the session's scale", () => {
+    const own: TranscriptItem[] = [
+      msg("s1", "Assistant", 7_000, { startedAtMs: 6_200, toolCalls: [{ id: "x", name: "grep", endedAtMs: 8_000 }] }),
+    ];
+    const t = buildTimeline(
+      SESSION,
+      [...MAIN, agent({ id: "sub", label: "audit", spawnedAtMs: 6_000, endedAtMs: 9_000 })],
+      [],
+      20_000,
+      { sub: own },
+    );
+    const lane = t.lanes.find((l) => l.agentId === "sub");
+    expect(lane!.bars.length).toBeGreaterThan(0);
+    // On the session's scale: its bars sit inside its own span.
+    for (const b of lane!.bars) expect(b.x).toBeGreaterThanOrEqual(lane!.span!.x - 1);
+  });
+});
+
+describe("an expanded fork", () => {
+  it("shows only what it did, not the parent history it was seeded with", () => {
+    // `/fork` copies the source's log, timestamps and all. Drawn unfiltered a
+    // fork claimed to have been working through turns that predate it.
+    const copied: TranscriptItem[] = [
+      msg("old", "Assistant", 3_000, { startedAtMs: 2_000, text: "from the parent" }),
+      msg("mine", "Assistant", 9_000, { startedAtMs: 8_000, text: "my own work" }),
+    ];
+    const t = buildTimeline(
+      SESSION,
+      MAIN,
+      [fork({ id: "f1", createdAtMs: 7_000, lastActivityMs: 9_000 })],
+      20_000,
+      { f1: copied },
+    );
+    const bars = t.lanes.find((l) => l.agentId === "f1")!.bars;
+    expect(bars.map((b) => b.entryId)).toEqual(["mine"]);
   });
 });

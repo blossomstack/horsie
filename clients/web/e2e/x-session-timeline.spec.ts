@@ -51,10 +51,15 @@ test("X1: the timeline draws the session and clicks through to the subagent", as
   await expect(main).toHaveCount(1);
   await expect(page.locator('[data-testid^="timeline-bar-"]').first()).toBeVisible();
 
-  // The subagent has a lane of its own, and it opens that agent.
+  // The subagent has a lane of its own. Its name in the sidebar is what opens
+  // it — the span beside the name drills into its work without leaving.
   const sub = page.locator('[data-testid^="timeline-lane-"][data-kind="subagent"]').first();
   await expect(sub).toBeVisible();
   await sub.locator('[data-testid^="timeline-span-"]').click();
+  await expect(sub).toHaveAttribute("data-expanded", "true");
+  await expect(page).not.toHaveURL(/\/agents\//);
+
+  await sub.locator('[data-testid^="timeline-open-"]').click();
   await expect(page).toHaveURL(/\/agents\//);
 
   // ...and there the toggle is gone. Scoped to one agent, the transcript is
@@ -73,7 +78,7 @@ test("X3: a scoped agent page will not open the timeline, even if the URL asks",
 
   await page.getByTestId("timeline-toggle").click();
   const sub = page.locator('[data-testid^="timeline-lane-"][data-kind="subagent"]').first();
-  await sub.locator('[data-testid^="timeline-span-"]').click();
+  await sub.locator('[data-testid^="timeline-open-"]').click();
   await expect(page).toHaveURL(/\/agents\//);
 
   // `view=timeline` is still on the URL from the toggle — the agent page must

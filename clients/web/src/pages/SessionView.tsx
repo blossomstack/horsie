@@ -1,7 +1,7 @@
 import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2 } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ApiRequestError, MAIN_AGENT } from "../api/client";
+import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
@@ -17,7 +17,8 @@ import { TranscriptSpine } from "../components/TranscriptSpine";
 import { WorkflowRunView } from "./workflows/WorkflowRunView";
 import { askConfirm } from "../lib/confirm";
 import { usePersistentState } from "../hooks/usePersistentState";
-import { useSessionStream } from "../hooks/useSessionStream";
+import { transcriptItems, useSessionStream } from "../hooks/useSessionStream";
+import type { TranscriptItem } from "../hooks/useSessionStream";
 import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
@@ -214,6 +215,36 @@ export function SessionView() {
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
 
+  /** Agents whose own work is being drawn on their lane, and the histories
+   * fetched for them.
+   *
+   * On demand rather than up front: a session with a dozen subagents would be a
+   * dozen requests on open, to draw detail nobody had asked to see yet. One
+   * read per lane, the first time it is opened, kept for as long as the page
+   * lives. */
+  const [expanded, setExpanded] = useState<string[]>([]);
+  /** Agents whose children are folded away. */
+  const [collapsed, setCollapsed] = useState<string[]>([]);
+  const [histories, setHistories] = useState<Record<string, TranscriptItem[]>>({});
+
+  const toggleExpand = async (agentId: string) => {
+    if (expanded.includes(agentId)) {
+      setExpanded((prev) => prev.filter((a) => a !== agentId));
+      return;
+    }
+    setExpanded((prev) => [...prev, agentId]);
+    if (histories[agentId] || !id) return;
+    try {
+      const page = await api.sessions.messages(id, agentId, { max: 200 });
+      // `false, false`: a fetched history is a finished read, so nothing in it
+      // is still in flight, and it is the whole of what there is to page.
+      setHistories((prev) => ({ ...prev, [agentId]: transcriptItems(page.entries, false, false) }));
+    } catch {
+      // The lane stays a span. A failed read must not take the view with it.
+      setExpanded((prev) => prev.filter((a) => a !== agentId));
+    }
+  };
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   // When a scroll-back page is loading, holds the scroll height captured just
@@ -318,8 +349,15 @@ export function SessionView() {
   // `Date.now()` is read here rather than inside the builder so one layout pass
   // measures every still-running bar against the same instant.
   const timeline = useMemo(
-    () => buildTimeline(stream.items, detail?.agents ?? [], detail?.forks ?? [], Date.now()),
-    [stream.items, detail?.agents, detail?.forks],
+    () =>
+      buildTimeline(
+        stream.items,
+        detail?.agents ?? [],
+        detail?.forks ?? [],
+        Date.now(),
+        histories,
+      ),
+    [stream.items, detail?.agents, detail?.forks, histories],
   );
 
   /** Scroll to a transcript entry by id, to a boundary by seq, or to either end. */
@@ -565,6 +603,14 @@ export function SessionView() {
             <div className="min-h-0 flex-1">
               <SessionTimeline
                 timeline={timeline}
+                expanded={expanded}
+                collapsed={collapsed}
+                onToggleCollapse={(agent) =>
+                  setCollapsed((prev) =>
+                    prev.includes(agent) ? prev.filter((a) => a !== agent) : [...prev, agent],
+                  )
+                }
+                onToggleExpand={(agent) => void toggleExpand(agent)}
                 onSelectEntry={(entryId) => {
                   // Reading an entry means reading the transcript. Switch back
                   // and record where to go; the effect above seeks once the

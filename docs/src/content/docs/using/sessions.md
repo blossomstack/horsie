@@ -72,9 +72,21 @@ the time went, or to see what a session delegated without scrolling for it.
 
 The top lane is the main agent, one bar per entry — what you said, what it
 thought, each tool call, each answer — coloured by kind and as wide as it took.
-Subagents and forked conversations get their own lanes below, each starting at
-the moment it branched off. Click a bar to jump back to that entry in the
-transcript; click a lane to open that agent.
+Subagents and forked conversations get their own lanes below, each running from
+the moment it branched off to the last thing it did.
+
+Names sit in a sidebar down the left, indented under whatever spawned them, and
+they stay put while the lanes scroll. From there:
+
+- **Hover a lane** — dashed lines drop from its start and end to the lane it
+  came from, so you can see which part of the parent's work it covers, and a
+  card gives its full name, what became of it and how long it took.
+- **Click the name** — opens that agent's own page.
+- **Click its bar** — draws that agent's own work along the same axis, without
+  leaving the map.
+- **Click the chevron** — folds away everything that agent spawned.
+
+Click any bar on any lane to jump to that entry in the transcript.
 
 One thing about the axis is worth knowing: idle stretches longer than a minute
 collapse to a narrow hatched gutter labelled with what they swallowed, so a

@@ -76,6 +76,7 @@ fn wire_fork(row: &crate::sessions::supervisor::ForkRow) -> horsie_models::sessi
         title: row.title.clone(),
         status: wire_agent_status(row.status).to_string(),
         created_at_ms: row.created_at_ms,
+        last_activity_ms: row.last_activity_ms,
     }
 }
 
@@ -558,6 +559,7 @@ mod tests {
             title: Some("Other migration".into()),
             status: AgentStatus::Idle,
             created_at_ms: 1_700_000_000_000,
+            last_activity_ms: 1_700_000_000_000,
         }];
 
         let view = detail("s1", &rec, None);
@@ -585,6 +587,7 @@ mod tests {
                 title: None,
                 status: AgentStatus::Running,
                 created_at_ms: 10,
+                last_activity_ms: 10,
             },
             crate::sessions::supervisor::ForkRow {
                 id: child,
@@ -592,6 +595,7 @@ mod tests {
                 title: Some("deeper".into()),
                 status: AgentStatus::Idle,
                 created_at_ms: 20,
+                last_activity_ms: 20,
             },
         ];
 

@@ -62,6 +62,15 @@ pub struct ForkRecord {
     pub title: Option<String>,
     pub status: AgentStatus,
     pub created_at_ms: u64,
+    /// When this fork last did anything — the moment of its most recent status
+    /// change, which is the end of its last turn once it is idle again.
+    ///
+    /// A conversation has no *end*, which is why `fork_entry` reports none. But
+    /// a reader looking at a session's shape still needs to know how far along
+    /// a fork got, and "still going, forever" is not that. Zero until the fork
+    /// has moved at all. `#[serde(default)]` so pre-stamp journal rows load.
+    #[serde(default)]
+    pub last_activity_ms: u64,
 }
 
 /// Every fork a session holds, keyed by agent id. Iteration is uuid order,
@@ -96,6 +105,7 @@ impl ForkRoster {
                 // it is precisely the state in which no turn has run.
                 status: AgentStatus::Provisioning,
                 created_at_ms: at_ms,
+                last_activity_ms: at_ms,
             },
         );
     }
@@ -113,9 +123,12 @@ impl ForkRoster {
         }
     }
 
-    pub fn apply_status(&mut self, id: Uuid, status: AgentStatus) {
+    /// A fork moved. `at_ms` is the event's own stamp, so a replay reproduces
+    /// exactly the activity times a live run recorded.
+    pub fn apply_status(&mut self, id: Uuid, status: AgentStatus, at_ms: u64) {
         if let Some(rec) = self.forks.get_mut(&id) {
             rec.status = status;
+            rec.last_activity_ms = at_ms;
         }
     }
 
@@ -324,7 +337,7 @@ mod tests {
         r.apply_deleted(id(1));
         r.apply_seeded(id(1));
         r.apply_titled(id(1), "ghost".to_string());
-        r.apply_status(id(1), AgentStatus::Running);
+        r.apply_status(id(1), AgentStatus::Running, 2_000);
         assert!(!r.contains(id(1)));
     }
 

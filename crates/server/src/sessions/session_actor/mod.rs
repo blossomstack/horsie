@@ -418,6 +418,7 @@ impl SessionActor {
                 title: rec.title.clone(),
                 status: rec.status,
                 created_at_ms: rec.created_at_ms,
+                last_activity_ms: rec.last_activity_ms,
             })
             .collect();
         if forks == self.last_reported_forks {

@@ -66,12 +66,14 @@ kept current by `ForksChanged`, and reach the wire only through
 `SessionSummary.forks` for the session list. This is the one server change the
 feature needs; see below.
 
-**A fork has no end, and never had one.** `ForkView` is `id`, `parent`,
-`title`, `status`, `created_at_ms` — there is no end stamp to want, and
-`fork_entry` says why: "a conversation is never *done*". So a fork lane is
-drawn as a start marker and an open bar running to the right edge, never as a
-measured span. A subagent lane, whose `spawned_at_ms`/`ended_at_ms` are both
-real, is.
+**A fork had no end.** `ForkView` was `id`, `parent`, `title`, `status`,
+`created_at_ms`, and `fork_entry` explains why there is no end stamp: "a
+conversation is never *done*". True, and useless to draw — every fork became a
+bar running off the right edge of the pane. So `ForkRecord` and `ForkView` gain
+`last_activity_ms`, stamped from the `at_ms` that `ForkStatusChanged` already
+carries, which needs no new event and replays identically. It is not an end; it
+is how far the fork got, which is the question a reader actually has. A fork
+whose status is still live is drawn open regardless.
 
 **A tool call has no start time.** `ToolResultPart` carries `tool_call_id`,
 `output` and `is_error` and no timestamps at all. A tool's duration is
@@ -325,6 +327,27 @@ One Playwright spec covers the wiring: open a session with a subagent, toggle
 the view, assert the lanes, click the subagent lane and land on its page. Lane
 and bar testids carry the agent id, because the suite has a history of strict-
 mode failures from duplicate testids.
+
+## The interaction model
+
+Settled after seeing it: four different questions, four different controls.
+
+**Hover a lane** and dashed lines drop from its start and its end to the lane it
+branched from, plus a card with its full name, its status and how long it took.
+Hover rather than always-on, because drawn for every lane at once they were a
+thicket of dashes; and a card because the sidebar is a fixed width, so a long
+subagent label is always going to be cut.
+
+**Click the name** to open that agent's page. **Click its span** to draw its own
+history along the same axis without leaving. **Click the chevron** to fold away
+what it spawned. The chevron is a tree control, not a detail control: what an
+agent spawned is structure, what it did is out on the timeline already.
+
+An expanded lane's bars are laid out on the *session's* scale, not one of their
+own, so a subagent's work lines up under the turn that spawned it. They are also
+filtered to the agent's own lifetime: `/fork` seeds a fork with a copy of its
+parent's log, timestamps and all, so unfiltered a fork claimed to have been
+working through turns that happened before it existed.
 
 ## Out of scope
 

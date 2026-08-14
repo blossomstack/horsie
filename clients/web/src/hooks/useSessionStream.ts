@@ -464,6 +464,145 @@ let optimisticSeq = 0;
  * used to carry were all managing. Status, the queue, the task list and the
  * last error are folded from the same entries the transcript is built from.
  */
+/**
+ * Fold one agent's log into the rows a transcript (or a timeline) draws.
+ *
+ * Extracted from the stream's own derivation rather than copied, so a second
+ * reader of a second agent's history cannot drift from what the open
+ * conversation shows. `running` decides whether a tool call with no result yet
+ * is *in flight* or merely unanswered; `hasMoreBefore` decides whether a
+ * compaction can honestly say how much it covered.
+ */
+export function transcriptItems(
+  entries: AgentLogEntry[],
+  running: boolean,
+  hasMoreBefore: boolean,
+): TranscriptItem[] {
+  // Tool results and hook records, keyed by the call they answer, so a call
+  // can be resolved wherever it appears.
+  const results = new Map<string, { output: string; isError: boolean; atMs: number }>();
+  const hooks = new Map<string, HookRecord[]>();
+  for (const entry of entries) {
+    if (entry.body.type === "Llm" && entry.body.value.role === Role.Tool) {
+      for (const part of entry.body.value.parts) {
+        if (part.type === "ToolResult") {
+          results.set(part.value.toolCallId, {
+            output: part.value.output,
+            isError: part.value.isError,
+            atMs: entry.atMs,
+          });
+        }
+      }
+    } else if (entry.body.type === "Hook") {
+      const scope = toolScope(entry.body.value.record);
+      if (scope) {
+        hooks.set(scope.toolCallId, [
+          ...(hooks.get(scope.toolCallId) ?? []),
+          entry.body.value.record,
+        ]);
+      }
+    }
+  }
+
+  const resolveTool = (tc: { id: string; name: string; input: unknown }): RenderedToolCall => {
+    const result = results.get(tc.id);
+    return {
+      ...tc,
+      output: result?.output,
+      isError: result?.isError,
+      endedAtMs: result?.atMs,
+      // A call with no result yet, in a session that is running, *is*
+      // running. Derived rather than pushed, so a client that joined late
+      // draws it the same way one that watched it start does.
+      running: result === undefined && running,
+      hooks: hooks.get(tc.id) ?? [],
+    };
+  };
+
+  const renderMessage = (m: Message): RenderedMessage => ({
+    id: m.id,
+    role: m.role === Role.Assistant ? "Assistant" : "User",
+    text: textOf(m.parts),
+    thinking: thinkingOf(m.parts),
+    toolCalls: m.parts
+      .filter(
+        (p): p is Extract<ContentPart, { type: "ToolCall" }> =>
+          p.type === "ToolCall",
+      )
+      .map((p) =>
+        resolveTool({ id: p.value.id, name: p.value.name, input: p.value.input }),
+      ),
+    subagentResults: subAgentResultsOf(m.parts),
+    createdAtMs: m.createdAtMs,
+    startedAtMs: m.startedAtMs ?? undefined,
+  });
+
+  const items: TranscriptItem[] = [];
+  // Where the previous conversation ended, so a boundary can say how much
+  // *it* closed rather than how far the log stretches behind it.
+  let previousBoundarySeq: number | null = null;
+  for (const entry of entries) {
+    if (entry.body.type === "Llm") {
+      if (entry.body.value.role === Role.Tool) continue;
+      items.push({ kind: "message", value: renderMessage(entry.body.value) });
+    } else if (entry.body.type === "Hook") {
+      const record = entry.body.value.record;
+      if (toolScope(record)) continue; // shown on its call's card
+      items.push({
+        kind: "notice",
+        value: { id: entry.body.value.id, record, atMs: entry.body.value.createdAtMs },
+      });
+    } else if (
+      entry.body.type === "Lifecycle" &&
+      entry.body.value.kind === "Forked"
+    ) {
+      // The one lifecycle entry the transcript renders. The rest are folded
+      // into status and progress, because they describe the conversation
+      // rather than sitting *in* it — but a branch happened at a point, and
+      // the point is the whole of what it says.
+      items.push({
+        kind: "fork",
+        value: {
+          id: entry.body.value.value.id,
+          mode: entry.body.value.value.mode,
+          atMs: entry.atMs,
+        },
+      });
+    } else if (entry.body.type === "Compaction") {
+      const c = entry.body.value;
+      items.push({
+        kind: "compaction",
+        value: {
+          seq: entry.seq,
+          summary: c.summary,
+          carriedState: c.carriedState,
+          // The span *this* boundary closed, in log entries — measured from
+          // the previous boundary, not from the start of the log, or every
+          // compaction after the first would claim the whole history.
+          //
+          // `null` when the previous boundary has not been paged in yet: the
+          // honest answer is that the count is unknown, and inventing one by
+          // measuring from seq 0 is exactly the bug this replaced.
+          covered:
+            previousBoundarySeq === null
+              ? hasMoreBefore
+                ? null
+                : c.coversThroughSeq + 1
+              : c.coversThroughSeq - previousBoundarySeq,
+          tokensBefore: c.tokensBefore,
+          tokensAfter: c.tokensAfter,
+          manual: c.trigger.kind === "Manual",
+          atMs: entry.atMs,
+        },
+      });
+      previousBoundarySeq = entry.seq;
+    }
+    // Lifecycle entries drive the fold above; they are not transcript rows.
+  }
+
+  return items;
+}
+
 export function useSessionStream(
   sessionId: string | undefined,
   agentId: string = MAIN_AGENT,
@@ -556,127 +695,7 @@ export function useSessionStream(
     const folded = fold(state.entries);
     const running = folded.status === SessionStatusKind.Running;
 
-    // Tool results and hook records, keyed by the call they answer, so a call
-    // can be resolved wherever it appears.
-    const results = new Map<string, { output: string; isError: boolean; atMs: number }>();
-    const hooks = new Map<string, HookRecord[]>();
-    for (const entry of state.entries) {
-      if (entry.body.type === "Llm" && entry.body.value.role === Role.Tool) {
-        for (const part of entry.body.value.parts) {
-          if (part.type === "ToolResult") {
-            results.set(part.value.toolCallId, {
-              output: part.value.output,
-              isError: part.value.isError,
-              atMs: entry.atMs,
-            });
-          }
-        }
-      } else if (entry.body.type === "Hook") {
-        const scope = toolScope(entry.body.value.record);
-        if (scope) {
-          hooks.set(scope.toolCallId, [
-            ...(hooks.get(scope.toolCallId) ?? []),
-            entry.body.value.record,
-          ]);
-        }
-      }
-    }
-
-    const resolveTool = (tc: { id: string; name: string; input: unknown }): RenderedToolCall => {
-      const result = results.get(tc.id);
-      return {
-        ...tc,
-        output: result?.output,
-        isError: result?.isError,
-        endedAtMs: result?.atMs,
-        // A call with no result yet, in a session that is running, *is*
-        // running. Derived rather than pushed, so a client that joined late
-        // draws it the same way one that watched it start does.
-        running: result === undefined && running,
-        hooks: hooks.get(tc.id) ?? [],
-      };
-    };
-
-    const renderMessage = (m: Message): RenderedMessage => ({
-      id: m.id,
-      role: m.role === Role.Assistant ? "Assistant" : "User",
-      text: textOf(m.parts),
-      thinking: thinkingOf(m.parts),
-      toolCalls: m.parts
-        .filter(
-          (p): p is Extract<ContentPart, { type: "ToolCall" }> =>
-            p.type === "ToolCall",
-        )
-        .map((p) =>
-          resolveTool({ id: p.value.id, name: p.value.name, input: p.value.input }),
-        ),
-      subagentResults: subAgentResultsOf(m.parts),
-      createdAtMs: m.createdAtMs,
-      startedAtMs: m.startedAtMs ?? undefined,
-    });
-
-    const items: TranscriptItem[] = [];
-    // Where the previous conversation ended, so a boundary can say how much
-    // *it* closed rather than how far the log stretches behind it.
-    let previousBoundarySeq: number | null = null;
-    for (const entry of state.entries) {
-      if (entry.body.type === "Llm") {
-        if (entry.body.value.role === Role.Tool) continue;
-        items.push({ kind: "message", value: renderMessage(entry.body.value) });
-      } else if (entry.body.type === "Hook") {
-        const record = entry.body.value.record;
-        if (toolScope(record)) continue; // shown on its call's card
-        items.push({
-          kind: "notice",
-          value: { id: entry.body.value.id, record, atMs: entry.body.value.createdAtMs },
-        });
-      } else if (
-        entry.body.type === "Lifecycle" &&
-        entry.body.value.kind === "Forked"
-      ) {
-        // The one lifecycle entry the transcript renders. The rest are folded
-        // into status and progress, because they describe the conversation
-        // rather than sitting *in* it — but a branch happened at a point, and
-        // the point is the whole of what it says.
-        items.push({
-          kind: "fork",
-          value: {
-            id: entry.body.value.value.id,
-            mode: entry.body.value.value.mode,
-            atMs: entry.atMs,
-          },
-        });
-      } else if (entry.body.type === "Compaction") {
-        const c = entry.body.value;
-        items.push({
-          kind: "compaction",
-          value: {
-            seq: entry.seq,
-            summary: c.summary,
-            carriedState: c.carriedState,
-            // The span *this* boundary closed, in log entries — measured from
-            // the previous boundary, not from the start of the log, or every
-            // compaction after the first would claim the whole history.
-            //
-            // `null` when the previous boundary has not been paged in yet: the
-            // honest answer is that the count is unknown, and inventing one by
-            // measuring from seq 0 is exactly the bug this replaced.
-            covered:
-              previousBoundarySeq === null
-                ? state.hasMoreBefore
-                  ? null
-                  : c.coversThroughSeq + 1
-                : c.coversThroughSeq - previousBoundarySeq,
-            tokensBefore: c.tokensBefore,
-            tokensAfter: c.tokensAfter,
-            manual: c.trigger.kind === "Manual",
-            atMs: entry.atMs,
-          },
-        });
-        previousBoundarySeq = entry.seq;
-      }
-      // Lifecycle entries drive the fold above; they are not transcript rows.
-    }
+    const items = transcriptItems(state.entries, running, state.hasMoreBefore);
 
     // Queued first, then this tab's un-acknowledged echoes: everything the
     // server already holds is older than anything still in flight to it.
