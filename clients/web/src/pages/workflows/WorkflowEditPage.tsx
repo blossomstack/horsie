@@ -160,9 +160,18 @@ function WorkflowEditor() {
     <div className="flex h-full flex-col" data-testid="workflow-edit-page">
       <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
-        <h1 className="page-title">{editing ? `Edit ${name}` : "New workflow"}</h1>
+        <h1 className="page-title min-w-0 flex-1 truncate">
+          {editing ? `Edit ${name}` : "New workflow"}
+        </h1>
         <button
-          className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          onClick={() => navigate("/workflows")}
+          data-testid="cancel-workflow"
+        >
+          Cancel
+        </button>
+        <button
+          className="key key-go !px-2.5 !py-1.5 text-xs"
           onClick={save}
           data-testid="save-workflow"
           disabled={!slug.trim() || stepNames.length === 0}

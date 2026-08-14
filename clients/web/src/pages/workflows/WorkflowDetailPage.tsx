@@ -1,4 +1,4 @@
-import { Pencil, Play } from "lucide-react";
+import { ArrowLeft, Pencil, Play } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { StatusBadge } from "../../components/StatusBadge";
 import { WorkflowGraph } from "../../components/WorkflowGraph";
@@ -42,7 +42,15 @@ export function WorkflowDetailPage() {
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
       <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
-        <h1 className="page-title">{workflow.name}</h1>
+        <Link
+          to="/workflows"
+          className="key !px-2.5 !py-1.5 text-xs"
+          data-testid="return-to-workflows"
+        >
+          <ArrowLeft size={14} />
+          Return
+        </Link>
+        <h1 className="page-title min-w-0 flex-1 truncate">{workflow.name}</h1>
         <Link
           to={`/workflows/${encodeURIComponent(workflow.name)}/edit`}
           className="key ml-auto !px-2.5 !py-1.5 text-xs"

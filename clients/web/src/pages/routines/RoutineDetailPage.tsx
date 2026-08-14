@@ -1,4 +1,4 @@
-import { Pencil, Play } from "lucide-react";
+import { ArrowLeft, Pencil, Play } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { StatusDot } from "../../components/StatusBadge";
 import { ApiRequestError } from "../../api/client";
@@ -46,9 +46,15 @@ export function RoutineDetailPage() {
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
       <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
-        <h1 className="page-title">
-          {routine.name}
-        </h1>
+        <Link
+          to="/routines"
+          className="key !px-2.5 !py-1.5 text-xs"
+          data-testid="return-to-routines"
+        >
+          <ArrowLeft size={15} />
+          Return
+        </Link>
+        <h1 className="page-title min-w-0 flex-1 truncate">{routine.name}</h1>
         {!routine.enabled && (
           <span className="rounded-full border px-2 py-0.5 text-[0.6875rem] text-faint">
             paused
