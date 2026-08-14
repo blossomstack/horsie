@@ -13,9 +13,13 @@
 use super::{Bus, Topic};
 use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use std::sync::Arc;
-use uuid::Uuid;
 
 /// What the server sends a runtime: tool calls, scans, hook runs.
+///
+/// `runtime` is a string rather than a `Uuid` because a runtime id is not always
+/// one: the dial token's format admits "a session UUID **or** a vendor-minted
+/// label", and typing this segment more narrowly than the id it names refuses a
+/// legitimate runtime at the door.
 ///
 /// The incarnation is in the name and not merely in the session id, so a
 /// sandbox from a previous provision of the same session subscribes to a topic
@@ -24,20 +28,20 @@ use uuid::Uuid;
 #[must_use]
 pub fn runtime_in(
     bus: Arc<dyn Bus>,
-    session: Uuid,
+    runtime: &str,
     incarnation: &str,
 ) -> Topic<RuntimeInboundMessage> {
-    Topic::new(bus, format!("rt:{session}:{incarnation}:in"))
+    Topic::new(bus, format!("rt:{runtime}:{incarnation}:in"))
 }
 
 /// What a runtime sends back: its handshake, and one reply per request.
 #[must_use]
 pub fn runtime_out(
     bus: Arc<dyn Bus>,
-    session: Uuid,
+    runtime: &str,
     incarnation: &str,
 ) -> Topic<RuntimeOutboundMessage> {
-    Topic::new(bus, format!("rt:{session}:{incarnation}:out"))
+    Topic::new(bus, format!("rt:{runtime}:{incarnation}:out"))
 }
 
 #[cfg(test)]
@@ -45,6 +49,7 @@ pub fn runtime_out(
 mod tests {
     use super::*;
     use crate::bus::MemoryBus;
+    use uuid::Uuid;
 
     fn bus() -> Arc<dyn Bus> {
         Arc::new(MemoryBus::new())
@@ -56,10 +61,10 @@ mod tests {
     /// nothing at all.
     #[test]
     fn the_two_directions_of_one_runtime_are_different_topics() {
-        let (session, incarnation) = (Uuid::new_v4(), "1755043200000");
+        let (session, incarnation) = (Uuid::new_v4().to_string(), "1755043200000");
         assert_ne!(
-            runtime_in(bus(), session, incarnation).name(),
-            runtime_out(bus(), session, incarnation).name()
+            runtime_in(bus(), &session, incarnation).name(),
+            runtime_out(bus(), &session, incarnation).name()
         );
     }
 
@@ -68,9 +73,9 @@ mod tests {
     /// anything else names a runtime nobody is on, and the failure is silence.
     #[test]
     fn a_topic_names_the_incarnation_the_session_actually_minted() {
-        let session = Uuid::new_v4();
+        let session = Uuid::new_v4().to_string();
         assert_eq!(
-            runtime_in(bus(), session, "1755043200000").name(),
+            runtime_in(bus(), &session, "1755043200000").name(),
             format!("rt:{session}:1755043200000:in")
         );
     }
@@ -80,10 +85,10 @@ mod tests {
     /// to, so it cannot receive — and therefore cannot re-run — a tool call.
     #[test]
     fn a_second_incarnation_of_one_session_is_a_different_topic() {
-        let session = Uuid::new_v4();
+        let session = Uuid::new_v4().to_string();
         assert_ne!(
-            runtime_in(bus(), session, "1755043200000").name(),
-            runtime_in(bus(), session, "1755043200001").name()
+            runtime_in(bus(), &session, "1755043200000").name(),
+            runtime_in(bus(), &session, "1755043200001").name()
         );
     }
 
@@ -92,8 +97,8 @@ mod tests {
     fn two_sessions_never_share_a_topic() {
         let incarnation = "1755043200000";
         assert_ne!(
-            runtime_in(bus(), Uuid::new_v4(), incarnation).name(),
-            runtime_in(bus(), Uuid::new_v4(), incarnation).name()
+            runtime_in(bus(), &Uuid::new_v4().to_string(), incarnation).name(),
+            runtime_in(bus(), &Uuid::new_v4().to_string(), incarnation).name()
         );
     }
 }

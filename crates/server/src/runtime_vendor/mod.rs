@@ -14,6 +14,7 @@
 //! can have. An earlier revision deleted the trait as "pure indirection" when
 //! every vendor was a socket; it stops being indirection the moment one is not.
 
+mod bus_transport;
 pub mod config;
 /// A scriptable runtime vendor for tests only — never compiled into a
 /// production build. Available to this crate's own tests (`cfg(test)`) and to
@@ -30,6 +31,7 @@ pub mod velos;
 pub mod velos_api;
 mod websocket;
 
+pub use bus_transport::BusTransport;
 pub use config::{
     RuntimeVendorConfigService, RuntimeVendorRow, RuntimeVendorStore, StoredFlySettings,
     StoredVendorSettings,
