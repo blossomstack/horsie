@@ -1,81 +1,12 @@
-//! HTTP surface for the plugin-bundle library: CRUD for the operator (web UI)
-//! plus a token-guarded artifact endpoint the session runtime fetches from.
+//! The one plugin route that is not a control-plane operation: the
+//! token-guarded artifact endpoint a session runtime fetches a bundle zip from.
+//! Managing the library itself lives in `control::plugins`.
 
+use super::AppState;
 use super::error::Api;
-use super::{AppState, Scope};
-use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Response};
-use horsie_models::plugins::{InstallOutcome, PluginDefaultInput, PluginInstallInput, PluginView};
-
-/// GET /api/plugins — the installed bundle library (metadata only).
-pub async fn list(Scope(state): Scope) -> Result<Json<Vec<PluginView>>, Api> {
-    state.plugins.list().await.map(Json).map_err(Api::internal)
-}
-
-/// GET /api/builtins — the slash commands horsie answers itself.
-///
-/// Its own endpoint rather than a field on the plugin list, and deliberately
-/// not scoped to a session: a built-in is offered whether or not any bundle is
-/// installed and whether or not `use_plugins` is on. Folded into the plugin
-/// list it would inherit that gating and vanish from exactly the plainest
-/// session.
-pub async fn builtins() -> Json<Vec<horsie_models::plugins::CatalogEntryView>> {
-    Json(horsie_support::plugin::builtins::catalogue_entries())
-}
-
-/// POST /api/plugins — install a bundle, or register the catalogue a URL turned
-/// out to be. One box: the caller does not have to know which it pasted, and
-/// both outcomes create a row, so both are 201.
-pub async fn install(
-    Scope(state): Scope,
-    Json(input): Json<PluginInstallInput>,
-) -> Result<(StatusCode, Json<InstallOutcome>), Api> {
-    state
-        .plugins
-        .install(input)
-        .await
-        .map(|v| (StatusCode::CREATED, Json(v)))
-        .map_err(Api::unprocessable)
-}
-
-/// POST /api/plugins/:name/update — re-clone from the remembered source.
-pub async fn update(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<PluginView>, Api> {
-    state
-        .plugins
-        .update(&name)
-        .await
-        .map(Json)
-        .map_err(Api::unprocessable)
-}
-
-/// PUT /api/plugins/:name — toggle whether the bundle is enabled by default.
-pub async fn set_default(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-    Json(input): Json<PluginDefaultInput>,
-) -> Result<Json<PluginView>, Api> {
-    state
-        .plugins
-        .set_default(&name, input)
-        .await
-        .map(Json)
-        .map_err(Api::unprocessable)
-}
-
-/// DELETE /api/plugins/:name — remove the bundle and GC its artifact.
-pub async fn remove(Scope(state): Scope, Path(name): Path<String>) -> Result<StatusCode, Api> {
-    state
-        .plugins
-        .remove(&name)
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(Api::unprocessable)
-}
 
 /// GET /api/plugin-artifacts/:file — stream a bundle zip. `:file` is
 /// `<hash>.zip`; the bearer is the runtime's dial token. Served under a

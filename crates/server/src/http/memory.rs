@@ -1,71 +1,21 @@
-//! HTTP surface for agent memory: CRUD over memory spaces and the memories in
-//! them, for the web UI. The agent reaches the same data through
-//! `MemoryToolbox`, not through these routes.
+//! HTTP surface for the individual memories inside a space, for the web UI.
+//!
+//! Spaces themselves are a control-plane resource (`control::memory_spaces`).
+//! These stay here: the agent reaches the same rows through `MemoryToolbox`, so
+//! a second agent-facing vocabulary over them would be one to keep in step for
+//! no caller that wants it.
 
 use super::Scope;
 use super::error::Api;
 use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
-use horsie_models::memory::{
-    MemoryCreateInput, MemorySpaceCreateInput, MemorySpaceUpdateInput, MemorySpaceView,
-    MemoryUpdateInput, MemoryView,
-};
+use horsie_models::memory::{MemoryCreateInput, MemoryUpdateInput, MemoryView};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 pub struct ListQuery {
     space: Option<String>,
-}
-
-/// GET /api/memory-spaces
-pub async fn list_spaces(Scope(state): Scope) -> Result<Json<Vec<MemorySpaceView>>, Api> {
-    state
-        .memory
-        .list_spaces()
-        .await
-        .map(Json)
-        .map_err(Api::internal)
-}
-
-/// POST /api/memory-spaces
-pub async fn create_space(
-    Scope(state): Scope,
-    Json(input): Json<MemorySpaceCreateInput>,
-) -> Result<(StatusCode, Json<MemorySpaceView>), Api> {
-    state
-        .memory
-        .create_space(input)
-        .await
-        .map(|v| (StatusCode::CREATED, Json(v)))
-        .map_err(Api::unprocessable)
-}
-
-/// PUT /api/memory-spaces/:name — rename and/or re-describe.
-pub async fn update_space(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-    Json(input): Json<MemorySpaceUpdateInput>,
-) -> Result<Json<MemorySpaceView>, Api> {
-    state
-        .memory
-        .update_space(&name, input)
-        .await
-        .map(Json)
-        .map_err(Api::unprocessable)
-}
-
-/// DELETE /api/memory-spaces/:name — removes the space and its memories.
-pub async fn delete_space(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<StatusCode, Api> {
-    state
-        .memory
-        .delete_space(&name)
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(Api::not_found)
 }
 
 /// GET /api/memories?space=<name>

@@ -1,6 +1,9 @@
-//! Configured-MCP-server endpoints (`/api/mcp/servers`): CRUD plus a
-//! connect/smoke-test. Thin wrappers over [`crate::mcp::McpService`]; bodies are
-//! fluorite wire types and views never carry secrets.
+//! The MCP OAuth pair (`/api/mcp/servers/:name/connect` and its callback).
+//!
+//! Everything else about a configured server is a control-plane operation in
+//! [`crate::control::mcp`]. These two are not, because both build their
+//! `redirect_uri` from the host headers of the request that carried them, and
+//! an operation is handed only its input.
 
 use crate::github::urlencode;
 use crate::http::Scope;
@@ -9,53 +12,8 @@ use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::HeaderMap;
 use axum::response::Redirect;
-use horsie_models::mcp::{
-    McpAuthorizeUrl, McpConnectResult, McpServerInput, McpServerList, McpServerView,
-};
+use horsie_models::mcp::McpAuthorizeUrl;
 use serde::Deserialize;
-
-pub async fn list(Scope(state): Scope) -> Result<Json<McpServerList>, Api> {
-    let servers = state.mcp.list().await.map_err(Api::internal)?;
-    Ok(Json(McpServerList { servers }))
-}
-
-/// `PUT /api/mcp/servers/:name` — upsert; the path is the id of record, so it
-/// overrides any `name` in the body.
-pub async fn upsert(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-    Json(mut input): Json<McpServerInput>,
-) -> Result<Json<McpServerView>, Api> {
-    input.name = name;
-    state
-        .mcp
-        .upsert(input)
-        .await
-        .map(Json)
-        .map_err(Api::unprocessable)
-}
-
-pub async fn delete(Scope(state): Scope, Path(name): Path<String>) -> Result<(), Api> {
-    state.mcp.delete(&name).await.map_err(Api::internal)
-}
-
-/// `POST /api/mcp/servers/:name/test` — connect (`initialize` + `tools/list`),
-/// persist the outcome, and return it. `200` with the result envelope for a
-/// configured server; a failed *connect* is `ok: false` with `error`, not an
-/// HTTP error. A server that is not configured at all is a 404, which is a
-/// different thing and used to be a 500.
-pub async fn test(
-    Scope(state): Scope,
-    Path(name): Path<String>,
-) -> Result<Json<McpConnectResult>, Api> {
-    state
-        .mcp
-        .test(&name)
-        .await
-        .map_err(Api::internal)?
-        .map(Json)
-        .ok_or_else(|| Api::not_found(format!("no MCP server '{name}'")))
-}
 
 /// `POST /api/mcp/servers/:name/connect` — begin OAuth for an `oauth` server:
 /// discover + (if needed) register a client, then return the authorize URL for
