@@ -27,6 +27,9 @@ tempfile    = { workspace = true }
 uuid        = { workspace = true }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
+# The cluster harness creates its own database: three nodes are nodes that
+# agree on one journal, so each test needs a fresh one they can all share.
+sqlx = { workspace = true }
 
 [lints]
 workspace = true

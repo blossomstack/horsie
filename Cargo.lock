@@ -2205,6 +2205,7 @@ dependencies = [
  "horsie-server",
  "reqwest 0.12.28",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
