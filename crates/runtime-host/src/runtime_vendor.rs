@@ -20,15 +20,13 @@
 //! that relays to a `horsie connect` process, and that process drives a vendor
 //! of its own.
 
-use crate::TransportError;
 use crate::error::RuntimeError;
 use async_trait::async_trait;
-use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use std::sync::Arc;
 
 /// Where a runtime is, as its vendor currently understands it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum RuntimeProgress {
     /// The substrate accepted the request and nothing more is known yet.
     Requested,
@@ -37,13 +35,35 @@ pub enum RuntimeProgress {
     /// The runtime is up and running its provision steps.
     Provisioning { detail: String },
     /// Reachable now.
-    Ready(Arc<dyn RuntimeHandle>),
+    Ready(Arc<dyn crate::RuntimeTransport>),
     /// On its way down.
     Stopping,
     /// Down, and revivable.
     Stopped,
     /// Down, and not coming back.
     Gone { reason: String },
+}
+
+/// Written out rather than derived: `Ready` carries a transport, and requiring
+/// `Debug` of every transport would put a capability in the trait for the sake
+/// of one log line. A transport has no useful debug form anyway — it is a pipe.
+impl std::fmt::Debug for RuntimeProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Requested => write!(f, "Requested"),
+            Self::Starting { detail } => {
+                f.debug_struct("Starting").field("detail", detail).finish()
+            }
+            Self::Provisioning { detail } => f
+                .debug_struct("Provisioning")
+                .field("detail", detail)
+                .finish(),
+            Self::Ready(_) => write!(f, "Ready"),
+            Self::Stopping => write!(f, "Stopping"),
+            Self::Stopped => write!(f, "Stopped"),
+            Self::Gone { reason } => f.debug_struct("Gone").field("reason", reason).finish(),
+        }
+    }
 }
 
 /// One progress report, stamped with the runtime it concerns.
@@ -219,161 +239,6 @@ pub trait RuntimeVendor: Send + Sync {
     ) -> Result<RuntimeProgress, RuntimeVendorError>;
 }
 
-/// A live runtime.
-///
-/// Every member is the runtime protocol, which is why a handle looks the same
-/// whatever substrate is underneath — a Fly machine, a velos container and a
-/// process on someone's laptop are all just something you can send a
-/// [`RuntimeInboundMessage`] to.
-///
-/// There is deliberately no `stop`: stopping is a vendor operation keyed by id
-/// ([`RuntimeVendor::hibernate`], [`RuntimeVendor::delete`]), and a `stop` here
-/// would have been ambiguous against both.
-#[async_trait]
-pub trait RuntimeHandle: Send + Sync + std::fmt::Debug {
-    /// The runtime this handle talks to. Equal to the owning session's id.
-    fn id(&self) -> &str;
-
-    /// Send a message and wait for its reply.
-    async fn relay(
-        &self,
-        message: RuntimeInboundMessage,
-    ) -> Result<RuntimeOutboundMessage, TransportError>;
-
-    /// Send a message that draws no reply (a relayed `CancelCall`).
-    async fn relay_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError>;
-
-    /// Resolves once this runtime can no longer be reached.
-    ///
-    /// The unifying signal for a runtime going away, whatever noticed first:
-    /// a vendor link reporting a state change, a WebSocket closing, or a
-    /// substrate that reported a dead machine. Whoever holds the handle drops
-    /// it, so a dead runtime is never handed to a turn.
-    async fn closed(&self);
-}
-
-/// The only [`RuntimeHandle`] implementation there needs to be.
-///
-/// Every difference between vendors lives in the transport, which is a seam
-/// that already existed: a websocket vendor supplies one that relays through
-/// its vendor link, and an in-server vendor supplies the socket its runtime
-/// registered when it dialled back. Two handle types would have re-derived a
-/// split [`RuntimeTransport`] already makes.
-pub struct RuntimeHandleImpl {
-    runtime_id: String,
-    transport: Arc<dyn crate::RuntimeTransport>,
-    /// Flipped by whoever owns the connection when it can no longer be reached,
-    /// or absent when nothing is in a position to notice — see
-    /// [`RuntimeHandleImpl::unwatched`].
-    closed: Option<tokio::sync::watch::Receiver<bool>>,
-}
-
-impl RuntimeHandleImpl {
-    #[must_use]
-    pub fn new(
-        runtime_id: String,
-        transport: Arc<dyn crate::RuntimeTransport>,
-        closed: tokio::sync::watch::Receiver<bool>,
-    ) -> Self {
-        Self {
-            runtime_id,
-            transport,
-            closed: Some(closed),
-        }
-    }
-
-    /// A handle whose runtime nothing watches for closure.
-    ///
-    /// For a vendor whose registry reports liveness by *presence*: a dropped
-    /// runtime is simply absent from it, and there is no flag anyone flips. The
-    /// alternative was a `watch` channel whose sender was dropped on the spot,
-    /// which is worse than it looks — `wait_for` returns `Err` the moment its
-    /// sender goes, so [`closed`](RuntimeHandle::closed) resolved *immediately*
-    /// and reported every runtime dead the instant it was asked.
-    ///
-    /// So this waits forever instead. Saying "I cannot tell you" costs a
-    /// parked task; saying "it is dead" costs a live runtime.
-    #[must_use]
-    pub fn unwatched(runtime_id: String, transport: Arc<dyn crate::RuntimeTransport>) -> Self {
-        Self {
-            runtime_id,
-            transport,
-            closed: None,
-        }
-    }
-}
-
-impl std::fmt::Debug for RuntimeHandleImpl {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RuntimeHandleImpl")
-            .field("runtime_id", &self.runtime_id)
-            .field("closed", &self.closed.as_ref().map(|rx| *rx.borrow()))
-            .finish_non_exhaustive()
-    }
-}
-
-#[async_trait]
-impl RuntimeHandle for RuntimeHandleImpl {
-    fn id(&self) -> &str {
-        &self.runtime_id
-    }
-
-    async fn relay(
-        &self,
-        message: RuntimeInboundMessage,
-    ) -> Result<RuntimeOutboundMessage, TransportError> {
-        self.transport.relay(message).await
-    }
-
-    async fn relay_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
-        self.transport.send_oneway(message).await
-    }
-
-    async fn closed(&self) {
-        let Some(mut rx) = self.closed.clone() else {
-            // Nothing watches this runtime. Never resolve rather than resolve
-            // now — see `unwatched`.
-            return std::future::pending().await;
-        };
-        // Checked before waiting, not after: a handle whose runtime died before
-        // anyone asked must still answer immediately, and `wait_for` alone
-        // would miss a flip that happened before this clone.
-        if *rx.borrow() {
-            return;
-        }
-        // A dropped sender means nobody is left to report a closure, which is
-        // not the same as a closure. Waiting on is the safe reading: treating
-        // it as closed would have every caller drop a runtime that is fine.
-        if rx.wait_for(|closed| *closed).await.is_err() {
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-/// Lets a handle be used wherever a [`RuntimeTransport`] is expected.
-///
-/// `RuntimeClient` is built over a transport and a handle is built over one, so
-/// this is the one-line adapter between them rather than a second abstraction:
-/// it keeps `RuntimeHandle` free to be about a *runtime* while `RuntimeTransport`
-/// stays about *bytes*.
-///
-/// [`RuntimeTransport`]: crate::RuntimeTransport
-pub struct RuntimeHandleTransport(pub Arc<dyn RuntimeHandle>);
-
-#[async_trait]
-impl crate::RuntimeTransport for RuntimeHandleTransport {
-    async fn relay(
-        &self,
-        message: RuntimeInboundMessage,
-    ) -> Result<RuntimeOutboundMessage, TransportError> {
-        self.0.relay(message).await
-    }
-
-    async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError> {
-        self.0.relay_oneway(message).await
-    }
-}
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -383,6 +248,8 @@ impl crate::RuntimeTransport for RuntimeHandleTransport {
 )]
 mod tests {
     use super::*;
+    use crate::TransportError;
+    use horsie_models::runtime::{RuntimeInboundMessage, RuntimeOutboundMessage};
     use std::time::Duration;
 
     fn spec() -> RuntimeSpec {
@@ -393,25 +260,18 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct StubHandle(String);
+    struct StubTransport(String);
 
     #[async_trait]
-    impl RuntimeHandle for StubHandle {
-        fn id(&self) -> &str {
-            &self.0
-        }
+    impl crate::RuntimeTransport for StubTransport {
         async fn relay(
             &self,
             _: RuntimeInboundMessage,
         ) -> Result<RuntimeOutboundMessage, TransportError> {
-            Err(TransportError::SendFailed("stub".to_string()))
+            Err(TransportError::SendFailed(format!("stub {}", self.0)))
         }
-        async fn relay_oneway(&self, _: RuntimeInboundMessage) -> Result<(), TransportError> {
+        async fn send_oneway(&self, _: RuntimeInboundMessage) -> Result<(), TransportError> {
             Ok(())
-        }
-        async fn closed(&self) {
-            std::future::pending::<()>().await;
         }
     }
 
@@ -439,7 +299,7 @@ mod tests {
             _: &RuntimeSpec,
             _: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
-            Ok(RuntimeProgress::Ready(Arc::new(StubHandle(
+            Ok(RuntimeProgress::Ready(Arc::new(StubTransport(
                 runtime_id.to_string(),
             ))))
         }
@@ -449,7 +309,7 @@ mod tests {
             _: &RuntimeSpec,
             _: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
-            Ok(RuntimeProgress::Ready(Arc::new(StubHandle(
+            Ok(RuntimeProgress::Ready(Arc::new(StubTransport(
                 runtime_id.to_string(),
             ))))
         }
@@ -499,7 +359,7 @@ mod tests {
                     RuntimeProgress::Provisioning {
                         detail: "cloning".to_string(),
                     },
-                    RuntimeProgress::Ready(Arc::new(StubHandle(id.clone()))),
+                    RuntimeProgress::Ready(Arc::new(StubTransport(id.clone()))),
                 ] {
                     let _ = progress
                         .send(RuntimeEvent {
@@ -551,7 +411,7 @@ mod tests {
         let (tx, mut rx) = sink(8);
         let progress = ImmediateVendor.create("s1", &spec(), tx).await.unwrap();
         match progress {
-            RuntimeProgress::Ready(handle) => assert_eq!(handle.id(), "s1"),
+            RuntimeProgress::Ready(_) => {}
             other => panic!("expected Ready, got {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "nothing should have been emitted");
@@ -592,116 +452,6 @@ mod tests {
             }
         }
         assert_eq!(ids.len(), 2, "both runtimes reported on the one channel");
-    }
-
-    #[derive(Default)]
-    struct RecordingTransport {
-        relays: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait]
-    impl crate::RuntimeTransport for RecordingTransport {
-        async fn relay(
-            &self,
-            _: RuntimeInboundMessage,
-        ) -> Result<RuntimeOutboundMessage, TransportError> {
-            self.relays
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Err(TransportError::SendFailed("recorded".to_string()))
-        }
-        async fn send_oneway(&self, _: RuntimeInboundMessage) -> Result<(), TransportError> {
-            Ok(())
-        }
-    }
-
-    fn ping() -> RuntimeInboundMessage {
-        RuntimeInboundMessage::CancelCall(horsie_models::runtime::CancelCallRequest {
-            call_id: "c1".to_string(),
-        })
-    }
-
-    #[tokio::test]
-    async fn a_handle_delegates_every_message_to_its_transport() {
-        let transport = Arc::new(RecordingTransport::default());
-        let (_tx, rx) = tokio::sync::watch::channel(false);
-        let handle = RuntimeHandleImpl::new("s1".to_string(), transport.clone(), rx);
-
-        assert_eq!(handle.id(), "s1");
-        let _ = handle.relay(ping()).await;
-        handle.relay_oneway(ping()).await.unwrap();
-        assert_eq!(
-            transport.relays.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn closed_resolves_when_the_connection_goes_away() {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let handle = RuntimeHandleImpl::new(
-            "s1".to_string(),
-            Arc::new(RecordingTransport::default()),
-            rx,
-        );
-
-        let waiting = tokio::spawn(async move { handle.closed().await });
-        tx.send(true).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .expect("closed() should resolve once the connection is marked dead")
-            .unwrap();
-    }
-
-    /// The bug a dropped sender hid. A vendor whose registry reports liveness
-    /// by presence has no flag to flip, and the stand-in was a `watch` channel
-    /// whose sender was dropped on the spot — so `wait_for` errored at once and
-    /// `closed()` reported every live runtime dead the instant it was asked.
-    #[tokio::test]
-    async fn an_unwatched_handle_never_claims_its_runtime_died() {
-        let handle =
-            RuntimeHandleImpl::unwatched("s1".to_string(), Arc::new(RecordingTransport::default()));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), handle.closed())
-                .await
-                .is_err(),
-            "a handle with nothing watching it must not answer 'closed'"
-        );
-    }
-
-    /// Same property when the watcher goes away mid-life: nobody is left to
-    /// report a closure, which is not the same as a closure.
-    #[tokio::test]
-    async fn a_dropped_watcher_is_not_a_closed_runtime() {
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        let handle = RuntimeHandleImpl::new(
-            "s1".to_string(),
-            Arc::new(RecordingTransport::default()),
-            rx,
-        );
-        drop(tx);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), handle.closed())
-                .await
-                .is_err()
-        );
-    }
-
-    #[tokio::test]
-    async fn closed_resolves_immediately_for_a_runtime_that_already_died() {
-        // A handle asked after the fact must still answer: checking the value
-        // only after subscribing would hang forever on a flip that already
-        // happened.
-        let (tx, rx) = tokio::sync::watch::channel(false);
-        tx.send(true).unwrap();
-        let handle = RuntimeHandleImpl::new(
-            "s1".to_string(),
-            Arc::new(RecordingTransport::default()),
-            rx,
-        );
-
-        tokio::time::timeout(Duration::from_millis(200), handle.closed())
-            .await
-            .expect("closed() must not wait for a flip that already happened");
     }
 
     #[tokio::test]

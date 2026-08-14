@@ -1450,14 +1450,10 @@ pub(super) struct BootingVendor;
 pub(super) const BOOTING_CREATE: &str = "the machine is booting";
 pub(super) const BOOTING_ACQUIRE: &str = "the machine is resuming";
 
-#[derive(Debug)]
 pub(super) struct StubHandle;
 
 #[async_trait]
-impl crate::runtime_vendor::RuntimeHandle for StubHandle {
-    fn id(&self) -> &str {
-        "stub"
-    }
+impl horsie_runtime_host::RuntimeTransport for StubHandle {
     async fn relay(
         &self,
         _: horsie_models::runtime::RuntimeInboundMessage,
@@ -1465,14 +1461,11 @@ impl crate::runtime_vendor::RuntimeHandle for StubHandle {
     {
         Err(horsie_runtime_host::TransportError::Disconnected)
     }
-    async fn relay_oneway(
+    async fn send_oneway(
         &self,
         _: horsie_models::runtime::RuntimeInboundMessage,
     ) -> Result<(), horsie_runtime_host::TransportError> {
         Ok(())
-    }
-    async fn closed(&self) {
-        std::future::pending::<()>().await;
     }
 }
 

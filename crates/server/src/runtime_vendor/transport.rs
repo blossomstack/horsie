@@ -42,6 +42,12 @@ pub struct RuntimeVendorTransport {
     vendors: crate::runtime_vendor::WebsocketVendorTable,
     vendor_name: String,
     runtime_id: String,
+    /// Flips when the vendor process this runtime lives behind goes away.
+    ///
+    /// `None` for a vendor with nothing watching, which is not the same as a
+    /// vendor that is fine — see [`RuntimeTransport::closed`] for why the two
+    /// must not be conflated.
+    closed: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl RuntimeVendorTransport {
@@ -55,7 +61,15 @@ impl RuntimeVendorTransport {
             vendors,
             vendor_name,
             runtime_id,
+            closed: None,
         }
+    }
+
+    /// The same transport, reporting a closure when `closed` flips.
+    #[must_use]
+    pub fn watching(mut self, closed: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.closed = Some(closed);
+        self
     }
 
     /// The vendor's live link, or `None` while it is away.
@@ -132,6 +146,10 @@ impl RuntimeTransport for RuntimeVendorTransport {
             .send_oneway(self.addressed(message))
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))
+    }
+
+    async fn closed(&self) {
+        horsie_runtime_host::closed_when(self.closed.clone()).await;
     }
 }
 

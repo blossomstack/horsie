@@ -26,11 +26,11 @@
 
 use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
 use crate::runtime_vendor::velos_api::{ContainerApi, ContainerLaunchSpec, VelosError};
-use crate::runtime_vendor::{RuntimeHandle, RuntimeVendor, RuntimeVendorError};
+use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use horsie_runtime_host::{
-    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeHandleImpl, RuntimeProgress, RuntimeProgressSink,
+    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -113,20 +113,6 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
             settings,
             connected,
         }
-    }
-
-    fn handle(
-        &self,
-        runtime_id: &str,
-        transport: Arc<dyn horsie_runtime_host::RuntimeTransport>,
-    ) -> Arc<dyn RuntimeHandle> {
-        // The registry reports liveness by presence — a dropped runtime is
-        // simply absent from it — so there is no flag anyone flips, and the
-        // handle says so rather than inventing a channel nobody holds.
-        Arc::new(RuntimeHandleImpl::unwatched(
-            runtime_id.to_string(),
-            transport,
-        ))
     }
 
     fn launch_spec(
@@ -219,9 +205,7 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
             let outcome = await_dial_back(api.as_ref(), &id, waiter).await;
             let event = match outcome {
                 Ok(()) => match connected.runtime_transport(&id).await {
-                    Some(transport) => RuntimeProgress::Ready(Arc::new(
-                        RuntimeHandleImpl::unwatched(id.clone(), transport),
-                    )),
+                    Some(transport) => RuntimeProgress::Ready(transport),
                     None => RuntimeProgress::Gone {
                         reason: "the runtime announced itself and then vanished".to_string(),
                     },
@@ -353,7 +337,7 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
         let _ = spec;
         if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
-            return Ok(RuntimeProgress::Ready(self.handle(runtime_id, transport)));
+            return Ok(RuntimeProgress::Ready(transport));
         }
 
         // Not connected is not the same as not there, and conflating them was
@@ -402,7 +386,7 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         // Keeping the runtime running costs compute; the alternative costs the
         // user's work.
         Ok(match self.connected.runtime_transport(runtime_id).await {
-            Some(transport) => RuntimeProgress::Ready(self.handle(runtime_id, transport)),
+            Some(transport) => RuntimeProgress::Ready(transport),
             // Never `Stopped`: nothing was stopped. The container was left
             // exactly as it was, and a later `get` is what discovers whether it
             // is still coming up or gone.

@@ -46,9 +46,10 @@ pub trait RuntimeTransport: Send + Sync {
     /// Defaulted to *never*, which is the honest answer for a transport that
     /// tracks nothing. Saying "I cannot tell you" costs a parked task; saying
     /// "it is dead" costs a live runtime, since whoever holds the transport
-    /// drops it. A transport with a real signal overrides this.
+    /// drops it. A transport with a real signal overrides this, and one backed
+    /// by a `watch` channel should do so through [`closed_when`].
     async fn closed(&self) {
-        std::future::pending().await
+        closed_when(None).await
     }
 
     /// `agent_id` keys the runtime's per-agent cwd/env state. It is a required
@@ -198,6 +199,28 @@ pub trait RuntimeTransport: Send + Sync {
     }
 }
 
+/// The body of a [`RuntimeTransport::closed`] backed by a `watch` channel.
+///
+/// Free-standing so the two rules it encodes stay testable without a transport
+/// to hang them on, and so every transport that has such a channel encodes them
+/// the same way:
+///
+/// - the value is checked **before** waiting, because a flip that happened
+///   before this clone must still be answered rather than waited on forever;
+/// - a dropped sender means nobody is left to report a closure, which is not
+///   the same as a closure, so it waits rather than resolving.
+pub async fn closed_when(watched: Option<tokio::sync::watch::Receiver<bool>>) {
+    let Some(mut rx) = watched else {
+        return std::future::pending().await;
+    };
+    if *rx.borrow() {
+        return;
+    }
+    if rx.wait_for(|closed| *closed).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 fn wrong_reply(what: &str) -> TransportError {
     TransportError::SendFailed(format!(
         "the runtime answered {what} with the wrong message"
@@ -242,6 +265,44 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::MockTransport;
+
+    /// The bug a dropped sender hid. A vendor whose registry reports liveness
+    /// by presence has no flag to flip, and the stand-in was a `watch` channel
+    /// whose sender was dropped on the spot — so `wait_for` errored at once and
+    /// `closed()` reported every live runtime dead the instant it was asked.
+    #[tokio::test]
+    async fn a_dropped_watcher_is_not_a_closed_runtime() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), closed_when(Some(rx)))
+                .await
+                .is_err(),
+            "nobody left to report a closure is not the same as a closure"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closure_resolves_it() {
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let waiting = tokio::spawn(closed_when(Some(rx)));
+        tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("closed must resolve once the connection is marked dead")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_closure_that_already_happened_resolves_immediately() {
+        // Checking the value only after subscribing would hang forever on a
+        // flip that landed before this receiver was cloned.
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(200), closed_when(Some(rx)))
+            .await
+            .expect("closed must not wait for a flip that already happened");
+    }
 
     /// A transport that tracks nothing must never claim its runtime died.
     ///
