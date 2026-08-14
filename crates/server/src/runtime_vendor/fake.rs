@@ -1004,7 +1004,7 @@ mod tests {
             "test-agent".to_string(),
             "rt-1".to_string(),
         );
-        let client = RuntimeClient::from_arc(std::sync::Arc::new(transport), "main-agent");
+        let client = RuntimeClient::from_arc_detached(std::sync::Arc::new(transport), "main-agent");
 
         client
             .invoke(

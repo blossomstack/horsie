@@ -14,6 +14,7 @@ pub mod memory;
 pub mod plugins;
 pub mod routines;
 pub mod runtime_manager;
+mod runtime_reconciler;
 pub mod runtime_vendor;
 pub mod sessions;
 #[cfg(any(test, feature = "test-util"))]

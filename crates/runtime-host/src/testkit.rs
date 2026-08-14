@@ -140,6 +140,9 @@ pub struct MockTransport {
     /// Every `Ping` this transport was asked, so a test can prove an idle runtime
     /// is not polled at all.
     pings: Arc<Mutex<usize>>,
+    /// Every call a caller gave up waiting for, in order — how a test sees a
+    /// reconciler fail a request rather than merely log about it.
+    abandoned: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -161,7 +164,16 @@ impl MockTransport {
             in_flight: Arc::new(Mutex::new(Vec::new())),
             swallow_pings: false,
             pings: Arc::new(Mutex::new(0)),
+            abandoned: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Every call whoever held this transport gave up waiting for, in order.
+    pub fn abandoned(&self) -> Vec<String> {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The ids a `Pong` from this transport reports, and the handle to change
@@ -452,6 +464,13 @@ impl RuntimeTransport for MockTransport {
                 .push(req.call_id);
         }
         Ok(())
+    }
+
+    async fn abandon(&self, call_id: &str) {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call_id.to_string());
     }
 }
 

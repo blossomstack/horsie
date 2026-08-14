@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, RunHooksRequest,
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent,
-    ToolCall, ToolCallRequest, ToolResult,
+    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, PingRequest,
+    RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -87,6 +87,46 @@ pub trait RuntimeTransport: Send + Sync {
             call_id: call_id.to_string(),
         }))
         .await
+    }
+
+    /// Ask the runtime what it is currently executing.
+    ///
+    /// The only call in this trait with a bound worth acting on. A tool has no
+    /// natural bound — a file read and a twenty-minute build ride the same
+    /// `invoke` — but a ping is answered concurrently by the runtime's
+    /// dispatcher, so one that goes unanswered says something no slow tool ever
+    /// could. The caller supplies the bound; this method just asks.
+    async fn ping(&self, call_id: &str) -> Result<Vec<String>, TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::Ping(PingRequest {
+                call_id: call_id.to_string(),
+            }))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::Provisioning(_)
+            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::HookRecords(_)
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a ping")),
+        }
+    }
+
+    /// Give up waiting for `call_id`, so whoever is awaiting it fails now.
+    ///
+    /// Local only, and that is the whole point: it is what a caller does when the
+    /// runtime cannot be reached at all, where a `cancel` would be published into
+    /// a pipe nothing is reading. A reply that arrives afterwards has no waiter
+    /// and is dropped, which is the behaviour an uncorrelated reply already gets.
+    ///
+    /// Defaulted to nothing, because a transport that keeps no correlation table
+    /// of its own has no wait to abandon — a vendor-relayed transport is answered
+    /// by the vendor link's table, not by one here.
+    async fn abandon(&self, call_id: &str) {
+        let _ = call_id;
     }
 
     /// Scan the selected workspaces (`workspace`: `None` = all, `Some(name)` = one),

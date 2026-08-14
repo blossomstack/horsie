@@ -25,7 +25,8 @@ use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
 use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
 use horsie_models::runtime::RuntimeOutboundMessage;
-use horsie_runtime_host::RuntimeClient;
+use horsie_runtime_host::{InFlight, RuntimeClient};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What can go wrong acquiring a runtime, split by what the session should do
@@ -122,14 +123,86 @@ pub type NarrationSink = tokio::sync::mpsc::Sender<String>;
 /// How many unread lines of narration may queue before the newest are dropped.
 pub const NARRATION_BUFFER: usize = 8;
 
+/// What the manager keeps for one acquired runtime, for as long as it is
+/// acquired.
+///
+/// Per `(runtime, incarnation)` rather than per client, because both members are
+/// about the *sandbox*: one in-flight map so a reconciler sees every agent's
+/// calls rather than one agent's, and one reconciler task so N clones of a
+/// `RuntimeClient` do not become N polling loops.
+struct RuntimeSlot {
+    in_flight: Arc<InFlight>,
+    /// Aborted when this slot is dropped — on hibernate, on delete, or when the
+    /// manager itself goes away.
+    _reconciler: ReconcilerTask,
+}
+
+struct ReconcilerTask(tokio::task::JoinHandle<()>);
+
+impl Drop for ReconcilerTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub struct RuntimeManager {
     deps: RuntimeDeps,
+    /// One slot per acquired runtime, keyed by `(runtime, incarnation)`.
+    ///
+    /// A `std::sync::Mutex` rather than an async one: every critical section here
+    /// is a map read or insert, and nothing awaits while holding it.
+    slots: std::sync::Mutex<HashMap<(String, String), Arc<RuntimeSlot>>>,
 }
 
 impl RuntimeManager {
     #[must_use]
     pub fn new(deps: RuntimeDeps) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            slots: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// This runtime's slot, spawning its reconciler on the first acquisition.
+    ///
+    /// The transport is only used to build the reconciler, and only on the round
+    /// that creates the slot: every later acquisition of the same runtime joins
+    /// the loop already running rather than starting a rival.
+    fn slot(
+        &self,
+        session: &str,
+        incarnation: &str,
+        transport: &Arc<dyn horsie_runtime_host::RuntimeTransport>,
+    ) -> Arc<RuntimeSlot> {
+        let key = (session.to_string(), incarnation.to_string());
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(slots.entry(key).or_insert_with(|| {
+            let in_flight = Arc::new(InFlight::new());
+            let reconciler = tokio::spawn(crate::runtime_reconciler::reconcile(
+                transport.clone(),
+                in_flight.clone(),
+            ));
+            Arc::new(RuntimeSlot {
+                in_flight,
+                _reconciler: ReconcilerTask(reconciler),
+            })
+        }))
+    }
+
+    /// Forget every slot for this runtime, whatever its incarnation, which is
+    /// what stops its reconciler.
+    ///
+    /// By runtime and not by `(runtime, incarnation)` because the callers —
+    /// hibernate and delete — are about the runtime as a whole, and a slot left
+    /// behind for a superseded incarnation would poll a sandbox nobody can reach.
+    fn forget(&self, session: &str) {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(runtime, _), _| runtime != session);
     }
 
     fn vendor(&self, vendor: &str) -> Result<Arc<dyn RuntimeVendor>, RuntimeError> {
@@ -363,7 +436,8 @@ impl RuntimeManager {
                 narrate.as_ref(),
             )
             .await?;
-        Ok(Self::client(session, transport))
+        let slot = self.slot(session, incarnation, &transport);
+        Ok(Self::client(session, transport, slot.in_flight.clone()))
     }
 
     fn vendor_error(e: RuntimeVendorError) -> RuntimeError {
@@ -526,16 +600,23 @@ impl RuntimeManager {
     /// passes the session id as `runtime_id`, and that is also what the agent
     /// journal is keyed by (`agent/<session-uuid>`). A subagent sharing this
     /// runtime derives its own handle with `RuntimeClient::with_agent_id`.
+    /// The in-flight map comes from the runtime's slot rather than being minted
+    /// here, so every client for one sandbox — this session's and every
+    /// subagent's — tracks into the set its reconciler diffs against. A client
+    /// with a map of its own would be invisible to that diff, and its calls would
+    /// read as orphans and be cancelled.
     fn client(
         session: &str,
         handle: Arc<dyn horsie_runtime_host::RuntimeTransport>,
+        in_flight: Arc<InFlight>,
     ) -> RuntimeClient {
-        RuntimeClient::from_arc(handle, session)
+        RuntimeClient::from_arc(handle, session, in_flight)
     }
 
     /// Advisory: the session is going cold. Best effort — a vendor that is not
     /// there simply misses the hint, and nothing about the session changes.
     pub async fn hibernate(&self, session: &str, vendor: &str) {
+        self.forget(session);
         if let Ok(link) = self.vendor(vendor) {
             let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
             let _ = link.hibernate(session, progress).await;
@@ -544,6 +625,7 @@ impl RuntimeManager {
 
     /// The session was deleted; the vendor decides the runtime's fate.
     pub async fn delete(&self, session: &str, vendor: &str) {
+        self.forget(session);
         if let Ok(link) = self.vendor(vendor) {
             let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
             let _ = link.delete(session, progress).await;

@@ -138,6 +138,12 @@ impl RuntimeTransport for BusTransport {
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))
     }
+
+    /// Drop the waiter, which is what fails the `relay` awaiting it: the sender
+    /// going away resolves its receiver as `Disconnected`.
+    async fn abandon(&self, call_id: &str) {
+        self.pending.lock().await.remove(call_id);
+    }
 }
 
 #[cfg(test)]

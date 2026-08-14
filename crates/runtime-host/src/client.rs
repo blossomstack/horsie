@@ -1,10 +1,10 @@
+use crate::in_flight::InFlight;
 use crate::transport::{RuntimeTransport, TransportError};
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
     ScanResponse, ServerHookEvent, ToolCall, ToolError, ToolOutput, ToolResult,
 };
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 // Still minted for the calls that have no model tool_call_id to borrow —
 // `scan_workspace` and `run_hooks` are server-initiated, not tool calls.
 use uuid::Uuid;
@@ -52,36 +52,69 @@ pub struct RuntimeClient {
     /// (also the main agent's journal id); a subagent derives its own handle
     /// with [`Self::with_agent_id`].
     agent_id: String,
-    /// Ids of calls currently awaiting a reply — the model's own `tool_call_id`s.
+    /// Calls awaiting a reply on this *runtime* — the model's own
+    /// `tool_call_id`s, each against the agent that issued it.
     ///
     /// `invoke` used to mint a private id here, so nothing outside this client
     /// could name an in-flight call to cancel it; that is why `cancel` had no
     /// caller and stopping a turn left the sandbox running the command to
     /// completion (#61 item 23). Shared across clones so a holder that did not
-    /// issue the call can still stop it.
-    in_flight: Arc<Mutex<HashSet<String>>>,
+    /// issue the call can still stop it — and now shared across every client for
+    /// one runtime, because a reconciler needs the whole sandbox's calls rather
+    /// than one agent's. See [`InFlight`].
+    in_flight: Arc<InFlight>,
 }
 
 impl RuntimeClient {
-    pub fn new(transport: impl RuntimeTransport + 'static, agent_id: impl Into<String>) -> Self {
+    pub fn new(
+        transport: impl RuntimeTransport + 'static,
+        agent_id: impl Into<String>,
+        in_flight: Arc<InFlight>,
+    ) -> Self {
         Self {
             inner: Arc::new(transport),
             hook_sink: None,
             agent_id: agent_id.into(),
-            in_flight: Arc::new(Mutex::new(HashSet::new())),
+            in_flight,
         }
+    }
+
+    /// A client whose in-flight calls nothing else reconciles.
+    ///
+    /// For the callers that have no runtime manager and therefore no reconciler:
+    /// the CLI, and tests. Named rather than defaulted so a production caller
+    /// cannot reach it by accident — a client built this way is invisible to the
+    /// reconciler for its runtime, whose diff would then read every call this
+    /// client issued as an orphan and cancel it.
+    pub fn detached(
+        transport: impl RuntimeTransport + 'static,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self::new(transport, agent_id, Arc::new(InFlight::new()))
     }
 
     /// Build a client from an already-type-erased transport — e.g. the one handed
     /// back by `ExecutorClient::runtime_transport`, which cannot be re-boxed by
     /// [`RuntimeClient::new`]'s `impl RuntimeTransport` bound.
-    pub fn from_arc(transport: Arc<dyn RuntimeTransport>, agent_id: impl Into<String>) -> Self {
+    pub fn from_arc(
+        transport: Arc<dyn RuntimeTransport>,
+        agent_id: impl Into<String>,
+        in_flight: Arc<InFlight>,
+    ) -> Self {
         Self {
             inner: transport,
             hook_sink: None,
             agent_id: agent_id.into(),
-            in_flight: Arc::new(Mutex::new(HashSet::new())),
+            in_flight,
         }
+    }
+
+    /// [`Self::from_arc`] for a caller with no reconciler — see [`Self::detached`].
+    pub fn from_arc_detached(
+        transport: Arc<dyn RuntimeTransport>,
+        agent_id: impl Into<String>,
+    ) -> Self {
+        Self::from_arc(transport, agent_id, Arc::new(InFlight::new()))
     }
 
     /// Route hook records to `sink`. Set once, by the session that journals
@@ -165,27 +198,25 @@ impl RuntimeClient {
     }
 
     fn track(&self, call_id: &str) {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(call_id.to_string());
+        self.in_flight.track(call_id, &self.agent_id);
     }
 
     fn untrack(&self, call_id: &str) {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(call_id);
+        self.in_flight.untrack(call_id);
     }
 
-    /// How many calls are awaiting a reply. Test observability for the tracking
-    /// that makes [`Self::cancel_in_flight`] possible.
+    /// The map this client tracks into, for whoever reconciles this runtime.
+    #[must_use]
+    pub fn in_flight(&self) -> Arc<InFlight> {
+        self.in_flight.clone()
+    }
+
+    /// How many calls are awaiting a reply *on this runtime*, whichever agent
+    /// issued them. Test observability for the tracking that makes
+    /// [`Self::cancel_in_flight`] possible.
     #[must_use]
     pub fn in_flight_count(&self) -> usize {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.in_flight.len()
     }
 
     /// Tell the runtime to abandon every call still awaiting a reply.
@@ -194,15 +225,11 @@ impl RuntimeClient {
     /// keeps running the command to completion, holding resources, with its output
     /// discarded. Best-effort and non-blocking on failure — the caller is already
     /// tearing the turn down.
+    /// Only *this agent's* calls, never the runtime's. The map is shared by
+    /// every client on one sandbox, so cancelling everything here would abort a
+    /// sibling subagent's tool call mid-flight.
     pub async fn cancel_in_flight(&self) {
-        let ids: Vec<String> = {
-            let guard = self
-                .in_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            guard.iter().cloned().collect()
-        };
-        for id in &ids {
+        for id in &self.in_flight.of_agent(&self.agent_id) {
             self.cancel(id).await;
         }
     }
@@ -310,7 +337,7 @@ mod tests {
         // The gate holds two invokes open so both are genuinely in flight when the
         // cancel arrives — the shape a Stop mid-batch produces.
         let gate = crate::testkit::BlockHandle::new();
-        let c = RuntimeClient::new(
+        let c = RuntimeClient::detached(
             crate::testkit::MockTransport::gated_invoke(&gate),
             "test-agent",
         );
@@ -339,7 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_settled_call_is_no_longer_tracked() {
-        let c = RuntimeClient::new(crate::testkit::MockTransport::ok(""), "test-agent");
+        let c = RuntimeClient::detached(crate::testkit::MockTransport::ok(""), "test-agent");
         assert_eq!(c.in_flight_count(), 0);
         assert!(c.invoke("tc1", probe_call()).await.is_ok());
         assert_eq!(
@@ -355,7 +382,7 @@ mod tests {
     /// would turn a reconnect into a dead turn.
     #[tokio::test]
     async fn a_client_stays_usable_after_a_transport_error() {
-        let c = RuntimeClient::new(MockTransport::disconnect_after(0), "test-agent");
+        let c = RuntimeClient::detached(MockTransport::disconnect_after(0), "test-agent");
         assert!(c.invoke("tc1", probe_call()).await.is_err());
         assert_eq!(
             c.in_flight_count(),
@@ -375,7 +402,7 @@ mod tests {
     #[tokio::test]
     async fn the_agent_id_is_stamped_on_invokes() {
         let probe = crate::testkit::TransportProbe::new();
-        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "agent-1");
+        let client = RuntimeClient::detached(MockTransport::ok("").observed_by(&probe), "agent-1");
         client.invoke("tc1", probe_call()).await.unwrap();
         assert_eq!(probe.agent_ids(), vec!["agent-1".to_string()]);
     }
@@ -388,7 +415,7 @@ mod tests {
     #[tokio::test]
     async fn the_models_call_id_reaches_the_runtime_unchanged() {
         let probe = crate::testkit::TransportProbe::new();
-        let client = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "agent-1");
+        let client = RuntimeClient::detached(MockTransport::ok("").observed_by(&probe), "agent-1");
         client.invoke("toolu_abc123", probe_call()).await.unwrap();
         client.invoke("toolu_def456", probe_call()).await.unwrap();
         assert_eq!(
@@ -436,7 +463,7 @@ mod tests {
             ),
         };
         let told = Arc::new(AtomicBool::new(false));
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("done").with_hooks(vec![record]),
             "agent-1",
         )
@@ -454,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn a_derived_handle_stamps_its_own_agent_id() {
         let probe = crate::testkit::TransportProbe::new();
-        let parent = RuntimeClient::new(MockTransport::ok("").observed_by(&probe), "main");
+        let parent = RuntimeClient::detached(MockTransport::ok("").observed_by(&probe), "main");
         let sub = parent.clone().with_agent_id("sub-1");
         parent.invoke("tc1", probe_call()).await.unwrap();
         sub.invoke("tc2", probe_call()).await.unwrap();
@@ -464,9 +491,42 @@ mod tests {
         );
     }
 
+    /// Why the in-flight map keys `call_id → agent_id` rather than being a set.
+    ///
+    /// The map is shared by every client on one runtime, so a `cancel_in_flight`
+    /// that took all of it would abort a sibling subagent's tool call mid-flight —
+    /// and the caller doing this is a subagent being stopped, which must leave its
+    /// parent and its siblings running.
+    #[tokio::test]
+    async fn cancelling_one_agent_leaves_its_siblings_calls_alone() {
+        let probe = crate::testkit::TransportProbe::new();
+        let in_flight = Arc::new(InFlight::new());
+        let parent = RuntimeClient::new(
+            MockTransport::ok("").observed_by(&probe),
+            "parent",
+            in_flight.clone(),
+        );
+        let child = parent.clone().with_agent_id("child");
+        in_flight.track("p1", "parent");
+        in_flight.track("c1", "child");
+
+        child.cancel_in_flight().await;
+
+        assert_eq!(
+            probe.cancels(),
+            vec!["c1".to_string()],
+            "only the cancelling agent's own call may be abandoned"
+        );
+        assert_eq!(
+            in_flight.of_agent("parent"),
+            vec!["p1".to_string()],
+            "the parent's call is still outstanding"
+        );
+    }
+
     #[tokio::test]
     async fn client_returns_ok_output() {
-        let client = RuntimeClient::new(MockTransport::ok("hello"), "test-agent");
+        let client = RuntimeClient::detached(MockTransport::ok("hello"), "test-agent");
         let output = client
             .invoke(
                 "tc1",
@@ -482,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_returns_err_on_tool_failure() {
-        let client = RuntimeClient::new(MockTransport::err("oops"), "test-agent");
+        let client = RuntimeClient::detached(MockTransport::err("oops"), "test-agent");
         let err = client
             .invoke(
                 "tc1",
@@ -510,7 +570,8 @@ mod tests {
             skills: vec![],
             platform: None,
         };
-        let client = RuntimeClient::new(MockTransport::ok("").with_scan(vec![scan]), "test-agent");
+        let client =
+            RuntimeClient::detached(MockTransport::ok("").with_scan(vec![scan]), "test-agent");
         let resp = client
             .scan_workspace(
                 None,

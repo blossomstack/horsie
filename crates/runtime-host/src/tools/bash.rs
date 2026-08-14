@@ -76,7 +76,7 @@ mod tests {
     /// tokens here even though it is stated once already.
     #[test]
     fn the_description_names_the_cwd_tool_and_forbids_cd() {
-        let tool = BashTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
+        let tool = BashTool::new(RuntimeClient::detached(MockTransport::ok(""), "test-agent"));
         let d = tool.spec().description;
         assert!(d.contains("set_working_dir"), "{d}");
         assert!(d.contains("do not prefix the command with `cd`"), "{d}");
@@ -84,7 +84,7 @@ mod tests {
 
     #[tokio::test]
     async fn surfaces_stderr_on_success() {
-        let tool = BashTool::new(RuntimeClient::new(
+        let tool = BashTool::new(RuntimeClient::detached(
             MockTransport::output(ToolOutput {
                 stdout: "out".into(),
                 stderr: "a warning".into(),
@@ -100,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonzero_exit_is_reported_as_error() {
-        let tool = BashTool::new(RuntimeClient::new(
+        let tool = BashTool::new(RuntimeClient::detached(
             MockTransport::output(ToolOutput {
                 stdout: String::new(),
                 stderr: "boom".into(),

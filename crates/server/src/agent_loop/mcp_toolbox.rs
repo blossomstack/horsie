@@ -284,7 +284,7 @@ mod tests {
     /// server's own JSON Schema carried through.
     #[test]
     fn plugin_mcp_tools_become_specs() {
-        let client = horsie_runtime_host::RuntimeClient::new(
+        let client = horsie_runtime_host::RuntimeClient::detached(
             horsie_runtime_host::testkit::MockTransport::ok(""),
             "agent",
         );
@@ -317,7 +317,7 @@ mod tests {
     /// to a runtime that would have to refuse it anyway.
     #[tokio::test]
     async fn an_unknown_plugin_mcp_tool_is_refused_locally() {
-        let client = horsie_runtime_host::RuntimeClient::new(
+        let client = horsie_runtime_host::RuntimeClient::detached(
             horsie_runtime_host::testkit::MockTransport::ok(""),
             "agent",
         );
@@ -491,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn an_admin_server_outranks_a_plugin_of_the_same_name() {
         let plugin: Arc<dyn Toolbox> = Arc::new(PluginMcpToolbox::new(
-            horsie_runtime_host::RuntimeClient::new(
+            horsie_runtime_host::RuntimeClient::detached(
                 horsie_runtime_host::testkit::MockTransport::ok(""),
                 "agent",
             ),
