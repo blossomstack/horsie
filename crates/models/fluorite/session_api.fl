@@ -114,18 +114,9 @@ struct Ack {}
 /// Uniform HTTP error envelope.
 struct ApiError { code: String, message: String }
 
-/// A registered session group. Groups may exist with zero sessions; a group
-/// referenced only by annotations is not registered but still lists.
-struct SessionGroupView { name: String }
-
-struct CreateGroupRequest { name: String }
-struct CreateGroupResponse { group: SessionGroupView }
-/// Rename a group; sessions annotated with the old name follow.
-struct RenameGroupRequest { name: String }
 /// Rename a session. Single line, non-empty, at most 60 characters — the same
 /// rule the agent's own title tool is held to.
 struct RenameSessionRequest { name: String }
-struct ListGroupsResponse { groups: Vec<SessionGroupView> }
 
 /// Merge-update a session's annotations: every `set` entry upserts a key,
 /// every `remove` entry drops one. Keys not mentioned are untouched.
