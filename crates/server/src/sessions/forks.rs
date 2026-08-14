@@ -111,8 +111,18 @@ impl ForkRoster {
     }
 
     /// The seed is durable, so the fork may run.
+    ///
+    /// Only out of `Provisioning`. The seed carries the fork's first message, so
+    /// the fork drains it and reports `Running` the moment the seed arrives —
+    /// before the session records that it landed. Writing `Idle` regardless
+    /// moved a working fork backwards and left it reading idle for the whole of
+    /// its first turn.
     pub fn apply_seeded(&mut self, id: Uuid) {
-        if let Some(rec) = self.forks.get_mut(&id) {
+        if let Some(rec) = self
+            .forks
+            .get_mut(&id)
+            .filter(|rec| rec.status == AgentStatus::Provisioning)
+        {
             rec.status = AgentStatus::Idle;
         }
     }
@@ -144,6 +154,19 @@ impl ForkRoster {
     #[must_use]
     pub fn contains(&self, id: Uuid) -> bool {
         self.forks.contains_key(&id)
+    }
+
+    /// Whether this fork's history has landed and it may run.
+    ///
+    /// Not `status == Idle`: a fork drains its first message as soon as the seed
+    /// arrives, so the first status a seeded fork reaches is usually `Running`.
+    /// `Provisioning` is the one state in which no turn has run — everything
+    /// else is a fork that is seeded and has got somewhere.
+    #[must_use]
+    pub fn is_seeded(&self, id: Uuid) -> bool {
+        self.forks
+            .get(&id)
+            .is_some_and(|rec| rec.status != AgentStatus::Provisioning)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&Uuid, &ForkRecord)> {
@@ -193,6 +216,27 @@ mod tests {
 
     fn id(n: u8) -> Uuid {
         Uuid::from_bytes([n; 16])
+    }
+
+    /// `ForkSeeded` can be journaled *after* the fork has already begun its
+    /// first turn: the seed carries the message, so the fork drains it the
+    /// moment it arrives and its actor reports `Running` before the session gets
+    /// round to recording that the seed landed. Writing `Idle` unconditionally
+    /// reported a working fork as resting, for the whole of its first turn.
+    #[test]
+    fn seeding_does_not_overwrite_a_fork_that_is_already_working() {
+        let mut r = ForkRoster::default();
+        r.apply_created(
+            id(1),
+            ForkParent::Main,
+            0,
+            ForkMode::Copy,
+            "go".into(),
+            1_000,
+        );
+        r.apply_status(id(1), AgentStatus::Running, 1_100);
+        r.apply_seeded(id(1));
+        assert_eq!(r.get(id(1)).unwrap().status, AgentStatus::Running);
     }
 
     #[test]

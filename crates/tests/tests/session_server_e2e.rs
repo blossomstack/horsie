@@ -1217,7 +1217,10 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     block.wait_until_received().await;
 
     let res = client
-        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+        .post(format!(
+            "http://{}/api/sessions/{id}/agents/main/stop",
+            server.addr
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -1289,7 +1292,10 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     // Stop cancels the turn and nothing else: the runtime is the supervisor's
     // to release when the session goes cold, not the user's to destroy.
     let res = client
-        .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+        .post(format!(
+            "http://{}/api/sessions/{id}/agents/main/stop",
+            server.addr
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -1311,6 +1317,96 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     );
     wait_turns(&client, &server.addr, &id, 2).await;
     assert!(agent.signals().contains(&format!("get:{id}")));
+
+    server.shutdown().await;
+}
+
+/// Stop, addressed to a fork, over the route a client actually calls.
+///
+/// The whole reason `stop` is agent-scoped: a session hosts several
+/// conversations at once, each with a turn of its own. The old session-wide
+/// route could only ever mean the main agent, so a fork could not be
+/// interrupted at all — and an unknown id had no way to be refused.
+#[tokio::test]
+async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("first");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id = create_session(&client, &server.addr, &agent, "one").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
+
+    let stop = |target: String| {
+        let client = client.clone();
+        let addr = server.addr;
+        let id = id.clone();
+        async move {
+            client
+                .post(format!(
+                    "http://{addr}/api/sessions/{id}/agents/{target}/stop"
+                ))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(
+        stop(uuid::Uuid::new_v4().to_string()).await,
+        404,
+        "an id naming no agent in this session is refused"
+    );
+
+    // The fork's own first turn is held open, so there is genuinely something
+    // to interrupt when the stop lands.
+    let block = mock.blocking_response("the fork's turn");
+    let res = client
+        .post(format!("http://{}/api/sessions/{id}/messages", server.addr))
+        .json(&serde_json::json!({ "text": "/fork try the other way" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 202);
+    let ack: serde_json::Value = res.json().await.unwrap();
+    let fork = ack["forkedAgent"]
+        .as_str()
+        .expect("a fork command answers with a fork")
+        .to_string();
+    block.wait_until_received().await;
+
+    assert_eq!(stop(fork.clone()).await, 200);
+    block.release();
+
+    // The fork's own log carries the boundary; the main agent's turn count is
+    // untouched, because the main agent was not what was stopped.
+    wait_until("the fork's turn ends as stopped", async || {
+        let page: serde_json::Value = client
+            .get(format!(
+                "http://{}/api/sessions/{id}/messages?aid={fork}&max=100",
+                server.addr
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        page["entries"]
+            .as_array()?
+            .iter()
+            .any(|e| e["body"]["value"]["value"]["outcome"]["kind"] == "Stopped")
+            .then_some(())
+    })
+    .await;
+    wait_turns(&client, &server.addr, &id, 1).await;
 
     server.shutdown().await;
 }
@@ -1825,7 +1921,10 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         .await;
 
         let res = client
-            .post(format!("http://{}/api/sessions/{id}/stop", server.addr))
+            .post(format!(
+                "http://{}/api/sessions/{id}/agents/main/stop",
+                server.addr
+            ))
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -2290,7 +2389,10 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
     assert_eq!(agent.live_runtimes().len(), 2, "one runtime per session");
 
     client
-        .post(format!("http://{}/api/sessions/{a}/stop", server.addr))
+        .post(format!(
+            "http://{}/api/sessions/{a}/agents/main/stop",
+            server.addr
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await

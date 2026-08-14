@@ -184,11 +184,14 @@ pub fn app(state: AppState) -> Router {
             get(handlers::get_agent).delete(handlers::delete_fork),
         )
         .route(
+            "/api/sessions/{id}/agents/{agent_id}/stop",
+            post(handlers::stop_agent),
+        )
+        .route(
             "/api/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
         .route("/api/sessions/{id}/name", put(handlers::rename_session))
-        .route("/api/sessions/{id}/stop", post(handlers::stop_session))
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))
         .route(
@@ -853,7 +856,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                &format!("/api/sessions/{id}/stop"),
+                &format!("/api/sessions/{id}/agents/main/stop"),
                 &serde_json::json!({}),
             ))
             .await

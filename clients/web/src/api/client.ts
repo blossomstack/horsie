@@ -296,11 +296,14 @@ export const api = {
         },
       ),
 
-    stop: (id: string): Promise<Ack> =>
-      request(`/sessions/${encodeURIComponent(id)}/stop`, {
-        method: "POST",
-        body: "{}",
-      }),
+    /** Cancel one agent's turn. `agentId` is `"main"` or an agent's uuid —
+     * there is no session-wide stop, because a session hosts several
+     * conversations at once and each has a turn of its own. */
+    stop: (id: string, agentId: string): Promise<Ack> =>
+      request(
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/stop`,
+        { method: "POST", body: "{}" },
+      ),
 
     /** One agent's current values: task list, usage, and — for a subagent —
      * its spawn metadata and terminal result. */

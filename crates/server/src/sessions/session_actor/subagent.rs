@@ -598,6 +598,54 @@ mod tests {
         );
     }
 
+    /// Stop, addressed to a subagent.
+    ///
+    /// The child is cancelled *and* the parent is told, because the parent is
+    /// blocked on a `spawn_agent` result: stopping the child quietly would leave
+    /// it waiting for one that can never come. Reported as a failed child, which
+    /// is the shape crash recovery already delivers for the same situation.
+    #[tokio::test]
+    async fn stopping_a_subagent_cancels_it_and_tells_the_parent() {
+        let provider = BlockingProvider::new();
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(provider.clone() as Arc<dyn horsie_agentcore::LlmProvider>)
+                .await;
+        let sub = spawn_sub(&session, "research", "dig").await;
+        wait_for_tree(&journal, id, |t| {
+            t.node(sub)
+                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+        })
+        .await;
+
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: sub.to_string(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a working subagent is stoppable");
+
+        // Owed and delivered: a stopped child still owes its parent an answer.
+        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let rec = state.subagents.node(sub).unwrap();
+        assert_eq!(
+            rec.status,
+            crate::sessions::subagents::SubAgentStatus::Failed
+        );
+        let texts = subagent_texts(&main_history(&session).await);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[subagent \"research\" failed]")),
+            "the parent must hear that its child was stopped: {texts:?}"
+        );
+        provider.release();
+    }
+
     /// A subagent that failed says so where a reader opening it will look.
     #[tokio::test]
     async fn a_failed_subagents_own_log_carries_the_error() {

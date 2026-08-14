@@ -128,9 +128,10 @@ pub enum SessionSupervisorCommand {
         text: String,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
-    /// Cancel the session's turn in flight.
+    /// Cancel one of a session's agents' turn in flight.
     Stop {
         id: SessionId,
+        agent_id: String,
         reply: ReplyTo<Result<(), String>>,
     },
     /// Delete one fork of a session. Never automatic — nothing prunes a fork,
@@ -811,7 +812,11 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::Stop { id, reply } => {
+            SessionSupervisorCommand::Stop {
+                id,
+                agent_id,
+                reply,
+            } => {
                 match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(format!("no such session: {id}")));
@@ -820,6 +825,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let (tx, rx) = oneshot::channel();
                         if session
                             .tell(SessionCommand::Turn(TurnCommand::Stop {
+                                agent_id,
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await
@@ -827,9 +833,14 @@ impl EventSourcedActor for SessionSupervisor {
                         {
                             let _ = reply.send(Err("session unavailable".to_string()));
                         } else {
+                            // The session's own answer, forwarded rather than
+                            // flattened to `Ok`: only it can tell an id that
+                            // names no agent from one that had nothing to stop.
                             tokio::spawn(async move {
-                                let _ = rx.await;
-                                let _ = reply.send(Ok(()));
+                                let _ = reply
+                                    .send(rx.await.unwrap_or_else(|_| {
+                                        Err("session unavailable".to_string())
+                                    }));
                             });
                         }
                     }

@@ -738,11 +738,18 @@ mod tests {
         let (_f, session, id, journal) =
             spawn_run_with_provider(provider.clone() as Arc<dyn LlmProvider>).await;
 
-        wait_for_run(&journal, id, |r| r.current() == Some(0)).await;
+        let step = wait_for_run(&journal, id, |r| r.current() == Some(0)).await;
+        let agent = step.current_agent().expect("a step in flight has an agent");
         session
-            .ask(|reply| SessionCommand::Turn(TurnCommand::Stop { reply }))
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: agent.to_string(),
+                    reply,
+                })
+            })
             .await
-            .unwrap();
+            .unwrap()
+            .expect("a step in flight is stoppable");
 
         let run = wait_for_run(&journal, id, |r| {
             r.status == crate::sessions::workflow::WorkflowRunStatus::Suspended

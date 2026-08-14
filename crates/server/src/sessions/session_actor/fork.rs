@@ -728,8 +728,8 @@ mod tests {
     // ---- integration, over the real actors ----
 
     use super::super::testing::{
-        EchoProvider, FailOnNeedleProvider, agent_history, send, spawn_session_with_provider,
-        spawn_sub, turn_outcomes, turns_begun, wait_for_state,
+        BlockingProvider, EchoProvider, FailOnNeedleProvider, agent_history, send,
+        spawn_session_with_provider, spawn_sub, turn_outcomes, turns_begun, wait_for_state,
     };
     use crate::sessions::addressing::SessionRef;
     use crate::sessions::session_actor::{SessionCommand, TurnCommand};
@@ -808,6 +808,28 @@ mod tests {
         )
     }
 
+    /// Wait until any turn in `agent_id`'s log has ended, and hand back how.
+    ///
+    /// For a fixture where the copied history carries no boundary of its own —
+    /// a source held mid-turn — so the first end to appear is the fork's.
+    async fn wait_for_any_turn_end(
+        session: &SessionRef,
+        agent_id: Option<String>,
+    ) -> horsie_agentcore::TurnOutcome {
+        for _ in 0..300 {
+            if let Some(outcome) =
+                turn_outcomes(&agent_history(session, agent_id.clone()).await).pop()
+            {
+                return outcome;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "no turn ever ended in that log: {}",
+            transcript(session, agent_id).await
+        )
+    }
+
     /// A fork's page folds its own log: `TurnBegan` reads `Running` and only a
     /// `TurnEnded` clears it. Without one the page says `RUNNING` for ever —
     /// through reloads *and* restarts, because the status is derived from the
@@ -822,9 +844,7 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(fork_id)
         })
         .await;
 
@@ -883,9 +903,7 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle | AgentStatus::Failed))
+            s.forks.is_seeded(fork_id)
         })
         .await;
 
@@ -897,6 +915,97 @@ mod tests {
             );
         };
         assert!(failed.error.contains("bad key"), "{:?}", failed.error);
+    }
+
+    /// Stop, addressed to a fork.
+    ///
+    /// It used to be addressed to nothing: the gate read the *session's* status,
+    /// which a fork never moves, so pressing Stop on a fork's page returned
+    /// `200` having done nothing at all. The fork went on working, and there was
+    /// no way to interrupt it.
+    #[tokio::test]
+    async fn stopping_a_fork_cancels_that_forks_turn() {
+        let provider = BlockingProvider::new();
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(provider.clone() as Arc<dyn horsie_agentcore::LlmProvider>)
+                .await;
+        // The source's turn is held open too, so nothing about this test can
+        // pass by stopping the main agent instead.
+        send(&session, "the original question").await;
+
+        let fork = fork_via(&session, None, "/fork try the other migration")
+            .await
+            .expect("a fork");
+        let fork_id = Uuid::parse_str(&fork).unwrap();
+        wait_for_state(&journal, id, "the fork is working", |s| {
+            s.forks
+                .get(fork_id)
+                .is_some_and(|r| r.status == AgentStatus::Running)
+        })
+        .await;
+
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: fork.clone(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a working fork is stoppable");
+
+        // Any end in this log is the fork's own: the source is deliberately
+        // held mid-turn, so the history the copy carried has an *open* turn in
+        // it and no boundary of its own.
+        let outcome = wait_for_any_turn_end(&session, Some(fork.clone())).await;
+        assert!(
+            matches!(outcome, horsie_agentcore::TurnOutcome::Stopped(_)),
+            "the fork's turn ends as stopped, not {outcome:?}: {}",
+            transcript(&session, Some(fork)).await
+        );
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(
+            state.status,
+            crate::sessions::spec::SessionStatus::Running,
+            "the source's own turn is untouched — it was not what was stopped"
+        );
+        provider.release();
+    }
+
+    /// An id that names no agent here is a `404`, which the session-wide stop
+    /// could not say at all. Distinct from an agent that simply is not working:
+    /// nothing to stop is `Ok`, so a client racing a turn's own end is not told
+    /// it failed for winning the race.
+    #[tokio::test]
+    async fn stopping_an_unknown_agent_is_refused_but_an_idle_one_is_not() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        send(&session, "the original question").await;
+
+        let stop = |agent_id: String| {
+            let session = session.clone();
+            async move {
+                session
+                    .ask(move |reply| SessionCommand::Turn(TurnCommand::Stop { agent_id, reply }))
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(
+            stop(Uuid::new_v4().to_string()).await.is_err(),
+            "an id naming no agent is refused"
+        );
+        assert!(
+            stop("not-even-a-uuid".to_string()).await.is_err(),
+            "and so is one that is not an id at all"
+        );
+        assert!(
+            stop(crate::sessions::session_actor::MAIN_AGENT_ID.to_string())
+                .await
+                .is_ok(),
+            "an agent with nothing in flight is not a failure"
+        );
     }
 
     /// The whole of `/fork`: the fork exists, carries what was said before it,
@@ -914,9 +1023,7 @@ mod tests {
         // and it is what releases the message waiting in the fork's queue.
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(fork_id)
         })
         .await;
 
@@ -947,9 +1054,7 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the summary fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(fork_id)
         })
         .await;
 
@@ -1067,9 +1172,7 @@ mod tests {
         let first = fork_via(&session, None, "/fork one").await.expect("a fork");
         let first_id = Uuid::parse_str(&first).unwrap();
         wait_for_state(&journal, id, "the first fork is seeded", |s| {
-            s.forks
-                .get(first_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(first_id)
         })
         .await;
 
@@ -1147,9 +1250,7 @@ mod tests {
             .expect("a parked conversation can still be forked");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(fork_id)
         })
         .await;
 
@@ -1206,9 +1307,7 @@ mod tests {
         // `Incoming` the fork will merge into a turn.
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
-                .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
+            s.forks.is_seeded(fork_id)
         })
         .await;
         let forked = transcript(&session, Some(fork.clone())).await;

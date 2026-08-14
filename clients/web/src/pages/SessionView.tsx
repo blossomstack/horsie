@@ -29,7 +29,7 @@ import {
   useSendMessage,
   useSession,
   useAgent,
-  useStopSession,
+  useStopAgent,
 } from "../hooks/useSessions";
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
@@ -187,7 +187,7 @@ export function SessionView() {
   const { data: mainAgent } = useAgent(id, agentId ?? MAIN_AGENT);
   const send = useSendMessage();
   const answerAsks = useAnswerAsks();
-  const stop = useStopSession();
+  const stop = useStopAgent();
   const del = useDeleteSession();
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
@@ -462,9 +462,13 @@ export function SessionView() {
   // a spinner in front of it would delay what is already on screen.
   if (isError) return <SessionUnavailable id={id} error={error} />;
 
+  // The agent this page is showing, which is the one whose turn the button
+  // interrupts. Unscoped, it always meant the main agent: on a fork's page it
+  // cancelled a turn the reader was not looking at, or — once the fork was what
+  // was running — did nothing at all and said `200`.
   const handleStop = async () => {
     try {
-      await stop.mutateAsync(id);
+      await stop.mutateAsync({ id, agentId: agentId ?? MAIN_AGENT });
     } catch {
       /* surfaced via status */
     }

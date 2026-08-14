@@ -18,13 +18,15 @@
 use super::component::{ActionCx, Component};
 use super::{AgentAction, LifecycleCommand, TurnEnd};
 use super::{
-    AgentKey, AnswerError, AskAnswer, CommandEffect, ForkCommand, MessageAccepted, SessionActor,
-    SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
+    AgentKey, AgentStatus, AnswerError, AskAnswer, CommandEffect, ForkCommand, MessageAccepted,
+    SessionActor, SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::forks::{ForkMode, ForkParent};
+use crate::sessions::subagents::SubAgentStatus;
+use horsie_agentcore::{EmptyOutcome, TurnOutcome};
 
 /// A recognised fork command: which of the two it was, and what the new
 /// conversation is for.
@@ -66,35 +68,8 @@ impl Turns {
                     .on_user_message(state, agent_id, text, reply, ctx)
                     .await
             }
-            TurnCommand::Stop { reply } => {
-                // A run's step in flight is what a stop cancels there, and a
-                // step can be *parked* on a question rather than running — the
-                // run page offers Interrupt for that too — so the gate is "is
-                // there a step to stop", not the session's status.
-                let step = state.run.as_ref().and_then(WorkflowRunState::current);
-                if step.is_none() && state.status != SessionStatus::Running {
-                    let _ = reply.send(());
-                    return CommandEffect::none();
-                }
-                actor.cancel_in_flight(state).await;
-                let _ = reply.send(());
-                let stopped = match step {
-                    // Cancelling the agent is not enough on a run: without this
-                    // the step's log entry stays `Running` for ever, so
-                    // `current()` never clears and the driver starts nothing
-                    // again — the run wedged while its page read "Running".
-                    // `StepCancelled` suspends it, which is the state a retry
-                    // can move.
-                    Some(index) => vec![SessionDomainEvent::StepCancelled {
-                        at_ms: now_ms(),
-                        index,
-                    }],
-                    // Stop is a turn boundary like any other: the agent drains
-                    // whatever arrived while the cancelled turn ran, because a
-                    // stop cancels the turn, not the promise.
-                    None => vec![SessionDomainEvent::TurnStopped { at_ms: now_ms() }],
-                };
-                actor.persist_and_advance(state, stopped, ctx).await
+            TurnCommand::Stop { agent_id, reply } => {
+                actor.on_stop(state, &agent_id, reply, ctx).await
             }
             TurnCommand::Answer {
                 agent_id,
@@ -109,6 +84,116 @@ impl Turns {
 /// fields — the roster, the supervisor link, the spawn helpers. An inherent
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
+    /// Cancel one agent's turn, and journal the boundary its kind uses.
+    ///
+    /// Two questions, deliberately separate. *Which agent* is pure resolution
+    /// from state — and unlike [`resolve_agent`](super::SessionActor::resolve_agent)
+    /// it never spawns one, because waking a cold agent in order to stop it is
+    /// work to achieve nothing. *Whether it is doing anything* is
+    /// [`Self::stop_boundary`], which answers with the event to journal, so the
+    /// gate and the record cannot disagree about what was stopped.
+    pub(super) async fn on_stop(
+        &mut self,
+        state: &SessionState,
+        agent_id: &str,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionDomainEvent> {
+        let Some(key) = Self::stop_target(state, agent_id) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(stopped) = Self::stop_boundary(state, key) else {
+            // Not working is not a failure. A client that pressed Stop as the
+            // turn ended on its own has got what it asked for.
+            let _ = reply.send(Ok(()));
+            return CommandEffect::none();
+        };
+        self.cancel_agent(key).await;
+        let _ = reply.send(Ok(()));
+        self.persist_and_advance(state, vec![stopped], ctx).await
+    }
+
+    /// Which agent `agent_id` names, without spawning anything.
+    ///
+    /// `main` on a run resolves to the step in flight: a run has no main agent,
+    /// and at most one step runs at a time, so there is nothing else an
+    /// unaddressed stop could mean there.
+    fn stop_target(state: &SessionState, agent_id: &str) -> Option<AgentKey> {
+        if agent_id == super::MAIN_AGENT_ID {
+            return match state.run.as_ref().and_then(WorkflowRunState::current_agent) {
+                Some(step) => Some(AgentKey::Step(step)),
+                None => Some(AgentKey::Main),
+            };
+        }
+        let id = Uuid::parse_str(agent_id).ok()?;
+        // Steps and forks before the forest, and forks before subagents, for the
+        // reason `resolve_agent` gives: the roster cannot say what *kind* of
+        // agent an id names, because forks and subagents share one map.
+        if state
+            .run
+            .as_ref()
+            .is_some_and(|r| r.index_of_agent(id).is_some())
+        {
+            return Some(AgentKey::Step(id));
+        }
+        if state.forks.contains(id) {
+            return Some(AgentKey::Fork(id));
+        }
+        state.subagents.node(id).map(|_| AgentKey::Sub(id))
+    }
+
+    /// What to journal for stopping `key`, or `None` if it is not working.
+    ///
+    /// Every kind ends its turn in its own vocabulary — the session's status is
+    /// the main agent's, a fork's is its roster entry, a subagent's is its node
+    /// in the forest — so there is no one event that means "stopped" for all of
+    /// them, and the mapping lives here rather than four times over.
+    ///
+    /// The gate is `Running` and not also `AwaitingInput`, except for a step.
+    /// Cancelling does not clear the questions an agent is parked on, so a
+    /// boundary journaled over a park would read `Idle` beside questions still
+    /// pending. A step escapes that because `StepCancelled` suspends the
+    /// execution outright, which is a state its own document can show.
+    fn stop_boundary(state: &SessionState, key: AgentKey) -> Option<SessionDomainEvent> {
+        let at_ms = now_ms();
+        match key {
+            // Stop is a turn boundary like any other: the agent drains whatever
+            // arrived while the cancelled turn ran, because a stop cancels the
+            // turn, not the promise.
+            AgentKey::Main => (state.status == SessionStatus::Running)
+                .then_some(SessionDomainEvent::TurnStopped { at_ms }),
+            // Cancelling the agent is not enough on a run: without this the
+            // step's log entry stays `Running` for ever, so `current()` never
+            // clears and the driver starts nothing again — the run wedged while
+            // its page read "Running". `StepCancelled` suspends it, which is the
+            // state a retry can move.
+            AgentKey::Step(id) => {
+                let run = state.run.as_ref()?;
+                let index = run.index_of_agent(id)?;
+                (run.current() == Some(index))
+                    .then_some(SessionDomainEvent::StepCancelled { at_ms, index })
+            }
+            AgentKey::Fork(id) => (state.forks.get(id)?.status == AgentStatus::Running).then_some(
+                SessionDomainEvent::ForkTurnEnded {
+                    at_ms,
+                    id,
+                    outcome: TurnOutcome::Stopped(EmptyOutcome {}),
+                },
+            ),
+            // The parent is blocked on this child's result, so stopping it
+            // quietly would leave it waiting for one that can never come. The
+            // same shape recovery delivers for a child a crash left running:
+            // the parent hears a failure, and carries on.
+            AgentKey::Sub(id) => (state.subagents.node(id)?.status == SubAgentStatus::Running)
+                .then_some(SessionDomainEvent::SubAgentFailed {
+                    at_ms,
+                    id,
+                    error: crate::sessions::subagents::STOPPED_ERROR.to_string(),
+                }),
+        }
+    }
+
     /// Route a set of answers to the agent that asked.
     ///
     /// Pure routing, and the agent replies to the caller directly: it owns the

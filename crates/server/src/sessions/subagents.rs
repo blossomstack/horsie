@@ -16,6 +16,14 @@ pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: u32 = 8;
 /// Error recorded for a subagent that was mid-run when the process died.
 pub const INTERRUPTED_ERROR: &str = "interrupted by restart";
 
+/// Error recorded for a subagent someone stopped.
+///
+/// Its own wording rather than [`INTERRUPTED_ERROR`]'s, because this one reaches
+/// a *model*: the parent reads it as the result of the child it is waiting on,
+/// and "interrupted by restart" would have it reason about a crash that never
+/// happened.
+pub const STOPPED_ERROR: &str = "stopped before it finished";
+
 /// Largest result (output or error) injected into a parent's context or
 /// rendered by `subagent_status` — the same bound the runtime puts on a
 /// tool's streamed output.
