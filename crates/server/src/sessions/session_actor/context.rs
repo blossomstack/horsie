@@ -1544,8 +1544,13 @@ mod tests {
     async fn a_subagent_fires_subagent_start_never_session_start() {
         let (f, session) = stop_harness(vec![]).await;
         spawn_sub(&session, "research", "dig into it").await;
+        // Waited for on the *last* of the events asserted about, not the first.
+        // `SessionStart` here belongs to the turn the main agent runs after the
+        // subagent reports back, so stopping at `SubagentStart` left the
+        // assertion reading a list the run had not finished writing — and the
+        // count it wanted was the one still to come.
         for _ in 0..200 {
-            if f.agent.hook_events().contains(&"SubagentStart") {
+            if f.agent.hook_events().contains(&"SessionStart") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

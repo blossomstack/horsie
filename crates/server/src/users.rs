@@ -23,14 +23,10 @@ use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use crate::sessions::supervisor::{SessionSupervisor, SessionSupervisorCommand, SupervisorConfig};
 use horsie_actor::{ActorSystem, Journal};
 use horsie_models::model_cards::ModelCardInput;
-use horsie_models::session::GlobalSessionEvent;
 use horsie_models::settings::ServerInfo;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::{OnceCell, broadcast};
-
-/// How many global events a subscriber may fall behind before it is lagged.
-const GLOBAL_EVENT_CAPACITY: usize = 256;
+use tokio::sync::OnceCell;
 
 /// The actor system this process runs, over the node's journal.
 ///
@@ -122,10 +118,6 @@ pub struct UserServices {
     pub deps: ServerDeps,
     /// Where readers wait for this account's sessions to move.
     pub revisions: Arc<SessionRevisions>,
-    /// This account's global event stream. One channel per account rather than
-    /// one channel and a filter: a filter is one forgotten line from leaking
-    /// every session title on the server.
-    pub global_events: broadcast::Sender<GlobalSessionEvent>,
     pub config_store: Arc<dyn crate::config::ConfigStore>,
     /// This account's live LLM clients, keyed by model alias, and the vendor
     /// map its sessions select a runtime from. Both are handles the config
@@ -265,7 +257,6 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     #[cfg(any(test, feature = "test-util"))]
     let deps = shared.deps.clone().unwrap_or(deps);
 
-    let (global_events, _) = broadcast::channel(GLOBAL_EVENT_CAPACITY);
     // Named, not started. A shard type's actors are built by the recipe this
     // node registered, on whichever node the cluster placed them — so building
     // an account's bundle no longer starts anything, and the supervisor comes
@@ -310,12 +301,14 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         supervisor.clone(),
     ));
 
+    // The same account form the runtime topics use, because both name topics on
+    // the one bus this deployment shares.
+    let account = user.as_str().to_string();
     Ok(Arc::new(UserServices {
         user,
         supervisor,
         deps,
-        revisions: Arc::new(SessionRevisions::default()),
-        global_events,
+        revisions: Arc::new(SessionRevisions::new(&account, shared.bus.clone())),
         config_store: opened.store,
         provider_registry: opened.registry,
         vendors: opened.vendors,
@@ -587,18 +580,21 @@ mod tests {
         let (sa, sb) = (reg.get(&a).await.unwrap(), reg.get(&b).await.unwrap());
 
         assert!(!Arc::ptr_eq(&sa, &sb));
-        // A frame published to one account's stream reaches nobody on the
-        // other's, because there is no path between them to filter.
-        let mut watching_b = sb.global_events.subscribe();
-        sa.global_events
-            .send(GlobalSessionEvent::TitleChanged(
-                horsie_models::session::GlobalSessionTitleEvent {
-                    session_id: "x".into(),
-                    name: "a's session".into(),
-                },
-            ))
-            .ok();
-        assert!(watching_b.try_recv().is_err());
+        // One account's list moving is invisible to the other, because there is
+        // no path between them to filter. Two counters, not one counter and a
+        // scope check — a filter is one forgotten line from leaking a title.
+        let b_before = *sb.revisions.list().borrow();
+        sa.revisions.bump_list();
+        assert_eq!(
+            *sb.revisions.list().borrow(),
+            b_before,
+            "one account's session list must not move another's"
+        );
+        assert_ne!(
+            *sa.revisions.list().borrow(),
+            b_before,
+            "and the bump must have actually happened"
+        );
     }
 
     /// A dormant account costs nothing until something asks for it.

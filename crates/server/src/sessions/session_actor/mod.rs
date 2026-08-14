@@ -464,10 +464,15 @@ impl SessionActor {
         // A subagent and a step journal under their own id; the main agent
         // journals under the session's, because its transcript *is* the
         // session's. The revision channel follows the same split.
+        //
+        // `publishing` rather than `for_agent`: this node is the one running
+        // the agent, so every move of its counter has to reach whichever node
+        // is answering readers of it — routinely a different one, since a
+        // session and its supervisor are placed independently.
         let (journal_id, revision) = match plan.kind {
-            SessionAgentKind::Main => (self.id, revisions.for_agent(MAIN_AGENT_ID)),
+            SessionAgentKind::Main => (self.id, revisions.publishing(MAIN_AGENT_ID)),
             SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                (id, revisions.for_agent(&id.to_string()))
+                (id, revisions.publishing(&id.to_string()))
             }
         };
         // Its name under this session, and the id it is addressed by.

@@ -222,6 +222,43 @@ async fn a_session_belongs_to_one_account_and_is_invisible_to_the_other() {
     f.shutdown().await;
 }
 
+/// The one boundary a session's own id cannot supply.
+///
+/// `SessionActor`'s persistence id is `("session", <uuid>)` with **no account in
+/// it**, so nothing about the actor says whose it is. The supervisor's
+/// session-list check is the entirety of the isolation on this path, and this
+/// is the test that fails when it is removed.
+///
+/// It carries more weight than it used to. An agent's revision now travels
+/// between nodes on a per-session topic, and every wait still goes through the
+/// supervisor for exactly this reason — letting a reader follow a session's
+/// topic directly would be fewer hops and would move the boundary onto an id
+/// that another account could simply have been told.
+#[tokio::test]
+async fn one_account_cannot_open_anothers_message_stream() {
+    let f = fixture().await;
+    let id = create_session(&f, &f.a).await;
+
+    // The owner can, which is what makes the refusal below a statement about
+    // the account rather than about the stream being unavailable to anyone.
+    let mine = f.get(&f.a, &format!("/api/sessions/{id}/messages")).await;
+    assert_eq!(
+        mine.status().as_u16(),
+        200,
+        "the owner must be able to read its own stream"
+    );
+    drop(mine);
+
+    let theirs = f.get(&f.b, &format!("/api/sessions/{id}/messages")).await;
+    assert_eq!(
+        theirs.status().as_u16(),
+        404,
+        "another account must not be able to open this stream"
+    );
+
+    f.shutdown().await;
+}
+
 /// Two agents, both announcing `main`. Before per-account maps the second was
 /// refused outright — and had it been accepted, the first account's session
 /// would have run its tools on the second's machine.
@@ -272,33 +309,32 @@ async fn the_same_vendor_name_in_two_accounts_is_two_runtimes() {
     f.shutdown().await;
 }
 
-/// `/api/events` carries session titles and status transitions. One channel per
-/// account, so there is no path between them for a filter to have to police.
+/// `/api/events` reports one account's session list and never another's.
+///
+/// One revision per account, so there is no path between them for a filter to
+/// have to police. The counter replaced a per-account broadcast channel; the
+/// isolation argument is unchanged and so is this test's shape — two objects,
+/// not one object and a scope check.
 #[tokio::test]
-async fn the_global_event_stream_carries_only_its_own_accounts_frames() {
-    use horsie_models::session::{GlobalSessionEvent, GlobalSessionTitleEvent};
-
+async fn the_global_event_stream_carries_only_its_own_accounts_changes() {
     let f = fixture().await;
-    let watching_b = f.services(&f.b).await.global_events.subscribe();
-    let mut watching_a = f.services(&f.a).await.global_events.subscribe();
+    let a = f.services(&f.a).await;
+    let b = f.services(&f.b).await;
 
-    f.services(&f.a)
-        .await
-        .global_events
-        .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
-            session_id: "s-1".into(),
-            name: "a's private title".into(),
-        }))
-        .expect("a subscriber is listening");
+    let a_before = *a.revisions.list().borrow();
+    let b_before = *b.revisions.list().borrow();
 
-    match watching_a.try_recv() {
-        Ok(GlobalSessionEvent::TitleChanged(e)) => assert_eq!(e.name, "a's private title"),
-        other => panic!("the owner must see their own frame, got {other:?}"),
-    }
+    create_session(&f, &f.a).await;
+
+    assert_ne!(
+        *a.revisions.list().borrow(),
+        a_before,
+        "the owner's list must move"
+    );
     assert_eq!(
-        watching_b.len(),
-        0,
-        "another account's stream must be empty, not filtered"
+        *b.revisions.list().borrow(),
+        b_before,
+        "another account's list must not move, not merely be filtered"
     );
 
     f.shutdown().await;

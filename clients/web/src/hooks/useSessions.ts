@@ -6,13 +6,12 @@ import {
 } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { api } from "../api/client";
+import { deriveTitle } from "../lib/format";
 import type {
   CreateSessionRequest,
   GetSessionResponse,
-  GlobalSessionEvent,
   ListSessionsResponse,
 } from "../api/types";
-import { deriveTitle } from "../lib/format";
 
 export const qk = {
   sessions: ["sessions"] as const,
@@ -51,110 +50,26 @@ export function useAgent(id: string | undefined, agentId: string) {
   });
 }
 
-function applyGlobalStatus(
-  client: QueryClient,
-  ev: Extract<GlobalSessionEvent, { type: "StatusChanged" }>["value"],
-) {
-  let matched = false;
-  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
-    if (!prev) return prev;
-    const sessions = prev.sessions.map((s) => {
-      if (s.id !== ev.sessionId) return s;
-      matched = true;
-      return { ...s, status: ev.status, lastError: ev.reason ?? s.lastError };
-    });
-    return { sessions };
-  });
-  // A status change for a session we don't know about yet → refetch the list.
-  if (!matched) client.invalidateQueries({ queryKey: qk.sessions });
-
-  client.setQueryData<GetSessionResponse>(
-    qk.session(ev.sessionId),
-    (prev) =>
-      prev
-        ? {
-            session: {
-              ...prev.session,
-              status: ev.status,
-              lastError: ev.reason ?? prev.session.lastError,
-            },
-          }
-        : prev,
-  );
-}
-
-function applyGlobalTitle(
-  client: QueryClient,
-  ev: Extract<GlobalSessionEvent, { type: "TitleChanged" }>["value"],
-) {
-  let matched = false;
-  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
-    if (!prev) return prev;
-    const sessions = prev.sessions.map((s) => {
-      if (s.id !== ev.sessionId) return s;
-      matched = true;
-      return { ...s, name: ev.name };
-    });
-    return { sessions };
-  });
-  // A title change for a session we don't know about yet → refetch the list.
-  if (!matched) client.invalidateQueries({ queryKey: qk.sessions });
-
-  client.setQueryData<GetSessionResponse>(
-    qk.session(ev.sessionId),
-    (prev) =>
-      prev
-        ? {
-            session: {
-              ...prev.session,
-              name: ev.name,
-            },
-          }
-        : prev,
-  );
-}
-
 /**
- * A session's fork roster changed — one appeared, renamed itself, or moved
- * between statuses.
+ * Take the session list a frame carries as the current truth.
  *
- * Replaces the rows wholesale rather than merging, because the frame carries
- * the whole roster: a client that had missed an earlier frame would otherwise
- * keep a fork the server has already dropped.
+ * Replaces three per-field patchers — status, title, forks — which existed
+ * because a frame used to describe one changed field. A frame is now the whole
+ * list, so there is nothing to reconcile: a reader that missed a frame is
+ * corrected by the next one rather than left holding a half-applied delta.
+ *
+ * Any open detail query is refreshed from the same list, so a session's own
+ * page cannot disagree with the row for it in the sidebar.
  */
-function applyGlobalForks(
+export function applySessionList(
   client: QueryClient,
-  ev: Extract<GlobalSessionEvent, { type: "ForksChanged" }>["value"],
+  next: ListSessionsResponse,
 ) {
-  let matched = false;
-  client.setQueryData<ListSessionsResponse>(qk.sessions, (prev) => {
-    if (!prev) return prev;
-    const sessions = prev.sessions.map((s) => {
-      if (s.id !== ev.sessionId) return s;
-      matched = true;
-      return { ...s, forks: ev.forks };
-    });
-    return { sessions };
-  });
-  // Forks for a session we don't know about yet → refetch the list.
-  if (!matched) client.invalidateQueries({ queryKey: qk.sessions });
-
-  client.setQueryData<GetSessionResponse>(qk.session(ev.sessionId), (prev) =>
-    prev ? { session: { ...prev.session, forks: ev.forks } } : prev,
-  );
-}
-
-export function applyGlobalEvent(client: QueryClient, ev: GlobalSessionEvent) {
-  switch (ev.type) {
-    case "StatusChanged":
-      applyGlobalStatus(client, ev.value);
-      return;
-    case "TitleChanged":
-      applyGlobalTitle(client, ev.value);
-      return;
-    case "ForksChanged":
-      applyGlobalForks(client, ev.value);
-      return;
+  client.setQueryData<ListSessionsResponse>(qk.sessions, next);
+  for (const session of next.sessions) {
+    client.setQueryData<GetSessionResponse>(qk.session(session.id), (prev) =>
+      prev ? { session: { ...prev.session, ...session } } : prev,
+    );
   }
 }
 
@@ -169,9 +84,9 @@ export function useGlobalSessionFeed() {
     const es = new EventSource(api.globalEventsUrl());
     es.onmessage = (e: MessageEvent<string>) => {
       try {
-        applyGlobalEvent(client, JSON.parse(e.data) as GlobalSessionEvent);
+        applySessionList(client, JSON.parse(e.data) as ListSessionsResponse);
       } catch (err) {
-        console.error("failed to parse global session event", err);
+        console.error("failed to parse the session list", err);
       }
     };
     return () => es.close();

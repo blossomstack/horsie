@@ -383,11 +383,11 @@ mod tests {
         .await;
         drop(session);
 
-        let seen = f.reports().await;
+        let before = f.list_revision().await;
         f.node.restart().await;
         let _revived = f.start(id, actor_spec_fixture()).await;
         assert!(
-            !wait_for_report(&seen).await.is_empty(),
+            wait_for_report(&f, before).await,
             "a loaded session must report a status, repairs or not"
         );
     }
@@ -556,7 +556,17 @@ mod tests {
         let sub = spawn_sub(&session, "research", "dig").await;
         // Owed, then delivered: the tree's notified flag flips exactly once.
         wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
-        let texts = subagent_texts(&main_history(&session).await);
+        // …and then wait for the main agent to have *taken* it. The flag says
+        // the result was handed over — one message into main's mailbox — never
+        // that main has appended it, so reading the history the moment the flag
+        // flips is a race. It only ever passed because nothing else was
+        // competing for the scheduler at that instant.
+        let texts = wait_for_subagent_text(&session, |texts| {
+            texts.iter().any(|t| {
+                t.contains("[subagent \"research\" completed]") && t.contains("sub answer")
+            })
+        })
+        .await;
         assert!(
             texts.iter().any(
                 |t| t.contains("[subagent \"research\" completed]") && t.contains("sub answer")

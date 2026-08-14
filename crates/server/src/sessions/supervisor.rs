@@ -25,15 +25,12 @@ use crate::sessions::session_actor::{
 use crate::sessions::session_actor::{
     CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
-use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus, status_kind, status_reason};
+use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{SessionRevisions, UserMessageError};
 use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
-use horsie_models::session::{
-    ForkView, GlobalSessionEvent, GlobalSessionForksEvent, GlobalSessionStatusEvent,
-    GlobalSessionTitleEvent,
-};
+use horsie_models::session::ForkView;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -204,6 +201,21 @@ pub enum SessionSupervisorCommand {
     /// Answers straight away when the revision already differs, and otherwise
     /// waits until it moves or `POLL_WINDOW` passes — on expiry answering with
     /// the revision unchanged, which the reader reads as "still nothing".
+    /// Wait until this account's session list changes.
+    ///
+    /// The list twin of [`Self::AwaitAgentRevision`], and the same shape for
+    /// the same reason: what crosses a host boundary is a number, because a
+    /// `watch` handle is a pointer into one process. Unlike the agent counter
+    /// this one needs no help getting here — the supervisor both moves it and
+    /// answers it, so an `ask` from any node reaches the only copy that counts.
+    ///
+    /// `after: None` is a reader that has never looked, and answers at once
+    /// with wherever the list currently is; blocking it would make every fresh
+    /// connection wait a poll window before its first frame.
+    AwaitListRevision {
+        after: Option<crate::sessions::Revision>,
+        reply: ReplyTo<crate::sessions::Revision>,
+    },
     AwaitAgentRevision {
         id: SessionId,
         agent_id: Option<String>,
@@ -513,43 +525,15 @@ impl SessionSupervisor {
         ))
     }
 
-    fn publish(&self, id: &str, status: &SessionStatus) {
-        let _ = self
-            .services()
-            .global_events
-            .send(GlobalSessionEvent::StatusChanged(
-                GlobalSessionStatusEvent {
-                    session_id: id.to_string(),
-                    status: status_kind(status),
-                    reason: status_reason(status),
-                },
-            ));
-    }
-
-    /// Tell every open session list that a session's forks moved.
+    /// Note that this account's session list changed.
     ///
-    /// Called beside the write, exactly as [`Self::publish`] is, and gated by
-    /// the same idempotence check: a session reports its whole roster after
-    /// every persisted batch, so publishing unconditionally would push a frame
-    /// per batch for the life of every forked session.
-    fn publish_forks(&self, id: &str, forks: &[ForkRow]) {
-        let _ = self
-            .services()
-            .global_events
-            .send(GlobalSessionEvent::ForksChanged(GlobalSessionForksEvent {
-                session_id: id.to_string(),
-                forks: forks.iter().map(ForkRow::to_view).collect(),
-            }));
-    }
-
-    fn publish_title(&self, id: &str, name: &str) {
-        let _ = self
-            .services()
-            .global_events
-            .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
-                session_id: id.to_string(),
-                name: name.to_string(),
-            }));
+    /// Replaces three per-field publishers. What a reader needs is that the
+    /// list moved — it re-reads the list and replaces what it has, so naming
+    /// *which* field changed bought nothing but three ways to forget one.
+    /// Call sites keep their idempotence gating: this is cheap, but waking
+    /// every open sidebar on every persisted batch is not.
+    fn list_changed(&self) {
+        self.revisions().bump_list();
     }
 
     /// Stop counting `id` as loaded, and let go of its revision channels unless
@@ -735,7 +719,7 @@ impl EventSourcedActor for SessionSupervisor {
                 // Not a guess: a fresh session is provisioning, and says so
                 // until its vendor confirms the runtime. Recorded by the fold
                 // of `SessionCreated`, which is why nothing is inserted here.
-                self.publish(&id, &SessionStatus::Provisioning);
+                self.list_changed();
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
                     spec,
@@ -1006,6 +990,27 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::AwaitListRevision { after, reply } => {
+                // No `sessions.contains_key` guard and no `touch`: this is the
+                // account's list, which exists whether or not any session does,
+                // and an empty list is a legitimate thing to wait on.
+                let mut rx = self.revisions().list().subscribe();
+                let current = *rx.borrow_and_update();
+                if after != Some(current) {
+                    let _ = reply.send(current);
+                    return CommandEffect::none();
+                }
+                // Off this mailbox, which has to stay free to serve every other
+                // request while one reader waits.
+                tokio::spawn(async move {
+                    let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
+                    let _ = reply.send(match moved {
+                        Ok(Ok(())) => *rx.borrow(),
+                        Ok(Err(_)) | Err(_) => current,
+                    });
+                });
+                CommandEffect::none()
+            }
             SessionSupervisorCommand::AwaitAgentRevision {
                 id,
                 agent_id,
@@ -1021,18 +1026,25 @@ impl EventSourcedActor for SessionSupervisor {
                     let _ = reply.send(None);
                     return CommandEffect::none();
                 }
-                let wire_id = agent_id.as_deref().unwrap_or("main");
+                let wire_id = agent_id.unwrap_or_else(|| "main".to_string());
                 let revisions = self.revisions().of(&id);
                 revisions.touch();
-                let mut rx = revisions.for_agent(wire_id).subscribe();
-                let current = *rx.borrow_and_update();
-                if after != Some(current) {
-                    let _ = reply.send(Some(current));
-                    return CommandEffect::none();
-                }
-                // Nothing new yet, so wait — off this mailbox, which has to stay
-                // free to serve every other session while one reader waits.
+                // Everything below is off this mailbox, which has to stay free
+                // to serve every other session while one reader waits — and
+                // now also while the first reader of a session waits for its
+                // feed.
                 tokio::spawn(async move {
+                    // The counter this agent moves may be moved in another
+                    // process entirely, and this is what makes a copy of it
+                    // arrive here. Awaited before the read below, so that a
+                    // move published after that read cannot be missed.
+                    revisions.mirror().await;
+                    let mut rx = revisions.for_agent(&wire_id).subscribe();
+                    let current = *rx.borrow_and_update();
+                    if after != Some(current) {
+                        let _ = reply.send(Some(current));
+                        return;
+                    }
                     let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
                     // A closed channel is not the end of the stream: the
                     // registry outlives the session precisely so a reader can
@@ -1091,7 +1103,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::none()
             }
             SessionSupervisorCommand::SessionStatusChanged { id, status } => {
-                self.publish(&id, &status);
+                self.list_changed();
                 // Idempotent on purpose: a session reports after every persisted
                 // batch and once more at load, so only a real transition is
                 // worth a write. Without this a busy session would journal a row
@@ -1113,7 +1125,7 @@ impl EventSourcedActor for SessionSupervisor {
                 // session with one fork would journal a row here per batch.
                 match state.sessions.get(&id) {
                     Some(rec) if rec.forks != forks => {
-                        self.publish_forks(&id, &forks);
+                        self.list_changed();
                         CommandEffect::persist(vec![SessionSupervisorEvent::SessionForksChanged {
                             id,
                             forks,
@@ -1151,7 +1163,7 @@ impl EventSourcedActor for SessionSupervisor {
                         }))
                         .await;
                 }
-                self.publish_title(&id, &title);
+                self.list_changed();
                 let _ = reply.send(Ok(title.clone()));
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionNamed {
                     id,
@@ -1166,7 +1178,7 @@ impl EventSourcedActor for SessionSupervisor {
                     .get(&id)
                     .and_then(|rec| rec.spec.name.as_deref());
                 if current == Some(name.as_str()) {
-                    self.publish_title(&id, &name);
+                    self.list_changed();
                 }
                 CommandEffect::none()
             }
@@ -1319,6 +1331,61 @@ mod tests {
             // the sweep runs, so nothing here is a race.
             tick_interval: None,
         }
+    }
+
+    /// A reader that has never looked must not block.
+    ///
+    /// `after: None` is every fresh SSE connection. Blocking it would make each
+    /// one wait a full poll window before its first frame, which reads to a
+    /// user as a UI that takes 30 seconds to populate.
+    #[tokio::test]
+    async fn a_first_list_wait_answers_at_once() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let answered = tokio::time::timeout(
+            Duration::from_secs(5),
+            sup.ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: None, reply }),
+        )
+        .await;
+        assert!(answered.is_ok(), "a first wait must not block");
+    }
+
+    /// Creating a session moves the list revision.
+    ///
+    /// The whole point of the counter: it is what tells a reader on any node
+    /// that the list it is showing is out of date.
+    #[tokio::test]
+    async fn creating_a_session_moves_the_list_revision() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let before = sup
+            .ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: None, reply })
+            .await
+            .unwrap();
+
+        create(&sup).await;
+
+        let after = tokio::time::timeout(
+            Duration::from_secs(5),
+            sup.ask(|reply| SessionSupervisorCommand::AwaitListRevision {
+                after: Some(before),
+                reply,
+            }),
+        )
+        .await
+        .expect("a wait held past a change that already happened")
+        .unwrap();
+        assert_ne!(after, before, "creating a session must move the list");
+    }
+
+    /// Where this account's session list has got to.
+    ///
+    /// `after: None` never blocks, so this reads the current value rather than
+    /// waiting for the next one.
+    async fn list_revision(sup: &SupervisorRef) -> crate::sessions::Revision {
+        sup.ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: None, reply })
+            .await
+            .unwrap()
     }
 
     async fn create(sup: &SupervisorRef) -> SessionId {
@@ -1695,11 +1762,11 @@ mod tests {
     /// invisible from the durable side, which is why the test asserts on the
     /// stream rather than on `List`.
     #[tokio::test]
-    async fn a_fork_change_is_broadcast_for_the_session_list() {
+    async fn a_fork_change_reaches_the_session_list() {
         let f = fixture().await;
         let sup = f.supervisor().await;
-        let mut grx = f.node.services().await.global_events.subscribe();
         let id = create(&sup).await;
+        let before = list_revision(&sup).await;
         let fork = Uuid::from_bytes([9; 16]);
 
         sup.tell(SessionSupervisorCommand::ForksChanged {
@@ -1715,34 +1782,34 @@ mod tests {
         })
         .await
         .unwrap();
+        wait_for_forks(&sup, &id).await;
 
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
-                .await
-                .expect("a forks frame reaches the session list")
-                .unwrap();
-            if let GlobalSessionEvent::ForksChanged(event) = frame {
-                assert_eq!(event.session_id, id);
-                assert_eq!(event.forks.len(), 1);
-                assert_eq!(event.forks[0].id, fork.to_string());
-                assert_eq!(event.forks[0].title.as_deref(), Some("The other direction"));
-                assert_eq!(
-                    event.forks[0].status, "provisioning",
-                    "the frame speaks the wire vocabulary a client already reads"
-                );
-                break;
-            }
-        }
+        assert_ne!(
+            list_revision(&sup).await,
+            before,
+            "a fork must move the list, or the sidebar only learns of it on some \
+             unrelated refetch"
+        );
+        // And what a woken reader then reads is the fork itself. Asserting both
+        // halves is the point: the counter waking a reader is worthless if the
+        // list it reads has not caught up.
+        let listed = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        let forks = &listed.iter().find(|(sid, ..)| *sid == id).unwrap().1.forks;
+        assert_eq!(forks.len(), 1);
+        assert_eq!(forks[0].id, fork);
+        assert_eq!(forks[0].title.as_deref(), Some("The other direction"));
     }
 
     /// The publish rides the same idempotence guard as the write: a session
     /// reports its whole roster after every persisted batch, so a fork that has
     /// not changed must not wake every open sidebar.
     #[tokio::test]
-    async fn re_reporting_the_same_forks_broadcasts_nothing() {
+    async fn re_reporting_the_same_forks_moves_nothing() {
         let f = fixture().await;
         let sup = f.supervisor().await;
-        let mut grx = f.node.services().await.global_events.subscribe();
         let id = create(&sup).await;
         let rows = vec![ForkRow {
             id: Uuid::from_bytes([9; 16]),
@@ -1760,13 +1827,7 @@ mod tests {
         .await
         .unwrap();
         wait_for_forks(&sup, &id).await;
-        // Drain everything the first report produced.
-        while let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_millis(200), grx.recv()).await
-        {
-            if matches!(frame, GlobalSessionEvent::ForksChanged(_)) {
-                break;
-            }
-        }
+        let settled = list_revision(&sup).await;
 
         sup.tell(SessionSupervisorCommand::ForksChanged {
             id: id.clone(),
@@ -1780,13 +1841,11 @@ mod tests {
             .await
             .unwrap();
 
-        while let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_millis(200), grx.recv()).await
-        {
-            assert!(
-                !matches!(frame, GlobalSessionEvent::ForksChanged(_)),
-                "an unchanged roster must not broadcast"
-            );
-        }
+        assert_eq!(
+            list_revision(&sup).await,
+            settled,
+            "an unchanged roster must not wake every open sidebar"
+        );
     }
 
     /// A session reports its whole roster after every persisted batch. Writing
@@ -2154,7 +2213,6 @@ mod tests {
     async fn rename_is_durable_and_publishes_the_current_title() {
         let f = fixture().await;
         let sup = f.supervisor().await;
-        let mut grx = f.node.services().await.global_events.subscribe();
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
@@ -2174,6 +2232,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+        let before = list_revision(&sup).await;
         sup.tell(SessionSupervisorCommand::PublishSessionTitle {
             id: id.clone(),
             name: "Investigate login failure".into(),
@@ -2181,17 +2240,22 @@ mod tests {
         .await
         .unwrap();
 
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            if let GlobalSessionEvent::TitleChanged(event) = frame {
-                assert_eq!(event.session_id, id);
-                assert_eq!(event.name, "Investigate login failure");
-                break;
-            }
-        }
+        assert_ne!(
+            list_revision(&sup).await,
+            before,
+            "a title must move the list"
+        );
+        let listed = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|(sid, ..)| *sid == id)
+                .and_then(|(_, rec)| rec.spec.name.as_deref()),
+            Some("Investigate login failure"),
+        );
     }
 
     /// A person renaming a session, as opposed to the agent titling one.
@@ -2205,7 +2269,6 @@ mod tests {
     async fn a_person_can_rename_a_session_without_waking_it() {
         let f = fixture().await;
         let sup = f.supervisor().await;
-        let mut grx = f.node.services().await.global_events.subscribe();
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: SessionSpec {
@@ -2244,17 +2307,6 @@ mod tests {
             Some("Investigate login failure"),
             "the rename is durable, not just broadcast"
         );
-
-        loop {
-            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            if let GlobalSessionEvent::TitleChanged(event) = frame {
-                assert_eq!(event.name, "Investigate login failure");
-                break;
-            }
-        }
 
         assert_eq!(
             sup.ask(|reply| SessionSupervisorCommand::SetSessionTitle {
