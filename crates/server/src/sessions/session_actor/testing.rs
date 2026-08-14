@@ -428,6 +428,31 @@ pub(super) async fn spawn_run_with_provider(
     (f, session, id, journal)
 }
 
+/// Poll one agent's folded state until `pred` holds (2s cap).
+///
+/// A step's timers, asks and nudge budget live on its own journal, so a test
+/// asserting on how a *turn* ended has to wait on this rather than on the run.
+pub(super) async fn wait_for_agent(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    agent_id: Uuid,
+    pred: impl Fn(&crate::agent_loop::AgentState) -> bool,
+) -> crate::agent_loop::AgentState {
+    for _ in 0..200 {
+        let state = crate::sessions::events::fold_agent_state(journal, agent_id).await;
+        if pred(&state) {
+            return state;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let state = crate::sessions::events::fold_agent_state(journal, agent_id).await;
+    panic!(
+        "agent never satisfied the predicate: parked={} timers={} nudges={}",
+        state.parked,
+        state.timers.len(),
+        state.nudges
+    );
+}
+
 /// Poll the folded run until `pred` holds (2s cap).
 pub(super) async fn wait_for_run(
     journal: &Arc<dyn horsie_actor::Journal>,

@@ -249,17 +249,13 @@ impl SessionActor {
                 }],
                 false,
             ),
-            TurnEnd::Parked => {
-                let error = "step parked; timers are not supported in workflows".to_string();
-                (
-                    vec![SessionDomainEvent::StepFailed {
-                        at_ms: now_ms(),
-                        index,
-                        error,
-                    }],
-                    false,
-                )
-            }
+            // A step that armed a timer, or is waiting on subagents it spawned,
+            // ends its turn without finishing — and that is not the step
+            // ending. It stays running until whatever it is waiting for wakes
+            // it, exactly as a parked question does. This used to fail the run
+            // outright, which made a step that suspended itself deliberately
+            // indistinguishable from one that crashed.
+            TurnEnd::Parked => (Vec::new(), false),
             // A step the process died inside is suspended by
             // `WorkflowRun::on_load`, which is the state a retry can move.
             // Recording it a second time from the step agent's own recovery
@@ -592,6 +588,62 @@ mod tests {
             run.steps[0].output.as_ref().and_then(|o| o.get("severity")),
             Some(&serde_json::json!("p2")),
             "and the result it submitted after the nudge is the one that routed"
+        );
+    }
+
+    /// A step that armed a timer and then stopped talking is *parked*, not
+    /// stuck: the timer will wake it. Nudging here would push a model that
+    /// deliberately suspended itself into submitting a result it does not have
+    /// yet, and failing the step would end a run that was working correctly.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_holding_a_timer_is_parked_not_nudged() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                        horsie_agentcore::ToolCallPart {
+                            id: "t-1".into(),
+                            name: "set_timer".into(),
+                            input: serde_json::json!({
+                                "kind": "one_shot",
+                                "after_secs": 3600,
+                                "label": "check back",
+                                "message": "see whether CI went green",
+                            }),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::ToolUse,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+                // Then it stops talking, holding the timer.
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "I'll pick this up when the timer fires.".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+            ])
+            // Anything past this is the bug: a parked step must not run again
+            // until its timer fires.
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"outcome": "p0"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+        let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
+        assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
+        assert_eq!(step.timers.len(), 1, "and the timer is still armed");
+        let run = crate::sessions::events::fold_session_state(&journal, id)
+            .await
+            .run
+            .expect("the run exists");
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Running,
+            "the step is still running, waiting on its timer"
         );
     }
 
