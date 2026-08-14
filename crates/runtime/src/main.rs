@@ -298,9 +298,17 @@ async fn run(cli: Cli, runtime_id: String, endpoint: Endpoint) {
     // Taken before `cli` is partially moved into the workspace registry below.
     let state_file = cli.state_file.clone();
 
-    // The session's selected bundles, fetched by this runtime over its own
-    // outbound connection. The only source of skills there is.
-    let plugins_dir = horsie_runtime::plugins_fetch::provision_plugins().await;
+    // Where this runtime keeps plugins: the bundle store and every agent's
+    // tree. Bundles are fetched per agent on `ProvisionAgent`, not here — the
+    // whole session's manifest used to be fetched at startup, before the
+    // runtime had even dialled, which is why a failed fetch was invisible.
+    //
+    // A `horsie connect --plugins-dir` library also arrives through this path,
+    // as plugins sitting directly under the root. An agent that selects no
+    // bundles of its own is linked to them.
+    let plugins_dir = std::env::var(horsie_models::ENV_PLUGINS_DIR)
+        .ok()
+        .map(PathBuf::from);
     let registry = Arc::new(
         horsie_runtime::workspace::WorkspaceRegistry::new(cli.workspaces)
             .with_plugins(plugins_dir, cli.hook_path),
@@ -558,15 +566,6 @@ async fn run_loop<S>(
     // Plugin-declared MCP servers, live for as long as this connection: a stdio
     // child respawned per tool call would cost more than the call.
     let mcp = Arc::new(horsie_runtime::mcp::McpRegistry::default());
-    // Agents this runtime has installed a plugin tree for.
-    //
-    // "Provisioned" is an explicit state rather than something inferred from a
-    // directory existing, which is what lets a request naming an unprovisioned
-    // agent be refused. An agent with no bundles is still in here — it was
-    // provisioned, with nothing — so the empty case and the never-asked case
-    // stay distinguishable.
-    let provisioned: Arc<Mutex<std::collections::HashSet<String>>> =
-        Arc::new(Mutex::new(std::collections::HashSet::new()));
     let in_flight: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -579,7 +578,7 @@ async fn run_loop<S>(
                 };
                 match inbound {
                     RuntimeInboundMessage::ToolCall(req) => {
-                        if !provisioned.lock().await.contains(&req.agent_id) {
+                        if !registry.is_provisioned(&req.agent_id) {
                             let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
                             if let Ok(json) = serde_json::to_string(&refusal) {
                                 let _ = sink.lock().await.send(Message::Text(json.into())).await;
@@ -626,7 +625,7 @@ async fn run_loop<S>(
                             .insert(req.call_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::ScanWorkspace(req) => {
-                        if !provisioned.lock().await.contains(&req.agent_id) {
+                        if !registry.is_provisioned(&req.agent_id) {
                             let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
                             if let Ok(json) = serde_json::to_string(&refusal) {
                                 let _ = sink.lock().await.send(Message::Text(json.into())).await;
@@ -751,7 +750,6 @@ async fn run_loop<S>(
                         let call_id = req.call_id.clone();
                         let map_id = req.call_id.clone();
                         let registry = registry.clone();
-                        let provisioned = provisioned.clone();
                         let sink_clone = sink.clone();
                         let in_flight_clone = in_flight.clone();
 
@@ -787,19 +785,12 @@ async fn run_loop<S>(
                                 }
                             };
                             let (result, root) = match outcome {
-                                Ok(root) => {
-                                    // Only a success marks the agent
-                                    // provisioned. A failed install must leave it
-                                    // refused rather than running with a tree
-                                    // that is not what was asked for.
-                                    provisioned.lock().await.insert(agent_id);
-                                    (
-                                        ProvisionResult::Ok(ProvisionOk {
-                                            applied: Vec::new(),
-                                        }),
-                                        root,
-                                    )
-                                }
+                                Ok(root) => (
+                                    ProvisionResult::Ok(ProvisionOk {
+                                        applied: Vec::new(),
+                                    }),
+                                    root,
+                                ),
                                 Err(reason) => (
                                     ProvisionResult::Err(ProvisionError { reason }),
                                     String::new(),
@@ -844,7 +835,7 @@ async fn run_loop<S>(
                         }
                     }
                     RuntimeInboundMessage::RunHooks(req) => {
-                        if !provisioned.lock().await.contains(&req.agent_id) {
+                        if !registry.is_provisioned(&req.agent_id) {
                             let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
                             if let Ok(json) = serde_json::to_string(&refusal) {
                                 let _ = sink.lock().await.send(Message::Text(json.into())).await;
@@ -886,7 +877,7 @@ async fn run_loop<S>(
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::McpDiscover(req) => {
-                        if !provisioned.lock().await.contains(&req.agent_id) {
+                        if !registry.is_provisioned(&req.agent_id) {
                             let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
                             if let Ok(json) = serde_json::to_string(&refusal) {
                                 let _ = sink.lock().await.send(Message::Text(json.into())).await;
@@ -935,7 +926,7 @@ async fn run_loop<S>(
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
                     }
                     RuntimeInboundMessage::McpInvoke(req) => {
-                        if !provisioned.lock().await.contains(&req.agent_id) {
+                        if !registry.is_provisioned(&req.agent_id) {
                             let refusal = refuse_unprovisioned(&req.call_id, &req.agent_id);
                             if let Ok(json) = serde_json::to_string(&refusal) {
                                 let _ = sink.lock().await.send(Message::Text(json.into())).await;

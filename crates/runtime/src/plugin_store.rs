@@ -147,6 +147,18 @@ impl PluginStore {
         self.root.join("agents").join(sanitize(agent_id))
     }
 
+    /// Whether this agent's tree has been built.
+    ///
+    /// Read from disk rather than remembered in the process. A runtime outlives
+    /// its link — it reconnects, and a hibernating vendor stops and respawns it
+    /// — and an in-memory set would forget every agent each time, refusing work
+    /// for agents whose trees are sitting right there. The marker is written
+    /// last, so a directory carrying one is a tree that was finished.
+    #[must_use]
+    pub fn is_provisioned(&self, agent_id: &str) -> bool {
+        self.agent_dir(agent_id).join(MARKER).is_file()
+    }
+
     fn store_dir(&self) -> PathBuf {
         self.root.join("store")
     }
@@ -181,6 +193,9 @@ impl PluginStore {
         // Whatever a previous set left is not what this agent selected, and the
         // scanner reads the whole directory.
         clear_dir(&agent_dir);
+        if bundles.is_empty() {
+            self.link_host_library(&agent_dir);
+        }
         for bundle in bundles {
             self.link(&agent_dir, bundle)?;
         }
@@ -237,6 +252,43 @@ impl PluginStore {
                 Ok(())
             }
             Err(e) => Err(format!("bundle '{}': cannot store: {e}", bundle.name)),
+        }
+    }
+
+    /// Link a host-provided library into this agent's tree.
+    ///
+    /// `horsie connect --plugins-dir` hands the runtime a directory of plugins
+    /// it did not fetch and does not own. Selected bundles win and the host
+    /// library is the fallback — the rule that was here before provisioning
+    /// became per-agent, and the most common self-hosted setup depends on it.
+    ///
+    /// Linked rather than read from a second place so everything downstream —
+    /// the scan, hook matching, MCP discovery — keeps reading exactly one
+    /// directory: this agent's.
+    ///
+    /// Best-effort. A host library that cannot be linked leaves the agent with
+    /// no skills, which is what it had before; failing the provision would take
+    /// down a session over a directory the runtime does not own.
+    fn link_host_library(&self, agent_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // `store` and `agents` are ours. Everything else at the root came
+            // from whoever pointed `--plugins-dir` here.
+            let name = entry.file_name();
+            if name == "store" || name == "agents" || !path.is_dir() {
+                continue;
+            }
+            #[cfg(unix)]
+            {
+                let link = agent_dir.join(&name);
+                let target = Path::new("../..").join(&name);
+                if let Err(e) = std::os::unix::fs::symlink(&target, &link) {
+                    eprintln!("plugins: cannot link host plugin {name:?}: {e}");
+                }
+            }
         }
     }
 
@@ -568,6 +620,58 @@ mod tests {
         assert!(
             !root.path().join("store/not-the-real-hash").exists(),
             "unverified bytes must never be named after the hash they claimed"
+        );
+    }
+
+    /// `horsie connect --plugins-dir` is the most common self-hosted setup: a
+    /// directory of plugins the runtime did not fetch. An agent that selects no
+    /// bundles must still see it.
+    #[tokio::test]
+    async fn an_agent_with_no_bundles_sees_a_host_provided_library() {
+        let root = tempfile::tempdir().unwrap();
+        let host_skill = root.path().join("host-pack/skills/from-host");
+        std::fs::create_dir_all(&host_skill).unwrap();
+        std::fs::write(host_skill.join("SKILL.md"), "host-body").unwrap();
+        let store = PluginStore::new(root.path().to_path_buf());
+
+        let dir = store
+            .provision_agent("a1", &[], &FakeSource::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("host-pack/skills/from-host/SKILL.md")).unwrap(),
+            "host-body",
+            "a host library must reach an agent that selected no bundles"
+        );
+    }
+
+    /// Selected bundles win: an agent that chose its own set gets that set, not
+    /// the host library as well. Otherwise a preset could never *narrow* what an
+    /// agent sees, which is the whole point of selecting.
+    #[tokio::test]
+    async fn selected_bundles_replace_the_host_library() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("host-pack/skills/from-host")).unwrap();
+        let (source, hash) = FakeSource::with(&[("skills/a/SKILL.md", "body-a")]);
+        let store = PluginStore::new(root.path().to_path_buf());
+
+        let dir = store
+            .provision_agent(
+                "a1",
+                &[BundleRef {
+                    name: "pack".into(),
+                    hash,
+                }],
+                &source,
+            )
+            .await
+            .unwrap();
+
+        assert!(dir.join("pack").exists());
+        assert!(
+            !dir.join("host-pack").exists(),
+            "a selected set must not also drag in the host library"
         );
     }
 

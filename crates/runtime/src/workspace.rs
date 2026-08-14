@@ -42,6 +42,23 @@ impl WorkspaceRegistry {
         self.plugins_dir.as_deref()
     }
 
+    /// Whether `agent_id` may be served.
+    ///
+    /// A runtime with no plugins root has nothing to provision, so every agent
+    /// passes: refusing there would break every deployment that runs without
+    /// plugins at all. Otherwise the agent's tree has to exist — see
+    /// [`crate::plugin_store::PluginStore::is_provisioned`] for why that is read
+    /// from disk rather than remembered.
+    #[must_use]
+    pub fn is_provisioned(&self, agent_id: &str) -> bool {
+        match &self.plugins_dir {
+            None => true,
+            Some(root) => {
+                crate::plugin_store::PluginStore::new(root.clone()).is_provisioned(agent_id)
+            }
+        }
+    }
+
     /// The plugin tree `agent_id` reads — its own, never a shared one.
     ///
     /// `None` when this runtime has no plugins root at all. An agent that *has*

@@ -128,7 +128,12 @@ async fn ready_arrives_without_anyone_asking_for_provisioning() {
 #[tokio::test]
 async fn a_request_for_an_unprovisioned_agent_is_refused_not_answered_empty() {
     let ws = tempfile::tempdir().unwrap();
-    let mut rt = Runtime::spawn(ws.path(), "rt-unprovisioned").await;
+    // With a plugins root: a runtime that has none has nothing to provision, so
+    // every agent passes — refusing there would break every deployment that
+    // runs without plugins at all.
+    let plugins = tempfile::tempdir().unwrap();
+    let mut rt =
+        Runtime::spawn_with_plugins(ws.path(), "rt-unprovisioned", Some(plugins.path())).await;
 
     rt.send(RuntimeInboundMessage::ScanWorkspace(ScanRequest {
         call_id: "s1".to_string(),
@@ -160,7 +165,8 @@ async fn a_request_for_an_unprovisioned_agent_is_refused_not_answered_empty() {
 #[tokio::test]
 async fn an_agent_provisioned_with_no_bundles_is_served_normally() {
     let ws = tempfile::tempdir().unwrap();
-    let mut rt = Runtime::spawn(ws.path(), "rt-empty-set").await;
+    let plugins = tempfile::tempdir().unwrap();
+    let mut rt = Runtime::spawn_with_plugins(ws.path(), "rt-empty-set", Some(plugins.path())).await;
 
     rt.send(RuntimeInboundMessage::ProvisionAgent(
         ProvisionAgentRequest {
@@ -202,6 +208,16 @@ struct Runtime {
 impl Runtime {
     /// Spawn the real binary, accept its dial-back, and consume its handshake.
     async fn spawn(workspace: &Path, runtime_id: &str) -> Self {
+        Self::spawn_with_plugins(workspace, runtime_id, None).await
+    }
+
+    /// As [`Self::spawn`], with a plugins root. The root is what makes the
+    /// provisioning guard apply at all.
+    async fn spawn_with_plugins(
+        workspace: &Path,
+        runtime_id: &str,
+        plugins: Option<&Path>,
+    ) -> Self {
         // Port 0: the OS picks, so parallel runs never collide.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -214,6 +230,12 @@ impl Runtime {
                 .arg(runtime_id)
                 .arg("--workspace")
                 .arg(format!("main={}", workspace.display()))
+                .envs(plugins.map(|p| {
+                    (
+                        horsie_models::ENV_PLUGINS_DIR.to_string(),
+                        p.display().to_string(),
+                    )
+                }))
                 .kill_on_drop(true)
                 .spawn()
                 .expect("spawn the runtime");
