@@ -865,6 +865,7 @@ mod tests {
             agent_type: None,
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
+                "i1".to_string(),
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -926,6 +927,7 @@ mod tests {
         let provider = SessionContextProvider {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
+                "i1".to_string(),
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -968,6 +970,7 @@ mod tests {
         let build = |unattended: bool| SessionContextProvider {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
+                "i1".to_string(),
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -1290,6 +1293,7 @@ mod tests {
         let provider = SessionContextProvider {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
+                "i1".to_string(),
                 "mock".to_string(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -1484,6 +1488,7 @@ mod tests {
             agent_type: None,
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
                 id.to_string(),
+                "i1".to_string(),
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),

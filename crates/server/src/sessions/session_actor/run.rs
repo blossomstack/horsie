@@ -775,7 +775,7 @@ mod tests {
         spec.workflow = Some(Arc::new(run_spec_fixture("the build is red")));
         f.deps
             .runtimes
-            .create(&id.to_string(), "mock", &spec)
+            .create(&id.to_string(), "i1", "mock", &spec)
             .await
             .expect("create");
 
