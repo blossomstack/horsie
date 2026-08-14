@@ -3,7 +3,7 @@ use crate::transport::{RuntimeTransport, TransportError};
 use horsie_models::executor::ProvisionStep;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    ProvisionError, ProvisionResult, ScanResponse, ServerHookEvent, ToolCall, ToolError,
+    BundleRef, ProvisionError, ProvisionResult, ScanResponse, ServerHookEvent, ToolCall, ToolError,
     ToolOutput, ToolResult,
 };
 use std::sync::Arc;
@@ -222,6 +222,30 @@ impl RuntimeClient {
         }
     }
 
+    /// Install this agent's plugin tree, and answer with its root.
+    ///
+    /// Tracked like every other server-initiated command. Sent on every agent
+    /// load: the runtime is the only party that knows what is already on its
+    /// disk, so it absorbs the repeat rather than the server predicting it.
+    pub async fn provision_agent(
+        &self,
+        bundles: Vec<BundleRef>,
+    ) -> Result<String, RuntimeCallError> {
+        let call_id = Uuid::new_v4().to_string();
+        self.track(&call_id);
+        let outcome = self
+            .inner
+            .provision_agent(&call_id, &self.agent_id, bundles)
+            .await;
+        self.untrack(&call_id);
+        match outcome.map_err(RuntimeCallError::Transport)? {
+            (ProvisionResult::Ok(_), root) => Ok(root),
+            (ProvisionResult::Err(ProvisionError { reason }), _) => {
+                Err(RuntimeCallError::ToolFailed(reason))
+            }
+        }
+    }
+
     pub async fn cancel(&self, call_id: &str) {
         let _ = self.inner.cancel(call_id).await;
     }
@@ -272,7 +296,6 @@ impl RuntimeClient {
         workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-        include_shared: bool,
     ) -> Result<ScanResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
@@ -280,10 +303,10 @@ impl RuntimeClient {
             .inner
             .scan_workspace(
                 &call_id,
+                &self.agent_id,
                 workspace,
                 instruction_candidates,
                 skills_glob,
-                include_shared,
             )
             .await;
         self.untrack(&call_id);
@@ -323,7 +346,7 @@ impl RuntimeClient {
     ) -> Result<horsie_models::runtime::McpDiscoverResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
         self.track(&call_id);
-        let outcome = self.inner.mcp_discover(&call_id).await;
+        let outcome = self.inner.mcp_discover(&call_id, &self.agent_id).await;
         self.untrack(&call_id);
         outcome.map_err(RuntimeCallError::Transport)
     }

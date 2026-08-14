@@ -1,6 +1,7 @@
 pub mod git_credential;
 pub mod hooks;
 pub mod mcp;
+pub mod plugin_store;
 pub mod plugins;
 pub mod plugins_fetch;
 pub mod scan;

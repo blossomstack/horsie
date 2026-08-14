@@ -12,9 +12,9 @@ export interface ScanResponse {
    */
   sharedAgents?: PluginAgent[];
   /**
-   * Absolute path of the shared plugin library root, when one is configured
-   * and the request asked for it. Optional so an older runtime binary still
-   * deserializes against a newer server.
+   * Absolute root of the calling agent's plugin tree. Optional so an older
+   * runtime binary still deserializes against a newer server; a current one
+   * always reports it, because the agent was provisioned before it scanned.
    */
   sharedRoot?: string;
 }

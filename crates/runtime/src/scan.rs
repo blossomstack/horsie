@@ -113,8 +113,8 @@ mod tests {
 
     fn req(workspace: Option<String>) -> ScanRequest {
         ScanRequest {
-            include_shared: false,
             call_id: "c".into(),
+            agent_id: "a1".into(),
             workspace,
             instruction_candidates: vec!["AGENTS.md".into(), "AGENT.md".into(), "CLAUDE.md".into()],
             skills_glob: ".claude/skills/*/SKILL.md".into(),

@@ -3,7 +3,8 @@ use horsie_models::executor::ProvisionStep;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
     CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, PingRequest,
-    ProvisionResult, ProvisionWorkspaceRequest, RunHooksRequest, RuntimeInboundMessage,
+    BundleRef, ProvisionAgentRequest, ProvisionResult, ProvisionWorkspaceRequest,
+    RunHooksRequest, RuntimeInboundMessage,
     RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent, ToolCall, ToolCallRequest,
     ToolResult,
 };
@@ -83,6 +84,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -116,6 +118,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -159,13 +162,48 @@ pub trait RuntimeTransport: Send + Sync {
         match reply {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::ProvisionResult(resp) => Ok(resp.result),
-            RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::AgentProvisioned(_)
+            | RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
             | RuntimeOutboundMessage::McpResult(_)
             | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a workspace provision")),
+        }
+    }
+
+    /// Install `bundles` as `agent_id`'s plugin tree, and answer with its root.
+    ///
+    /// Sent on every agent load. The runtime absorbs the repeat: a set it has
+    /// already built costs no I/O, and a bundle already in its store is linked
+    /// rather than refetched.
+    async fn provision_agent(
+        &self,
+        call_id: &str,
+        agent_id: &str,
+        bundles: Vec<BundleRef>,
+    ) -> Result<(ProvisionResult, String), TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::ProvisionAgent(
+                ProvisionAgentRequest {
+                    call_id: call_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    bundles,
+                },
+            ))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::AgentProvisioned(resp) => Ok((resp.result, resp.root)),
+            RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::HookRecords(_)
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("an agent provision")),
         }
     }
 
@@ -177,18 +215,18 @@ pub trait RuntimeTransport: Send + Sync {
     async fn scan_workspace(
         &self,
         call_id: &str,
+        agent_id: &str,
         workspace: Option<String>,
         instruction_candidates: Vec<String>,
         skills_glob: String,
-        include_shared: bool,
     ) -> Result<ScanResponse, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::ScanWorkspace(ScanRequest {
                 call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
                 workspace,
                 instruction_candidates,
                 skills_glob,
-                include_shared,
             }))
             .await?;
         match reply {
@@ -196,6 +234,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -225,6 +264,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::McpTools(_)
@@ -237,10 +277,15 @@ pub trait RuntimeTransport: Send + Sync {
     ///
     /// One request for all of them: a session wants the whole list or none, and
     /// a server that cannot start contributes nothing rather than failing.
-    async fn mcp_discover(&self, call_id: &str) -> Result<McpDiscoverResponse, TransportError> {
+    async fn mcp_discover(
+        &self,
+        call_id: &str,
+        agent_id: &str,
+    ) -> Result<McpDiscoverResponse, TransportError> {
         let reply = self
             .relay(RuntimeInboundMessage::McpDiscover(McpDiscoverRequest {
                 call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
             }))
             .await?;
         match reply {
@@ -248,6 +293,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::McpTools(resp) => Ok(resp),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -275,6 +321,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
             RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
+            | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
@@ -328,6 +375,7 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::McpInvoke(req) => &req.call_id,
         RuntimeInboundMessage::Ping(req) => &req.call_id,
         RuntimeInboundMessage::ProvisionWorkspace(req) => &req.call_id,
+        RuntimeInboundMessage::ProvisionAgent(req) => &req.call_id,
     }
 }
 
@@ -343,6 +391,7 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::McpResult(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Pong(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::ProvisionResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::AgentProvisioned(resp) => Some(&resp.call_id),
         // A cancellation answers the call it names, so it resolves that waiter
         // like any other reply — which is what lets the caller learn it was
         // cancelled instead of waiting out a reply that will never come.
