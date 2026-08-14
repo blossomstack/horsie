@@ -94,6 +94,44 @@ async fn accept_vendor_agent(listener: TcpListener) -> WebSocketStream<tokio::ne
     }
 }
 
+/// Provision `agent_id` on `runtime_id` with no bundles, and consume the reply.
+///
+/// A server does this at every agent load; a test that drives the protocol by
+/// hand has to do it too. The runtime refuses a request naming an agent it has
+/// never been told about, which is what keeps a sequencing bug from presenting
+/// as an agent that silently has no plugins.
+async fn provision_agent(
+    ws: &mut WebSocketStream<tokio::net::TcpStream>,
+    request_id: &str,
+    runtime_id: &str,
+    agent_id: &str,
+) {
+    send_command(
+        ws,
+        request_id,
+        RuntimeVendorCommand::Runtime(RuntimeRelayRequest {
+            runtime_id: runtime_id.to_string(),
+            message: RuntimeInboundMessage::ProvisionAgent(
+                horsie_models::runtime::ProvisionAgentRequest {
+                    call_id: format!("prov-{agent_id}"),
+                    agent_id: agent_id.to_string(),
+                    bundles: Vec::new(),
+                },
+            ),
+        }),
+    )
+    .await;
+    let reply = next_event(ws).await;
+    match reply.event {
+        RuntimeVendorEvent::Runtime(ev) => assert!(
+            matches!(ev.message, RuntimeOutboundMessage::AgentProvisioned(_)),
+            "expected the agent to be provisioned, got {:?}",
+            ev.message
+        ),
+        other => panic!("expected a relayed reply, got {other:?}"),
+    }
+}
+
 async fn next_event(
     ws: &mut WebSocketStream<tokio::net::TcpStream>,
 ) -> RuntimeVendorOutboundMessage {
@@ -225,6 +263,7 @@ async fn connect_registers_as_a_vendor_then_spawns_and_serves_a_runtime() {
     }
 
     // 3. A tool call is relayed to that child and answered.
+    provision_agent(&mut ws, "req-prov", "rt-1", "agent-1").await;
     send_command(
         &mut ws,
         "req-tool",
@@ -364,6 +403,7 @@ async fn a_runtime_survives_restarting_the_agent() {
     }
 
     // State a session would notice losing.
+    provision_agent(&mut ws, "req-prov-1", "rt-1", "agent-1").await;
     send_command(
         &mut ws,
         "req-setenv",
@@ -418,6 +458,13 @@ async fn a_runtime_survives_restarting_the_agent() {
     }
 
     // And the rebuilt runtime is the same one as far as the agent is concerned.
+    //
+    // Provisioned again after the restart, exactly as a server does at every
+    // agent load: `horsie connect` gives each runtime a plugins root, so the
+    // guard applies here. The runtime reads "already provisioned" off the tree
+    // on disk, so this is a cheap no-op when the tree survived — which is the
+    // property being relied on rather than merely tolerated.
+    provision_agent(&mut ws, "req-prov-2", "rt-1", "agent-1").await;
     send_command(
         &mut ws,
         "req-tool",

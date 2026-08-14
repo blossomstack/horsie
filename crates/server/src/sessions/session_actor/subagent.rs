@@ -699,7 +699,21 @@ mod tests {
             crate::sessions::subagents::SubAgentStatus::Failed
         );
         assert!(rec.error.as_deref().unwrap().contains("bad key"));
-        let texts = subagent_texts(&main_history(&session).await);
+        // Polled, not read once. `SubAgentNotified` is journaled as soon as the
+        // parent's *mailbox* accepts the report — it is a `tell` — so the flag
+        // means "handed over", not "recorded". The parent appends to its own
+        // history a scheduling hop later, and reading immediately races that.
+        let mut texts = Vec::new();
+        for _ in 0..300 {
+            texts = subagent_texts(&main_history(&session).await);
+            if texts
+                .iter()
+                .any(|t| t.contains("[subagent \"risky\" failed]"))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(
             texts
                 .iter()

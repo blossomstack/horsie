@@ -285,10 +285,13 @@ Three stacked PRs.
 
 ## Open questions
 
-- **Symlink traversal under the sandbox.** Both the store and the agent trees sit
-  inside the granted path, so Landlock should resolve the target fine, and the
-  macOS seatbelt profile should too. Neither is verified. PR 2 needs a test that
-  runs a confined runtime against a linked tree before the layout is committed to.
+- ~~**Symlink traversal under the sandbox.**~~ **Answered.**
+  `crates/runtime/tests/sandbox_symlinks.rs` builds the store-and-link layout,
+  enters the real sandbox in a re-exec'd probe, and reads a bundle through its
+  per-agent link — both the bytes and the `Path::is_dir()` resolution the scanner
+  depends on. Confirmed on macOS/Seatbelt locally and on Linux/Landlock in CI.
+  The probe prints a positive marker and the parent asserts on it, so a host that
+  cannot confine reports "NOT verified" rather than passing silently.
 - **Does dropping `include_shared` lose anything?** It is read today only as the
   `use_plugins` switch, which becomes "provision with an empty bundle set". No
   other consumer found, but the search was not exhaustive.

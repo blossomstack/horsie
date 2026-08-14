@@ -8,10 +8,10 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, PluginSkill, PongResponse, ProvisionOk,
-    ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse, ToolError, ToolOutput,
-    ToolResult, WorkspaceScan,
+    McpDiscoverResponse, McpInvokeResponse, PluginSkill, PongResponse, ProvisionAgentResponse,
+    ProvisionOk, ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse,
+    ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
@@ -392,6 +392,22 @@ impl RuntimeTransport for MockTransport {
                     hooks: self.hooks.clone(),
                 }))
             }
+            RuntimeInboundMessage::ProvisionAgent(req) => {
+                if let Some(gate) = &self.prep_gate {
+                    gate.notified().await;
+                }
+                Ok(RuntimeOutboundMessage::AgentProvisioned(
+                    ProvisionAgentResponse {
+                        call_id: req.call_id,
+                        // Whatever the mock was told the tree root is; a real
+                        // runtime answers with the agent's own directory.
+                        root: self.shared_root.clone().unwrap_or_default(),
+                        result: ProvisionResult::Ok(ProvisionOk {
+                            applied: req.bundles.iter().map(|b| b.name.clone()).collect(),
+                        }),
+                    },
+                ))
+            }
             RuntimeInboundMessage::ProvisionWorkspace(req) => {
                 // Behind the same gate the scan uses: both are session
                 // preparation, and a test that wants to observe one mid-flight
@@ -412,11 +428,10 @@ impl RuntimeTransport for MockTransport {
                 if let Some(gate) = &self.prep_gate {
                     gate.notified().await;
                 }
-                let (shared, shared_root) = if req.include_shared {
-                    (self.shared.clone(), self.shared_root.clone())
-                } else {
-                    (Vec::new(), None)
-                };
+                // No `include_shared` gate any more: a mock reports whatever
+                // tree it was configured with, exactly as a runtime reports the
+                // agent's own — an agent that selected nothing has an empty one.
+                let (shared, shared_root) = (self.shared.clone(), self.shared_root.clone());
                 Ok(RuntimeOutboundMessage::ScanResult(ScanResponse {
                     call_id: req.call_id,
                     workspaces: self.scan.clone(),
@@ -581,7 +596,7 @@ mod tests {
         let scan = {
             let t = t.clone();
             tokio::spawn(async move {
-                t.scan_workspace("c1", None, vec![], "*.md".into(), false)
+                t.scan_workspace("c1", "a1", None, vec![], "*.md".into())
                     .await
             })
         };

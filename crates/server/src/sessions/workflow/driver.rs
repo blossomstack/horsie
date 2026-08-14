@@ -184,6 +184,7 @@ mod tests {
             max_concurrent_subagents: None,
             auto_compact: None,
             control_plane: None,
+            plugins: Vec::new(),
         }
     }
 

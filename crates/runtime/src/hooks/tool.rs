@@ -52,7 +52,7 @@ pub async fn dispatch_with_hooks(
     call_id: &str,
     call: ToolCall,
 ) -> (ToolResult, Vec<HookRecord>) {
-    let Some(plugins_dir) = registry.plugins_dir() else {
+    let Some(plugins_dir) = registry.plugins_dir_for(agent) else {
         return (
             crate::tools::dispatch(registry, state, agent, call).await,
             Vec::new(),
@@ -66,7 +66,7 @@ pub async fn dispatch_with_hooks(
 
     // --- PreToolUse ---
     let mut call = call;
-    for (root, plugin, decl) in matching(plugins_dir, HookEvent::PreToolUse, &subjects) {
+    for (root, plugin, decl) in matching(&plugins_dir, HookEvent::PreToolUse, &subjects) {
         let input = call_input(&call);
         let invocation = HookInvocation::PreToolUse {
             tool: name,
@@ -95,7 +95,7 @@ pub async fn dispatch_with_hooks(
     let mut result = crate::tools::dispatch(registry, state, agent, call.clone()).await;
 
     // --- PostToolUse ---
-    for (root, plugin, decl) in matching(plugins_dir, HookEvent::PostToolUse, &subjects) {
+    for (root, plugin, decl) in matching(&plugins_dir, HookEvent::PostToolUse, &subjects) {
         let (response, is_error) = match &result {
             ToolResult::Ok(o) => (o.stdout.clone(), false),
             ToolResult::Err(e) => (e.reason.clone(), true),
@@ -204,23 +204,42 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    /// The agent every hook test runs as. Named rather than inline so the
+    /// fixture and the assertions cannot drift apart — they must agree, since
+    /// hooks now come from *an agent's* tree rather than a shared one.
+    pub(crate) const TEST_AGENT: &str = "test-agent";
+
     pub(crate) struct Env {
         _work: TempDir,
         _plugins: TempDir,
+        _root: TempDir,
         pub(crate) registry: WorkspaceRegistry,
         state: RuntimeState,
     }
 
+    /// Wrap a flat plugin directory in the per-agent layout the runtime reads.
+    ///
+    /// Callers build their plugins at the root of `plugins`, which is what a
+    /// bundle's contents look like; production reaches them through
+    /// `<root>/agents/<agent>/<bundle>`. Linking rather than copying, because a
+    /// link is exactly what `provision_agent` writes — so these tests exercise
+    /// the same traversal a real agent does.
     pub(crate) fn env(plugins: TempDir) -> Env {
         let work = TempDir::new().unwrap();
+        let root = TempDir::new().unwrap();
+        let agents = root.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(plugins.path(), agents.join(TEST_AGENT)).unwrap();
         let registry = WorkspaceRegistry::new(vec![Workspace {
             name: "main".into(),
             path: work.path().to_path_buf(),
         }])
-        .with_plugins(Some(plugins.path().to_path_buf()), Vec::new());
+        .with_plugins(Some(root.path().to_path_buf()), Vec::new());
         Env {
             _work: work,
             _plugins: plugins,
+            _root: root,
             registry,
             state: RuntimeState::new(),
         }
@@ -234,7 +253,7 @@ pub(crate) mod tests {
     }
 
     async fn run(e: &Env, call: ToolCall) -> (ToolResult, Vec<HookRecord>) {
-        dispatch_with_hooks(&e.registry, &e.state, "agent-1", "call-1", call).await
+        dispatch_with_hooks(&e.registry, &e.state, TEST_AGENT, "call-1", call).await
     }
 
     #[tokio::test]

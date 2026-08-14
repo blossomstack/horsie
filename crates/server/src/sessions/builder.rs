@@ -49,6 +49,9 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
         instructions: w.instructions,
         auto_compact: w.auto_compact,
         control_plane: w.control_plane,
+        plugins: Vec::new(),
+        // Filled in by `build_session_spec` once the session's bundle names are
+        // resolved; the wire request names them beside the agent, not inside it.
     }
 }
 
@@ -161,6 +164,11 @@ pub async fn build_session_spec(
     if !common.plugins.is_empty() {
         agent.use_plugins = Some(true);
     }
+    // The session's main agent runs with the session's bundles. Held on the
+    // agent as well as on the spec because provisioning is per agent now, and
+    // the two readers want different things: the spec's copy is the union the
+    // command catalogue is read against, the agent's is what gets installed.
+    agent.plugins.clone_from(&common.plugins);
     // Resolve the effective thinking effort once, here: session choice wins,
     // else the model's configured default, else nothing. Effort is fixed for a
     // session's lifetime (changing it mid-conversation invalidates the prompt

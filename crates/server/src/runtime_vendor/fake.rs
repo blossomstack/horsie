@@ -44,6 +44,14 @@ struct Recorder {
     /// for. A list rather than a count because the interesting assertion is
     /// that an acquisition sends one *each time*, with the same steps.
     provisions: Mutex<Vec<Vec<String>>>,
+    /// Every `ProvisionAgent`, as `(agent_id, bundle names)`. Paired, because
+    /// the claim worth testing is that two agents in one session were sent
+    /// *different* sets — which a flat list of names could not show.
+    agent_provisions: Mutex<Vec<(String, Vec<String>)>>,
+    /// Every relayed request kind, in arrival order. The one thing a per-kind
+    /// counter cannot answer: whether provisioning reached the runtime *before*
+    /// the hooks that read what it installed.
+    relayed: Mutex<Vec<String>>,
     /// Remaining attach failures to inject, and whether creates fail.
     gone_on_get: Mutex<bool>,
     tool_calls: Mutex<usize>,
@@ -331,6 +339,26 @@ impl FakeRuntimeVendor {
     pub fn cancelled_calls(&self) -> Vec<String> {
         self.recorder
             .cancels
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every relayed request kind, in arrival order.
+    #[must_use]
+    pub fn relayed(&self) -> Vec<String> {
+        self.recorder
+            .relayed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Every `ProvisionAgent` the server sent, as `(agent_id, bundle names)`.
+    #[must_use]
+    pub fn agent_provisions(&self) -> Vec<(String, Vec<String>)> {
+        self.recorder
+            .agent_provisions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -754,6 +782,11 @@ async fn run_agent<S>(
             }
             RuntimeVendorCommand::Runtime(cmd) => {
                 let runtime_id = cmd.runtime_id;
+                recorder
+                    .relayed
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(kind_of(&cmd.message).to_string());
                 let answer = match cmd.message {
                     RuntimeInboundMessage::ToolCall(req) => {
                         recorder
@@ -816,6 +849,31 @@ async fn run_agent<S>(
                         gate.release();
                         // One-way by protocol: no reply.
                         None
+                    }
+                    RuntimeInboundMessage::ProvisionAgent(req) => {
+                        recorder
+                            .agent_provisions
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push((
+                                req.agent_id.clone(),
+                                req.bundles.iter().map(|b| b.name.clone()).collect(),
+                            ));
+                        Some(RuntimeOutboundMessage::AgentProvisioned(
+                            horsie_models::runtime::ProvisionAgentResponse {
+                                call_id: req.call_id,
+                                root: "/fake/plugins/agents/x".to_string(),
+                                result: horsie_models::runtime::ProvisionResult::Ok(
+                                    horsie_models::runtime::ProvisionOk {
+                                        applied: req
+                                            .bundles
+                                            .iter()
+                                            .map(|b| b.name.clone())
+                                            .collect(),
+                                    },
+                                ),
+                            },
+                        ))
                     }
                     RuntimeInboundMessage::ProvisionWorkspace(req) => {
                         let applied: Vec<String> =
@@ -962,6 +1020,21 @@ async fn run_agent<S>(
 
 /// A `RuntimeSpec` naming one workspace.
 #[must_use]
+/// The name of a relayed request's kind, for the arrival-order log.
+fn kind_of(m: &RuntimeInboundMessage) -> &'static str {
+    match m {
+        RuntimeInboundMessage::ToolCall(_) => "ToolCall",
+        RuntimeInboundMessage::CancelCall(_) => "CancelCall",
+        RuntimeInboundMessage::ScanWorkspace(_) => "ScanWorkspace",
+        RuntimeInboundMessage::RunHooks(_) => "RunHooks",
+        RuntimeInboundMessage::McpDiscover(_) => "McpDiscover",
+        RuntimeInboundMessage::McpInvoke(_) => "McpInvoke",
+        RuntimeInboundMessage::Ping(_) => "Ping",
+        RuntimeInboundMessage::ProvisionWorkspace(_) => "ProvisionWorkspace",
+        RuntimeInboundMessage::ProvisionAgent(_) => "ProvisionAgent",
+    }
+}
+
 pub fn runtime_spec_fixture(workspace: &str) -> RuntimeSpec {
     RuntimeSpec {
         workspaces: vec![WorkspaceSpec {
@@ -999,10 +1072,10 @@ mod tests {
         let resp = transport
             .scan_workspace(
                 "scan-1",
+                "agent-1",
                 None,
                 vec!["AGENTS.md".to_string()],
                 "skills/**/*.md".to_string(),
-                false,
             )
             .await
             .expect("scan must be answered, not hang");

@@ -79,9 +79,17 @@ pub struct DeclaredServer {
 /// held only long enough to claim a slot: a handshake that spawns `npx` can
 /// take minutes, and holding the map across it would serialise every other
 /// server behind the slowest one.
+/// Keyed by `(agent_id, server_name)`, not by server name alone. Two agents can
+/// select different bundles that declare the same server name, and a cache keyed
+/// on the name would hand the second agent the first agent's process — running
+/// out of the wrong plugin root, with the wrong environment.
+/// One agent's connection to one named server, claimed before it is built —
+/// see the `OnceCell` note above.
+type ClientSlot = Arc<OnceCell<Arc<McpClient>>>;
+
 #[derive(Default)]
 pub struct McpRegistry {
-    clients: Mutex<BTreeMap<String, Arc<OnceCell<Arc<McpClient>>>>>,
+    clients: Mutex<BTreeMap<(String, String), ClientSlot>>,
 }
 
 /// What one discovery pass produced.
@@ -136,9 +144,14 @@ impl McpRegistry {
     ///
     /// `cwd` is where a stdio server runs — the first workspace, so a server
     /// that reads files reads the ones the agent is working on.
-    pub async fn discover(&self, plugins_dir: &Path, cwd: Option<&Path>) -> Discovery {
+    pub async fn discover(
+        &self,
+        agent_id: &str,
+        plugins_dir: &Path,
+        cwd: Option<&Path>,
+    ) -> Discovery {
         let (declared, mut failures) = Self::declared(plugins_dir);
-        let passes = declared.iter().map(|d| self.list_one(d, cwd));
+        let passes = declared.iter().map(|d| self.list_one(agent_id, d, cwd));
         // Collected in declaration order rather than completion order, so the
         // tool list a session sees does not depend on which server happened to
         // be quickest today.
@@ -155,12 +168,13 @@ impl McpRegistry {
     /// Connect to one server and list its tools, within the discovery budget.
     async fn list_one(
         &self,
+        agent_id: &str,
         declared: &DeclaredServer,
         cwd: Option<&Path>,
     ) -> Result<Vec<PluginMcpTool>, McpServerFailure> {
         let name = &declared.server.name;
         let pass = async {
-            let client = self.connect(declared, cwd).await.map_err(|e| {
+            let client = self.connect(agent_id, declared, cwd).await.map_err(|e| {
                 tracing::warn!(server = %name, error = %e, "MCP server unavailable");
                 as_failure(name, &e)
             })?;
@@ -192,6 +206,7 @@ impl McpRegistry {
     /// Call one namespaced tool.
     pub async fn invoke(
         &self,
+        agent_id: &str,
         plugins_dir: &Path,
         cwd: Option<&Path>,
         tool: &str,
@@ -205,7 +220,7 @@ impl McpRegistry {
             return Err(format!("no plugin declares an MCP server '{server_name}'"));
         };
         let client = self
-            .connect(&declared, cwd)
+            .connect(agent_id, &declared, cwd)
             .await
             .map_err(|e| format!("{server_name}: {e}"))?;
         let outcome = client
@@ -224,6 +239,7 @@ impl McpRegistry {
     /// `npx` install to start blocks only callers of *that* server.
     async fn connect(
         &self,
+        agent_id: &str,
         declared: &DeclaredServer,
         cwd: Option<&Path>,
     ) -> Result<Arc<McpClient>, McpError> {
@@ -231,7 +247,7 @@ impl McpRegistry {
             let mut clients = self.clients.lock().await;
             Arc::clone(
                 clients
-                    .entry(declared.server.name.clone())
+                    .entry((agent_id.to_string(), declared.server.name.clone()))
                     .or_insert_with(|| Arc::new(OnceCell::new())),
             )
         };
@@ -456,7 +472,9 @@ mod tests {
             "broken",
             r#"{"mcpServers":{"nope":{"command":"horsie-no-such-binary"}}}"#,
         );
-        let discovery = McpRegistry::default().discover(plugins.path(), None).await;
+        let discovery = McpRegistry::default()
+            .discover("a1", plugins.path(), None)
+            .await;
         assert!(discovery.tools.is_empty());
         assert_eq!(discovery.failures.len(), 1);
         assert_eq!(reasons(&discovery.failures)[0].0, "nope");
@@ -471,7 +489,9 @@ mod tests {
             "mcpServers": { "docs": { "command": "sh", "args": ["-c", LISTING_SERVER] } }
         });
         declare(plugins.path(), "p", &json.to_string());
-        let discovery = McpRegistry::default().discover(plugins.path(), None).await;
+        let discovery = McpRegistry::default()
+            .discover("a1", plugins.path(), None)
+            .await;
         assert!(discovery.failures.is_empty(), "{:?}", discovery.failures);
         assert_eq!(discovery.tools.len(), 1);
         assert_eq!(discovery.tools[0].name, "mcp__docs__search");
@@ -523,7 +543,7 @@ mod tests {
         let started = std::time::Instant::now();
         let discovery = tokio::time::timeout(
             DISCOVER_TIMEOUT + Duration::from_secs(10),
-            McpRegistry::default().discover(plugins.path(), None),
+            McpRegistry::default().discover("a1", plugins.path(), None),
         )
         .await
         .expect("discovery must not outlive one budget");
@@ -545,6 +565,7 @@ mod tests {
         declare(plugins.path(), "p", &json.to_string());
         let out = McpRegistry::default()
             .invoke(
+                "a1",
                 plugins.path(),
                 None,
                 "mcp__big__anything",

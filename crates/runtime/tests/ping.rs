@@ -24,8 +24,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    BashInput, PingRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ToolCall,
-    ToolCallRequest,
+    BashInput, PingRequest, ProvisionAgentRequest, RuntimeInboundMessage, RuntimeOutboundMessage,
+    ToolCall, ToolCallRequest,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -76,6 +76,24 @@ async fn a_busy_runtime_answers_a_ping_and_names_the_call_it_is_running() {
     assert!(
         matches!(announced, RuntimeOutboundMessage::Ready(_)),
         "expected a handshake, got {announced:?}"
+    );
+
+    // The agent has to exist before it may run anything: the runtime refuses a
+    // request naming one nothing has provisioned. An empty bundle set is still
+    // a provision.
+    send(
+        &mut ws,
+        RuntimeInboundMessage::ProvisionAgent(ProvisionAgentRequest {
+            call_id: "prov".to_string(),
+            agent_id: "a1".to_string(),
+            bundles: Vec::new(),
+        }),
+    )
+    .await;
+    let provisioned = next_outbound(&mut ws).await;
+    assert!(
+        matches!(provisioned, RuntimeOutboundMessage::AgentProvisioned(_)),
+        "expected the agent to be provisioned, got {provisioned:?}"
     );
 
     send(

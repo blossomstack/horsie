@@ -21,8 +21,8 @@
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::executor::{ProvisionStep, StepParam};
 use horsie_models::runtime::{
-    BashInput, CancelCallRequest, ProvisionWorkspaceRequest, RuntimeInboundMessage,
-    RuntimeOutboundMessage, ToolCall, ToolCallRequest,
+    BashInput, CancelCallRequest, ProvisionAgentRequest, ProvisionWorkspaceRequest,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ToolCall, ToolCallRequest,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -39,6 +39,7 @@ const BLOCKING_TOOL: &str = "sleep 30";
 async fn a_cancelled_tool_call_is_answered_as_cancelled() {
     let ws = tempfile::tempdir().unwrap();
     let mut rt = spawn(ws.path(), "rt-cancel-tool").await;
+    provision_agent(&mut rt, "a1").await;
 
     send(
         &mut rt.ws,
@@ -158,6 +159,28 @@ async fn spawn(workspace: &Path, runtime_id: &str) -> Runtime {
         "expected a handshake, got {announced:?}"
     );
     Runtime { ws, child }
+}
+
+/// Provision `agent_id` with no bundles.
+///
+/// Required before any request may name it: the runtime refuses one that names
+/// an agent it has never been told about, which is what stops a sequencing bug
+/// from presenting as an agent that silently has no skills. An empty set is
+/// still a provision — "this agent takes no plugins" is a thing to be told.
+async fn provision_agent(rt: &mut Runtime, agent_id: &str) {
+    send(
+        &mut rt.ws,
+        RuntimeInboundMessage::ProvisionAgent(ProvisionAgentRequest {
+            call_id: format!("prov-{agent_id}"),
+            agent_id: agent_id.to_string(),
+            bundles: Vec::new(),
+        }),
+    )
+    .await;
+    match next_outbound(&mut rt.ws).await {
+        RuntimeOutboundMessage::AgentProvisioned(_) => {}
+        other => panic!("expected the agent to be provisioned, got {other:?}"),
+    }
 }
 
 async fn send<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>, message: RuntimeInboundMessage)

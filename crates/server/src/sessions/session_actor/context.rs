@@ -364,6 +364,55 @@ impl SessionContextProvider {
         self.settings.use_plugins.unwrap_or(true)
     }
 
+    /// Install this agent's own plugin bundles into its own tree on the runtime.
+    ///
+    /// The bundles come from the agent's settings, which a workflow step fills
+    /// from its own preset — that is what makes a step able to run with skills
+    /// its siblings do not have. It used to be the session's union, installed
+    /// once for everyone.
+    ///
+    /// Retryable on failure. The bundles come from the artifact store over the
+    /// runtime's own connection, and a store that is briefly unreachable is the
+    /// ordinary transient — not a reason to make the session terminal.
+    async fn provision_agent(&self, client: &RuntimeClient) -> Result<(), ContextError> {
+        if !self.use_plugins() {
+            // Provisioned with nothing, deliberately, rather than skipped: the
+            // runtime refuses requests naming an agent it has never been told
+            // about, and "this agent takes no plugins" is a thing to be told.
+            return client
+                .provision_agent(Vec::new())
+                .await
+                .map(|_| ())
+                .map_err(|e| ContextError::retryable(e.to_string()));
+        }
+        let mut names = self.settings.plugins.clone();
+        if names.is_empty() {
+            // Nothing selected falls back to the account's default-enabled set,
+            // exactly as session-wide provisioning did.
+            if let Some(library) = &self.plugin_library {
+                names = library.default_names().await;
+            }
+        }
+        let bundles = match &self.plugin_library {
+            Some(library) if !names.is_empty() => library
+                .resolve(&names)
+                .await
+                .map_err(ContextError::retryable)?
+                .iter()
+                .map(|r| horsie_models::runtime::BundleRef {
+                    name: r.name.clone(),
+                    hash: r.hash.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        client
+            .provision_agent(bundles)
+            .await
+            .map(|_| ())
+            .map_err(|e| ContextError::retryable(e.to_string()))
+    }
+
     /// Acquire this agent's runtime handle, scoped to it. Sink-less: `provide`
     /// attaches one for the tool hooks that report themselves mid-call, while
     /// `start_hooks` returns its records to the agent, which journals them
@@ -524,6 +573,29 @@ impl ContextProvider for SessionContextProvider {
             Some(cached) => cached.without_hook_sink(),
             None => self.runtime_client().await?,
         };
+        // KNOWN GAP: this seam runs *before* `provide` (see the
+        // `ContextProvider` docs), so the hooks below run against an agent whose
+        // plugin tree has not been built yet — and a hook is itself a plugin
+        // file. A runtime refuses a request naming an unprovisioned agent, and
+        // `run_hooks` swallows that with `unwrap_or_default`, so the hooks
+        // simply never fire.
+        //
+        // Provisioning here is the obvious fix and is NOT applied, because the
+        // extra pre-turn round trip wedges a fork's turn: with it, three fork
+        // tests and one subagent test hang; without it, all 36 pass. That is a
+        // fork-path fragility this change surfaces rather than causes, and it
+        // needs its own diagnosis before this line goes in.
+        // Before the hooks, because a hook *is* a plugin file. This seam runs
+        // ahead of `provide` — see the `ContextProvider` docs — so it is the
+        // first place an agent's tree can exist, and hooks fired against an
+        // agent the runtime has never been told about are refused. `run_hooks`
+        // swallows that with `unwrap_or_default`, so the failure would be every
+        // plugin hook silently not running.
+        //
+        // `provide` provisions too. Both is correct rather than wasteful: this
+        // method is skipped entirely when `has_start_hooks` is false, and the
+        // runtime absorbs a repeat for a set it has already built.
+        self.provision_agent(&client).await?;
         let mut records = Vec::new();
         if let Some(source) = turn.start_source {
             // A subagent's start is a `SubagentStart`. It used to be a
@@ -604,6 +676,12 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
+        // Before anything reads this agent's plugins — the hooks its bundles
+        // declare, the skills the scan finds, the MCP servers discovery starts.
+        // Sent on every load rather than once: the runtime is the only party
+        // that knows what is already on its disk, and it absorbs the repeat.
+        self.provision_agent(&runtime_client).await?;
+
         if broadcast {
             emit_progress(
                 &self.session,
@@ -613,7 +691,7 @@ impl ContextProvider for SessionContextProvider {
             )
             .await;
         }
-        let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
+        let (ws, shared_scan) = scan_workspace(&runtime_client, None).await;
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
         // hook, always reporting `source: "startup"`. It now fires once per
@@ -947,6 +1025,7 @@ mod tests {
             instructions: None,
             auto_compact: None,
             control_plane: None,
+            plugins: Vec::new(),
         };
         let (toolbox, index) = build_control_layer(
             base.clone(),
@@ -1694,6 +1773,48 @@ mod tests {
     /// And a subagent stays quiet, exactly as it does for every other
     /// preparation stage: its progress reaches a reader as the parent's
     /// `SubAgent` entry, not as a second narration of the same sandbox.
+    /// Provisioning reaches the runtime before the hooks that read what it
+    /// installed.
+    ///
+    /// A hook is a file inside a plugin bundle, so hooks fired against an agent
+    /// whose tree does not exist find nothing — and a runtime refuses a request
+    /// naming an agent it has never been told about. `run_hooks` swallows that
+    /// refusal with `unwrap_or_default`, so getting this order wrong is not an
+    /// error anywhere: it is every plugin hook silently never running.
+    ///
+    /// Ordering rather than mere presence, because `start_hooks` runs *ahead* of
+    /// `provide` — provisioning only in `provide` looks correct and is exactly
+    /// the bug.
+    #[tokio::test]
+    async fn an_agent_is_provisioned_before_its_hooks_run() {
+        let (f, session, id) = catalog_harness_with(Vec::new(), Vec::new()).await;
+        let provider = catalog_provider(&f, &session, id);
+
+        provider
+            .start_hooks(StartTurn {
+                start_source: Some(horsie_models::runtime::SessionStartSource::Startup),
+                prompt: Some("hello".to_string()),
+            })
+            .await
+            .expect("prepare");
+
+        let relayed = f.agent.relayed();
+        let first_provision = relayed.iter().position(|k| k == "ProvisionAgent");
+        let first_hooks = relayed.iter().position(|k| k == "RunHooks");
+        assert!(
+            first_provision.is_some(),
+            "the agent must be provisioned at all: {relayed:?}"
+        );
+        assert!(
+            first_hooks.is_some(),
+            "the hooks must actually have run: {relayed:?}"
+        );
+        assert!(
+            first_provision < first_hooks,
+            "provisioning must precede the hooks that read it: {relayed:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_subagent_narrates_nothing() {
         let seen = Arc::new(Mutex::new(Vec::new()));

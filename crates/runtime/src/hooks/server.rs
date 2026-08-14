@@ -13,13 +13,21 @@ use horsie_support::plugin::hooks::HookInvocation;
 
 use crate::workspace::WorkspaceRegistry;
 
-/// Run every hook matching `event`, in stable plugin order.
+/// Run every hook matching `event` from `agent_id`'s own plugin tree, in stable
+/// plugin order.
 ///
-/// Empty when there is no plugin library or nothing declares the event —
-/// including, deliberately, when a hook failed: a failure is a record, not an
-/// omission.
-pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) -> Vec<HookRecord> {
-    let Some(plugins_dir) = registry.plugins_dir() else {
+/// Per agent, because a hook is a file in a bundle: an agent that selected
+/// different bundles has different hooks, and one that selected none has none
+/// rather than inheriting its siblings'.
+///
+/// Empty when the agent has no tree or nothing declares the event — including,
+/// deliberately, when a hook failed: a failure is a record, not an omission.
+pub async fn run_hooks(
+    registry: &WorkspaceRegistry,
+    agent_id: &str,
+    event: &ServerHookEvent,
+) -> Vec<HookRecord> {
+    let Some(plugins_dir) = registry.plugins_dir_for(agent_id) else {
         return Vec::new();
     };
     let invocation = match event {
@@ -61,7 +69,7 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
     let hook_path = registry.hook_path();
     let subjects = invocation.matcher_subjects();
     let mut records = Vec::new();
-    for (root, plugin, decl) in super::matching(plugins_dir, invocation.event(), &subjects) {
+    for (root, plugin, decl) in super::matching(&plugins_dir, invocation.event(), &subjects) {
         let (_, record) = super::run_one(&root, &plugin, &decl, hook_path, invocation).await;
         records.push(record);
     }
@@ -77,7 +85,7 @@ pub async fn run_hooks(registry: &WorkspaceRegistry, event: &ServerHookEvent) ->
 )]
 mod tests {
     use super::*;
-    use crate::hooks::tool::tests::{env, plugin};
+    use crate::hooks::tool::tests::{TEST_AGENT, env, plugin};
     use horsie_models::Workspace;
     use horsie_models::hooks::{HookAction, SessionStartOutcome, StopOutcome};
     use horsie_models::runtime::{SessionStartInput, SessionStartSource, StopInput};
@@ -101,7 +109,7 @@ mod tests {
             "echo CONVENTIONS",
         );
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].plugin, "boot");
         match &records[0].action {
@@ -132,12 +140,12 @@ mod tests {
         );
         let e = env(plugins);
         assert!(
-            run_hooks(&e.registry, &start(SessionStartSource::Startup))
+            run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup))
                 .await
                 .is_empty()
         );
         assert_eq!(
-            run_hooks(&e.registry, &start(SessionStartSource::Resume))
+            run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Resume))
                 .await
                 .len(),
             1
@@ -157,7 +165,7 @@ mod tests {
             "echo nope 1>&2; exit 1",
         );
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         match &records[0].action {
             HookAction::SessionStart(r) => {
                 assert!(matches!(r.outcome, SessionStartOutcome::Failed(_)));
@@ -181,6 +189,7 @@ mod tests {
         let e = env(plugins);
         let records = run_hooks(
             &e.registry,
+            TEST_AGENT,
             &ServerHookEvent::Stop(StopInput {
                 last_assistant_message: Some("done".into()),
                 stop_hook_active: false,
@@ -206,7 +215,7 @@ mod tests {
             path: work.path().to_path_buf(),
         }]);
         assert!(
-            run_hooks(&registry, &start(SessionStartSource::Startup))
+            run_hooks(&registry, TEST_AGENT, &start(SessionStartSource::Startup))
                 .await
                 .is_empty()
         );
@@ -234,11 +243,11 @@ mod tests {
             })
         };
         assert!(
-            run_hooks(&e.registry, &event("researcher"))
+            run_hooks(&e.registry, TEST_AGENT, &event("researcher"))
                 .await
                 .is_empty()
         );
-        let records = run_hooks(&e.registry, &event("reviewer")).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &event("reviewer")).await;
         assert_eq!(records.len(), 1);
         match &records[0].action {
             HookAction::SubagentStop(r) => assert_eq!(r.agent_type, "reviewer"),
@@ -298,7 +307,7 @@ mod tests {
         let plugins = TempDir::new().unwrap();
         http_plugin(plugins.path(), "webhook", "SessionStart", &url);
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         assert_eq!(records.len(), 1);
         match &records[0].action {
             HookAction::SessionStart(r) => match &r.outcome {
@@ -321,6 +330,7 @@ mod tests {
         let e = env(plugins);
         let records = run_hooks(
             &e.registry,
+            TEST_AGENT,
             &ServerHookEvent::Stop(StopInput {
                 last_assistant_message: None,
                 stop_hook_active: false,
@@ -344,7 +354,7 @@ mod tests {
         let plugins = TempDir::new().unwrap();
         http_plugin(plugins.path(), "webhook", "SessionStart", &url);
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         match &records[0].action {
             HookAction::SessionStart(r) => match &r.outcome {
                 SessionStartOutcome::Failed(f) => assert!(f.reason.contains("500"), "{f:?}"),
@@ -364,7 +374,7 @@ mod tests {
         let plugins = TempDir::new().unwrap();
         http_plugin(plugins.path(), "webhook", "SessionStart", &url);
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         match &records[0].action {
             HookAction::SessionStart(r) => match &r.outcome {
                 SessionStartOutcome::Failed(f) => assert!(f.reason.contains("302"), "{f:?}"),
@@ -387,7 +397,7 @@ mod tests {
             "http://127.0.0.1:1/hook",
         );
         let e = env(plugins);
-        let records = run_hooks(&e.registry, &start(SessionStartSource::Startup)).await;
+        let records = run_hooks(&e.registry, TEST_AGENT, &start(SessionStartSource::Startup)).await;
         match &records[0].action {
             HookAction::SessionStart(r) => {
                 assert!(matches!(r.outcome, SessionStartOutcome::Failed(_)));
