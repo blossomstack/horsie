@@ -2,7 +2,7 @@ import { Check } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useMatch, useNavigate } from "react-router-dom";
 import type { SessionSummary } from "../api/types";
-import { relativeTime, sessionTitle } from "../lib/format";
+import { sessionTitle } from "../lib/format";
 import { askConfirm } from "../lib/confirm";
 import { cn } from "../lib/cn";
 import { normalizeTagName, sessionTags } from "../lib/sessionTags";
@@ -18,7 +18,7 @@ export function SessionRow({
   tags,
 }: {
   s: SessionSummary;
-  /** Every tag in existence, so the menu can offer them all — not just the
+  /** Every tag in existence, so the menu can offer them all — not only the
    * ones this session already carries. */
   tags: string[];
 }) {
@@ -45,8 +45,8 @@ export function SessionRow({
     }
   };
 
-  // Typing a name nobody has used before is how a tag comes into existence;
-  // there is no create step because there is nothing to register.
+  // Typing a name nobody has used before is how a tag comes into existence:
+  // there is no create step, because there is nothing to register.
   const submitTag = () => {
     const name = normalizeTagName(draft);
     if (!name) return;
@@ -60,6 +60,12 @@ export function SessionRow({
     <div className="group relative">
       <NavLink
         to={`/sessions/${s.id}`}
+        // A fork lives at `/sessions/:id/agents/:forkId`, which is a
+        // *descendant* of this path — so without `end` opening a fork lit its
+        // parent session up as well and two rows claimed to be the one on
+        // screen. `open` below already made this distinction; the styling
+        // simply never got it.
+        end
         data-testid="session-row"
         data-session-id={s.id}
         title={`${title} — ${meta.hint}`}
@@ -68,8 +74,11 @@ export function SessionRow({
             // Room for the menu so a long title never runs under it. Always,
             // now that the menu is always there.
             "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 pr-9 transition-colors",
+            // The raised fill is the whole cue. The ring that used to sit on
+            // top of it drew a border that competed with the fork rails
+            // beneath for the same job.
             isActive
-              ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+              ? "bg-raised text-legend"
               : "text-dim hover:bg-raised hover:text-legend",
           )
         }
@@ -79,12 +88,17 @@ export function SessionRow({
           <span className="block truncate text-[0.8125rem] leading-5">
             {title}
           </span>
-          <span className="legend mt-0.5 block truncate">
-            {/* A run says which workflow it came from: the rail holds runs and
-                ordinary sessions together, so the row has to say which it is. */}
-            {s.workflow ? `${s.workflow} · ` : ""}
-            {meta.label} · {relativeTime(s.createdAt)}
-          </span>
+          {/* A run says which workflow it came from: the rail holds runs and
+              ordinary sessions together, so the row has to say which it is.
+              Nothing else does — the status is already the dot beside the
+              title, and the age is on the session itself for anyone who wants
+              it. Spelling both out under every row gave a list of "Idle · just
+              now" that said the same thing on every line and cost a second
+              line of height to do it. Tags are the same bargain, which is why
+              they live in the menu that edits them rather than on the row. */}
+          {s.workflow && (
+            <span className="legend mt-0.5 block truncate">{s.workflow}</span>
+          )}
         </span>
       </NavLink>
       {/* Revealed on row hover; focus-within keeps it visible while its menu is

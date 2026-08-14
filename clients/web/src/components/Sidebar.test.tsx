@@ -15,7 +15,7 @@ import { SessionStatusKind } from "../api/types";
 import { Sidebar } from "./Sidebar";
 
 // jsdom has no window.matchMedia, which useTheme reads at module scope via
-// ThemeToggle; the theme toggle is irrelevant to grouping.
+// ThemeToggle; the theme toggle is irrelevant to the rail's list behaviour.
 vi.mock("./ThemeToggle", () => ({ ThemeToggle: () => null }));
 
 vi.mock("../api/client", () => ({
@@ -25,12 +25,6 @@ vi.mock("../api/client", () => ({
       setAnnotations: vi.fn(),
       remove: vi.fn(),
       deleteFork: vi.fn(),
-    },
-    sessionGroups: {
-      list: vi.fn(),
-      create: vi.fn(),
-      rename: vi.fn(),
-      remove: vi.fn(),
     },
     globalEventsUrl: () => "/api/events",
   },
@@ -49,13 +43,13 @@ function renderSidebar(at = "/") {
   );
 }
 
-function session(id: string, group?: string): SessionSummary {
+function session(id: string, tags: string[] = []): SessionSummary {
   return {
     id,
     name: `session ${id}`,
     status: SessionStatusKind.Idle,
     createdAt: 1,
-    annotations: group ? [{ key: "group", value: group }] : [],
+    annotations: tags.map((t) => ({ key: `tag.${t}`, value: "" })),
     forks: [],
   };
 }
@@ -68,43 +62,151 @@ afterEach(() => {
   resetConfirm();
 });
 
-describe("Sidebar groups", () => {
-  it("renders union sections: registered, annotation-only, ungrouped", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "api" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({
-      sessions: [session("1", "web"), session("2")],
-    });
-    renderSidebar();
-    await waitFor(() => {
-      expect(screen.getByTestId("group-section-api")).toBeDefined();
-      expect(screen.getByTestId("group-section-web")).toBeDefined();
-      expect(screen.getByTestId("group-section-ungrouped")).toBeDefined();
-    });
-    expect(screen.getByTestId("group-section-ungrouped").textContent).toContain(
-      "session 2",
-    );
-  });
-
-  it("stays flat until a group exists, but the row menu still deletes", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
+describe("Sidebar tag filter", () => {
+  it("hides the filter button until a tag exists", async () => {
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: [session("1")],
     });
     renderSidebar();
     await screen.findByTestId("session-row");
-    expect(screen.queryByLabelText("Collapse Ungrouped")).toBeNull();
+    expect(screen.queryByTestId("tag-filter-button")).toBeNull();
+  });
 
-    // No group means nowhere to move to, so the menu is Delete and nothing
-    // else — but it is still there, which it was not before.
-    fireEvent.click(screen.getByTestId("session-row-menu-1"));
-    expect(screen.queryByTestId("move-to-group-ungrouped")).toBeNull();
-    expect(screen.getByTestId("delete-session-1")).toBeTruthy();
+  it("cycles a chip through require and exclude, narrowing the list each way", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", ["web"]), session("2")],
+    });
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(2),
+    );
+
+    fireEvent.click(screen.getByTestId("tag-filter-button"));
+    const chip = screen.getByTestId("tag-chip-web");
+
+    fireEvent.click(chip);
+    expect(chip.getAttribute("data-state")).toBe("require");
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+    expect(
+      screen.getByTestId("session-row").getAttribute("data-session-id"),
+    ).toBe("1");
+
+    fireEvent.click(chip);
+    expect(chip.getAttribute("data-state")).toBe("exclude");
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+    expect(
+      screen.getByTestId("session-row").getAttribute("data-session-id"),
+    ).toBe("2");
+
+    fireEvent.click(screen.getByTestId("clear-tag-filter"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(2),
+    );
+  });
+
+  it("says so when the tag filter empties the list", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", ["web"])],
+    });
+    renderSidebar();
+    await screen.findByTestId("session-row");
+    fireEvent.click(screen.getByTestId("tag-filter-button"));
+    fireEvent.click(screen.getByTestId("tag-chip-web"));
+    fireEvent.click(screen.getByTestId("tag-chip-web"));
+    expect(await screen.findByTestId("no-tag-matches")).toBeTruthy();
+  });
+
+  // A filtered list that looks like the whole list is the one failure mode of
+  // putting the filter behind a button.
+  it("marks the button while a constraint is active, even with the panel shut", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", ["web"])],
+    });
+    renderSidebar();
+    await screen.findByTestId("session-row");
+    const button = screen.getByTestId("tag-filter-button");
+    const quiet = button.className;
+
+    fireEvent.click(button);
+    fireEvent.click(screen.getByTestId("tag-chip-web"));
+    fireEvent.click(button);
+    expect(screen.queryByTestId("tag-filter-panel")).toBeNull();
+    expect(button.className).not.toBe(quiet);
+  });
+
+  it("remembers the filter across a remount", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", ["web"]), session("2")],
+    });
+    renderSidebar();
+    fireEvent.click(await screen.findByTestId("tag-filter-button"));
+    fireEvent.click(screen.getByTestId("tag-chip-web"));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+
+    cleanup();
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+  });
+
+  // Otherwise a tag whose last session was deleted hides the rail with no
+  // visible cause: the chip that would explain it is not rendered either.
+  it("drops a persisted constraint naming a tag nobody carries", async () => {
+    localStorage.setItem(
+      "horsie.session-tag-filter",
+      JSON.stringify({ require: ["gone"], exclude: [] }),
+    );
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1"), session("2")],
+    });
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(2),
+    );
+  });
+
+  it("ANDs the tag filter with the text filter", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [
+        ...Array.from({ length: 8 }, (_, i) => session(String(i), ["web"])),
+        session("8"),
+      ],
+    });
+    renderSidebar();
+    fireEvent.click(await screen.findByTestId("tag-filter-button"));
+    fireEvent.click(screen.getByTestId("tag-chip-web"));
+    fireEvent.change(screen.getByTestId("session-filter"), {
+      target: { value: "session 3" },
+    });
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(1),
+    );
+    expect(
+      screen.getByTestId("session-row").getAttribute("data-session-id"),
+    ).toBe("3");
+  });
+});
+
+describe("Sidebar sessions", () => {
+  it("renders one flat list, with no group chrome", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({
+      sessions: [session("1", ["web"]), session("2")],
+    });
+    renderSidebar();
+    await waitFor(() =>
+      expect(screen.getAllByTestId("session-row")).toHaveLength(2),
+    );
+    expect(screen.queryByTestId("new-group-button")).toBeNull();
   });
 
   it("deletes a session from the row menu, once confirmed", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: [session("1")],
     });
@@ -123,7 +225,6 @@ describe("Sidebar groups", () => {
   });
 
   it("cancelling the confirm leaves the session alone", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: [session("1")],
     });
@@ -137,172 +238,7 @@ describe("Sidebar groups", () => {
     expect(api.sessions.remove).not.toHaveBeenCalled();
   });
 
-  it("creates a group from the header button", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
-    vi.mocked(api.sessionGroups.create).mockResolvedValue({
-      group: { name: "web" },
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
-    renderSidebar();
-    fireEvent.click(await screen.findByTestId("new-group-button"));
-    fireEvent.change(screen.getByTestId("group-name-input"), {
-      target: { value: "web" },
-    });
-    fireEvent.keyDown(screen.getByTestId("group-name-input"), { key: "Enter" });
-    await waitFor(() =>
-      expect(api.sessionGroups.create).toHaveBeenCalledWith("web"),
-    );
-  });
-
-  it("creates a group from the tick, and dismisses the box from the cross", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
-    vi.mocked(api.sessionGroups.create).mockResolvedValue({
-      group: { name: "web" },
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
-    renderSidebar();
-
-    // Cancel: the box goes away and nothing is created.
-    fireEvent.click(await screen.findByTestId("new-group-button"));
-    fireEvent.click(screen.getByTestId("create-group-cancel"));
-    expect(screen.queryByTestId("group-name-input")).toBeNull();
-    expect(api.sessionGroups.create).not.toHaveBeenCalled();
-
-    // The tick is inert until the name is non-empty.
-    fireEvent.click(screen.getByTestId("new-group-button"));
-    expect(
-      screen.getByTestId<HTMLButtonElement>("create-group-confirm").disabled,
-    ).toBe(true);
-    fireEvent.change(screen.getByTestId("group-name-input"), {
-      target: { value: "web" },
-    });
-    fireEvent.click(screen.getByTestId("create-group-confirm"));
-    await waitFor(() =>
-      expect(api.sessionGroups.create).toHaveBeenCalledWith("web"),
-    );
-    expect(screen.queryByTestId("group-name-input")).toBeNull();
-  });
-
-  it("collapses and expands a group by clicking its header row", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({
-      sessions: [session("1", "web")],
-    });
-    renderSidebar();
-    const toggle = await screen.findByTestId("group-toggle-web");
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByTestId("group-section-web").textContent).toContain(
-      "session 1",
-    );
-
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.getByTestId("group-section-web").textContent).not.toContain(
-      "session 1",
-    );
-
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
-  });
-
-  it("opens the menu without collapsing the group", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({
-      sessions: [session("1", "web")],
-    });
-    renderSidebar();
-    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
-    expect(screen.getByTestId("rename-group-item")).toBeDefined();
-    expect(
-      screen.getByTestId("group-toggle-web").getAttribute("aria-expanded"),
-    ).toBe("true");
-  });
-
-  it("moves a session to a group from the row menu", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({
-      sessions: [session("1")],
-    });
-    vi.mocked(api.sessions.setAnnotations).mockResolvedValue({});
-    renderSidebar();
-    fireEvent.click(await screen.findByTestId("session-row-menu-1"));
-    fireEvent.click(screen.getByTestId("move-to-group-web"));
-    await waitFor(() =>
-      expect(api.sessions.setAnnotations).toHaveBeenCalledWith("1", {
-        set: [{ key: "group", value: "web" }],
-        remove: [],
-      }),
-    );
-  });
-
-  it("confirms a delete in the header, not behind the menu", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessionGroups.remove).mockResolvedValue({});
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
-    renderSidebar();
-    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
-    fireEvent.click(screen.getByTestId("delete-group-item"));
-
-    // The prompt is on the rail itself, so the confirm is one click away —
-    // the menu it came from has already closed.
-    const confirm = await screen.findByTestId("group-delete-confirm-web");
-    expect(confirm.textContent).toContain("Its sessions move to Ungrouped");
-    fireEvent.click(screen.getByTestId("confirm-delete-group-item"));
-    await waitFor(() =>
-      expect(api.sessionGroups.remove).toHaveBeenCalledWith("web"),
-    );
-  });
-
-  it("backs out of a delete without removing the group", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
-    renderSidebar();
-    fireEvent.click(await screen.findByTestId("group-menu-button-web"));
-    fireEvent.click(screen.getByTestId("delete-group-item"));
-    fireEvent.click(await screen.findByTestId("cancel-delete-group-item"));
-    expect(screen.queryByTestId("group-delete-confirm-web")).toBeNull();
-    expect(screen.getByTestId("group-toggle-web")).toBeDefined();
-    expect(api.sessionGroups.remove).not.toHaveBeenCalled();
-  });
-  // Group *order* already survived a reload and collapse did not, so half of
-  // an arrangement came back and half of it did not.
-  it("remembers which groups are collapsed across a remount", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({
-      groups: [{ name: "web" }],
-    });
-    vi.mocked(api.sessions.list).mockResolvedValue({
-      sessions: [session("1", "web")],
-    });
-    renderSidebar();
-    expect(
-      (await screen.findByTestId("group-section-web")).textContent,
-    ).toContain("session 1");
-    fireEvent.click(screen.getByTestId("group-toggle-web"));
-    expect(screen.getByTestId("group-section-web").textContent).not.toContain(
-      "session 1",
-    );
-
-    cleanup();
-    renderSidebar();
-    await waitFor(() =>
-      expect(
-        screen.getByTestId("group-section-web").textContent,
-      ).not.toContain("session 1"),
-    );
-  });
-
   it("filters the rail by session title once there is enough to search", async () => {
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     vi.mocked(api.sessions.list).mockResolvedValue({
       sessions: Array.from({ length: 9 }, (_, i) => session(String(i))),
     });
@@ -319,7 +255,15 @@ describe("Sidebar groups", () => {
     await waitFor(() =>
       expect(screen.queryAllByTestId("session-row")).toHaveLength(0),
     );
-    expect(screen.getByText(/No session matches/)).toBeDefined();
+    expect(screen.getByTestId("no-text-matches")).toBeTruthy();
+  });
+
+  it("sends the nameplate home", async () => {
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [] });
+    renderSidebar("/agents");
+    expect(
+      (await screen.findByTestId("home-link")).getAttribute("href"),
+    ).toBe("/");
   });
 });
 
@@ -330,9 +274,11 @@ describe("forks in the rail", () => {
 
   it("nests a fork of a fork under the fork it came from", async () => {
     const s = session("s1");
-    s.forks = [fork("a", undefined, "idle", "first"), fork("b", "a", "idle", "second")];
+    s.forks = [
+      fork("a", undefined, "idle", "first"),
+      fork("b", "a", "idle", "second"),
+    ];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar();
 
     const rows = await screen.findAllByTestId("fork-row");
@@ -347,7 +293,6 @@ describe("forks in the rail", () => {
     s.status = SessionStatusKind.Idle;
     s.forks = [fork("a", undefined, "running", "busy one")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar();
 
     const forkRow = await screen.findByTestId("fork-row");
@@ -360,7 +305,6 @@ describe("forks in the rail", () => {
     const s = session("s1");
     s.forks = [fork("a")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar();
 
     expect(await screen.findByText("Untitled fork")).toBeTruthy();
@@ -373,7 +317,6 @@ describe("forks in the rail", () => {
     const s = session("s1");
     s.forks = [fork("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar("/sessions/s1/agents/a");
 
     const forkRow = await screen.findByTestId("fork-row");
@@ -387,7 +330,6 @@ describe("forks in the rail", () => {
     const s = session("s1");
     s.forks = [fork("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar("/sessions/s1");
 
     const sessionRow = await screen.findByTestId("session-row");
@@ -401,7 +343,6 @@ describe("forks in the rail", () => {
     const s = session("s1");
     s.forks = [fork("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    vi.mocked(api.sessionGroups.list).mockResolvedValue({ groups: [] });
     renderSidebar();
 
     const row = await screen.findByTestId("fork-row");

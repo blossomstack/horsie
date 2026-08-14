@@ -1,29 +1,31 @@
 import {
   Bot,
   CalendarClock,
-  Check,
   Container,
-  FolderPlus,
+  ListFilter,
   Plus,
   Settings,
   ShieldCheck,
   Workflow,
-  X,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { Link, NavLink, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import {
-  partitionSessions,
-  reconcileOrder,
-  UNGROUPED,
-  unionGroups,
-} from "../lib/sessionGroups";
-import { useCreateGroup, useGroupList } from "../hooks/useGroups";
+  allTags,
+  EMPTY_FILTER,
+  filterIsActive,
+  matchesTagFilter,
+  reconcileFilter,
+  type TagFilter,
+} from "../lib/sessionTags";
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionList } from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
-import { SessionGroupSection } from "./SessionGroupSection";
+import { ForkRow } from "./ForkRow";
+import { forkTree } from "../lib/forkTree";
+import { SessionRow } from "./SessionRow";
+import { TagFilterPanel } from "./TagFilterPanel";
 import { ThemeToggle } from "./ThemeToggle";
 
 /** A standing destination, above the session list: the things you keep, as
@@ -93,68 +95,51 @@ function FooterLink({
 
 export function Sidebar() {
   const { data: sessions, isLoading, isError } = useSessionList();
-  const { data: registeredGroups } = useGroupList();
-  const createGroup = useCreateGroup();
-  const [addingGroup, setAddingGroup] = useState(false);
-  const [newGroupName, setNewGroupName] = useState("");
-  // Persisted section order; reconciled with live groups for display only —
-  // written back solely on an explicit drag reorder.
-  const [savedOrder, setSavedOrder] = usePersistentState<string[]>(
-    "horsie.session-group-order",
-    [],
+  // Persisted for the same reason group order and collapse once were: an
+  // arrangement that half survives a reload is worse than one that does not.
+  const [savedFilter, setSavedFilter] = usePersistentState<TagFilter>(
+    "horsie.session-tag-filter",
+    EMPTY_FILTER,
     {
-      deserialize: (raw) =>
-        Array.isArray(raw) && raw.every((x) => typeof x === "string")
-          ? (raw as string[])
-          : undefined,
+      deserialize: (raw) => {
+        if (typeof raw !== "object" || raw === null) return undefined;
+        const { require, exclude } = raw as Partial<TagFilter>;
+        const ok = (v: unknown) =>
+          Array.isArray(v) && v.every((x) => typeof x === "string");
+        return ok(require) && ok(exclude)
+          ? { require: require as string[], exclude: exclude as string[] }
+          : undefined;
+      },
     },
   );
-  // Which sections are shut. Persisted for the same reason the order is: an
-  // arrangement that half survives a reload is worse than one that does not,
-  // and collapsing a group is how a long session rail is made readable at all.
-  const [collapsed, setCollapsed] = usePersistentState<string[]>(
-    "horsie.session-groups-collapsed",
-    [],
-    {
-      deserialize: (raw) =>
-        Array.isArray(raw) && raw.every((x) => typeof x === "string")
-          ? (raw as string[])
-          : undefined,
-    },
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [filterText, setFilterText] = useState("");
+
+  const tags = useMemo(() => allTags(sessions ?? []), [sessions]);
+  // Read through the live universe: a constraint naming a tag whose last
+  // session was deleted would hide the rail with no visible cause, because the
+  // chip that would explain it is not rendered either.
+  const filter = useMemo(
+    () => reconcileFilter(savedFilter, tags),
+    [savedFilter, tags],
   );
-  const [filter, setFilter] = useState("");
-  const groups = useMemo(
-    () => unionGroups(registeredGroups ?? [], sessions ?? []),
-    [registeredGroups, sessions],
-  );
-  const ordered = useMemo(
-    () => reconcileOrder(savedOrder, groups),
-    [savedOrder, groups],
-  );
-  // Filtering happens before partitioning, so a group whose every session is
-  // filtered out disappears with them rather than sitting there empty.
-  const needle = filter.trim().toLowerCase();
-  const shown = useMemo(() => {
-    if (!needle) return sessions ?? [];
-    return (sessions ?? []).filter((s) =>
-      [sessionTitle(s.name), s.workflow ?? ""]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle),
-    );
-  }, [sessions, needle]);
-  const parts = useMemo(
-    () => partitionSessions(shown, groups),
-    [shown, groups],
+
+  const needle = filterText.trim().toLowerCase();
+  const shown = useMemo(
+    () =>
+      (sessions ?? [])
+        .filter((s) => matchesTagFilter(s, filter))
+        .filter(
+          (s) =>
+            !needle ||
+            [sessionTitle(s.name), s.workflow ?? ""]
+              .join(" ")
+              .toLowerCase()
+              .includes(needle),
+        ),
+    [sessions, filter, needle],
   );
   const navigate = useNavigate();
-
-  const submitGroup = () => {
-    const name = newGroupName.trim();
-    if (!name) return;
-    createGroup.mutate(name);
-    setAddingGroup(false);
-  };
 
   return (
     <aside className="flex h-full w-[17.5rem] shrink-0 flex-col border-r bg-panel">
@@ -162,21 +147,27 @@ export function Sidebar() {
           dead feed is visible before you click anything. Height is shared with
           the session and task-panel headers so the three columns line up. */}
       <div className="flex h-[3.25rem] shrink-0 items-center gap-2.5 border-b px-4">
-        <span
-          aria-hidden
-          className="flex h-6 w-6 items-center justify-center rounded-[4px] bg-orange font-mono text-[0.8125rem] font-bold text-orange-ink shadow-[var(--cap-lift)]"
+        <Link
+          to="/"
+          data-testid="home-link"
+          className="-mx-1 flex min-w-0 items-center gap-2.5 rounded-[var(--radius-control)] px-1 py-0.5 transition-colors hover:bg-raised"
         >
-          h
-        </span>
-        <span className="font-mono text-[0.8125rem] font-semibold tracking-[0.16em] text-legend">
-          HORSIE
-        </span>
-        {/* Only the fault state earns a place here. "N running" restated what
-            every session row below already carries in its own status dot and
-            word, and "Ready" labelled the absence of news. A dead server link
-            is the one thing that is visible nowhere else — without it the
-            first symptom is an empty session list that looks like an account
-            with no sessions. */}
+          <span
+            aria-hidden
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] bg-orange font-mono text-[0.8125rem] font-bold text-orange-ink shadow-[var(--cap-lift)]"
+          >
+            h
+          </span>
+          <span className="font-mono text-[0.8125rem] font-semibold tracking-[0.16em] text-legend">
+            HORSIE
+          </span>
+        </Link>
+        {/* Only the fault state earns a place here, and it stays outside the
+            link: it is status, not a destination. "N running" restated what
+            every session row below already carries, and "Ready" labelled the
+            absence of news. A dead server link is visible nowhere else —
+            without it the first symptom is an empty session list that looks
+            like an account with no sessions. */}
         {isError && (
           <span
             className="ml-auto flex shrink-0 items-center gap-2 text-red-ink"
@@ -216,23 +207,30 @@ export function Sidebar() {
         />
       </div>
 
-      {/* The + is the only session control here, so it carries the row's
-          right edge; the group action sits to its left. */}
       <div className="flex items-center justify-between pb-1.5 pl-4 pr-2 pt-4">
         <span className="legend">Sessions</span>
         <div className="flex items-center gap-0.5">
-          <button
-            className="key-icon !h-6 !w-6"
-            onClick={() => {
-              setNewGroupName("");
-              setAddingGroup(true);
-            }}
-            data-testid="new-group-button"
-            title="Create a group"
-            aria-label="Create a group"
-          >
-            <FolderPlus size={14} aria-hidden />
-          </button>
+          {/* Nothing to filter by until a tag exists, and an empty panel
+              behind a button is a control with no job. */}
+          {tags.length > 0 && (
+            <button
+              className={cn(
+                "key-icon !h-6 !w-6",
+                // A filtered list must never look like the whole list: the one
+                // failure mode of a collapsible filter is a short rail read as
+                // an account that has lost its sessions.
+                filterIsActive(filter) &&
+                  "!bg-raised !text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
+              )}
+              onClick={() => setPanelOpen((v) => !v)}
+              aria-expanded={panelOpen}
+              data-testid="tag-filter-button"
+              title="Filter by tag"
+              aria-label="Filter by tag"
+            >
+              <ListFilter size={14} aria-hidden />
+            </button>
+          )}
           <button
             className="key-icon !h-6 !w-6"
             onClick={() => navigate("/")}
@@ -245,18 +243,26 @@ export function Sidebar() {
         </div>
       </div>
 
+      {panelOpen && tags.length > 0 && (
+        <TagFilterPanel
+          tags={tags}
+          filter={filter}
+          onChange={setSavedFilter}
+        />
+      )}
+
       {/* Only once there is enough to search. Below that the box is a control
           with nothing to do, taking rail height from the list itself — but it
           stays once it holds a filter, or deleting down to eight sessions
           would strand one with no way to clear it. */}
-      {((sessions?.length ?? 0) > 8 || filter !== "") && (
+      {((sessions?.length ?? 0) > 8 || filterText !== "") && (
         <div className="px-2 pb-1.5">
           <input
             className="w-full rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none placeholder:text-faint focus:border-[var(--rule-strong)]"
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
+            value={filterText}
+            onChange={(e) => setFilterText(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setFilter("");
+              if (e.key === "Escape") setFilterText("");
             }}
             placeholder="Filter sessions…"
             aria-label="Filter sessions"
@@ -276,93 +282,53 @@ export function Sidebar() {
             reload.
           </p>
         )}
-        {/* Only when there is nothing at all to show. With a group present the
-            sections speak for themselves, and the invitation would compete with
-            them. */}
-        {!isLoading && !isError && sessions?.length === 0 && !groups.length && (
+        {!isLoading && !isError && sessions?.length === 0 && (
           <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
             No sessions yet. Press <span className="text-legend">+</span> to
             start one.
           </p>
         )}
-        {/* Enter and Escape still work, but they were the *only* way out: the
-            box had no visible commit and no visible way to back out of one you
-            opened by mistake. */}
-        {addingGroup && (
-          <div className="mx-1 mb-1 flex items-center gap-1">
-            <input
-              data-testid="group-name-input"
-              className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none focus:border-[var(--rule-strong)]"
-              placeholder="Group name"
-              value={newGroupName}
-              autoFocus
-              onChange={(e) => setNewGroupName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitGroup();
-                else if (e.key === "Escape") setAddingGroup(false);
-              }}
-            />
-            <button
-              type="button"
-              className="key key-go !h-7 !w-7 !p-0"
-              disabled={newGroupName.trim() === ""}
-              onClick={submitGroup}
-              data-testid="create-group-confirm"
-              title="Create group"
-              aria-label="Create group"
-            >
-              <Check size={14} aria-hidden />
-            </button>
-            <button
-              type="button"
-              className="key-icon !h-7 !w-7"
-              onClick={() => setAddingGroup(false)}
-              data-testid="create-group-cancel"
-              title="Cancel"
-              aria-label="Cancel"
-            >
-              <X size={14} aria-hidden />
-            </button>
-          </div>
-        )}
-        {/* A filter that matches nothing has to say so, or it reads as an
-            account whose sessions have gone. */}
-        {!isLoading && !isError && needle !== "" && shown.length === 0 && (
-          <p className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint">
-            No session matches “{filter.trim()}”.
-          </p>
-        )}
+        {/* Two filters narrow one list, so an empty result has to name the one
+            that emptied it. Otherwise a filtered rail reads as a lost account. */}
         {!isLoading &&
           !isError &&
-          ordered
-            // While filtering, a section with no surviving rows is noise.
-            .filter((g) => needle === "" || (parts.get(g)?.length ?? 0) > 0)
-            .map((g) => (
-              <SessionGroupSection
-                key={g}
-                name={g}
-                sessions={parts.get(g) ?? []}
-                groups={groups}
-                ungrouped={g === UNGROUPED}
-                // A filter that hides its matches inside a collapsed group has
-                // found nothing as far as the user is concerned.
-                collapsed={needle === "" && collapsed.includes(g)}
-                onToggleCollapsed={() =>
-                  setCollapsed(
-                    collapsed.includes(g)
-                      ? collapsed.filter((x) => x !== g)
-                      : [...collapsed, g],
-                  )
-                }
-                // Until a group exists there is nothing to be un-grouped from,
-                // so the Ungrouped header would be a label with no job — and
-                // grouping chrome nobody asked for. The rows render bare, and
-                // the header appears the moment the first group does.
-                bare={g === UNGROUPED && groups.length === 0}
-                order={ordered}
-                onReorder={setSavedOrder}
-              />
-            ))}
+          shown.length === 0 &&
+          (sessions?.length ?? 0) > 0 &&
+          (needle !== "" ? (
+            <p
+              className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
+              data-testid="no-text-matches"
+            >
+              No session matches “{filterText.trim()}”.
+            </p>
+          ) : (
+            <p
+              className="px-2.5 py-8 text-[0.8125rem] leading-relaxed text-faint"
+              data-testid="no-tag-matches"
+            >
+              No session matches these tags.
+            </p>
+          ))}
+        {!isLoading &&
+          !isError &&
+          shown.map((s) => (
+            <div key={s.id}>
+              <SessionRow s={s} tags={tags} />
+              {/* Forks nest under the conversation they branched from. Built
+                  from the flat, parent-linked list the registry holds, so
+                  listing sessions still loads none of them. */}
+              {forkTree(s.forks).map(({ fork, depth, rails, last }) => (
+                <ForkRow
+                  key={fork.id}
+                  sessionId={s.id}
+                  fork={fork}
+                  depth={depth}
+                  rails={rails}
+                  last={last}
+                />
+              ))}
+            </div>
+          ))}
       </nav>
 
       <div className="flex items-center gap-0.5 border-t px-1.5 py-2">
