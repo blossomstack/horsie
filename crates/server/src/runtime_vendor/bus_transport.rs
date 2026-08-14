@@ -150,8 +150,10 @@ impl RuntimeTransport for BusTransport {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::bus::MemoryBus;
-    use horsie_models::runtime::{BashInput, ToolCall, ToolCallResponse, ToolOutput, ToolResult};
+    use crate::bus::{MemoryBus, Reader};
+    use horsie_models::runtime::{
+        BashInput, ToolCall, ToolCallRequest, ToolCallResponse, ToolOutput, ToolResult,
+    };
     use uuid::Uuid;
 
     const ACCOUNT: &str = "acct-1";
@@ -288,5 +290,87 @@ mod tests {
                 .is_err(),
             "another account's sandbox must never answer this account's call"
         );
+    }
+
+    /// The next thing the pump sees, or a failure rather than a hang.
+    async fn seen(pump: &mut Reader<RuntimeInboundMessage>) -> RuntimeInboundMessage {
+        tokio::time::timeout(std::time::Duration::from_secs(5), pump.recv())
+            .await
+            .expect("the pump must receive what was published")
+            .expect("the subscription must stay open")
+    }
+
+    /// `CancelCall` must not overtake the `ToolCall` it cancels.
+    ///
+    /// One socket preserved this for free; two publishes onto a topic need not.
+    /// The failure it guards is silent and permanent: a cancel that lands first
+    /// names a call the runtime has not started, so there is nothing to stop and
+    /// it is discarded — and then the call arrives and runs to completion, after
+    /// the turn that wanted it dead has already been torn down.
+    ///
+    /// Both messages leave through the same `inbound.publish`, so what is under
+    /// test is the topic, not `relay` or `send_oneway`. The call is fired with
+    /// `send_oneway` rather than by spawning an `invoke` on purpose: a spawned
+    /// relay may not have reached its publish when the cancel goes out, which
+    /// would leave the test racing its own setup instead of the bus.
+    async fn a_cancel_never_overtakes_its_call_over(bus: Arc<dyn Bus>) {
+        let session = Uuid::new_v4().to_string();
+        let mut pump = topics::runtime_in(bus.clone(), ACCOUNT, &session, "1")
+            .subscribe()
+            .await
+            .unwrap();
+        let transport = BusTransport::open(bus, ACCOUNT, &session, "1")
+            .await
+            .unwrap();
+
+        // Repeated because a reordering would be intermittent rather than
+        // systematic — a single pass says nothing about a bus that reorders
+        // occasionally, which is the only way this bug would ever present.
+        for i in 0..100 {
+            let call_id = format!("c{i}");
+            transport
+                .send_oneway(RuntimeInboundMessage::ToolCall(ToolCallRequest {
+                    call_id: call_id.clone(),
+                    agent_id: "a1".to_string(),
+                    call: bash(),
+                }))
+                .await
+                .unwrap();
+            transport.cancel(&call_id).await.unwrap();
+
+            let first = seen(&mut pump).await;
+            assert!(
+                matches!(&first, RuntimeInboundMessage::ToolCall(req) if req.call_id == call_id),
+                "iteration {i}: expected the call first, got {first:?}"
+            );
+            let second = seen(&mut pump).await;
+            assert!(
+                matches!(&second, RuntimeInboundMessage::CancelCall(req) if req.call_id == call_id),
+                "iteration {i}: expected the cancel second, got {second:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancel_never_overtakes_the_call_it_cancels() {
+        a_cancel_never_overtakes_its_call_over(Arc::new(MemoryBus::new())).await;
+    }
+
+    /// And over the bus a deployment actually runs. `MemoryBus` is a
+    /// `broadcast` channel, which orders sends by construction, so the
+    /// in-process case cannot fail for the reason this guards — it is Redis, a
+    /// second process reached over a multiplexed connection, where "same
+    /// publisher, so it very likely holds" was the assumption worth checking.
+    #[tokio::test]
+    async fn a_cancel_never_overtakes_the_call_it_cancels_over_redis() {
+        let Some(url) = std::env::var("HORSIE_TEST_REDIS_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+        else {
+            eprintln!("skipped: HORSIE_TEST_REDIS_URL is not set");
+            return;
+        };
+        let bus = crate::bus::open(Some(&url)).await.expect("open redis bus");
+        a_cancel_never_overtakes_its_call_over(bus).await;
     }
 }
