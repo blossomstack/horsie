@@ -202,7 +202,7 @@ pub async fn get_session(
 /// reason that module's tests give: this layer's job is one projection and no
 /// derivation, and a projection that cannot be called without a running
 /// supervisor cannot be tested at the level it is written.
-pub(crate) fn detail(
+fn detail(
     id: &str,
     rec: &SessionRecord,
     snapshot: Option<&crate::sessions::session_actor::SessionSnapshot>,

@@ -64,6 +64,25 @@ Beside the composer:
   right shows it live. The key that opens it lights once there is a plan
   behind it.
 
+## See its shape
+
+The key beside the session name swaps the transcript for a **timeline**: the
+same session drawn along one axis instead of down a page. Use it to find where
+the time went, or to see what a session delegated without scrolling for it.
+
+The top lane is the main agent, one bar per entry — what you said, what it
+thought, each tool call, each answer — coloured by kind and as wide as it took.
+Subagents and forked conversations get their own lanes below, each starting at
+the moment it branched off. Click a bar to jump back to that entry in the
+transcript; click a lane to open that agent.
+
+Two things about the axis are worth knowing. Idle stretches longer than a
+minute collapse to a narrow hatched gutter labelled with what they swallowed,
+so a session you left overnight is still readable. And a single very long bar
+is drawn short, with a dashed right edge — hover it for the real duration.
+
+The view is in the address bar, so a link to it opens on the timeline.
+
 ## Answer a question
 
 An agent can pause and ask you something. A question card appears in the

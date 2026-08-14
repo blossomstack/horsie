@@ -194,7 +194,12 @@ export function SessionView() {
   // state: a view of a session is a thing you send someone, and it should
   // survive a reload.
   const [searchParams, setSearchParams] = useSearchParams();
-  const timelineOpen = searchParams.get("view") === "timeline";
+  // Only on the session's own page. Scoped to one agent — a subagent, a fork, a
+  // workflow step — the transcript below is that agent's, while the roster is
+  // still the whole session's: the map would label the open agent "main agent"
+  // and draw its siblings hanging off it. A run already has its graph, which is
+  // the structural view for a run.
+  const timelineOpen = !agentId && searchParams.get("view") === "timeline";
   const showTimeline = (on: boolean) =>
     setSearchParams(
       (prev) => {
@@ -468,16 +473,18 @@ export function SessionView() {
             {/* Beside the title rather than in the key cluster on the right:
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}
-            <button
-              className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
-              onClick={() => showTimeline(!timelineOpen)}
-              aria-pressed={timelineOpen}
-              title={timelineOpen ? "Show the transcript" : "Show the timeline"}
-              aria-label="Toggle the session timeline"
-              data-testid="timeline-toggle"
-            >
-              <ChartNoAxesGantt size={15} aria-hidden />
-            </button>
+            {!agentId && (
+              <button
+                className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
+                onClick={() => showTimeline(!timelineOpen)}
+                aria-pressed={timelineOpen}
+                title={timelineOpen ? "Show the transcript" : "Show the timeline"}
+                aria-label="Toggle the session timeline"
+                data-testid="timeline-toggle"
+              >
+                <ChartNoAxesGantt size={15} aria-hidden />
+              </button>
+            )}
             {status && <StatusBadge status={status} />}
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript
