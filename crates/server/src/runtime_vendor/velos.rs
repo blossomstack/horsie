@@ -30,7 +30,7 @@ use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use horsie_runtime_host::{
-    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
+    RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -96,8 +96,6 @@ pub struct VelosRuntimeVendor<A: ContainerApi> {
     /// delete one that will never connect.
     api: Arc<A>,
     settings: VelosSettings,
-    /// Where this account's runtimes land when they dial back.
-    connected: Arc<ConnectedRuntimeRegistry>,
 }
 
 impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
@@ -105,13 +103,11 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         name: String,
         api: Arc<A>,
         settings: VelosSettings,
-        connected: Arc<ConnectedRuntimeRegistry>,
-    ) -> Self {
+        ) -> Self {
         Self {
             name,
             api,
             settings,
-            connected,
         }
     }
 
@@ -187,90 +183,6 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         Ok(())
     }
 
-    /// Wait for the dial-back, then report `Ready` on the sink.
-    ///
-    /// Spawned only after the calling operation has returned, which is the
-    /// ordering rule the vendor contract requires: the return value is the
-    /// caller's first observation, and nothing may precede it.
-    fn finish_in_background(
-        &self,
-        runtime_id: &str,
-        waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
-        progress: RuntimeProgressSink,
-    ) {
-        let api = self.api.clone();
-        let connected = self.connected.clone();
-        let id = runtime_id.to_string();
-        tokio::spawn(async move {
-            let outcome = await_dial_back(api.as_ref(), &id, waiter).await;
-            let event = match outcome {
-                Ok(()) => match connected.runtime_transport(&id).await {
-                    Some(transport) => RuntimeProgress::Ready(transport),
-                    None => RuntimeProgress::Gone {
-                        reason: "the runtime announced itself and then vanished".to_string(),
-                    },
-                },
-                Err(reason) => {
-                    // The container is not coming back, and leaving it costs a
-                    // slot on a worker for nothing.
-                    let _ = api.delete_container(&container_name(&id)).await;
-                    connected.remove(&id).await;
-                    RuntimeProgress::Gone { reason }
-                }
-            };
-            let _ = progress.try_send(RuntimeEvent {
-                runtime_id: id,
-                progress: event,
-            });
-        });
-    }
-}
-
-/// Race the dial-back against the deadline and against the container dying.
-///
-/// Free rather than a method because the background wait outlives the call that
-/// started it, and only needs the API.
-async fn await_dial_back<A: ContainerApi + ?Sized>(
-    api: &A,
-    runtime_id: &str,
-    waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
-) -> Result<(), String> {
-    {
-        let name = container_name(runtime_id);
-        tokio::pin!(waiter);
-        let deadline = tokio::time::sleep(READY_WINDOW);
-        tokio::pin!(deadline);
-        let mut poll =
-            tokio::time::interval_at(tokio::time::Instant::now() + PHASE_POLL, PHASE_POLL);
-        loop {
-            tokio::select! {
-                res = &mut waiter => {
-                    return match res {
-                        Ok(Ok(())) => Ok(()),
-                        Ok(Err(message)) => Err(message),
-                        Err(_) => Err(
-                            "nothing is waiting for this runtime any more".to_string()
-                        ),
-                    };
-                }
-                () = &mut deadline => {
-                    return Err("the runtime never dialed back".to_string());
-                }
-                _ = poll.tick() => {
-                    // Only a *dead* phase ends the wait. `Unknown` is a worker
-                    // whose lease went briefly stale, and treating it as death
-                    // would destroy a container that was about to connect.
-                    if let Ok(Some(phase)) = api.container_phase(&name).await
-                        && phase.is_dead()
-                    {
-                        return Err(format!(
-                            "the container reached {phase:?} before connecting"
-                        ));
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[async_trait]
@@ -317,13 +229,10 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         spec: &RuntimeSpec,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        // Registered BEFORE the container is scheduled. A container that boots
-        // and dials back faster than this call returns would otherwise find
-        // nobody waiting, and the acquisition would hang until its window
-        // expired.
-        let waiter = self.connected.notify_when_ready(runtime_id).await;
         self.schedule(runtime_id, spec).await?;
-        self.finish_in_background(runtime_id, waiter, progress);
+        // Nothing is waited on here: whether the runtime came up is its own
+        // report on its out topic, and the acquiring node is subscribed to it.
+        let _ = progress;
         Ok(RuntimeProgress::Starting {
             detail: "the container is being scheduled".to_string(),
         })
@@ -333,13 +242,10 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
+        provisioning: bool,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
         let _ = spec;
-        if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
-            return Ok(RuntimeProgress::Ready(transport));
-        }
-
         // Not connected is not the same as not there, and conflating them was
         // expensive: `schedule` deletes before it creates, so a `get` that
         // rescheduled whenever the runtime was merely not connected yet
@@ -348,17 +254,18 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         // interval could never converge.
         //
         // Two things say the runtime is on its way. A live phase means the
-        // container exists and is coming up. A pending waiter means a create is
-        // already watching for the dial-back, and this acquisition joins that
-        // wait rather than starting a rival container.
+        // container exists and is coming up. And the caller telling us a create
+        // is still outstanding covers the window before the substrate reports
+        // one at all — a fact the session's own journalled status knows and no
+        // node-local table can be trusted for once a session may be acquired
+        // from a node that never ran its create.
         let alive = self
             .api
             .container_phase(&container_name(runtime_id))
             .await?
             .is_some_and(|phase| !phase.is_dead());
-        if alive || self.connected.is_awaited(runtime_id).await {
-            let waiter = self.connected.notify_when_ready(runtime_id).await;
-            self.finish_in_background(runtime_id, waiter, progress);
+        if alive || provisioning {
+            let _ = progress;
             return Ok(RuntimeProgress::Starting {
                 detail: "the container is up; waiting for it to dial back".to_string(),
             });
@@ -385,14 +292,12 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         // workspace and everything in flight to save a slot on a worker.
         // Keeping the runtime running costs compute; the alternative costs the
         // user's work.
-        Ok(match self.connected.runtime_transport(runtime_id).await {
-            Some(transport) => RuntimeProgress::Ready(transport),
-            // Never `Stopped`: nothing was stopped. The container was left
-            // exactly as it was, and a later `get` is what discovers whether it
-            // is still coming up or gone.
-            None => RuntimeProgress::Starting {
-                detail: "velos cannot suspend; the container was left as it is".to_string(),
-            },
+        // Never `Stopped`: nothing was stopped. The container was left exactly
+        // as it was, and a later `get` is what discovers whether it is still
+        // coming up or gone.
+        let _ = runtime_id;
+        Ok(RuntimeProgress::Starting {
+            detail: "velos cannot suspend; the container was left as it is".to_string(),
         })
     }
 
@@ -404,7 +309,6 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         self.api
             .delete_container(&container_name(runtime_id))
             .await?;
-        self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Gone {
             reason: "the owning session was deleted".to_string(),
         })
@@ -495,7 +399,6 @@ mod tests {
                 },
                 connected.clone(),
             )),
-            connected,
         )
     }
 

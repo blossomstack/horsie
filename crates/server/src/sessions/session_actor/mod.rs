@@ -489,6 +489,12 @@ impl SessionActor {
                     .provisioned_at_ms
                     .map(|at| at.to_string())
                     .unwrap_or_default(),
+                // A create is still outstanding. The journal is the only thing
+                // that knows, and it has to say so: a substrate that has not
+                // reported the object yet is indistinguishable from one with
+                // nothing there, and the difference is between waiting for a
+                // runtime and declaring it gone.
+                matches!(state.status, SessionStatus::Provisioning),
                 self.spec().vendor.clone(),
                 self.spec().clone(),
             ),

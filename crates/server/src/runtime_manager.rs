@@ -24,6 +24,7 @@
 use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
 use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
+use horsie_models::runtime::RuntimeOutboundMessage;
 use horsie_runtime_host::RuntimeClient;
 use std::sync::Arc;
 
@@ -62,6 +63,27 @@ pub struct RuntimeDeps {
     /// The account whose runtimes these are. Travels in the dial token so the
     /// route that accepts the dial knows which secret to check it against.
     pub account: String,
+    /// How a runtime is reached once it has dialled in.
+    ///
+    /// Here rather than in each vendor because *which* node accepted the dial
+    /// is not a vendor's business, and a topic name contains no node. A vendor
+    /// brings the substrate up; the manager is what waits for the runtime on it
+    /// and hands back something to talk to.
+    pub bus: Arc<dyn crate::bus::Bus>,
+}
+
+/// What ended one turn of the acquisition wait.
+///
+/// Named rather than expressed as nested `Option`s because the two sources mean
+/// genuinely different things: one is the substrate's opinion of the machine,
+/// the other is the runtime speaking for itself.
+enum Awaited {
+    /// The vendor said something about the substrate, or stopped saying anything.
+    Substrate(Option<horsie_runtime_host::RuntimeEvent>),
+    /// The runtime announced itself on its out topic.
+    Dialled,
+    /// The runtime came up, ran its provision steps, and failed them.
+    ProvisionFailed(String),
 }
 
 /// How many progress reports may queue before the oldest are dropped.
@@ -300,23 +322,33 @@ impl RuntimeManager {
         incarnation: &str,
         vendor: &str,
         spec: &SessionSpec,
+        provisioning: bool,
         narrate: Option<NarrationSink>,
     ) -> Result<RuntimeClient, RuntimeError> {
         let link = self.vendor(vendor)?;
+        // Subscribed before the vendor is asked for anything. A runtime that is
+        // already up answers the moment it is spoken to, and the bus keeps
+        // nothing for a subscriber that has not arrived yet — so a subscription
+        // opened after the `get` would miss the `Ready` it exists to wait for.
+        let mut dialled = crate::bus::topics::runtime_out(self.deps.bus.clone(), session, incarnation)
+            .subscribe()
+            .await
+            .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
         // The receiver is held for the whole acquisition, not dropped on the
         // way out. A vendor whose substrate has to boot a machine answers
-        // `Starting` and finishes on this sink — so dropping it closed the one
-        // channel the eventual `Ready` had to arrive on, and every Fly or velos
-        // acquisition failed as "not reachable yet" no matter how long the
-        // runtime had been up.
+        // `Starting` and reports what became of the *substrate* on this sink —
+        // so dropping it loses the `Gone` that says the machine will never come
+        // up at all.
         let (progress, mut rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
         let rt_spec = self.runtime_spec(session, incarnation, spec).await?;
         let first = link
-            .get(session, &rt_spec.to_wire(), progress)
+            .get(session, &rt_spec.to_wire(), provisioning, progress)
             .await
             .map_err(Self::vendor_error)?;
-        let handle = Self::await_ready(session, first, &mut rx, narrate.as_ref()).await?;
-        Ok(Self::client(session, handle))
+        let transport = self
+            .await_ready(session, incarnation, first, &mut rx, &mut dialled, narrate.as_ref())
+            .await?;
+        Ok(Self::client(session, transport))
     }
 
     fn vendor_error(e: RuntimeVendorError) -> RuntimeError {
@@ -342,11 +374,15 @@ impl RuntimeManager {
     /// can sit here for minutes, and the vendor is describing the wait — first
     /// in the value it returned, then on the sink — the entire time.
     async fn await_ready(
+        &self,
         session: &str,
+        incarnation: &str,
         first: horsie_runtime_host::RuntimeProgress,
         rx: &mut tokio::sync::mpsc::Receiver<horsie_runtime_host::RuntimeEvent>,
+        dialled: &mut crate::bus::Reader<horsie_models::runtime::RuntimeOutboundMessage>,
         narrate: Option<&NarrationSink>,
     ) -> Result<Arc<dyn horsie_runtime_host::RuntimeTransport>, RuntimeError> {
+        use Awaited::{Dialled, ProvisionFailed, Substrate};
         use horsie_runtime_host::RuntimeProgress as P;
         let deadline = tokio::time::Instant::now() + ACQUIRE_WINDOW;
         let mut progress = first;
@@ -360,7 +396,10 @@ impl RuntimeManager {
                 let _ = sink.try_send(line);
             }
             match progress {
-                P::Ready(handle) => return Ok(handle),
+                // A vendor that hands back a pipe owns one: `horsie connect`
+                // relays its runtimes through its own link rather than having
+                // them dial this server, so there is no topic to wait on.
+                P::Ready(transport) => return Ok(transport),
                 // Terminal, and the reason travels: a session whose runtime is
                 // gone has to be able to say so rather than retry forever.
                 P::Gone { reason } => return Err(RuntimeError::Gone(reason)),
@@ -373,14 +412,53 @@ impl RuntimeManager {
                 }
                 P::Requested | P::Starting { .. } | P::Provisioning { .. } => {}
             }
-            let event = tokio::time::timeout_at(deadline, rx.recv()).await;
-            progress = match event {
-                Ok(Some(event)) if event.runtime_id == session => event.progress,
-                Ok(Some(_)) => continue,
+            // Two things can end this wait, and they come from different
+            // places. The vendor reports on the *substrate* — a machine that
+            // will never boot is a `Gone` nothing else would ever say. The
+            // runtime reports on *itself*, by dialling in and announcing
+            // `Ready` on its out topic, which is the only evidence that
+            // something is actually there to talk to.
+            let next = tokio::time::timeout_at(deadline, async {
+                loop {
+                    tokio::select! {
+                        event = rx.recv() => return Substrate(event),
+                        message = dialled.recv() => {
+                            match message {
+                                // Everything the runtime says crosses this
+                                // topic, so most frames here are replies to
+                                // somebody else's request. Only the handshake
+                                // ends the wait.
+                                Some(RuntimeOutboundMessage::Ready(_)) => return Dialled,
+                                Some(RuntimeOutboundMessage::ProvisionFailed(ev)) => {
+                                    return ProvisionFailed(ev.message);
+                                }
+                                Some(_) => continue,
+                                None => return Substrate(None),
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            progress = match next {
+                Ok(Dialled) => {
+                    let transport = crate::runtime_vendor::BusTransport::open(
+                        self.deps.bus.clone(),
+                        session,
+                        incarnation,
+                    )
+                    .await
+                    .map_err(|e| RuntimeError::Unavailable(e.to_string()))?;
+                    return Ok(Arc::new(transport));
+                }
+                Ok(ProvisionFailed(message)) => return Err(RuntimeError::Provision(message)),
+                Ok(Substrate(Some(event))) if event.runtime_id == session => event.progress,
+                Ok(Substrate(Some(_))) => continue,
                 // The vendor dropped the sink without ever reporting an
                 // outcome. Retryable rather than terminal: it says nothing
                 // about the runtime, only about the vendor.
-                Ok(None) => {
+                Ok(Substrate(None)) => {
                     return Err(RuntimeError::Unavailable(format!(
                         "the vendor stopped reporting on runtime '{session}'"
                     )));
@@ -437,6 +515,7 @@ impl RuntimeManager {
         self: &Arc<Self>,
         session: String,
         incarnation: String,
+        provisioning: bool,
         vendor: String,
         spec: SessionSpec,
     ) -> RuntimeClientProvider {
@@ -444,6 +523,7 @@ impl RuntimeManager {
             manager: self.clone(),
             session,
             incarnation,
+            provisioning,
             vendor,
             spec,
         }
@@ -459,6 +539,13 @@ pub struct RuntimeClientProvider {
     /// built rather than read per call, so every acquisition in one run
     /// addresses the same sandbox even if the session re-provisions beneath it.
     incarnation: String,
+    /// Whether this session's create was still outstanding when the provider
+    /// was built.
+    ///
+    /// Bound here rather than read per call, exactly as the incarnation is: a
+    /// run's acquisitions all speak about the same attempt, and a vendor asked
+    /// mid-run must not be told a create finished while it was waiting for it.
+    provisioning: bool,
     vendor: String,
     /// Held so an acquisition can carry the spec: the server is the only
     /// durable holder of it, and a vendor keeps no copy on disk.
@@ -477,6 +564,7 @@ impl RuntimeClientProvider {
                 &self.incarnation,
                 &self.vendor,
                 &self.spec,
+                self.provisioning,
                 narrate,
             )
             .await
@@ -496,6 +584,7 @@ pub(crate) fn test_runtime_manager(
             plugins: None,
             dial_secret: std::sync::Arc::new(b"test-dial-secret".to_vec()),
             account: "test-account".to_string(),
+            bus: std::sync::Arc::new(crate::bus::MemoryBus::new()),
         },
     ))
 }
@@ -550,6 +639,7 @@ mod tests {
             plugins: None,
             dial_secret: Arc::new(DIAL_SECRET.to_vec()),
             account: "acct-1".to_string(),
+            bus: std::sync::Arc::new(crate::bus::MemoryBus::new()),
         }))
     }
 
@@ -619,7 +709,7 @@ mod tests {
     async fn unavailable_when_the_vendor_name_is_not_registered() {
         let m = manager(Arc::new(RwLock::new(HashMap::new())));
         let Err(err) = m
-            .get("s1", "i1", "nope", &SessionSpec::for_vendor("v"), None)
+            .get("s1", "i1", "nope", &SessionSpec::for_vendor("v"), false, None)
             .await
         else {
             panic!("an unregistered vendor must not yield a client")
@@ -642,7 +732,7 @@ mod tests {
         let mut err = None;
         for _ in 0..50 {
             match m
-                .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+                .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
                 .await
             {
                 Err(RuntimeError::Unavailable(e)) => {
@@ -663,7 +753,7 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let Err(err) = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
         else {
             panic!("a get must never provision")
@@ -684,7 +774,7 @@ mod tests {
         m.create("s1", "i1", "v", &session_spec("v"))
             .await
             .expect("create");
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
             .expect("get after create");
         assert_eq!(
@@ -780,6 +870,7 @@ mod tests {
             plugins: Some(Arc::new(FakeProvisioner)),
             dial_secret: Arc::new(DIAL_SECRET.to_vec()),
             account: "acct-1".to_string(),
+            bus: std::sync::Arc::new(crate::bus::MemoryBus::new()),
         }));
         let mut spec = session_spec("v");
         spec.plugins = vec!["superpowers".to_string()];
@@ -849,6 +940,7 @@ mod tests {
             plugins: None,
             dial_secret: Arc::new(DIAL_SECRET.to_vec()),
             account: "acct-1".to_string(),
+            bus: std::sync::Arc::new(crate::bus::MemoryBus::new()),
         }));
         let mut spec = session_spec("v");
         spec.provision
@@ -958,6 +1050,7 @@ mod tests {
             &self,
             runtime_id: &str,
             _spec: &horsie_models::runtime_vendor::RuntimeSpec,
+            _provisioning: bool,
             progress: horsie_runtime_host::RuntimeProgressSink,
         ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
             let outcome = std::mem::take(&mut *self.outcome.lock().unwrap());
@@ -1011,7 +1104,7 @@ mod tests {
     async fn an_acquisition_follows_a_booting_runtime_to_ready() {
         let vendor = BootingVendor::ready();
         let m = manager(published_vendor(vendor));
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
             .expect("a runtime that comes up on the sink must be handed back");
     }
@@ -1026,7 +1119,7 @@ mod tests {
         });
         let m = manager(published_vendor(vendor));
         let Err(err) = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
         else {
             panic!("a runtime reported gone must not yield a client")
@@ -1043,7 +1136,7 @@ mod tests {
     async fn a_vendor_that_stops_reporting_leaves_the_session_recoverable() {
         let m = manager(published_vendor(BootingVendor::silent()));
         let Err(err) = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), None)
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
             .await
         else {
             panic!("a silent vendor must not yield a client")
@@ -1101,7 +1194,7 @@ mod tests {
         ]);
         let m = manager(published_vendor(vendor));
         let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, Some(tx))
             .await
             .expect("get");
 
@@ -1132,7 +1225,7 @@ mod tests {
         )));
         let (tx, mut rx) = tokio::sync::mpsc::channel(NARRATION_BUFFER);
         let _ = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), Some(tx))
+            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, Some(tx))
             .await;
         let mut said = Vec::new();
         while let Ok(line) = rx.try_recv() {

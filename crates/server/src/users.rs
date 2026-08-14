@@ -246,6 +246,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
             dial_secret: opened.dial_secret.clone(),
             account: user.as_str().to_string(),
+            bus: shared.bus.clone(),
         },
     ));
     let deps = ServerDeps {

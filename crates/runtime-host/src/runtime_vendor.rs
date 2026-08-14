@@ -215,10 +215,19 @@ pub trait RuntimeVendor: Send + Sync {
     /// Never provisions from nothing: an acquisition that silently built a
     /// fresh workspace would destroy work the user believes is still there.
     /// Carries the spec because the server is its only durable holder.
+    ///
+    /// `provisioning` says a create for this runtime is still outstanding. It
+    /// is a parameter rather than something a vendor looks up because the only
+    /// party that knows is the session, which journalled the attempt — and a
+    /// node-local table cannot answer it at all once a session may be acquired
+    /// from a node that never ran its create. A substrate that reports nothing
+    /// yet is indistinguishable from one with nothing there, and the difference
+    /// decides between waiting and declaring the runtime gone.
     async fn get(
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
+        provisioning: bool,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError>;
 
@@ -375,6 +384,7 @@ mod tests {
             &self,
             runtime_id: &str,
             spec: &RuntimeSpec,
+            provisioning: bool,
             progress: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
             self.create(runtime_id, spec, progress).await

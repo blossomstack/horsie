@@ -20,7 +20,7 @@ use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
 use horsie_runtime_host::{
-    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
+    RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -187,8 +187,6 @@ pub struct FlyRuntimeVendor<A: FlyApi> {
     name: String,
     api: A,
     settings: FlySettings,
-    /// Where this account's runtimes land when they dial back.
-    connected: Arc<ConnectedRuntimeRegistry>,
 }
 
 impl<A: FlyApi> FlyRuntimeVendor<A> {
@@ -196,13 +194,11 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
         name: String,
         api: A,
         settings: FlySettings,
-        connected: Arc<ConnectedRuntimeRegistry>,
-    ) -> Self {
+        ) -> Self {
         Self {
             name,
             api,
             settings,
-            connected,
         }
     }
 
@@ -299,43 +295,6 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             mount: volume.map(|id| (id, self.settings.workspace_root.clone())),
         })
     }
-
-    /// Wait for the runtime to dial back, then report `Ready` on the sink.
-    ///
-    /// Spawned only after the calling operation has returned, which is the
-    /// ordering rule the vendor contract requires: the return value is the
-    /// caller's first observation, and nothing may precede it.
-    fn finish_in_background(
-        &self,
-        runtime_id: &str,
-        waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
-        progress: RuntimeProgressSink,
-    ) {
-        let connected = self.connected.clone();
-        let id = runtime_id.to_string();
-        tokio::spawn(async move {
-            let outcome = tokio::time::timeout(READY_WINDOW, waiter).await;
-            let event = match outcome {
-                Ok(Ok(Ok(()))) => match connected.runtime_transport(&id).await {
-                    Some(transport) => RuntimeProgress::Ready(transport),
-                    None => RuntimeProgress::Gone {
-                        reason: "the runtime announced itself and then vanished".to_string(),
-                    },
-                },
-                Ok(Ok(Err(message))) => RuntimeProgress::Gone { reason: message },
-                Ok(Err(_)) => RuntimeProgress::Gone {
-                    reason: "nothing is waiting for this runtime any more".to_string(),
-                },
-                Err(_) => RuntimeProgress::Gone {
-                    reason: "the runtime never dialed back".to_string(),
-                },
-            };
-            let _ = progress.try_send(RuntimeEvent {
-                runtime_id: id,
-                progress: event,
-            });
-        });
-    }
 }
 
 #[async_trait]
@@ -381,11 +340,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         spec: &RuntimeSpec,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        // Registered BEFORE the machine is asked for. A machine that boots and
-        // dials back faster than this call returns would otherwise find nobody
-        // waiting, and the acquisition would hang until its window expired.
-        let waiter = self.connected.notify_when_ready(runtime_id).await;
-
         let volume = if self.settings.volumes {
             Some(
                 self.api
@@ -399,7 +353,11 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             .create_machine(&self.spec_for(runtime_id, spec, volume)?)
             .await?;
 
-        self.finish_in_background(runtime_id, waiter, progress);
+        // Nothing is waited on here. Whether the runtime came up is the
+        // runtime's own report, announced on its out topic, and the acquiring
+        // node is subscribed to it — this vendor's job ends once the substrate
+        // has accepted the machine.
+        let _ = progress;
         Ok(RuntimeProgress::Starting {
             detail: "the machine is booting".to_string(),
         })
@@ -409,12 +367,9 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
+        provisioning: bool,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
-            return Ok(RuntimeProgress::Ready(transport));
-        }
-
         let Some(machine) = self.api.machine_by_name(&machine_name(runtime_id)).await? else {
             // Terminal, and deliberately not a create: rebuilding here would
             // silently replace a workspace the user believes still holds work.
@@ -423,7 +378,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             )));
         };
 
-        let waiter = self.connected.notify_when_ready(runtime_id).await;
         // A started machine is a *live* runtime, always. The runtime is PID 1
         // under `restart: no`, so a machine outlives its runtime process by
         // nothing — and the runtime now re-dials rather than exiting when its
@@ -453,7 +407,7 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         // resuming one needs nothing rebuilt from the spec.
         let _ = spec;
 
-        self.finish_in_background(runtime_id, waiter, progress);
+        let _ = progress;
         Ok(RuntimeProgress::Starting {
             detail: detail.to_string(),
         })
@@ -484,7 +438,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             }
             match self.api.destroy(&machine.id).await {
                 Ok(()) => {
-                    self.connected.remove(runtime_id).await;
                     swept.push(runtime_id.to_string());
                 }
                 Err(e) => failure = Some(e),
@@ -521,7 +474,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             return Ok(RuntimeProgress::Stopped);
         };
         self.api.stop(&machine.id).await?;
-        self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Stopped)
     }
 
@@ -538,7 +490,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         // gone — a volume survives its machine, and one nobody deletes bills
         // for its full size forever.
         self.delete_volumes_of(runtime_id).await?;
-        self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Gone {
             reason: "the owning session was deleted".to_string(),
         })
@@ -687,7 +638,7 @@ mod tests {
     fn vendor(
         api: FakeFly,
         volumes: bool,
-    ) -> (FlyRuntimeVendor<FakeFly>, Arc<ConnectedRuntimeRegistry>) {
+    ) -> FlyRuntimeVendor<FakeFly> {
         let connected = Arc::new(ConnectedRuntimeRegistry::new());
         (
             FlyRuntimeVendor::new(
@@ -696,7 +647,6 @@ mod tests {
                 settings(volumes),
                 connected.clone(),
             ),
-            connected,
         )
     }
 

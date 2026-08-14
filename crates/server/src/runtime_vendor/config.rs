@@ -806,7 +806,6 @@ impl RuntimeVendorConfigService {
                         callback_url: fly.callback_url.clone(),
                         volumes: fly.volumes,
                     },
-                    self.connected.clone(),
                 )))
             }
             StoredVendorSettings::Velos(velos) => {
@@ -831,7 +830,6 @@ impl RuntimeVendorConfigService {
                         cpu: velos.cpu,
                         memory_bytes: u64::from(velos.memory_mb) * 1024 * 1024,
                     },
-                    self.connected.clone(),
                 )))
             }
         }

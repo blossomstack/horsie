@@ -407,6 +407,9 @@ impl crate::runtime_vendor::RuntimeVendor for WebsocketRuntimeVendor {
         &self,
         runtime_id: &str,
         spec: &WireRuntimeSpec,
+        // A `horsie connect` process answers only once its runtime is already
+        // up, so there is no window here for an outstanding create to explain.
+        _provisioning: bool,
         _progress: horsie_runtime_host::RuntimeProgressSink,
     ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
         let Some(me) = self.arc_self() else {
