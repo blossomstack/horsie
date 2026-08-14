@@ -13,7 +13,7 @@ pub(crate) mod handlers;
 mod marketplaces;
 mod mcp;
 mod memory;
-mod messages;
+pub(crate) mod messages;
 mod model_cards;
 mod plugins;
 pub mod runtime_connect;
@@ -165,14 +165,7 @@ pub fn app(state: AppState) -> Router {
     let web_dir = state.web_dir.clone();
     let api = Router::new()
         .route("/api/health", get(handlers::health))
-        .route(
-            "/api/sessions",
-            post(handlers::create_session).get(handlers::list_sessions),
-        )
-        .route(
-            "/api/sessions/{id}",
-            get(handlers::get_session).delete(handlers::delete_session),
-        )
+        .route("/api/sessions", post(handlers::create_session))
         .route(
             "/api/sessions/{id}/annotations",
             put(annotations::set_annotations),
@@ -183,14 +176,9 @@ pub fn app(state: AppState) -> Router {
             get(handlers::get_agent).delete(handlers::delete_fork),
         )
         .route(
-            "/api/sessions/{id}/agents/{agent_id}/stop",
-            post(handlers::stop_agent),
-        )
-        .route(
             "/api/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
-        .route("/api/sessions/{id}/name", put(handlers::rename_session))
         .route("/api/events", get(sse::global_events))
         .route("/api/config", get(config::get_config))
         .route(

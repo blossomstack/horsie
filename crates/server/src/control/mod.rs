@@ -19,6 +19,7 @@ pub mod agents;
 pub mod environments;
 pub mod http;
 pub mod routines;
+pub mod sessions;
 pub mod toolbox;
 pub mod workflows;
 
@@ -42,6 +43,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(routines::Routines),
         Box::new(environments::Environments),
         Box::new(workflows::Workflows),
+        Box::new(sessions::Sessions),
     ]
 }
 

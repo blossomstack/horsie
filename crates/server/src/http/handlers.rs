@@ -7,7 +7,7 @@ use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
 use crate::sessions::session_actor::{AgentEntry, AskAnswer};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
-use crate::sessions::supervisor::{RenameSessionError, SessionRecord, SessionSupervisorCommand};
+use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use axum::Json;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
@@ -18,7 +18,7 @@ use horsie_models::session::{
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
-    GetSessionResponse, ListSessionsResponse, RenameSessionRequest, SendMessageRequest, SessionAck,
+    SendMessageRequest, SessionAck,
 };
 use std::collections::BTreeMap;
 
@@ -136,64 +136,13 @@ pub async fn create_session(
     ))
 }
 
-/// Which sessions to list.
-///
-/// A run of a workflow or a routine is an ordinary session, so it is listed here
-/// rather than from a second endpoint that would re-derive the same row from the
-/// same registry read. Naming one is what scopes the list to it.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListSessionsQuery {
-    workflow: Option<String>,
-    routine: Option<String>,
-}
-
-/// Every session a person started, newest first.
-///
-/// With neither filter a routine's runs are deliberately absent: they are listed
-/// from `?routine=`, and a routine on a timer would otherwise bury the sessions
-/// somebody is actually having. Workflow runs are present — they are started by
-/// hand, and the row says which workflow it came from.
-pub async fn list_sessions(
-    Scope(state): Scope,
-    Query(q): Query<ListSessionsQuery>,
-) -> Result<impl IntoResponse, Api> {
-    let all = ask(&state, |reply| SessionSupervisorCommand::List { reply }).await?;
-    let mut sessions: Vec<_> = all
-        .iter()
-        .filter(|(_, rec)| match (&q.workflow, &q.routine) {
-            (Some(w), _) => rec.spec.workflow_name() == Some(w.as_str()),
-            (_, Some(r)) => rec.spec.routine() == Some(r.as_str()),
-            _ => rec.spec.routine().is_none(),
-        })
-        .map(|(id, rec)| summary(id, rec))
-        .collect();
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(Json(ListSessionsResponse { sessions }))
-}
-
-pub async fn get_session(
-    Scope(state): Scope,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, Api> {
-    let (rec, snapshot) = ask(&state, |reply| SessionSupervisorCommand::Get {
-        id: id.clone(),
-        reply,
-    })
-    .await?
-    .ok_or_else(|| Api::not_found(format!("no such session: {id}")))?;
-    Ok(Json(GetSessionResponse {
-        session: detail(&id, &rec, snapshot.as_ref()),
-    }))
-}
-
 /// Project one session onto its detail document.
 ///
 /// Pure, and beside [`summary`] rather than inline in the handler, for the
 /// reason that module's tests give: this layer's job is one projection and no
 /// derivation, and a projection that cannot be called without a running
 /// supervisor cannot be tested at the level it is written.
-fn detail(
+pub(crate) fn detail(
     id: &str,
     rec: &SessionRecord,
     snapshot: Option<&crate::sessions::session_actor::SessionSnapshot>,
@@ -400,71 +349,6 @@ pub async fn send_message(
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
         Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
-    }
-}
-
-/// `PUT /api/sessions/:id/name` — rename a session.
-///
-/// The agent's title tool was the only writer of a session name, so a session
-/// the model never titled kept its first message as its name for good. This is
-/// the other writer.
-pub async fn rename_session(
-    Scope(state): Scope,
-    Path(id): Path<String>,
-    Json(req): Json<RenameSessionRequest>,
-) -> Result<impl IntoResponse, Api> {
-    ask(&state, |reply| SessionSupervisorCommand::SetSessionTitle {
-        id,
-        name: req.name,
-        reply,
-    })
-    .await?
-    .map_err(|e| match e {
-        RenameSessionError::NotFound(m) => Api::not_found(m),
-        RenameSessionError::Invalid(m) => Api::unprocessable(m),
-    })?;
-    Ok(Json(Ack {}))
-}
-
-/// `POST /api/sessions/:id/agents/:agent_id/stop` — cancel one agent's turn.
-///
-/// Addressed rather than session-wide, because a session hosts several
-/// conversations at once and each has a turn of its own: "stop the session"
-/// named no single thing to cancel, and on any page but the main agent's it
-/// cancelled something the reader was not looking at — or, for a fork, silently
-/// nothing at all.
-///
-/// `404` names an agent this session does not have. An agent that simply is not
-/// working answers `200`: nothing to stop is not a failure, and a client racing
-/// a turn's own end would otherwise be told it failed for winning the race.
-pub async fn stop_agent(
-    Scope(state): Scope,
-    Path((id, agent_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, Api> {
-    let result = ask(&state, |reply| SessionSupervisorCommand::Stop {
-        id,
-        agent_id,
-        reply,
-    })
-    .await?;
-    match result {
-        Ok(()) => Ok(Json(Ack {})),
-        Err(msg) => Err(Api::not_found(msg)),
-    }
-}
-
-pub async fn delete_session(
-    Scope(state): Scope,
-    Path(id): Path<String>,
-) -> Result<impl IntoResponse, Api> {
-    let result = ask(&state, |reply| SessionSupervisorCommand::Delete {
-        id,
-        reply,
-    })
-    .await?;
-    match result {
-        Ok(()) => Ok(Json(Ack {})),
-        Err(msg) => Err(Api::not_found(msg)),
     }
 }
 
