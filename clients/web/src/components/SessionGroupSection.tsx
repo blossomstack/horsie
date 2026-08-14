@@ -214,12 +214,14 @@ export function SessionGroupSection({
               {/* Forks nest under the conversation they branched from. Built
                   from the flat, parent-linked list the registry holds, so
                   listing sessions still loads none of them. */}
-              {forkTree(s.forks).map(({ fork, depth }) => (
+              {forkTree(s.forks).map(({ fork, depth, rails, last }) => (
                 <ForkRow
                   key={fork.id}
                   sessionId={s.id}
                   fork={fork}
                   depth={depth}
+                  rails={rails}
+                  last={last}
                 />
               ))}
             </div>

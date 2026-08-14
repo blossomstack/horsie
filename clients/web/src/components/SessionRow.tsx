@@ -47,6 +47,12 @@ export function SessionRow({
     <div className="group relative">
       <NavLink
         to={`/sessions/${s.id}`}
+        // A fork lives at `/sessions/:id/agents/:forkId`, which is a
+        // *descendant* of this path — so without `end` opening a fork lit its
+        // parent session up as well and two rows claimed to be the one on
+        // screen. `open` below already made this distinction; the styling
+        // simply never got it.
+        end
         data-testid="session-row"
         data-session-id={s.id}
         title={`${title} — ${meta.hint}`}
@@ -60,8 +66,11 @@ export function SessionRow({
             // Room for the menu so a long title never runs under it. Always,
             // now that the menu is always there.
             "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 pr-9 transition-colors",
+            // The raised fill is the whole cue. The ring that used to sit on
+            // top of it drew a border that competed with the fork rails
+            // beneath for the same job.
             isActive
-              ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+              ? "bg-raised text-legend"
               : "text-dim hover:bg-raised hover:text-legend",
           )
         }

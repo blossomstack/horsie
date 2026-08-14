@@ -9,6 +9,13 @@ import { Menu, MenuItem } from "./Menu";
 import { StatusDot } from "./StatusBadge";
 
 /**
+ * How many lineage columns are drawn before the indent costs more readable
+ * width than it buys clarity. Past this the rows stop stepping right; the
+ * elbow still says the row is a fork, which is the part that matters.
+ */
+const MAX_RAILS = 4;
+
+/**
  * One forked conversation, indented under the one it branched from.
  *
  * Its own row rather than a variant of `SessionRow`: a fork is not a session,
@@ -24,10 +31,14 @@ export function ForkRow({
   sessionId,
   fork,
   depth,
+  rails,
+  last,
 }: {
   sessionId: string;
   fork: ForkView;
   depth: number;
+  rails: boolean[];
+  last: boolean;
 }) {
   const kind = agentStatusMeta(fork.status);
   const meta = statusMeta(kind);
@@ -50,30 +61,55 @@ export function ForkRow({
   };
 
   return (
-    <div className="group relative">
+    // `items-stretch`, and the lineage drawn outside the link: a rail has to
+    // span the row's full height and meet the next row's with no gap, which a
+    // glyph on a text baseline cannot do — it would leave a dashed column of
+    // disconnected marks. Drawn beside the link rather than inside it so the
+    // selected fill stops at the conversation and the lineage stays lineage.
+    <div className="group relative flex items-stretch pl-2.5">
+      {rails.slice(0, MAX_RAILS).map((rail, i) => (
+        <span
+          key={i}
+          aria-hidden
+          className={cn(
+            "w-3 shrink-0",
+            // A rail only where an ancestor still has a row below this one.
+            // Everywhere else the column is blank, or the line would run
+            // through rows that are not this fork's lineage.
+            rail && "border-l border-rule",
+          )}
+        />
+      ))}
+      {/* The elbow: down from the row above, then right into this row. It
+          stops at the title's centre line when nothing follows at this level
+          (└) and carries on down when a sibling does (├). */}
+      <span aria-hidden className="relative w-3 shrink-0">
+        <span
+          className={cn(
+            "absolute left-0 top-0 w-px bg-[var(--rule)]",
+            last ? "h-4" : "h-full",
+          )}
+        />
+        <span className="absolute left-0 top-4 h-px w-full bg-[var(--rule)]" />
+      </span>
       <NavLink
         to={to}
         data-testid="fork-row"
         data-fork-id={fork.id}
         data-depth={depth}
         title={`${title} — ${meta.hint}`}
-        // Indented by lineage, and capped: past a few levels the indent costs
-        // more readable width than it buys clarity, and the rail is narrow.
-        style={{ paddingLeft: `${0.625 + Math.min(depth, 4) * 0.75}rem` }}
         className={({ isActive }) =>
           cn(
-            "flex items-start gap-2.5 rounded-[var(--radius-control)] py-1.5 pr-9 transition-colors",
+            "flex min-w-0 flex-1 items-start gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2 pr-9 transition-colors",
+            // The fill alone says which row is open. A ring on top of it drew
+            // a second border beside the lineage rails, and the two read as
+            // competing structure rather than one selected row.
             isActive
-              ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+              ? "bg-raised text-legend"
               : "text-dim hover:bg-raised hover:text-legend",
           )
         }
       >
-        {/* The branch glyph is what makes an indented row read as *from* the
-            row above rather than merely after it. */}
-        <span className="mt-[3px] select-none text-faint" aria-hidden>
-          ⌐
-        </span>
         <StatusDot status={kind} className="mt-[5px]" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[0.8125rem] leading-5">
