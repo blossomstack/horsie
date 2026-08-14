@@ -77,7 +77,7 @@ describe("SessionTimeline", () => {
   it("hands a clicked bar's entry back", () => {
     const entry = vi.fn();
     view(TIMELINE, { entry });
-    fireEvent.click(screen.getByTestId("timeline-bar-m2"));
+    fireEvent.click(screen.getByTestId("timeline-bar-b2"));
     expect(entry).toHaveBeenCalledWith("m2");
   });
 
@@ -109,7 +109,7 @@ describe("SessionTimeline", () => {
 
   it("puts the real duration in every bar's tooltip", () => {
     view(TIMELINE);
-    expect(screen.getByTestId("timeline-bar-m2").getAttribute("title")).toBe("Bash · 12.4s");
+    expect(screen.getByTestId("timeline-bar-b2").getAttribute("title")).toBe("Bash · 12.4s");
   });
 
   it("says so when there is nothing to draw", () => {

@@ -191,6 +191,24 @@ describe("buildTimeline", () => {
     expect(t.ticks[0].label).toMatch(/^\d{2}:\d{2}$/);
   });
 
+  it("never repeats a tick label", () => {
+    // Several turns inside one minute drew `18:27 18:27 18:27` — three marks
+    // that say nothing. Spaced far enough apart to clear the collision rule,
+    // so only the duplicate-label rule can catch them.
+    const spaced: TranscriptItem[] = [];
+    for (let i = 0; i < 3; i++) {
+      spaced.push(msg(`u${i}`, "User", 1_000 + i * 15_000, { text: `turn ${i}` }));
+      spaced.push(
+        msg(`a${i}`, "Assistant", 9_000 + i * 15_000, {
+          startedAtMs: 2_000 + i * 15_000,
+          text: "ok",
+        }),
+      );
+    }
+    const t = buildTimeline(spaced, MAIN, [], 60_000);
+    expect(new Set(t.ticks.map((k) => k.label)).size).toBe(t.ticks.length);
+  });
+
   it("measures a still-running tool against now, not against zero", () => {
     const running: TranscriptItem[] = [
       msg("m1", "User", 1_000, { text: "go" }),
@@ -330,5 +348,50 @@ describe("buildTimeline", () => {
     const t = buildTimeline([], MAIN, [], 20_000);
     expect(t.width).toBe(0);
     expect(t.lanes[0].bars).toEqual([]);
+  });
+});
+
+describe("parallel tool calls", () => {
+  it("lays two calls issued together end to end rather than on top of each other", () => {
+    // Both were issued at the assistant message's end, so at their true starts
+    // they drew at the same x and the shorter hid under the longer.
+    const parallel: TranscriptItem[] = [
+      msg("m1", "User", 1_000, { text: "go" }),
+      msg("m2", "Assistant", 2_000, {
+        startedAtMs: 1_500,
+        toolCalls: [
+          { id: "t1", name: "bash", endedAtMs: 6_000 },
+          { id: "t2", name: "grep", endedAtMs: 4_000 },
+        ],
+      }),
+    ];
+    const bars = buildTimeline(parallel, MAIN, [], 10_000).lanes[0].bars.filter(
+      (b) => b.kind === "tool",
+    );
+    expect(bars).toHaveLength(2);
+    // Finish order, and no overlap.
+    expect(bars[0].title).toBe("grep");
+    expect(bars[1].title).toBe("bash");
+    expect(bars[1].x).toBeGreaterThanOrEqual(bars[0].x + bars[0].width - 1);
+    // Each keeps its own true duration.
+    expect(bars[0].detail).toBe("2.0s");
+    expect(bars[1].detail).toBe("4.0s");
+  });
+
+  it("gives every bar its own key, so no two share a test id", () => {
+    const parallel: TranscriptItem[] = [
+      msg("m1", "User", 1_000, { text: "go" }),
+      msg("m2", "Assistant", 2_000, {
+        startedAtMs: 1_500,
+        thinking: ["hmm"],
+        text: "done",
+        toolCalls: [
+          { id: "t1", name: "bash", endedAtMs: 6_000 },
+          { id: "t2", name: "grep", endedAtMs: 4_000 },
+        ],
+      }),
+    ];
+    const bars = buildTimeline(parallel, MAIN, [], 10_000).lanes[0].bars;
+    expect(new Set(bars.map((b) => b.key)).size).toBe(bars.length);
   });
 });

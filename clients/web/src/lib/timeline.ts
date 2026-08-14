@@ -262,16 +262,27 @@ function entriesOf(m: RenderedMessage, nowMs: number): Entry[] {
       turnStart: false,
     });
   }
-  for (const call of m.toolCalls) {
+  // Every tool call in one message was issued at the same instant, so laying
+  // them out at their true starts stacked them on top of each other — two
+  // parallel `bash` calls drew as one bar with the shorter hidden under the
+  // longer. Laid end to end in finish order instead: each bar keeps its own
+  // true duration, and the run of them reads as the work that message set off.
+  // The cost is that the picture no longer says they overlapped in time.
+  let issuedAt = ended;
+  for (const call of [...m.toolCalls].sort(
+    (a, b) => (a.endedAtMs ?? nowMs) - (b.endedAtMs ?? nowMs),
+  )) {
+    const took = Math.max(0, (call.endedAtMs ?? nowMs) - ended);
     out.push({
       kind: isAskCall(call.name, call.input) ? "ask" : "tool",
       entryId: m.id,
-      startMs: ended,
-      endMs: call.endedAtMs ?? nowMs,
+      startMs: issuedAt,
+      endMs: issuedAt + took,
       title: call.name,
       live: call.running,
       turnStart: false,
     });
+    issuedAt += took;
   }
   return out;
 }
@@ -328,16 +339,19 @@ export function buildTimeline(
     };
   });
 
-  // One per turn start, minus any that would print on top of the one before
-  // it. Four turns a second apart rendered four labels at the same pixel and
-  // read as a single line of garbled digits.
+  // One per turn start, minus two kinds of noise: a label that would print on
+  // top of the one before it (four turns a second apart rendered four labels at
+  // the same pixel, reading as one line of garbled digits), and a label that
+  // repeats the one before it — several turns inside the same minute produced
+  // `18:27 18:27 18:27`, three marks that say nothing.
   const ticks: { x: number; label: string }[] = [];
   for (const e of entries) {
     if (!e.turnStart) continue;
     const x = scale.toX(e.startMs);
+    const label = clockTime(e.startMs);
     const last = ticks[ticks.length - 1];
-    if (last && x - last.x < TICK_MIN_GAP_PX) continue;
-    ticks.push({ x, label: clockTime(e.startMs) });
+    if (last && (x - last.x < TICK_MIN_GAP_PX || label === last.label)) continue;
+    ticks.push({ x, label });
   }
 
   // The main agent is the one nothing spawned. Falling back to the first entry,

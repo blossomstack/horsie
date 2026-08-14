@@ -20,30 +20,32 @@ const GUTTER_W = 148;
 /** Lit by the same lamps as the rest of the console — amber for work in
  * motion, ok for something that landed, orange for a question waiting on a
  * person — so all three skins work without a fourth set of colours. */
+/** Solid, square and borderless: a bar is a block of colour, nothing else.
+ *
+ * The `-quiet` fills plus a border read as little containers with rounded
+ * corners — at the width a fast tool call earns, a 1px border on each side and
+ * a radius left almost no fill to see, so a lane of real work looked like a row
+ * of empty chips. The strong lamp colours carry it on their own. */
 const BAR_CLASS: Record<BarKind, string> = {
-  user: "bg-keycap border-keycap-ink",
-  assistant: "bg-lamp-ok-quiet border-lamp-ok",
-  // Filled with the rule colour, not `raised`. Outlined it read as an empty
-  // container, and `raised` on `panel` is too close to tell apart — since
-  // thinking is often the longest thing in a turn, the biggest object on the
-  // lane looked like a frame drawn around nothing.
-  thinking: "bg-rule border-rule-strong",
-  tool: "bg-amber-quiet border-amber",
-  ask: "bg-orange-quiet border-orange",
-  compaction: "bg-transparent border-dashed border-rule-strong",
+  user: "bg-legend",
+  assistant: "bg-lamp-ok",
+  thinking: "bg-rule-strong",
+  tool: "bg-amber",
+  ask: "bg-orange",
+  compaction: "bg-rule-strong",
 };
 
 /** A lane's own colour is what became of the agent, which is the one thing a
  * span can say that a bar cannot. Neutral grey on grey made a fast subagent
  * invisible at the width its duration earns it. */
 const SPAN_CLASS: Record<string, string> = {
-  running: "bg-amber-quiet border-amber",
-  provisioning: "bg-amber-quiet border-amber",
-  awaiting_input: "bg-orange-quiet border-orange",
-  completed: "bg-lamp-ok-quiet border-lamp-ok",
-  failed: "bg-red-quiet border-red",
-  cancelled: "bg-raised border-rule-strong",
-  idle: "bg-raised border-rule-strong",
+  running: "bg-amber",
+  provisioning: "bg-amber",
+  awaiting_input: "bg-orange",
+  completed: "bg-lamp-ok",
+  failed: "bg-red",
+  cancelled: "bg-rule-strong",
+  idle: "bg-rule-strong",
 };
 
 export function SessionTimeline({
@@ -207,12 +209,11 @@ function LaneRow({
             onClick={() => onSelectAgent(lane.agentId)}
             title={`${lane.label} — ${lane.status}`}
             className={cn(
-              "absolute top-1/2 -translate-y-1/2 rounded-[var(--radius-chip)] border transition-[filter] hover:brightness-110",
-              SPAN_CLASS[lane.status] ?? "border-rule-strong bg-raised",
-              // A fork is a conversation, not delegated work, so it is dashed
-              // rather than solid — the same "this is not a task" distinction
-              // `ForkMarker` draws in the transcript.
-              lane.kind === "fork" && "border-dashed",
+              "absolute top-1/2 -translate-y-1/2 transition-[filter] hover:brightness-125",
+              SPAN_CLASS[lane.status] ?? "bg-raised",
+              // A span is context, a bar is an event, so a lane sits at half
+              // strength and never competes with the work drawn above it.
+              "opacity-45",
             )}
             // An open span has no known end. It runs to the edge of the pane
             // rather than to the end of the drawn session: bounded by
@@ -231,19 +232,32 @@ function LaneRow({
 }
 
 function BarView({ bar, onSelect }: { bar: Bar; onSelect: (entryId: string) => void }) {
+  // A compaction is a boundary, not a stretch of work, so it stays a hairline
+  // the full height of the lane rather than a block with a width to misread.
+  const boundary = bar.kind === "compaction";
   return (
     <button
       type="button"
-      data-testid={`timeline-bar-${bar.entryId}`}
+      // Keyed on the bar, not on the entry: several bars share one message id
+      // (its thinking, its text, each of its tool calls), and an id that
+      // repeats is a duplicate testid Playwright's strict mode will fail on.
+      data-testid={`timeline-bar-${bar.key}`}
+      data-entry-id={bar.entryId}
       data-kind={bar.kind}
       onClick={() => onSelect(bar.entryId)}
       title={`${bar.title} · ${bar.detail}`}
       className={cn(
-        "absolute top-1/2 -translate-y-1/2 rounded-[var(--radius-chip)] border transition-[filter] hover:brightness-110",
+        "absolute top-1/2 -translate-y-1/2 transition-[filter] hover:brightness-125",
         BAR_CLASS[bar.kind],
         bar.live && "animate-pulse",
       )}
-      style={{ left: bar.x, width: bar.width, height: BAR_H }}
+      style={{
+        left: bar.x,
+        // A hairline off the right so two square bars butt-joined at the same
+        // pixel still read as two. Never below 2px, or a fast call vanishes.
+        width: boundary ? 2 : Math.max(2, bar.width - 1),
+        height: boundary ? BAR_H + 8 : BAR_H,
+      }}
     />
   );
 }
