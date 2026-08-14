@@ -450,7 +450,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   if (selectedAgent && agentChannel) {
     pickers.push({
       key: "model",
-      legend: "Model or agent",
+      legend: "Model",
       icon: <Cpu size={15} />,
       label: selectedAgent,
       marked: true,
@@ -619,7 +619,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   pickers.push({
     key: "model",
-    legend: "Model or agent",
+    legend: "Model",
     icon: <Cpu size={15} />,
     label: models.find((m) => m.alias === draft.model)?.alias ?? "Select",
     marked: !!draft.model,
