@@ -173,6 +173,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
 
     let shared = Arc::new(Shared {
         system,
+        serving: cluster.as_ref().map(|node| node.serving_watch()),
         bus,
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),

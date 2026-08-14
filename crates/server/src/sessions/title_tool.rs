@@ -213,6 +213,7 @@ mod tests {
             ),
             crate::auth::UserId::bootstrap(),
             uuid::Uuid::new_v4(),
+            None,
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let spec = toolbox
@@ -241,6 +242,7 @@ mod tests {
             ),
             crate::auth::UserId::bootstrap(),
             uuid::Uuid::new_v4(),
+            None,
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let result = toolbox
@@ -266,6 +268,7 @@ mod tests {
             ),
             crate::auth::UserId::bootstrap(),
             uuid::Uuid::new_v4(),
+            None,
         );
         let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
         let err = toolbox.execute("bash", json!({}), "tc1").await.unwrap_err();

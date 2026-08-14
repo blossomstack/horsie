@@ -137,6 +137,7 @@ mod tests {
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: crate::users::node_system(&db, None),
+            serving: None,
             db,
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("artifacts"),

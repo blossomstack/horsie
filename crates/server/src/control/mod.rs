@@ -84,11 +84,17 @@ where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> crate::sessions::supervisor::SessionSupervisorCommand,
     T: Send + 'static,
 {
-    services
-        .supervisor
-        .ask(make)
-        .await
-        .map_err(|_| ControlError::Internal("session supervisor unavailable".to_string()))
+    services.supervisor.ask(make).await.map_err(|e| match e {
+        // Not a fault: this node has lost touch with a quorum and cannot know
+        // whether these actors are still its own, so it refuses rather than
+        // answer from state that may already be history. Another node can.
+        horsie_actor::TellError::Undeliverable => ControlError::Unavailable(
+            "this node is not currently serving; retry against another".to_string(),
+        ),
+        horsie_actor::TellError::MailboxClosed | horsie_actor::TellError::NoAnswer => {
+            ControlError::Internal("session supervisor unavailable".to_string())
+        }
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -266,6 +272,12 @@ pub enum ControlError {
     },
     Invalid(String),
     Internal(String),
+    /// This node cannot serve the request, but another one can.
+    ///
+    /// Distinct from `Internal` because nothing is broken: a clustered node in
+    /// a minority stands down deliberately, and the caller should retry rather
+    /// than report a fault.
+    Unavailable(String),
 }
 
 impl From<ControlError> for Api {
@@ -275,6 +287,7 @@ impl From<ControlError> for Api {
             ControlError::Conflict { code, message } => Self::conflict(&code, message),
             ControlError::Invalid(m) => Self::unprocessable(m),
             ControlError::Internal(m) => Self::internal(m),
+            ControlError::Unavailable(m) => Self::unavailable(m),
         }
     }
 }
@@ -288,6 +301,11 @@ impl From<ControlError> for ToolCallError {
             ControlError::Conflict { message, .. } => Self::InvalidInput(message),
             // Ours, not theirs. Retrying the same call will not help.
             ControlError::Internal(m) => Self::ExecutionFailed(m),
+            // Also ours, but transient: this node stood down and another can
+            // serve. Still `ExecutionFailed` rather than `InvalidInput`,
+            // because nothing about the call was wrong — an agent has no way
+            // to pick a different node, so the message is what carries it.
+            ControlError::Unavailable(m) => Self::ExecutionFailed(m),
         }
     }
 }
@@ -500,5 +518,19 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ControlError::Invalid(_)));
+    }
+
+    /// A node that has stood down is a 503, not a 500.
+    ///
+    /// The distinction is the whole point: 500 tells a caller something is
+    /// broken and reporting it is the right move, where this says the request
+    /// was fine and another node can serve it. Both surfaces render this one
+    /// variant, so asserting the mapping here covers HTTP and the tool surface.
+    #[test]
+    fn standing_down_renders_as_unavailable_rather_than_internal() {
+        let api = Api::from(ControlError::Unavailable("retry elsewhere".to_string()));
+        assert_eq!(api.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let internal = Api::from(ControlError::Internal("broken".to_string()));
+        assert_eq!(internal.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

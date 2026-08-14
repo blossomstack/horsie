@@ -1623,6 +1623,7 @@ mod tests {
             ),
             crate::auth::UserId::bootstrap(),
             id,
+            None,
         );
         SessionContextProvider {
             agent_type: None,

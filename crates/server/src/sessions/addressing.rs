@@ -26,6 +26,26 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// Whether this node may still act on the actors it hosts.
+///
+/// `None` on a single-node deployment, which never stands down. On a clustered
+/// node it is `ClusterNode::serving_watch()`, which goes false while the node
+/// cannot see a leader — what being in a minority looks like from inside one.
+/// A node that has lost touch with a quorum cannot know whether its instances
+/// have been given to somebody else, so it must stop answering from them.
+///
+/// A watch rather than the node itself because these references are cloned per
+/// request, and reading a watch is a load rather than a lock.
+pub type Serving = Option<tokio::sync::watch::Receiver<bool>>;
+
+/// Whether `serving` permits sending right now.
+///
+/// Absent means unclustered, which is never gated — `None` must not read as
+/// "not serving", or a single-node deployment would refuse every request.
+fn may_send(serving: &Serving) -> bool {
+    serving.as_ref().is_none_or(|rx| *rx.borrow())
+}
+
 /// Between an account and what it owns, in a rendered id.
 ///
 /// Only ever written. Nothing reads one of these back apart, because every node
@@ -118,12 +138,17 @@ impl Shard for SessionShard {
 pub struct SupervisorRef {
     shard: ActorRef<SupervisorInbox>,
     account: UserId,
+    serving: Serving,
 }
 
 impl SupervisorRef {
     #[must_use]
-    pub fn new(shard: ActorRef<SupervisorInbox>, account: UserId) -> Self {
-        Self { shard, account }
+    pub fn new(shard: ActorRef<SupervisorInbox>, account: UserId, serving: Serving) -> Self {
+        Self {
+            shard,
+            account,
+            serving,
+        }
     }
 
     #[must_use]
@@ -134,6 +159,9 @@ impl SupervisorRef {
     /// # Errors
     /// If the command could not be delivered — see [`ActorRef::tell`].
     pub async fn tell(&self, cmd: SessionSupervisorCommand) -> Result<(), TellError> {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard.tell(self.addressed(cmd)).await
     }
 
@@ -144,6 +172,9 @@ impl SupervisorRef {
         F: FnOnce(ReplyTo<R>) -> SessionSupervisorCommand,
         R: Send + 'static,
     {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard.ask(|reply| self.addressed(make(reply))).await
     }
 
@@ -161,6 +192,9 @@ impl SupervisorRef {
         F: FnOnce(ReplyTo<R>) -> SessionSupervisorCommand,
         R: Send + 'static,
     {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard
             .ask_within(within, |reply| self.addressed(make(reply)))
             .await
@@ -184,20 +218,30 @@ impl SupervisorRef {
 pub struct SessionRef {
     shard: ActorRef<SessionInbox>,
     entity: SessionEntityId,
+    serving: Serving,
 }
 
 impl SessionRef {
     #[must_use]
-    pub fn new(shard: ActorRef<SessionInbox>, account: UserId, session: Uuid) -> Self {
+    pub fn new(
+        shard: ActorRef<SessionInbox>,
+        account: UserId,
+        session: Uuid,
+        serving: Serving,
+    ) -> Self {
         Self {
             shard,
             entity: SessionEntityId { account, session },
+            serving,
         }
     }
 
     /// # Errors
     /// If the command could not be delivered — see [`ActorRef::tell`].
     pub async fn tell(&self, cmd: SessionCommand) -> Result<(), TellError> {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard.tell(self.addressed(cmd)).await
     }
 
@@ -208,6 +252,9 @@ impl SessionRef {
         F: FnOnce(ReplyTo<R>) -> SessionCommand,
         R: Send + 'static,
     {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard.ask(|reply| self.addressed(make(reply))).await
     }
 
@@ -225,6 +272,9 @@ impl SessionRef {
         F: FnOnce(ReplyTo<R>) -> SessionCommand,
         R: Send + 'static,
     {
+        if !may_send(&self.serving) {
+            return Err(TellError::Undeliverable);
+        }
         self.shard
             .ask_within(within, |reply| self.addressed(make(reply)))
             .await
@@ -235,5 +285,47 @@ impl SessionRef {
             entity: self.entity.clone(),
             cmd,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// A minority node cannot know whether its instances have been given to
+    /// somebody else, so every send from it must be refused.
+    #[test]
+    fn a_node_that_has_stood_down_may_not_send() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        assert!(!may_send(&Some(rx)));
+    }
+
+    #[test]
+    fn a_serving_node_may_send() {
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        assert!(may_send(&Some(rx)));
+    }
+
+    /// `None` must not read as "not serving", or a single-node deployment —
+    /// the default, and almost every deployment — would refuse every request it
+    /// ever received.
+    #[test]
+    fn an_unclustered_node_is_never_gated() {
+        assert!(may_send(&None));
+    }
+
+    /// Read per send rather than captured once: a node that stands down
+    /// mid-connection has to stop, and one that recovers has to resume without
+    /// every held reference being rebuilt.
+    #[test]
+    fn the_flag_is_read_at_each_send() {
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        let serving = Some(rx);
+        assert!(may_send(&serving));
+        tx.send(false).unwrap();
+        assert!(!may_send(&serving));
+        tx.send(true).unwrap();
+        assert!(may_send(&serving));
     }
 }
