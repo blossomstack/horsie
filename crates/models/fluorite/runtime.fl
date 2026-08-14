@@ -258,6 +258,13 @@ struct RunHooksResponse { call_id: String, records: Vec<HookRecord> }
 struct ToolCallRequest  { call_id: String, agent_id: String, call: ToolCall }
 struct CancelCallRequest { call_id: String }
 
+/// Asks the runtime what it is currently executing.
+///
+/// A liveness call, and the only request in this protocol with a bound the
+/// caller may act on: it is answered concurrently, never queued behind a running
+/// tool, so an unanswered one says something a slow tool never could.
+struct PingRequest { call_id: String }
+
 #[type_tag = "type"]
 union RuntimeInboundMessage {
     ToolCall(ToolCallRequest),
@@ -266,6 +273,7 @@ union RuntimeInboundMessage {
     RunHooks(RunHooksRequest),
     McpDiscover(McpDiscoverRequest),
     McpInvoke(McpInvokeRequest),
+    Ping(PingRequest),
 }
 
 // --- Outbound (runtime → executor) ---
@@ -296,6 +304,15 @@ struct RuntimeProvisioning { runtime_id: String }
 /// surfaced as the create/attach failure reason.
 struct RuntimeProvisionFailed { runtime_id: String, message: String }
 
+/// Every request this runtime is currently executing, by call id.
+///
+/// The load-bearing part is `in_flight`, not the reply itself: it turns liveness
+/// from a boolean into a reconciliation against the caller's own list, which is
+/// what lets a twenty-minute build be told apart from a request the runtime never
+/// heard of. A boolean answer cannot distinguish them, and any deadline that
+/// tried would have to bound the one thing here with no natural bound.
+struct PongResponse { call_id: String, in_flight: Vec<String> }
+
 /// All messages the runtime sends to the executor.
 #[type_tag = "type"]
 union RuntimeOutboundMessage {
@@ -307,4 +324,5 @@ union RuntimeOutboundMessage {
     HookRecords(RunHooksResponse),
     McpTools(McpDiscoverResponse),
     McpResult(McpInvokeResponse),
+    Pong(PongResponse),
 }

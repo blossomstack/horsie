@@ -11,7 +11,7 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, RunHooksResponse, RuntimeInboundMessage,
+    McpDiscoverResponse, McpInvokeResponse, PongResponse, RunHooksResponse, RuntimeInboundMessage,
     RuntimeOutboundMessage, RuntimeProvisionFailed, RuntimeProvisioning, RuntimeReady,
     ScanResponse, ToolCallResponse, ToolError, ToolOutput, ToolResult,
 };
@@ -677,6 +677,39 @@ async fn run_loop<S>(
                         });
 
                         in_flight.lock().await.insert(map_id, handle.abort_handle());
+                    }
+                    RuntimeInboundMessage::Ping(req) => {
+                        // On its own task, like every other request, and for a
+                        // reason this one cannot compromise on: the caller fails
+                        // *every* outstanding call against a runtime that does
+                        // not answer a ping. A ping queued behind a running tool
+                        // would therefore abort exactly the long work it exists
+                        // to protect, so answering concurrently is the contract
+                        // rather than an optimisation.
+                        //
+                        // Deliberately not entered in the in-flight map: a ping
+                        // that reported itself as executing would make every
+                        // runtime look permanently busy, and what the caller
+                        // reconciles against is the tool calls it issued.
+                        let sink_clone = sink.clone();
+                        let in_flight_clone = in_flight.clone();
+                        tokio::spawn(async move {
+                            let executing: Vec<String> =
+                                in_flight_clone.lock().await.keys().cloned().collect();
+                            let response = serde_json::to_string(&RuntimeOutboundMessage::Pong(
+                                PongResponse {
+                                    call_id: req.call_id,
+                                    in_flight: executing,
+                                },
+                            ));
+                            if let Ok(json) = response {
+                                let _ = sink_clone
+                                    .lock()
+                                    .await
+                                    .send(Message::Text(json.into()))
+                                    .await;
+                            }
+                        });
                     }
                     RuntimeInboundMessage::CancelCall(req) => {
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {

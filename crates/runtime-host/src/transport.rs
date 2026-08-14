@@ -77,7 +77,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a tool call")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a tool call")),
         }
     }
 
@@ -118,7 +119,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a workspace scan")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a workspace scan")),
         }
     }
 
@@ -146,7 +148,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a hook run")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a hook run")),
         }
     }
 
@@ -168,7 +171,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("MCP discovery")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("MCP discovery")),
         }
     }
 
@@ -194,7 +198,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
-            | RuntimeOutboundMessage::McpTools(_) => Err(wrong_reply("an MCP tool call")),
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("an MCP tool call")),
         }
     }
 }
@@ -241,6 +246,7 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::RunHooks(req) => &req.call_id,
         RuntimeInboundMessage::McpDiscover(req) => &req.call_id,
         RuntimeInboundMessage::McpInvoke(req) => &req.call_id,
+        RuntimeInboundMessage::Ping(req) => &req.call_id,
     }
 }
 
@@ -254,6 +260,7 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::HookRecords(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::McpTools(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::McpResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::Pong(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_)
         | RuntimeOutboundMessage::Provisioning(_)
         | RuntimeOutboundMessage::ProvisionFailed(_) => None,
