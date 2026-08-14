@@ -1178,13 +1178,6 @@ mod tests {
                 StubHandle,
             )))
         }
-
-        /// Hands back `transport` as an already-up runtime, so a test can watch
-        /// what the manager says to it. `Ready` is answered from the vendor's own
-        /// pipe rather than over the bus, which is what makes this cheap.
-        fn handing_back(transport: Arc<dyn horsie_runtime_host::RuntimeTransport>) -> Arc<Self> {
-            Self::with(horsie_runtime_host::RuntimeProgress::Ready(transport))
-        }
     }
 
     struct StubHandle;
@@ -1391,7 +1384,7 @@ mod tests {
     #[tokio::test]
     async fn every_acquisition_provisions_the_workspace() {
         let handle = Arc::new(ProvisionRecorder::default());
-        let vendors = published_vendor(BootingVendor::handing_back(handle.clone()));
+        let vendors = published_vendor(WarmVendor::over(handle.clone()));
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
         let spec = spec_with_checkout();
 
@@ -1416,7 +1409,7 @@ mod tests {
     #[tokio::test]
     async fn a_session_with_no_steps_sends_no_provision_request() {
         let handle = Arc::new(ProvisionRecorder::default());
-        let vendors = published_vendor(BootingVendor::handing_back(handle.clone()));
+        let vendors = published_vendor(WarmVendor::over(handle.clone()));
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
 
         m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
@@ -1434,7 +1427,7 @@ mod tests {
         let handle = Arc::new(ProvisionRecorder::failing(
             "git_checkout: repository not found",
         ));
-        let vendors = published_vendor(BootingVendor::handing_back(handle));
+        let vendors = published_vendor(WarmVendor::over(handle));
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
 
         let Err(err) = m
@@ -1457,6 +1450,66 @@ mod tests {
                 with: vec![("url".to_string(), "file:///fixture".to_string())],
             }],
             ..SessionSpec::for_vendor("v")
+        }
+    }
+
+    /// A vendor whose runtime is already up, and stays up.
+    ///
+    /// Answers `Ready(transport)` as its *return value* on every acquisition, so
+    /// the manager takes the vendor-owns-the-pipe path and never waits on the
+    /// bus. `BootingVendor` cannot stand in: it drains its outcome list per call,
+    /// so a second acquisition would be told nothing and would wait out the whole
+    /// acquisition window.
+    struct WarmVendor(Arc<dyn horsie_runtime_host::RuntimeTransport>);
+
+    impl WarmVendor {
+        fn over(transport: Arc<dyn horsie_runtime_host::RuntimeTransport>) -> Arc<Self> {
+            Arc::new(Self(transport))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime_vendor::RuntimeVendor for WarmVendor {
+        fn name(&self) -> &str {
+            "warm"
+        }
+        fn capabilities(&self) -> horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+            horsie_models::runtime_vendor::RuntimeVendorCapabilities {
+                supports_provisioning: true,
+            }
+        }
+        async fn create(
+            &self,
+            _: &str,
+            _: &horsie_models::runtime_vendor::RuntimeSpec,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Ready(self.0.clone()))
+        }
+        async fn get(
+            &self,
+            _: &str,
+            _: &horsie_models::runtime_vendor::RuntimeSpec,
+            _: bool,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Ready(self.0.clone()))
+        }
+        async fn hibernate(
+            &self,
+            _: &str,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Stopped)
+        }
+        async fn delete(
+            &self,
+            _: &str,
+            _: horsie_runtime_host::RuntimeProgressSink,
+        ) -> Result<horsie_runtime_host::RuntimeProgress, RuntimeVendorError> {
+            Ok(horsie_runtime_host::RuntimeProgress::Gone {
+                reason: "deleted".into(),
+            })
         }
     }
 
