@@ -4,6 +4,7 @@ pub mod auth;
 pub mod boot;
 pub mod bus;
 pub mod config;
+pub mod control;
 pub mod db;
 pub mod environments;
 mod error;
