@@ -68,6 +68,39 @@ impl Node {
             .unwrap()
     }
 
+    /// `get`, retrying while this node says it is not serving. See
+    /// [`Node::post_when_serving`] for why retrying is the correct behaviour
+    /// rather than a workaround. Deliberately not used for `/api/health`,
+    /// which is the thing being asserted about.
+    async fn get_when_serving(&self, path: &str) -> reqwest::Response {
+        let start = Instant::now();
+        loop {
+            let res = self.get(path).await;
+            if res.status() != 503 || start.elapsed() > FORMATION {
+                return res;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// `post`, retrying while this node says it is not serving.
+    ///
+    /// Not a workaround for flakiness: 503 from horsie means "this node cannot
+    /// serve right now, retry" — so a client that retries is the behaviour the
+    /// status code asks for, and a test that does not retry is asserting
+    /// something no real client would. A node can stand down for a moment
+    /// whenever a heartbeat is late, which on a shared CI runner is ordinary.
+    async fn post_when_serving(&self, path: &str, body: &serde_json::Value) -> reqwest::Response {
+        let start = Instant::now();
+        loop {
+            let res = self.post(path, body).await;
+            if res.status() != 503 || start.elapsed() > FORMATION {
+                return res;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     /// Whether this node currently considers itself able to serve.
     fn serving(&self) -> bool {
         self.state
@@ -204,7 +237,12 @@ async fn start_node(
         // Per node: this is that node's vote, and two nodes over one file is
         // two nodes voting as one.
         raft_dir: Some(dir.join("raft")),
-        liveness_window_secs: Some(2),
+        // Deliberately generous. Three of these clusters run at once on one
+        // CI runner — nine Raft nodes — and a heartbeat that arrives late
+        // because the scheduler was busy is indistinguishable from a node that
+        // died. Two seconds is fine on a quiet machine and produces spurious
+        // stand-downs on a loaded one.
+        liveness_window_secs: Some(10),
     });
 
     let booted = boot(opts).await.expect("a node boots");
@@ -282,7 +320,7 @@ async fn a_session_created_on_one_node_is_readable_on_another() {
 
     let created = c
         .node(0)
-        .post(
+        .post_when_serving(
             "/api/sessions",
             &serde_json::json!({
                 "agent": { "model": "mock", "use_plugins": false },
@@ -300,7 +338,10 @@ async fn a_session_created_on_one_node_is_readable_on_another() {
 
     // Read it from a *different* node. The session actor is placed by the
     // cluster, so this either resolves across hosts or it does not resolve.
-    let read = c.node(1).get(&format!("/api/sessions/{id}")).await;
+    let read = c
+        .node(1)
+        .get_when_serving(&format!("/api/sessions/{id}"))
+        .await;
     assert_eq!(
         read.status(),
         200,
@@ -324,7 +365,7 @@ async fn every_node_lists_the_same_sessions() {
     };
 
     c.node(0)
-        .post(
+        .post_when_serving(
             "/api/sessions",
             &serde_json::json!({
                 "agent": { "model": "mock", "use_plugins": false },
@@ -335,7 +376,7 @@ async fn every_node_lists_the_same_sessions() {
         .await;
 
     for i in 0..3 {
-        let res = c.node(i).get("/api/sessions").await;
+        let res = c.node(i).get_when_serving("/api/sessions").await;
         assert_eq!(res.status(), 200, "node {i} should list sessions");
         let page: serde_json::Value = res.json().await.unwrap();
         let count = page["sessions"].as_array().map_or(0, Vec::len);
