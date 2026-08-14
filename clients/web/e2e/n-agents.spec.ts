@@ -121,7 +121,11 @@ test("N4: the control-plane toggle is off by default and persists when ticked", 
     )
     .toBe(true);
 
+  // Wait for the shell before the control: a reload in CI can be slow enough
+  // that the assertion runs against a page that has not rendered the form yet,
+  // which reads as "the toggle does not exist" rather than "not loaded".
   await page.reload();
+  await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await expect(page.getByTestId("agent-control-plane-toggle")).toBeChecked();
 
   await page.request.delete(`${appBase}/api/agents/e2e-control`);
