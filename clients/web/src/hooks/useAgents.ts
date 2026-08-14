@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { AgentPresetInput } from "../api/types";
+import type { AgentInvokeRequest, AgentPresetInput } from "../api/types";
 
 export const agentKeys = {
   all: ["agents"] as const,
@@ -37,6 +37,13 @@ export function useUpdateAgent() {
       qc.invalidateQueries({ queryKey: agentKeys.all });
       qc.invalidateQueries({ queryKey: agentKeys.one(name) });
     },
+  });
+}
+
+export function useInvokeAgent() {
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: AgentInvokeRequest }) =>
+      api.agents.invoke(name, body),
   });
 }
 

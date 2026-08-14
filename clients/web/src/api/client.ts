@@ -1,4 +1,6 @@
 import type {
+  AgentInvokeRequest,
+  AgentInvokeResponse,
   AgentPresetInput,
   AgentView,
   ApiError,
@@ -339,6 +341,13 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/agents/${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+    /** Create a session from this preset and queue its first message. */
+    invoke: (name: string, body: AgentInvokeRequest): Promise<AgentInvokeResponse> =>
+      request(`/agents/${encodeURIComponent(name)}/invoke`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
   },
 
   /**

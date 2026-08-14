@@ -10,6 +10,7 @@ import { memorySpacesKey } from "../hooks/useMemory";
 import { pluginsKey } from "../hooks/usePlugins";
 import { settingsKey } from "../hooks/useSettings";
 import type {
+  AgentChannel,
   ConfigDraft,
   EnvironmentChannel,
   EnvironmentDraft,
@@ -99,6 +100,15 @@ function workflowDraft(
     workflow,
     setWorkflow: () => {},
     workflows: ["triage", "release"],
+  };
+}
+
+function agentDraft(agent: string): ConfigDraft & EnvironmentChannel & AgentChannel & WorkflowChannel {
+  return {
+    ...workflowDraft(""),
+    agent,
+    setAgent: () => {},
+    agents: ["reviewer"],
   };
 }
 
@@ -241,6 +251,17 @@ describe("useConfigPickers", () => {
   it("drops the agent channels once a workflow is selected", () => {
     const k = keys(workflowDraft("triage", { provisions: true }));
     expect(k).toEqual(["workflow", "environment"]);
+  });
+
+  it("hides workflow and direct agent channels for a selected agent", () => {
+    expect(keys(agentDraft("reviewer"))).toEqual(["environment", "model"]);
+  });
+
+  it("lists agents separately from models in the model menu", () => {
+    const view = renderPickerBody(agentDraft(""), "model");
+    expect(view.getByText("Models")).toBeTruthy();
+    expect(view.getByText("Agents")).toBeTruthy();
+    expect(view.getByTestId("agent-option").getAttribute("data-value")).toBe("reviewer");
   });
 
   it("keeps every channel while no workflow is selected", () => {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AgentInvokeRequest,
   CreateSessionRequest,
   EnvironmentSpec,
   EnvironmentView,
@@ -18,6 +19,7 @@ import {
   type DraftPayload,
   type EnvironmentDraft,
 } from "./draftPersistence";
+import { useAgents } from "./useAgents";
 import { useEnvironments } from "./useEnvironments";
 import { useGithubStatus } from "./useGithub";
 import { useMemorySpaces } from "./useMemory";
@@ -77,15 +79,16 @@ export interface EnvironmentChannel {
   githubConnected: boolean;
 }
 
-/**
- * The workflow channel: what the new-session page starts, rather than how it
- * is configured.
- *
- * `""` means an ordinary session. Naming a workflow replaces the model and
- * toolbox channels instead of adding to them — a run takes those from each
- * step's own agent preset, and `WorkflowRunRequest` has no field to override
- * them — so `useConfigPickers` drops them while one is selected.
- */
+/** A predefined agent replaces the direct model and toolbox configuration. */
+export interface AgentChannel {
+  /** Selected predefined agent; empty means configure a model directly. */
+  agent: string;
+  setAgent: (agent: string) => void;
+  /** Agent presets available for direct invocation. */
+  agents: string[];
+}
+
+/** A workflow run replaces the direct model and toolbox configuration. */
 export interface WorkflowChannel {
   workflow: string;
   setWorkflow: (w: string) => void;
@@ -96,11 +99,14 @@ export interface WorkflowChannel {
 export interface SessionDraft
   extends ConfigDraft,
     EnvironmentChannel,
+    AgentChannel,
     WorkflowChannel {
   canSend: boolean;
   blockedReason: string | null;
   /** A session is created with its first message; there is no create-only call. */
   buildRequest: (message: string) => CreateSessionRequest;
+  /** Request for an invocation configured by a predefined agent. */
+  buildAgentRequest: (message: string) => AgentInvokeRequest;
   /** The same channels as a workflow run. Only meaningful when `workflow` is set. */
   buildRunRequest: (input: string) => WorkflowRunRequest;
 }
@@ -116,6 +122,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const { data: mcpServers } = useMcpServers();
   const { data: memorySpaces } = useMemorySpaces();
   const { data: workflows } = useWorkflows();
+  const { data: agents } = useAgents();
   const { data: environments } = useEnvironments();
   const models = settings?.models ?? [];
   const activeVendors = useMemo(() => settings?.vendors ?? [], [settings]);
@@ -134,6 +141,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   // session, but this one replaces what the page starts. Coming back days
   // later and silently being in workflow mode is not a setting anyone chose.
   const [workflow, setWorkflow] = useState(initialWorkflow);
+  // Like workflows, a preset replaces what this page starts, so it is never
+  // restored as a surprise on a later visit.
+  const [agent, setAgent] = useState("");
   const workflowNames = useMemo(
     () => (workflows ?? []).map((w) => w.name),
     [workflows],
@@ -143,6 +153,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   // preselection holds rather than flickering through plain-session mode.
   const selectedWorkflow =
     workflows === undefined || workflowNames.includes(workflow) ? workflow : "";
+
+  const agentNames = useMemo(() => (agents ?? []).map((a) => a.name), [agents]);
+  const selectedAgent = agents === undefined || agentNames.includes(agent) ? agent : "";
 
   const environmentNames = useMemo(
     () => (environments === undefined ? undefined : environments.map((e) => e.name)),
@@ -222,7 +235,8 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       return "Couldn’t load this server’s models and runtimes. Reload once the server is reachable.";
     // A run takes its model from each step's preset, so the model channel is
     // neither shown nor required while a workflow is selected.
-    if (!selectedWorkflow && !draft.model.trim()) return "Select a model to start.";
+    if (!selectedWorkflow && !selectedAgent && !draft.model.trim())
+      return "Select a model or agent to start.";
     if (!chosen) return "Select an environment to start.";
     if (needsGithub && !githubConnected) return "Connect GitHub to use these repos.";
     return null;
@@ -233,6 +247,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     needsGithub,
     githubConnected,
     selectedWorkflow,
+    selectedAgent,
   ]);
 
   // The menu belongs to the model, so a persisted draft can name an effort the
@@ -276,6 +291,11 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
 
   // A run carries no agent configuration: the graph names a preset per step,
   // and the snapshot taken at creation resolves each one server-side.
+  const buildAgentRequest = (message: string): AgentInvokeRequest => ({
+    message,
+    environment: environmentSpec(),
+  });
+
   const buildRunRequest = (input: string): WorkflowRunRequest => ({
     input,
     environment: environmentSpec(),
@@ -283,8 +303,17 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
 
   return {
     workflow: selectedWorkflow,
-    setWorkflow,
+    setWorkflow: (next) => {
+      setWorkflow(next);
+      if (next) setAgent("");
+    },
     workflows: workflowNames,
+    agent: selectedAgent,
+    setAgent: (next) => {
+      setAgent(next);
+      if (next) setWorkflow("");
+    },
+    agents: agentNames,
     environment,
     setEnvironment: (next) => setDraft({ ...draft, environment: next }),
     environments: environments ?? [],
@@ -306,6 +335,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     canSend: blockedReason === null,
     blockedReason,
     buildRequest,
+    buildAgentRequest,
     buildRunRequest,
   };
 }

@@ -20,6 +20,7 @@ import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import { ReadError } from "./ReadError";
 import type {
+  AgentChannel,
   ConfigDraft,
   EnvironmentChannel,
   WorkflowChannel,
@@ -122,6 +123,10 @@ function hasEnvironment(
 /** Likewise for the workflow channel: only the new-session draft starts one. */
 function hasWorkflow(draft: ConfigDraft): draft is ConfigDraft & WorkflowChannel {
   return "setWorkflow" in draft;
+}
+
+function hasAgent(draft: ConfigDraft): draft is ConfigDraft & AgentChannel {
+  return "setAgent" in draft;
 }
 
 /** Stands in when a draft has no environment channel, so the picker hook can
@@ -372,7 +377,9 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
 
   // Leftmost, and first read: it decides which of the others mean anything.
   const running = hasWorkflow(draft) ? draft.workflow : "";
-  if (hasWorkflow(draft)) {
+  const agentChannel = hasAgent(draft) ? draft : undefined;
+  const selectedAgent = agentChannel?.agent ?? "";
+  if (hasWorkflow(draft) && !selectedAgent) {
     const d = draft;
     pickers.push({
       key: "workflow",
@@ -437,6 +444,73 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
   // step's own agent preset, and `WorkflowRunRequest` carries none of them —
   // so while a workflow is selected these controls would configure nothing.
   if (running) return pickers;
+
+  // An agent preset supplies every agent channel itself. Keep it in the Model
+  // menu as a mutually-exclusive alternative to configuring a model directly.
+  if (selectedAgent && agentChannel) {
+    pickers.push({
+      key: "model",
+      legend: "Model",
+      icon: <Cpu size={15} />,
+      label: selectedAgent,
+      marked: true,
+      width: "w-72",
+      testId: "config-model",
+      warn: settingsFailed,
+      body: (close) => (
+        <>
+          <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+            Models
+          </p>
+          {models.map((m) => (
+            <button
+              key={m.alias}
+              type="button"
+              className={optionClass(false)}
+              data-popover-option
+              data-testid="model-option"
+              data-value={m.alias}
+              data-selected={false}
+              aria-pressed={false}
+              onClick={() => {
+                draft.setModel(m.alias);
+                agentChannel.setAgent("");
+                close();
+              }}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block font-mono text-sm text-legend">{m.alias}</span>
+                <span className="block text-[0.6875rem] text-faint">{m.modelId}</span>
+              </span>
+            </button>
+          ))}
+          <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+            Agents
+          </p>
+          {agentChannel.agents.map((agent) => (
+            <button
+              key={agent}
+              type="button"
+              className={optionClass(agent === selectedAgent)}
+              data-popover-option
+              data-testid="agent-option"
+              data-value={agent}
+              data-selected={agent === selectedAgent}
+              aria-pressed={agent === selectedAgent}
+              onClick={() => {
+                agentChannel.setAgent(agent);
+                close();
+              }}
+            >
+              <span className="min-w-0 flex-1 font-mono text-sm text-legend">{agent}</span>
+              {agent === selectedAgent && <SelectedMark />}
+            </button>
+          ))}
+        </>
+      ),
+    });
+    return pickers;
+  }
 
   // Skills and MCP are not workspace channels, so they are offered on every
   // vendor. A runtime fetches its selected bundles over its own outbound
@@ -551,9 +625,6 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     marked: !!draft.model,
     width: "w-72",
     testId: "config-model",
-    // `marked` stays false on a failed read, so the key does not claim a model
-    // was chosen — but the popover has to say why the list is empty, or it
-    // reads as an account with no models while Send says "Select a model".
     warn: settingsFailed,
     body: (close) =>
       settingsFailed ? (
@@ -567,6 +638,55 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
         <EmptyLink to="/settings/models">
           No models configured — add one in Settings
         </EmptyLink>
+      ) : agentChannel ? (
+        <>
+          <p className="px-2 pt-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+            Models
+          </p>
+          {models.map((m) => (
+            <button
+              key={m.alias}
+              type="button"
+              className={optionClass(draft.model === m.alias)}
+              data-popover-option
+              data-testid="model-option"
+              data-value={m.alias}
+              data-selected={draft.model === m.alias}
+              aria-pressed={draft.model === m.alias}
+              onClick={() => {
+                draft.setModel(m.alias);
+                close();
+              }}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block font-mono text-sm text-legend">{m.alias}</span>
+                <span className="block text-[0.6875rem] text-faint">{m.modelId}</span>
+              </span>
+              {draft.model === m.alias && <SelectedMark />}
+            </button>
+          ))}
+          <p className="px-2 pt-1.5 text-[0.6875rem] tracking-wide text-faint uppercase">
+            Agents
+          </p>
+          {agentChannel.agents.map((agent) => (
+            <button
+              key={agent}
+              type="button"
+              className={optionClass(false)}
+              data-popover-option
+              data-testid="agent-option"
+              data-value={agent}
+              data-selected={false}
+              aria-pressed={false}
+              onClick={() => {
+                agentChannel.setAgent(agent);
+                close();
+              }}
+            >
+              <span className="min-w-0 flex-1 font-mono text-sm text-legend">{agent}</span>
+            </button>
+          ))}
+        </>
       ) : (
         models.map((m) => (
           <button
