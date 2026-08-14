@@ -165,10 +165,10 @@ pub fn next_transition(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use horsie_models::workflow::OutcomeFilter;
     use crate::sessions::spec::AgentSettings;
     use crate::sessions::workflow::WorkflowRunStatus;
     use crate::sessions::workflow::spec::{TransitionSpec, WorkflowStepSpec};
+    use horsie_models::workflow::OutcomeFilter;
 
     fn settings() -> AgentSettings {
         AgentSettings {
