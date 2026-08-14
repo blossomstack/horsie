@@ -428,11 +428,27 @@ pub async fn rename_session(
     Ok(Json(Ack {}))
 }
 
-pub async fn stop_session(
+/// `POST /api/sessions/:id/agents/:agent_id/stop` — cancel one agent's turn.
+///
+/// Addressed rather than session-wide, because a session hosts several
+/// conversations at once and each has a turn of its own: "stop the session"
+/// named no single thing to cancel, and on any page but the main agent's it
+/// cancelled something the reader was not looking at — or, for a fork, silently
+/// nothing at all.
+///
+/// `404` names an agent this session does not have. An agent that simply is not
+/// working answers `200`: nothing to stop is not a failure, and a client racing
+/// a turn's own end would otherwise be told it failed for winning the race.
+pub async fn stop_agent(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Path((id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, Api> {
-    let result = ask(&state, |reply| SessionSupervisorCommand::Stop { id, reply }).await?;
+    let result = ask(&state, |reply| SessionSupervisorCommand::Stop {
+        id,
+        agent_id,
+        reply,
+    })
+    .await?;
     match result {
         Ok(()) => Ok(Json(Ack {})),
         Err(msg) => Err(Api::not_found(msg)),

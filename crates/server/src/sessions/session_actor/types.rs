@@ -100,9 +100,21 @@ pub enum TurnCommand {
         text: String,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
     },
-    /// Cancel the turn in flight. Queued messages are *not* discarded — stop
-    /// means "not this turn", not "throw away what I asked for".
-    Stop { reply: ReplyTo<()> },
+    /// Cancel one agent's turn in flight. Queued messages are *not* discarded —
+    /// stop means "not this turn", not "throw away what I asked for".
+    ///
+    /// Addressed, never session-wide: a session hosts several conversations at
+    /// once and each has its own turn, so "stop the session" named no single
+    /// thing to cancel. `agent_id` is `"main"` or an agent's uuid, the same
+    /// vocabulary every other agent-scoped request speaks.
+    ///
+    /// `Err` is for an id that names no agent here. An agent that is simply not
+    /// working is `Ok`: nothing to stop is not a failure, and a client racing a
+    /// turn's own end would otherwise see an error for winning the race.
+    Stop {
+        agent_id: String,
+        reply: ReplyTo<Result<(), String>>,
+    },
     /// Answer every question one agent is parked on, at once. Routed, not
     /// decided: the agent owns what it asked and validates the set.
     Answer {

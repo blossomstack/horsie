@@ -213,11 +213,15 @@ export function useRenameSession() {
   });
 }
 
-export function useStopSession() {
+/** Cancel one agent's turn. The agent is named, never implied: on a fork's page
+ * the unscoped stop cancelled the main agent's turn instead — or, once a fork
+ * was what was running, nothing at all. */
+export function useStopAgent() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api.sessions.stop(id),
-    onSuccess: (_r, id) => {
+    mutationFn: ({ id, agentId }: { id: string; agentId: string }) =>
+      api.sessions.stop(id, agentId),
+    onSuccess: (_r, { id }) => {
       client.invalidateQueries({ queryKey: qk.session(id) });
     },
   });
