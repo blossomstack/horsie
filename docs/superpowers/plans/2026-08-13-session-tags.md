@@ -1079,11 +1079,175 @@ git commit -m "test(e2e): session tags replace session groups"
 
 ---
 
-### Task 9: See it, then ship it
+### Task 9: Collapse an over-long user message
+
+A pasted log or a long brief currently renders in full, so one message can own
+the whole viewport and push the reply the user came back for off screen. It
+clamps instead, with a control at its bottom right.
+
+**Files:**
+- Create: `clients/web/src/components/CollapsibleText.tsx`
+- Create: `clients/web/src/components/CollapsibleText.test.tsx`
+- Modify: `clients/web/src/components/Transcript.tsx:155-182` (`UserTurn`)
+
+**Interfaces:**
+- Produces: `CollapsibleText({ children, maxHeight }: { children: ReactNode; maxHeight: number })` — `maxHeight` in px, default 320.
+
+Only clamps when the content actually overflows: measure `scrollHeight` against
+`maxHeight` in a layout effect, and render no control at all when it fits. A
+"More" button under a three-line message is chrome advertising a job it does
+not have.
+
+- [ ] **Step 1: Write the failing test**
+
+```tsx
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CollapsibleText } from "./CollapsibleText";
+
+afterEach(cleanup);
+
+/** jsdom reports every scrollHeight as 0, so overflow is staged explicitly. */
+function stageScrollHeight(px: number) {
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(px);
+}
+
+describe("CollapsibleText", () => {
+  it("renders no control when the content fits", () => {
+    stageScrollHeight(100);
+    render(<CollapsibleText maxHeight={320}>short</CollapsibleText>);
+    expect(screen.queryByTestId("expand-text")).toBeNull();
+  });
+
+  it("clamps and offers More when the content overflows", () => {
+    stageScrollHeight(900);
+    render(<CollapsibleText maxHeight={320}>long</CollapsibleText>);
+    const body = screen.getByTestId("collapsible-body");
+    expect(body).toHaveStyle({ maxHeight: "320px" });
+    expect(screen.getByTestId("expand-text")).toHaveTextContent("More");
+  });
+
+  it("expands and collapses again", () => {
+    stageScrollHeight(900);
+    render(<CollapsibleText maxHeight={320}>long</CollapsibleText>);
+    fireEvent.click(screen.getByTestId("expand-text"));
+    expect(screen.getByTestId("collapsible-body")).not.toHaveStyle({ maxHeight: "320px" });
+    expect(screen.getByTestId("expand-text")).toHaveTextContent("Less");
+    fireEvent.click(screen.getByTestId("expand-text"));
+    expect(screen.getByTestId("expand-text")).toHaveTextContent("More");
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `cd clients/web && bun run test src/components/CollapsibleText.test.tsx`
+Expected: FAIL — cannot resolve `./CollapsibleText`.
+
+- [ ] **Step 3: Implement**
+
+```tsx
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { cn } from "../lib/cn";
+
+/** Content that clamps to `maxHeight` and offers to open, but only once it
+ * actually overflows. A pasted log is otherwise a message that owns the whole
+ * viewport and pushes the reply you came back for off screen. */
+export function CollapsibleText({
+  children,
+  maxHeight = 320,
+  className,
+}: {
+  children: ReactNode;
+  maxHeight?: number;
+  className?: string;
+}) {
+  const body = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  // Measured, not guessed from character count: the same text is two lines
+  // wide and twelve narrow, and the rail can be opened or closed under it.
+  useLayoutEffect(() => {
+    const el = body.current;
+    if (!el) return;
+    const measure = () => setOverflows(el.scrollHeight > maxHeight + 8);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [maxHeight, children]);
+
+  const clamped = overflows && !open;
+
+  return (
+    <div className="relative">
+      <div
+        ref={body}
+        data-testid="collapsible-body"
+        className={cn("overflow-hidden", className)}
+        style={clamped ? { maxHeight } : undefined}
+      >
+        {children}
+      </div>
+      {clamped && (
+        // The fade says the text continues; the button says what to do about
+        // it. Without the fade a clamp reads as a message that ends mid-word.
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-[linear-gradient(to_top,var(--panel-raised),transparent)]"
+        />
+      )}
+      {overflows && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            data-testid="expand-text"
+            className="legend relative px-2 py-1 hover:!text-legend"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? "Less" : "More"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 4: Use it in `UserTurn`**
+
+Wrap the existing bubble, leaving its styling intact so nothing else about a
+user message changes:
+
+```tsx
+<CollapsibleText
+  className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend"
+>
+  {msg.text}
+</CollapsibleText>
+```
+
+- [ ] **Step 5: Run the tests**
+
+Run: `cd clients/web && bun run test src/components/CollapsibleText.test.tsx src/components/Transcript.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add clients/web/src/components/CollapsibleText.tsx clients/web/src/components/CollapsibleText.test.tsx clients/web/src/components/Transcript.tsx
+git commit -m "feat(web): clamp an over-long user message behind More"
+```
+
+---
+
+### Task 10: See it, then ship it
 
 - [ ] **Step 1: Screenshot the real stack**
 
-Write a throwaway `clients/web/e2e/zz-shots.spec.ts` (sorts last, so it never contaminates the FIFO mock queue) that captures, in both themes via `page.emulateMedia({ colorScheme })`: the rail with the tag panel open, the rail with it closed and a filter active, the row's tag menu, and the Agents / Environments / Workflows / Routines headers. Run with `TMPDIR=/tmp HORSIE_E2E_SKIP_BUILD=1 bunx playwright test zz-shots`, read every PNG, and **delete the spec before committing**.
+Write a throwaway `clients/web/e2e/zz-shots.spec.ts` (sorts last, so it never contaminates the FIFO mock queue) that captures, in both themes via `page.emulateMedia({ colorScheme })`: the rail with the tag panel open, the rail with it closed and a filter active, the row's tag menu, a clamped over-long user message with its More control, and the Agents / Environments / Workflows / Routines headers. Run with `TMPDIR=/tmp HORSIE_E2E_SKIP_BUILD=1 bunx playwright test zz-shots`, read every PNG, and **delete the spec before committing**.
 
 - [ ] **Step 2: Fix what the screenshots show**
 
@@ -1108,7 +1272,7 @@ Branch `session-tags`, PR body following `.github/pull_request_template.md`: Why
 
 ## Self-review
 
-**Spec coverage.** Data model → Task 1 + 2. Deletions → Tasks 2, 4, 5, 6. Flat rail, filter button, tag panel, tri-state, persistence, empty states → Task 4. Row menu → Task 3. Header alignment + nameplate → Task 7. Testing → Tasks 1–4, 8, 9. Journal consequence → Task 6 step 4, surfaced in the PR body at Task 9.
+**Spec coverage.** Data model → Task 1 + 2. Deletions → Tasks 2, 4, 5, 6. Flat rail, filter button, tag panel, tri-state, persistence, empty states → Task 4. Row menu → Task 3. Header alignment + nameplate → Task 7. Long-message clamping → Task 9 (added after the spec was written, at the user's request mid-implementation). Testing → Tasks 1–4, 8, 10. Journal consequence → Task 6 step 4, surfaced in the PR body at Task 10.
 
 **Ordering.** The frontend swaps to the annotations route (Tasks 1–4) before the group API is deleted (Tasks 5–6), so no task leaves the server broken. Task 2 does leave the *web* build broken until Task 4 lands, which is called out in Task 2 rather than left to be discovered.
 
