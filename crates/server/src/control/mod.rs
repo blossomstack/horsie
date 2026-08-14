@@ -18,7 +18,13 @@ use std::sync::Arc;
 pub mod agents;
 pub mod environments;
 pub mod http;
+pub mod marketplaces;
+pub mod mcp;
+pub mod memory_spaces;
+pub mod models;
+pub mod plugins;
 pub mod routines;
+pub mod runtime_vendors;
 pub mod sessions;
 pub mod toolbox;
 pub mod workflows;
@@ -44,6 +50,12 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(environments::Environments),
         Box::new(workflows::Workflows),
         Box::new(sessions::Sessions),
+        Box::new(mcp::Mcp),
+        Box::new(marketplaces::Marketplaces),
+        Box::new(plugins::Plugins),
+        Box::new(models::Models),
+        Box::new(runtime_vendors::RuntimeVendors),
+        Box::new(memory_spaces::MemorySpaces),
     ]
 }
 

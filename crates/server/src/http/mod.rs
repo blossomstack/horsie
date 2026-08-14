@@ -6,20 +6,16 @@ mod admin;
 mod annotations;
 pub mod auth;
 mod chatgpt;
-mod config;
 pub mod error;
 pub(crate) mod github;
 pub(crate) mod handlers;
-mod marketplaces;
 mod mcp;
 mod memory;
 pub(crate) mod messages;
-mod model_cards;
 mod plugins;
 pub mod runtime_connect;
 mod runtime_credentials;
 mod runtime_pump;
-mod runtime_vendors;
 mod sse;
 mod vendor_connect;
 mod workflows;
@@ -180,21 +176,6 @@ pub fn app(state: AppState) -> Router {
             post(handlers::send_message).get(messages::read_messages),
         )
         .route("/api/events", get(sse::global_events))
-        .route("/api/config", get(config::get_config))
-        .route(
-            "/api/config/default-runtime-vendor",
-            put(config::put_default_runtime_vendor).delete(config::delete_default_runtime_vendor),
-        )
-        .route("/api/config/models", get(config::list_models))
-        .route(
-            "/api/config/models/{alias}",
-            put(config::put_model).delete(config::delete_model),
-        )
-        .route("/api/config/model-providers", get(config::list_providers))
-        .route(
-            "/api/config/model-providers/{name}",
-            put(config::put_provider).delete(config::delete_provider),
-        )
         .route(
             "/api/config/model-providers/{name}/chatgpt",
             get(chatgpt::status),
@@ -207,7 +188,6 @@ pub fn app(state: AppState) -> Router {
             "/api/config/model-providers/{name}/chatgpt/poll",
             post(chatgpt::poll),
         )
-        .route("/api/model-cards", get(model_cards::list))
         .route(
             "/api/admin/model-cards",
             get(admin::list_cards).post(admin::create_card),
@@ -229,42 +209,14 @@ pub fn app(state: AppState) -> Router {
         )
         .route("/api/github/repos", get(github::repos))
         .route("/api/github/repos/branches", get(github::branches))
-        .route("/api/mcp/servers", get(mcp::list))
-        .route(
-            "/api/mcp/servers/{name}",
-            axum::routing::put(mcp::upsert).delete(mcp::delete),
-        )
-        .route("/api/mcp/servers/{name}/test", post(mcp::test))
+        // Not an operation: it builds its OAuth `redirect_uri` from this
+        // request's own Host, and a tool call has no origin to build one from.
         .route("/api/mcp/servers/{name}/connect", post(mcp::connect))
         .route(
             "/api/mcp/servers/{name}/oauth/callback",
             get(mcp::oauth_callback),
         )
-        .route("/api/marketplaces", get(marketplaces::list))
-        .route(
-            "/api/marketplaces/{name}",
-            axum::routing::delete(marketplaces::remove),
-        )
-        .route(
-            "/api/marketplaces/{name}/refresh",
-            post(marketplaces::refresh),
-        )
-        .route("/api/plugins", get(plugins::list).post(plugins::install))
-        .route("/api/builtins", get(plugins::builtins))
-        .route(
-            "/api/plugins/{name}",
-            put(plugins::set_default).delete(plugins::remove),
-        )
-        .route("/api/plugins/{name}/update", post(plugins::update))
         .route("/api/plugin-artifacts/{file}", get(plugins::get_artifact))
-        .route(
-            "/api/memory-spaces",
-            get(memory::list_spaces).post(memory::create_space),
-        )
-        .route(
-            "/api/memory-spaces/{name}",
-            put(memory::update_space).delete(memory::delete_space),
-        )
         .route(
             "/api/memories",
             get(memory::list_memories).post(memory::create_memory),
@@ -278,18 +230,6 @@ pub fn app(state: AppState) -> Router {
         // Every JSON management route is mounted from the operation table
         // instead of listed here, so a new operation cannot exist without one.
         .merge(crate::control::http::router(&crate::control::operations()))
-        .route(
-            "/api/runtime-vendors",
-            get(runtime_vendors::list_runtime_vendors),
-        )
-        .route(
-            "/api/runtime-vendors/{name}",
-            put(runtime_vendors::put_runtime_vendor).delete(runtime_vendors::delete_runtime_vendor),
-        )
-        .route(
-            "/api/runtime-vendors/{name}/test",
-            post(runtime_vendors::test_runtime_vendor),
-        )
         .route("/api/sessions/{id}/workflow", get(workflows::get_run_graph))
         .route(
             "/api/sessions/{id}/workflow/retry",
@@ -1667,9 +1607,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let app = app(test_state(&tmp).await);
 
+        // A body naming something else is a rename attempt, and the path is the
+        // id of record — so it is refused rather than silently overridden. This
+        // route used to override it; it now answers like every other resource.
+        let mismatched = serde_json::json!({
+            "name": "not-acme",
+            "url": "http://127.0.0.1:0/",
+            "auth": { "kind": "Bearer", "value": { "token": "sekret" } }
+        });
+        let res = app
+            .clone()
+            .oneshot(put_json("/api/mcp/servers/acme", &mismatched))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
         // Upsert a bearer server; the token is redacted to `has_token` in the view.
         let body = serde_json::json!({
-            "name": "ignored-by-path",
+            "name": "acme",
             "url": "http://127.0.0.1:0/",
             "auth": { "kind": "Bearer", "value": { "token": "sekret" } }
         });
