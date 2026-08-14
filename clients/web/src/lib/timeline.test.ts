@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ForkView, SubAgentView } from "../api/types";
 import type { TranscriptItem } from "../hooks/useSessionStream";
-import { buildScale, buildTimeline, GAP_PX, MAX_BAR_PX, MIN_BAR_PX } from "./timeline";
+import {
+  buildScale,
+  buildTimeline,
+  GAP_PX,
+  MIN_BAR_PX,
+  TARGET_LONGEST_PX,
+} from "./timeline";
 
 const S = (startMs: number, endMs: number) => ({ startMs, endMs });
 
@@ -11,13 +17,37 @@ describe("buildScale", () => {
     expect(s.toX(1000)).toBe(0);
   });
 
-  it("keeps a short gap proportional and collapses a long one", () => {
-    const kept = buildScale([S(0, 10_000), S(20_000, 30_000)]);
-    const collapsed = buildScale([S(0, 10_000), S(3_610_000, 3_620_000)]);
-    // A kept gap is drawn at the same scale as the spans around it: the second
-    // span starts twice as far along as the first one is wide.
-    expect(kept.toX(20_000)).toBeCloseTo(2 * kept.toX(10_000), 5);
-    expect(collapsed.toX(3_610_000)).toBeCloseTo(collapsed.toX(10_000) + GAP_PX, 5);
+  it("draws the longest span at the target width, whatever the session's pace", () => {
+    // The bug this pins: the old rule scaled the session's *total* to a fixed
+    // width and then clamped the scale, so a session that finished in three
+    // seconds drew as a hundred-pixel smudge.
+    const quick = buildScale([S(0, 800), S(900, 3_000)]);
+    const slow = buildScale([S(0, 800_000), S(900_000, 3_000_000)]);
+    expect(quick.toX(3_000) - quick.toX(900)).toBeCloseTo(TARGET_LONGEST_PX, 5);
+    expect(slow.toX(3_000_000) - slow.toX(900_000)).toBeCloseTo(TARGET_LONGEST_PX, 5);
+  });
+
+  it("keeps every other span in proportion to the longest", () => {
+    const s = buildScale([S(0, 1_000), S(1_000, 3_000)]);
+    const first = s.toX(1_000) - s.toX(0);
+    const second = s.toX(3_000) - s.toX(1_000);
+    expect(second).toBeCloseTo(2 * first, 5);
+  });
+
+  it("never draws a gap wider than the collapsed gutter", () => {
+    // Waiting must not outdraw working. At a quick session's scale a
+    // proportional fifty-second pause would be wider than every bar together.
+    const kept = buildScale([S(0, 1_000), S(51_000, 52_000)]);
+    expect(kept.toX(51_000) - kept.toX(1_000)).toBe(GAP_PX);
+    const collapsed = buildScale([S(0, 1_000), S(3_601_000, 3_602_000)]);
+    expect(collapsed.toX(3_601_000) - collapsed.toX(1_000)).toBe(GAP_PX);
+  });
+
+  it("keeps a gap short enough to draw in proportion", () => {
+    const s = buildScale([S(0, 240_000), S(240_100, 240_200)]);
+    // 100ms at 240px per 240_000ms is a tenth of a pixel — under the cap, so
+    // it stays proportional rather than jumping to the gutter width.
+    expect(s.toX(240_100) - s.toX(240_000)).toBeLessThan(GAP_PX);
   });
 
   it("reports what each collapsed gap swallowed", () => {
@@ -26,11 +56,17 @@ describe("buildScale", () => {
     expect(s.gaps[0].elapsedMs).toBe(3_600_000);
   });
 
-  it("clamps a span to the minimum and maximum bar width", () => {
-    const tiny = buildScale([S(0, 1)]);
-    expect(tiny.toX(1) - tiny.toX(0)).toBe(MIN_BAR_PX);
-    const huge = buildScale([S(0, 36_000_000)]);
-    expect(huge.toX(36_000_000) - huge.toX(0)).toBe(MAX_BAR_PX);
+  it("gives an instantaneous span a clickable minimum", () => {
+    const s = buildScale([S(0, 0)]);
+    expect(s.toX(0)).toBe(0);
+    expect(s.width).toBe(MIN_BAR_PX);
+  });
+
+  it("survives a session in which nothing took any time at all", () => {
+    // Only user messages: there is no longest span to be in proportion to, so
+    // the scale is zero and every bar falls to the minimum.
+    const s = buildScale([S(1_000, 1_000), S(2_000, 2_000)]);
+    expect(s.width).toBe(2 * MIN_BAR_PX);
   });
 
   it("clamps a moment before the start and after the end", () => {
@@ -42,13 +78,6 @@ describe("buildScale", () => {
   it("interpolates a moment inside a span", () => {
     const s = buildScale([S(0, 10_000)]);
     expect(s.toX(5_000)).toBeCloseTo(s.width / 2, 5);
-  });
-
-  it("keeps two zero-duration spans apart", () => {
-    // Two user messages a second apart. Each still needs a clickable bar, so
-    // neither may collapse onto the other.
-    const s = buildScale([S(1000, 1000), S(2000, 2000)]);
-    expect(s.toX(2000)).toBeGreaterThan(s.toX(1000) + MIN_BAR_PX - 1);
   });
 
   it("returns an empty scale for no spans", () => {
@@ -138,6 +167,28 @@ describe("buildTimeline", () => {
     const t = buildTimeline(SESSION, MAIN, [], 20_000);
     expect(t.ticks).toHaveLength(1);
     expect(t.ticks[0].x).toBe(0);
+  });
+
+  it("drops a tick that would print on top of the one before it", () => {
+    // Four quick turns rendered four labels at nearly the same pixel and read
+    // as one line of garbled digits. Only a screenshot showed it.
+    const rapid: TranscriptItem[] = [];
+    for (let i = 0; i < 4; i++) {
+      rapid.push(msg(`u${i}`, "User", 1_000 + i * 200, { text: `turn ${i}` }));
+      rapid.push(
+        msg(`a${i}`, "Assistant", 1_100 + i * 200, { startedAtMs: 1_050 + i * 200, text: "ok" }),
+      );
+    }
+    const t = buildTimeline(rapid, MAIN, [], 20_000);
+    expect(t.ticks.length).toBeGreaterThan(0);
+    for (let i = 1; i < t.ticks.length; i++) {
+      expect(t.ticks[i].x - t.ticks[i - 1].x).toBeGreaterThanOrEqual(56);
+    }
+  });
+
+  it("labels a tick with a 24-hour time, so its width is fixed", () => {
+    const t = buildTimeline(SESSION, MAIN, [], 20_000);
+    expect(t.ticks[0].label).toMatch(/^\d{2}:\d{2}$/);
   });
 
   it("measures a still-running tool against now, not against zero", () => {

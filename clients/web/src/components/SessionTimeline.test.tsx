@@ -107,20 +107,9 @@ describe("SessionTimeline", () => {
     expect(screen.queryByTestId("timeline-span-old")).toBeNull();
   });
 
-  it("marks a bar drawn at the cap, and says so in its tooltip", () => {
-    const capped: Timeline = {
-      ...TIMELINE,
-      lanes: [
-        {
-          ...TIMELINE.lanes[0],
-          bars: [
-            { key: "b1", kind: "tool", x: 0, width: 320, entryId: "m9", title: "Bash", detail: "41m" },
-          ],
-        },
-      ],
-    };
-    view(capped);
-    expect(screen.getByTestId("timeline-bar-m9").getAttribute("title")).toContain("drawn short");
+  it("puts the real duration in every bar's tooltip", () => {
+    view(TIMELINE);
+    expect(screen.getByTestId("timeline-bar-m2").getAttribute("title")).toBe("Bash · 12.4s");
   });
 
   it("says so when there is nothing to draw", () => {
@@ -136,5 +125,27 @@ describe("SessionTimeline", () => {
       width: 0,
     });
     expect(screen.getByTestId("timeline-empty")).toBeTruthy();
+  });
+});
+
+describe("SessionTimeline anchors", () => {
+  it("draws a connector back to the lane an agent came from", () => {
+    // The spec's "arrow pointing to the timeline". `anchor` was computed in the
+    // model and never rendered — invisible in every unit test, obvious in a
+    // screenshot.
+    view(TIMELINE);
+    expect(screen.getByTestId("timeline-anchor-s1")).toBeTruthy();
+    expect(screen.getByTestId("timeline-anchor-f1")).toBeTruthy();
+  });
+
+  it("draws no connector for an agent that could not be placed", () => {
+    view(TIMELINE);
+    expect(screen.queryByTestId("timeline-anchor-old")).toBeNull();
+  });
+
+  it("puts the connector at the moment the agent branched off", () => {
+    view(TIMELINE);
+    const anchor = screen.getByTestId("timeline-anchor-s1");
+    expect(anchor.getAttribute("style")).toContain("left: 30px");
   });
 });

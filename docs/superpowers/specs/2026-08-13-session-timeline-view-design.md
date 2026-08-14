@@ -161,15 +161,21 @@ The horizontal axis is wall-clock order with the dead air taken out.
 The layout walks the main agent's entries in start order, carrying a pixel
 cursor. Between two entries it advances the cursor by the real elapsed time
 times a scale factor — unless that gap exceeds 60 seconds, in which case it
-advances a fixed 20px and records a gap marker labelled with what was skipped
-(`⋯ 3h 12m`). A bar's width is its duration times the scale, clamped to a
-6px minimum so a fast tool call stays hittable and a 320px maximum so one long
-call cannot push everything else off the screen.
+advances a fixed 24px and records a gap marker labelled with what was skipped
+(`⋯ 3h 12m`). Either way a gap is capped at that same 24px, so waiting never
+outdraws working. A bar's width is its duration times the scale, with a 6px
+minimum so a fast tool call stays hittable. Nothing caps the top.
 
-The scale is chosen so the session's total *active* time — elapsed minus every
-collapsed gap — draws to roughly 2400px, about three pane-widths, then clamped
-to between 0.5 and 20 pixels per second so a two-minute session is not
-stretched absurdly and a week-long one is not crushed.
+**The scale is set by the longest single span**, which is drawn at 240px;
+everything else is in proportion to it. This is the second version of the rule.
+The first scaled the session's *total* active time to a fixed 2400px and then
+clamped the scale to between 0.5 and 20 pixels per second, reasoning that a
+short session should not be stretched absurdly. That reasoning was wrong, and
+wrong in a way no unit test could catch: at 20px/s a session that finished in
+three seconds drew as a 100px smudge in a 1000px pane. Scaling off the longest
+bar makes a three-second session and a three-day one equally readable, and it
+removes the need for a maximum bar width at all — the longest bar *is* the
+scale, so no bar can run away.
 
 A subagent result is not a bar. It lands in the parent's transcript inside a
 user message, and `transcriptSegments.ts` renders it as a `SubAgentCard` there
@@ -221,12 +227,21 @@ outside the timeline and saying so.
 
 Plain DOM, not SVG. Bars are absolutely positioned divs inside one horizontal
 scroller with a sticky label gutter down the left. `WorkflowGraph` uses SVG
-because it has to route edges around ranks; here the only non-rectangular
-things are the short spawn arrows, which sit in an SVG overlay above the lanes.
+because it has to route edges around ranks; here there is nothing to route.
 Divs get hover, focus, keyboard activation and text selection for free, and a
 few hundred of them are not a rendering problem.
 
-All lanes share the one scroller so alignment holds while scrolling.
+A lane's connector is a 1px line under a CSS arrowhead, drawn upward out of its
+own row rather than as cross-row geometry between two lanes. The parent is the
+lane above — or a lane above, for a nested one — so leaving the top edge reads
+as "this hangs off the timeline" without every row's height having to be known
+before layout, which the fork divider and the unplaced section would otherwise
+break.
+
+All lanes share the one scroller so alignment holds while scrolling. The
+scroller carries the panel surface, not just the sticky gutter: painting only
+the gutter leaves each label sitting in a rectangle of a different colour from
+the pane, which reads as a stray box down the left edge.
 
 Colours come from the existing lamp and skin variables, not new ones, so
 Paper/Soft/Slate all work without a fourth set of definitions.
@@ -320,14 +335,28 @@ the session document, and knows nothing the session page does not already know.
 
 ## Where the picture lies, deliberately
 
-Two places, both marked in the UI rather than hidden:
+One place, marked in the UI rather than hidden: a gap is never drawn wider than
+24px, whether it swallowed fifty seconds or two days, with the elapsed time
+written into the gutter and the collapsed ones hatched.
 
-A bar longer than 320px is drawn at 320px with a hatched right edge, so a
-forty-minute tool call does not make everything else unreadable. The tooltip
-always carries the true duration.
+Everything else — order, every bar's duration relative to every other, which
+turn spawned which agent, where a fork branched — is drawn from the real
+stamps.
 
-A collapsed gap is drawn at 20px regardless of whether it swallowed two minutes
-or two days, with the elapsed time written in the gutter.
+## What only a screenshot caught
 
-Everything else — order, relative durations within a burst of work, which turn
-spawned which agent, where a fork branched — is drawn from the real stamps.
+Every defect in this list passed the whole unit suite, the e2e suite, and CI.
+
+The scale rule crushed any short session to a smudge (above). Four turns a
+second apart printed four time labels at the same pixel, which read as one line
+of garbled digits — ticks now drop when they would land within 56px of the
+previous one. The thinking bar was outlined rather than filled, so the largest
+object on the lane looked like a frame around nothing. The sticky label gutter
+was `bg-panel` against a differently-coloured pane and read as a stray grey box
+down the left. An open span was bounded by the drawn session's width, so a fork
+taken near the end was a 13px stub that looked measured rather than open-ended.
+
+And the connectors were never drawn at all: `Lane.anchor` was computed, typed,
+and carried all the way to the component, which ignored it. "An arrow pointing
+back to the moment on its parent's lane" was in the first sketch and in this
+spec, and nothing in the test suite noticed it was missing.

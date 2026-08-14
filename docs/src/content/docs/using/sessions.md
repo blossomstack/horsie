@@ -76,10 +76,11 @@ Subagents and forked conversations get their own lanes below, each starting at
 the moment it branched off. Click a bar to jump back to that entry in the
 transcript; click a lane to open that agent.
 
-Two things about the axis are worth knowing. Idle stretches longer than a
-minute collapse to a narrow hatched gutter labelled with what they swallowed,
-so a session you left overnight is still readable. And a single very long bar
-is drawn short, with a dashed right edge — hover it for the real duration.
+One thing about the axis is worth knowing: idle stretches longer than a minute
+collapse to a narrow hatched gutter labelled with what they swallowed, so a
+session you left overnight is still readable. Everything else is drawn to
+scale, with the longest single step setting it — hover any bar for its exact
+duration.
 
 The view is in the address bar, so a link to it opens on the timeline.
 

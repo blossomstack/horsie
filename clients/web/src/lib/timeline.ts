@@ -20,16 +20,23 @@ import { forkTree } from "./forkTree";
 
 /** A gap longer than this is dead air, not part of the work. */
 export const GAP_THRESHOLD_MS = 60_000;
-/** What a collapsed gap is drawn at, however long it really was. */
-export const GAP_PX = 20;
+/** What a gap is drawn at, at most — collapsed or kept. No stretch of nothing
+ * happening is ever wider than this, so a gap can never dominate the picture. */
+export const GAP_PX = 24;
 /** Small enough to read as brief, big enough to still be a click target. */
 export const MIN_BAR_PX = 6;
-/** One forty-minute tool call must not push the rest of the session off screen. */
-export const MAX_BAR_PX = 320;
-/** Roughly three pane-widths of drawn session. */
-export const TARGET_PX = 2400;
-export const MIN_SCALE = 0.0005;
-export const MAX_SCALE = 0.02;
+/**
+ * What the longest single thing that happened is drawn at. The scale falls out
+ * of this: everything else is in proportion to it.
+ *
+ * Scaling off the longest bar rather than off the session's total is what makes
+ * a three-second session and a three-day one both readable. The first version
+ * scaled the total to a fixed target and then clamped the scale, which capped a
+ * short session at twenty pixels a second — a session that finished in a few
+ * seconds drew as a hundred-pixel smudge in a thousand-pixel pane. It is only
+ * visible in a screenshot; every unit test passed.
+ */
+export const TARGET_LONGEST_PX = 240;
 
 export interface Span {
   startMs: number;
@@ -42,8 +49,6 @@ export interface Scale {
   width: number;
   gaps: { x: number; elapsedMs: number }[];
 }
-
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
  * Build the time-to-pixel map from the spans that will be drawn on the main lane.
@@ -58,18 +63,13 @@ export function buildScale(spans: Span[]): Scale {
     return { toX: () => 0, width: 0, gaps: [] };
   }
 
-  // Scaled on *active* time — elapsed minus everything that will collapse —
-  // rather than on total elapsed, which would squeeze a session with one
-  // overnight gap in it down to a smudge.
-  let activeMs = 0;
-  for (let i = 0; i < spans.length; i++) {
-    activeMs += Math.max(0, spans[i].endMs - spans[i].startMs);
-    if (i > 0) {
-      const gap = spans[i].startMs - spans[i - 1].endMs;
-      if (gap > 0 && gap <= GAP_THRESHOLD_MS) activeMs += gap;
-    }
-  }
-  const scale = activeMs > 0 ? clamp(TARGET_PX / activeMs, MIN_SCALE, MAX_SCALE) : MIN_SCALE;
+  // The longest thing that happened sets the scale, and everything else is
+  // drawn in proportion to it. Zero when every span is instantaneous — a
+  // session of nothing but user messages — in which case every bar is the
+  // minimum and there is nothing to be in proportion to.
+  let longestMs = 0;
+  for (const s of spans) longestMs = Math.max(longestMs, s.endMs - s.startMs);
+  const scale = longestMs > 0 ? TARGET_LONGEST_PX / longestMs : 0;
 
   // Breakpoints: (ms, px) pairs, both increasing. Between two consecutive
   // points the map is linear, which is what makes `toX` one interpolation
@@ -99,15 +99,18 @@ export function buildScale(spans: Span[]): Scale {
         gaps.push({ x, elapsedMs: gap });
         x += GAP_PX;
       } else if (gap > 0) {
-        x += gap * scale;
+        // Capped at the same width a collapsed gap gets, so waiting never
+        // outdraws working: at a short session's scale a proportional
+        // fifty-second pause would be wider than every bar put together.
+        x += Math.min(gap * scale, GAP_PX);
       }
       push(spans[i].startMs, x);
     }
     const duration = Math.max(0, spans[i].endMs - spans[i].startMs);
-    // Clamped, which is the one place the drawing stops being literally true.
-    // A bar at the cap is marked in the UI and its tooltip carries the real
-    // number; a zero-duration span still gets MIN_BAR_PX so it stays clickable.
-    x += clamp(duration * scale, MIN_BAR_PX, MAX_BAR_PX);
+    // A zero-duration span — a user message — still gets a minimum so it stays
+    // clickable. Nothing caps the top: the longest bar *is* the scale, so no
+    // bar can run away, and every width is honest.
+    x += Math.max(duration * scale, MIN_BAR_PX);
     push(spans[i].endMs, x);
   }
 
@@ -189,9 +192,17 @@ function humanMs(ms: number): string {
   return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
 }
 
+/** 24-hour, so a label is five characters wide however long the session ran. */
 function clockTime(ms: number): string {
-  return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(ms).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
+
+/** How close two turn-start labels may sit before the later one is dropped. */
+const TICK_MIN_GAP_PX = 56;
 
 /**
  * Flatten one message into the things the timeline draws.
@@ -317,9 +328,17 @@ export function buildTimeline(
     };
   });
 
-  const ticks = entries
-    .filter((e) => e.turnStart)
-    .map((e) => ({ x: scale.toX(e.startMs), label: clockTime(e.startMs) }));
+  // One per turn start, minus any that would print on top of the one before
+  // it. Four turns a second apart rendered four labels at the same pixel and
+  // read as a single line of garbled digits.
+  const ticks: { x: number; label: string }[] = [];
+  for (const e of entries) {
+    if (!e.turnStart) continue;
+    const x = scale.toX(e.startMs);
+    const last = ticks[ticks.length - 1];
+    if (last && x - last.x < TICK_MIN_GAP_PX) continue;
+    ticks.push({ x, label: clockTime(e.startMs) });
+  }
 
   // The main agent is the one nothing spawned. Falling back to the first entry,
   // and then to the well-known id, so a roster that has not arrived yet still

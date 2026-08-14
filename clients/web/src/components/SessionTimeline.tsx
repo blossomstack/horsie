@@ -1,5 +1,4 @@
 import type { Bar, BarKind, Lane, Timeline } from "../lib/timeline";
-import { MAX_BAR_PX } from "../lib/timeline";
 import { cn } from "../lib/cn";
 
 /** A session's shape, drawn along one axis.
@@ -22,12 +21,29 @@ const GUTTER_W = 148;
  * motion, ok for something that landed, orange for a question waiting on a
  * person — so all three skins work without a fourth set of colours. */
 const BAR_CLASS: Record<BarKind, string> = {
-  user: "bg-raised border-rule-strong",
+  user: "bg-keycap border-keycap-ink",
   assistant: "bg-lamp-ok-quiet border-lamp-ok",
-  thinking: "bg-screen border-rule",
+  // Filled with the rule colour, not `raised`. Outlined it read as an empty
+  // container, and `raised` on `panel` is too close to tell apart — since
+  // thinking is often the longest thing in a turn, the biggest object on the
+  // lane looked like a frame drawn around nothing.
+  thinking: "bg-rule border-rule-strong",
   tool: "bg-amber-quiet border-amber",
   ask: "bg-orange-quiet border-orange",
   compaction: "bg-transparent border-dashed border-rule-strong",
+};
+
+/** A lane's own colour is what became of the agent, which is the one thing a
+ * span can say that a bar cannot. Neutral grey on grey made a fast subagent
+ * invisible at the width its duration earns it. */
+const SPAN_CLASS: Record<string, string> = {
+  running: "bg-amber-quiet border-amber",
+  provisioning: "bg-amber-quiet border-amber",
+  awaiting_input: "bg-orange-quiet border-orange",
+  completed: "bg-lamp-ok-quiet border-lamp-ok",
+  failed: "bg-red-quiet border-red",
+  cancelled: "bg-raised border-rule-strong",
+  idle: "bg-raised border-rule-strong",
 };
 
 export function SessionTimeline({
@@ -59,7 +75,10 @@ export function SessionTimeline({
   const firstForkAt = placed.findIndex((l) => l.kind === "fork");
 
   return (
-    <div className="h-full overflow-auto" data-testid="session-timeline">
+    // `bg-panel` on the scroller, not just on the sticky gutter: with only the
+    // gutter painted, each lane's label sat in a panel-coloured rectangle
+    // against the pane's own surface and read as a stray box down the left.
+    <div className="h-full overflow-auto bg-panel" data-testid="session-timeline">
       <div className="relative min-w-full pb-4" style={{ width: GUTTER_W + timeline.width + 48 }}>
         {/* Collapsed idle stretches, behind everything else. */}
         {timeline.gaps.map((g) => (
@@ -159,6 +178,23 @@ function LaneRow({
       </div>
 
       <div className="relative flex-1" style={{ height: LANE_H }}>
+        {/* Where this lane came from. Drawn upward out of the row rather than
+            as cross-row geometry: the parent is the lane above (or a lane
+            above, for a nested one), and a line that leaves the top edge under
+            an arrowhead says "this hangs off the timeline" without needing
+            every row's height to be known in advance. */}
+        {lane.anchor && (
+          <span
+            data-testid={`timeline-anchor-${lane.agentId}`}
+            aria-hidden
+            className="pointer-events-none absolute top-0 w-px bg-[var(--rule-strong)]"
+            style={{ left: lane.anchor.x, height: LANE_H / 2 }}
+          >
+            <span
+              className="absolute -top-px -left-[3px] h-0 w-0 border-r-[3px] border-b-[4px] border-l-[3px] border-r-transparent border-b-[var(--rule-strong)] border-l-transparent"
+            />
+          </span>
+        )}
         {lane.bars.map((bar) => (
           <BarView key={bar.key} bar={bar} onSelect={onSelectEntry} />
         ))}
@@ -172,13 +208,21 @@ function LaneRow({
             title={`${lane.label} — ${lane.status}`}
             className={cn(
               "absolute top-1/2 -translate-y-1/2 rounded-[var(--radius-chip)] border transition-[filter] hover:brightness-110",
-              lane.kind === "fork" ? "border-orange bg-orange-quiet" : "border-rule-strong bg-raised",
-              lane.status === "failed" && "!border-red !bg-red-quiet",
-              // An open span has no known end, so it fades out rather than
-              // claiming one.
-              lane.span.open && "opacity-60",
+              SPAN_CLASS[lane.status] ?? "border-rule-strong bg-raised",
+              // A fork is a conversation, not delegated work, so it is dashed
+              // rather than solid — the same "this is not a task" distinction
+              // `ForkMarker` draws in the transcript.
+              lane.kind === "fork" && "border-dashed",
             )}
-            style={{ left: lane.span.x, width: lane.span.width, height: BAR_H - 6 }}
+            // An open span has no known end. It runs to the edge of the pane
+            // rather than to the end of the drawn session: bounded by
+            // `scale.width` a fork taken near the end of a session was a
+            // thirteen-pixel stub that looked like a measured span.
+            style={
+              lane.span.open
+                ? { left: lane.span.x, right: 8, height: BAR_H - 6 }
+                : { left: lane.span.x, width: lane.span.width, height: BAR_H - 6 }
+            }
           />
         )}
       </div>
@@ -187,21 +231,17 @@ function LaneRow({
 }
 
 function BarView({ bar, onSelect }: { bar: Bar; onSelect: (entryId: string) => void }) {
-  // A bar at the cap is drawn shorter than the truth. Marked, so the picture
-  // does not quietly lie; the tooltip always carries the real duration.
-  const capped = bar.width >= MAX_BAR_PX;
   return (
     <button
       type="button"
       data-testid={`timeline-bar-${bar.entryId}`}
       data-kind={bar.kind}
       onClick={() => onSelect(bar.entryId)}
-      title={`${bar.title} · ${bar.detail}${capped ? " (drawn short)" : ""}`}
+      title={`${bar.title} · ${bar.detail}`}
       className={cn(
         "absolute top-1/2 -translate-y-1/2 rounded-[var(--radius-chip)] border transition-[filter] hover:brightness-110",
         BAR_CLASS[bar.kind],
         bar.live && "animate-pulse",
-        capped && "!border-r-4 !border-r-dashed",
       )}
       style={{ left: bar.x, width: bar.width, height: BAR_H }}
     />
