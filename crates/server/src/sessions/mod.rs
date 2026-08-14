@@ -107,25 +107,57 @@ impl Revisions {
     }
 }
 
-/// Every session's revision channels, for one account.
+/// Every session's revision channels, and the account's own list counter.
 ///
-/// On the account's bundle rather than on its supervisor, because the two
-/// actors that need these channels are placed independently: the session moves
-/// a counter, and the supervisor answers a reader's poll from it without
-/// loading anything. A map on either of them would be invisible to the other.
+/// **Node-local, and that is the constraint everything here is shaped by.** A
+/// `watch` channel is a pointer into this process, so a reader served by
+/// another host polls *that* host's copy of the number. What travels between
+/// hosts is therefore always the number and never a handle to it.
 ///
-/// Node-local, like everything else in the bundle. A `watch` channel is a
-/// pointer into this process, so a reader served by another host polls that
-/// host's copy of the number — which is why what travels is the number and
-/// never a handle to it.
+/// Which is why the two counters here reach a reader by different routes, and
+/// the difference is not arbitrary:
+///
+/// - the **list** counter is moved by the supervisor and read by the supervisor,
+///   so a reader on any host reaches it with one `ask` and this copy is the
+///   only copy that matters;
+/// - an **agent** counter is moved by the *session* and read by the
+///   *supervisor*, which are placed independently — so the session publishes
+///   the value and whichever host answers a reader mirrors it into its own copy
+///   here.
+///
+/// An earlier version of this comment said keeping the map on the account's
+/// bundle solved that second case, because "a map on either actor would be
+/// invisible to the other". The bundle is node-local too, so it was only ever
+/// true while both actors happened to share a process.
 #[derive(Default)]
-pub struct SessionRevisions(std::sync::Mutex<std::collections::HashMap<String, Revisions>>);
+pub struct SessionRevisions {
+    sessions: std::sync::Mutex<std::collections::HashMap<String, Revisions>>,
+    /// How many times this account's session list has changed — a status, a
+    /// title, or a fork set. One counter for the whole list rather than one per
+    /// session: a reader of the list re-reads the list, so knowing *that* it
+    /// moved is all the counter has to carry.
+    list: RevisionSender,
+}
 
 impl SessionRevisions {
+    /// The account's session-list counter, for a reader to wait on.
+    #[must_use]
+    pub fn list(&self) -> RevisionSender {
+        self.list.clone()
+    }
+
+    /// Note that the session list changed.
+    ///
+    /// Absolute rather than a delta, which is what makes a missed observation
+    /// harmless: whoever looks next sees the current value and re-reads the
+    /// list, rather than needing every step in between.
+    pub fn bump_list(&self) {
+        self.list.send_modify(|v| *v += 1);
+    }
     /// One session's channels, created on first use.
     #[must_use]
     pub fn of(&self, session: &str) -> Revisions {
-        self.0
+        self.sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session.to_string())
@@ -141,7 +173,7 @@ impl SessionRevisions {
     /// and reload it.
     pub fn release(&self, session: &str) {
         let mut map = self
-            .0
+            .sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if map.get(session).is_none_or(|p| !p.watched()) {
@@ -174,4 +206,47 @@ pub enum UserMessageError {
     /// place rather than in a handler guard.
     #[error("{0}")]
     Rejected(String),
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The list counter is absolute, not a delta.
+    ///
+    /// That is the property that makes a missed observation harmless: a reader
+    /// that looks after two changes sees one number it can compare, re-reads
+    /// the list, and is correct — it never needs the steps in between. Every
+    /// decision about how this value reaches another host rests on it.
+    #[test]
+    fn the_list_revision_is_absolute_and_moves_on_every_change() {
+        let revisions = SessionRevisions::default();
+        let start = *revisions.list().borrow();
+        revisions.bump_list();
+        revisions.bump_list();
+        assert_eq!(*revisions.list().borrow(), start + 2);
+    }
+
+    /// One counter for the whole list, not one per session.
+    ///
+    /// A reader of the list re-reads the list, so knowing *that* it moved is
+    /// all this has to carry — and a counter per session would be a map to
+    /// keep in step with the sessions themselves.
+    #[test]
+    fn every_session_shares_the_one_list_revision() {
+        let revisions = SessionRevisions::default();
+        let before = *revisions.list().borrow();
+        revisions
+            .of("session-a")
+            .for_agent("main")
+            .send_modify(|v| *v += 1);
+        assert_eq!(
+            *revisions.list().borrow(),
+            before,
+            "an agent moving is not the list changing"
+        );
+        revisions.bump_list();
+        assert_eq!(*revisions.list().borrow(), before + 1);
+    }
 }

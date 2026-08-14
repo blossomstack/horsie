@@ -204,6 +204,21 @@ pub enum SessionSupervisorCommand {
     /// Answers straight away when the revision already differs, and otherwise
     /// waits until it moves or `POLL_WINDOW` passes — on expiry answering with
     /// the revision unchanged, which the reader reads as "still nothing".
+    /// Wait until this account's session list changes.
+    ///
+    /// The list twin of [`Self::AwaitAgentRevision`], and the same shape for
+    /// the same reason: what crosses a host boundary is a number, because a
+    /// `watch` handle is a pointer into one process. Unlike the agent counter
+    /// this one needs no help getting here — the supervisor both moves it and
+    /// answers it, so an `ask` from any node reaches the only copy that counts.
+    ///
+    /// `after: None` is a reader that has never looked, and answers at once
+    /// with wherever the list currently is; blocking it would make every fresh
+    /// connection wait a poll window before its first frame.
+    AwaitListRevision {
+        after: Option<crate::sessions::Revision>,
+        reply: ReplyTo<crate::sessions::Revision>,
+    },
     AwaitAgentRevision {
         id: SessionId,
         agent_id: Option<String>,
@@ -514,6 +529,7 @@ impl SessionSupervisor {
     }
 
     fn publish(&self, id: &str, status: &SessionStatus) {
+        self.revisions().bump_list();
         let _ = self
             .services()
             .global_events
@@ -533,6 +549,7 @@ impl SessionSupervisor {
     /// every persisted batch, so publishing unconditionally would push a frame
     /// per batch for the life of every forked session.
     fn publish_forks(&self, id: &str, forks: &[ForkRow]) {
+        self.revisions().bump_list();
         let _ = self
             .services()
             .global_events
@@ -543,6 +560,7 @@ impl SessionSupervisor {
     }
 
     fn publish_title(&self, id: &str, name: &str) {
+        self.revisions().bump_list();
         let _ = self
             .services()
             .global_events
@@ -1006,6 +1024,27 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
+            SessionSupervisorCommand::AwaitListRevision { after, reply } => {
+                // No `sessions.contains_key` guard and no `touch`: this is the
+                // account's list, which exists whether or not any session does,
+                // and an empty list is a legitimate thing to wait on.
+                let mut rx = self.revisions().list().subscribe();
+                let current = *rx.borrow_and_update();
+                if after != Some(current) {
+                    let _ = reply.send(current);
+                    return CommandEffect::none();
+                }
+                // Off this mailbox, which has to stay free to serve every other
+                // request while one reader waits.
+                tokio::spawn(async move {
+                    let moved = tokio::time::timeout(POLL_WINDOW, rx.changed()).await;
+                    let _ = reply.send(match moved {
+                        Ok(Ok(())) => *rx.borrow(),
+                        Ok(Err(_)) | Err(_) => current,
+                    });
+                });
+                CommandEffect::none()
+            }
             SessionSupervisorCommand::AwaitAgentRevision {
                 id,
                 agent_id,
@@ -1319,6 +1358,51 @@ mod tests {
             // the sweep runs, so nothing here is a race.
             tick_interval: None,
         }
+    }
+
+    /// A reader that has never looked must not block.
+    ///
+    /// `after: None` is every fresh SSE connection. Blocking it would make each
+    /// one wait a full poll window before its first frame, which reads to a
+    /// user as a UI that takes 30 seconds to populate.
+    #[tokio::test]
+    async fn a_first_list_wait_answers_at_once() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let answered = tokio::time::timeout(
+            Duration::from_secs(5),
+            sup.ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: None, reply }),
+        )
+        .await;
+        assert!(answered.is_ok(), "a first wait must not block");
+    }
+
+    /// Creating a session moves the list revision.
+    ///
+    /// The whole point of the counter: it is what tells a reader on any node
+    /// that the list it is showing is out of date.
+    #[tokio::test]
+    async fn creating_a_session_moves_the_list_revision() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let before = sup
+            .ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: None, reply })
+            .await
+            .unwrap();
+
+        create(&sup).await;
+
+        let after = tokio::time::timeout(
+            Duration::from_secs(5),
+            sup.ask(|reply| SessionSupervisorCommand::AwaitListRevision {
+                after: Some(before),
+                reply,
+            }),
+        )
+        .await
+        .expect("a wait held past a change that already happened")
+        .unwrap();
+        assert_ne!(after, before, "creating a session must move the list");
     }
 
     async fn create(sup: &SupervisorRef) -> SessionId {
