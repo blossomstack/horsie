@@ -284,9 +284,21 @@ struct GlobalSessionTitleEvent {
     name: String,
 }
 
+/// A forks frame on the global `/api/events` stream.
+///
+/// Carries the session's whole roster rather than a delta, because that is what
+/// the registry holds and what `List` would answer: a client replaces the rows
+/// it has instead of reconciling an add against a status change it may have
+/// missed. The same reason `SessionRecord.forks` is a `Vec` and not an event log.
+struct GlobalSessionForksEvent {
+    session_id: String,
+    forks: Vec<ForkView>,
+}
+
 /// One frame on the global `/api/events` stream (live session-list updates).
 #[type_tag = "type"]
 union GlobalSessionEvent {
     StatusChanged(GlobalSessionStatusEvent),
     TitleChanged(GlobalSessionTitleEvent),
+    ForksChanged(GlobalSessionForksEvent),
 }

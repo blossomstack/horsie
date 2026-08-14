@@ -760,6 +760,27 @@ pub enum AgentStatus {
     Cancelled,
 }
 
+impl AgentStatus {
+    /// The name a client reads this status by.
+    ///
+    /// Here rather than beside a wire type because two places now project an
+    /// `AgentStatus` outward — the HTTP layer and the supervisor's global feed —
+    /// and a second copy of this mapping is a second chance for them to
+    /// disagree about what `awaiting_input` is called.
+    #[must_use]
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Provisioning => "provisioning",
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::AwaitingInput => "awaiting_input",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// One agent a session hosts: which agent it is, what became of it, and when.
 ///
 /// What it *said* is not here — a transcript is read from the agent's own log,
@@ -848,6 +869,26 @@ pub enum AgentKey {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Every state has a spelling, and one spelling: a `_ =>` arm is how the
+    /// documents that carry a status came to disagree about what a failed
+    /// provision looks like. Three projections read this now — the session
+    /// list, an agent document, and the global feed's fork rows — so the
+    /// mapping is tested where it lives rather than at one of them.
+    #[test]
+    fn every_agent_status_has_one_spelling() {
+        for (status, expected) in [
+            (AgentStatus::Provisioning, "provisioning"),
+            (AgentStatus::Running, "running"),
+            (AgentStatus::Idle, "idle"),
+            (AgentStatus::AwaitingInput, "awaiting_input"),
+            (AgentStatus::Completed, "completed"),
+            (AgentStatus::Failed, "failed"),
+            (AgentStatus::Cancelled, "cancelled"),
+        ] {
+            assert_eq!(status.as_wire(), expected);
+        }
+    }
 
     /// Every session journaled before forks existed carries no `forks` key. It
     /// must load with an empty roster — the alternative is a `recover()` that

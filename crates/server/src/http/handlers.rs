@@ -5,7 +5,7 @@ use crate::http::Scope;
 use crate::http::error::Api;
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
-use crate::sessions::session_actor::{AgentEntry, AgentStatus, AskAnswer};
+use crate::sessions::session_actor::{AgentEntry, AskAnswer};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::{RenameSessionError, SessionRecord, SessionSupervisorCommand};
 use axum::Json;
@@ -64,19 +64,11 @@ pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
         last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
-        forks: rec.forks.iter().map(wire_fork).collect(),
-    }
-}
-
-/// One fork row, for the session list.
-fn wire_fork(row: &crate::sessions::supervisor::ForkRow) -> horsie_models::session::ForkView {
-    horsie_models::session::ForkView {
-        id: row.id.to_string(),
-        parent: row.parent.map(|p| p.to_string()),
-        title: row.title.clone(),
-        status: wire_agent_status(row.status).to_string(),
-        created_at_ms: row.created_at_ms,
-        last_activity_ms: row.last_activity_ms,
+        forks: rec
+            .forks
+            .iter()
+            .map(crate::sessions::supervisor::ForkRow::to_view)
+            .collect(),
     }
 }
 
@@ -253,7 +245,11 @@ fn detail(
         // loaded, so this costs no extra read — and reading them from `rec`
         // rather than the snapshot is what makes them available on a session
         // that is not resident.
-        forks: rec.forks.iter().map(wire_fork).collect(),
+        forks: rec
+            .forks
+            .iter()
+            .map(crate::sessions::supervisor::ForkRow::to_view)
+            .collect(),
         workflow: rec.spec.workflow_name().map(str::to_string),
     }
 }
@@ -311,23 +307,10 @@ fn to_wire_agent(agent: &AgentEntry) -> SubAgentView {
         label: agent.label.clone(),
         depth: agent.depth,
         agent_type: agent.agent_type.clone(),
-        status: wire_agent_status(agent.status).to_string(),
+        status: agent.status.as_wire().to_string(),
         error: agent.error.clone(),
         spawned_at_ms: agent.started_at_ms,
         ended_at_ms: agent.ended_at_ms,
-    }
-}
-
-/// The one spelling of an agent's status on the wire.
-fn wire_agent_status(status: AgentStatus) -> &'static str {
-    match status {
-        AgentStatus::Provisioning => "provisioning",
-        AgentStatus::Running => "running",
-        AgentStatus::Idle => "idle",
-        AgentStatus::AwaitingInput => "awaiting_input",
-        AgentStatus::Completed => "completed",
-        AgentStatus::Failed => "failed",
-        AgentStatus::Cancelled => "cancelled",
     }
 }
 
@@ -371,7 +354,7 @@ pub async fn get_agent(
         label: detail.entry.label.clone(),
         task: detail.task,
         depth: detail.entry.depth,
-        status: wire_agent_status(detail.entry.status).to_string(),
+        status: detail.entry.status.as_wire().to_string(),
         output: detail.output,
         error: detail.entry.error,
         tasks: detail
@@ -502,6 +485,7 @@ pub async fn delete_fork(
 )]
 mod tests {
     use super::*;
+    use crate::sessions::session_actor::AgentStatus;
     use uuid::Uuid;
 
     /// A registry row for a session that has never been forked. The two
@@ -600,23 +584,5 @@ mod tests {
         ];
 
         assert_eq!(detail("s1", &rec, None).forks, summary("s1", &rec).forks);
-    }
-
-    /// Every state has a spelling, and one spelling: a `_ =>` arm here is how
-    /// the two documents that carry a status came to disagree about what a
-    /// failed provision looks like.
-    #[test]
-    fn every_agent_status_has_one_spelling() {
-        for (status, expected) in [
-            (AgentStatus::Provisioning, "provisioning"),
-            (AgentStatus::Running, "running"),
-            (AgentStatus::Idle, "idle"),
-            (AgentStatus::AwaitingInput, "awaiting_input"),
-            (AgentStatus::Completed, "completed"),
-            (AgentStatus::Failed, "failed"),
-            (AgentStatus::Cancelled, "cancelled"),
-        ] {
-            assert_eq!(wire_agent_status(status), expected);
-        }
     }
 }

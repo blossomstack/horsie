@@ -31,7 +31,8 @@ use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
 use horsie_models::session::{
-    GlobalSessionEvent, GlobalSessionStatusEvent, GlobalSessionTitleEvent,
+    ForkView, GlobalSessionEvent, GlobalSessionForksEvent, GlobalSessionStatusEvent,
+    GlobalSessionTitleEvent,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -424,6 +425,25 @@ pub struct ForkRow {
     pub last_activity_ms: u64,
 }
 
+impl ForkRow {
+    /// This row as a client reads it.
+    ///
+    /// On the row rather than in the HTTP layer because the global feed
+    /// publishes the same shape, and the list and the stream that updates it
+    /// must not be able to describe a fork differently.
+    #[must_use]
+    pub fn to_view(&self) -> ForkView {
+        ForkView {
+            id: self.id.to_string(),
+            parent: self.parent.map(|p| p.to_string()),
+            title: self.title.clone(),
+            status: self.status.as_wire().to_string(),
+            created_at_ms: self.created_at_ms,
+            last_activity_ms: self.last_activity_ms,
+        }
+    }
+}
+
 /// One registry row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -593,6 +613,22 @@ impl SessionSupervisor {
                     reason: status_reason(status),
                 },
             ));
+    }
+
+    /// Tell every open session list that a session's forks moved.
+    ///
+    /// Called beside the write, exactly as [`Self::publish`] is, and gated by
+    /// the same idempotence check: a session reports its whole roster after
+    /// every persisted batch, so publishing unconditionally would push a frame
+    /// per batch for the life of every forked session.
+    fn publish_forks(&self, id: &str, forks: &[ForkRow]) {
+        let _ = self
+            .services()
+            .global_events
+            .send(GlobalSessionEvent::ForksChanged(GlobalSessionForksEvent {
+                session_id: id.to_string(),
+                forks: forks.iter().map(ForkRow::to_view).collect(),
+            }));
     }
 
     fn publish_title(&self, id: &str, name: &str) {
@@ -1177,6 +1213,7 @@ impl EventSourcedActor for SessionSupervisor {
                 // session with one fork would journal a row here per batch.
                 match state.sessions.get(&id) {
                     Some(rec) if rec.forks != forks => {
+                        self.publish_forks(&id, &forks);
                         CommandEffect::persist(vec![SessionSupervisorEvent::SessionForksChanged {
                             id,
                             forks,
@@ -1835,6 +1872,109 @@ mod tests {
         assert_eq!(rec.forks.len(), 1);
         assert_eq!(rec.forks[0].id, fork);
         assert_eq!(rec.forks[0].title.as_deref(), Some("Other migration"));
+    }
+
+    /// Durable is not the same as live.
+    ///
+    /// The registry held fork rows correctly and `List` answered them, but
+    /// nothing was broadcast — so a fork reached the sidebar only when
+    /// something *else* forced a refetch of the session list. Status and title
+    /// publish beside their own write; forks did not, and the omission is
+    /// invisible from the durable side, which is why the test asserts on the
+    /// stream rather than on `List`.
+    #[tokio::test]
+    async fn a_fork_change_is_broadcast_for_the_session_list() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let mut grx = f.node.services().await.global_events.subscribe();
+        let id = create(&sup).await;
+        let fork = Uuid::from_bytes([9; 16]);
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: vec![ForkRow {
+                id: fork,
+                parent: None,
+                title: Some("The other direction".into()),
+                status: crate::sessions::session_actor::AgentStatus::Provisioning,
+                created_at_ms: 5,
+                last_activity_ms: 5,
+            }],
+        })
+        .await
+        .unwrap();
+
+        loop {
+            let frame = tokio::time::timeout(Duration::from_secs(2), grx.recv())
+                .await
+                .expect("a forks frame reaches the session list")
+                .unwrap();
+            if let GlobalSessionEvent::ForksChanged(event) = frame {
+                assert_eq!(event.session_id, id);
+                assert_eq!(event.forks.len(), 1);
+                assert_eq!(event.forks[0].id, fork.to_string());
+                assert_eq!(event.forks[0].title.as_deref(), Some("The other direction"));
+                assert_eq!(
+                    event.forks[0].status, "provisioning",
+                    "the frame speaks the wire vocabulary a client already reads"
+                );
+                break;
+            }
+        }
+    }
+
+    /// The publish rides the same idempotence guard as the write: a session
+    /// reports its whole roster after every persisted batch, so a fork that has
+    /// not changed must not wake every open sidebar.
+    #[tokio::test]
+    async fn re_reporting_the_same_forks_broadcasts_nothing() {
+        let f = fixture().await;
+        let sup = f.supervisor().await;
+        let mut grx = f.node.services().await.global_events.subscribe();
+        let id = create(&sup).await;
+        let rows = vec![ForkRow {
+            id: Uuid::from_bytes([9; 16]),
+            parent: None,
+            title: None,
+            status: crate::sessions::session_actor::AgentStatus::Idle,
+            created_at_ms: 5,
+            last_activity_ms: 5,
+        }];
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: rows.clone(),
+        })
+        .await
+        .unwrap();
+        wait_for_forks(&sup, &id).await;
+        // Drain everything the first report produced.
+        while let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_millis(200), grx.recv()).await
+        {
+            if matches!(frame, GlobalSessionEvent::ForksChanged(_)) {
+                break;
+            }
+        }
+
+        sup.tell(SessionSupervisorCommand::ForksChanged {
+            id: id.clone(),
+            forks: rows,
+        })
+        .await
+        .unwrap();
+        // Round-trip something else so the repeat has definitely been handled.
+        let _ = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+
+        while let Ok(Ok(frame)) = tokio::time::timeout(Duration::from_millis(200), grx.recv()).await
+        {
+            assert!(
+                !matches!(frame, GlobalSessionEvent::ForksChanged(_)),
+                "an unchanged roster must not broadcast"
+            );
+        }
     }
 
     /// A session reports its whole roster after every persisted batch. Writing
