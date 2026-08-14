@@ -48,6 +48,15 @@ Every field has a default, so an empty file — or no file — is valid.
     // Only for a deployment running more than one node. Absent means nodes
     // do not talk to each other, which is correct for a single server.
     "url": "redis://redis.internal:6379"
+  },
+  "cluster": {
+    // Absent on a single server, which is the default and costs nothing.
+    // See Running horsie clustered.
+    "node_id": 1,
+    "bind": "0.0.0.0:7100",
+    "peers": { "2": "node2.internal:7100", "3": "node3.internal:7100" },
+    "secret": "a-long-random-string",
+    "raft_dir": "/raft"
   }
 }
 ```
@@ -64,6 +73,17 @@ That is the whole server-side file.
 | `database.max_connections` | `10` | Connection pool size. |
 | `auth.mode` | `password` | `password`, `delegated`, or `off`. See [Authentication](/operating/authentication/). |
 | `bus.url` | *(none)* | Where nodes publish to each other. Leave unset for a single server. Setting it on a deployment of one is harmless; leaving it unset on a deployment of several is not — see below. |
+| `cluster.node_id` | *(required in the section)* | This node's identity, as an integer. Stable across restarts, unique in the cluster. |
+| `cluster.bind` | *(required in the section)* | Where this node listens for its peers. Separate from `--addr`. |
+| `cluster.peers` | `{}` | Where each other node listens, keyed by `node_id`. Read only while the Raft store is empty. |
+| `cluster.secret` | *(required in the section)* | Shared secret every node presents to every other. Identical everywhere; authenticates but does not encrypt. |
+| `cluster.raft_dir` | `<state_dir>/cluster` | Where this node keeps its Raft vote. Per-node; never shared. |
+| `cluster.liveness_window_secs` | `3` | How long a peer may go unacknowledged before the leader stops counting it live. |
+
+The whole `cluster` section is absent on a single server. Present, it requires a
+`postgres://` `database.url` and a `bus.url`, and the boot refuses the
+configuration without both — see
+[Running horsie clustered](/operating/clustering/).
 
 An unknown key is ignored rather than rejected, so an old file keeps parsing.
 
