@@ -306,6 +306,7 @@ mod tests {
             ),
             crate::auth::UserId::bootstrap(),
             Uuid::new_v4(),
+            None,
         );
         SubAgentToolbox::new(
             Arc::new(EmptyToolbox),

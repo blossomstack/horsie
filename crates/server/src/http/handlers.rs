@@ -38,13 +38,27 @@ pub(crate) fn wire_annotations(annotations: &BTreeMap<String, String>) -> Vec<An
         .collect()
 }
 
-pub async fn health() -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true }))
+/// Liveness, and — on a clustered node — readiness.
+///
+/// A node that has stood down reports 503 here so a load balancer drains it,
+/// rather than discovering it one request at a time. Unclustered, this is
+/// always 200: a single node never stands down.
+pub async fn health(
+    axum::extract::State(state): axum::extract::State<crate::http::AppState>,
+) -> impl IntoResponse {
+    let ready = state.shared.serving.as_ref().is_none_or(|rx| *rx.borrow());
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(serde_json::json!({ "ok": ready })))
 }
 
 /// Ask the supervisor a question, mapping a closed mailbox to a 500.
 ///
-/// The HTTP rendering of [`crate::control::ask`], which both surfaces share.
+/// The HTTP rendering of [`crate::control::ask`], which both surfaces share —
+/// including its 503 for a node that has stood down.
 pub(crate) async fn ask<T, F>(state: &crate::users::UserServices, make: F) -> Result<T, Api>
 where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> SessionSupervisorCommand,

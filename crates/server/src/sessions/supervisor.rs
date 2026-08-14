@@ -488,6 +488,7 @@ impl SessionSupervisor {
             ctx.shard_actor_of::<SessionShard>(),
             self.user.clone(),
             session,
+            None,
         ))
     }
 
@@ -508,6 +509,7 @@ impl SessionSupervisor {
             ctx.shard_actor_of::<SessionShard>(),
             self.user.clone(),
             session,
+            None,
         ))
     }
 
@@ -1207,7 +1209,7 @@ impl EventSourcedActor for SessionSupervisor {
             // This instance's own mailbox, not the shard reference: a tick sent
             // through the latter would rebuild the supervisor it was ticking,
             // so a stopped one would come back and start a second ticker.
-            let me = SupervisorRef::new(ctx.self_ref(), self.user.clone());
+            let me = SupervisorRef::new(ctx.self_ref(), self.user.clone(), None);
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(interval);
                 ticker.tick().await; // the first tick fires immediately
@@ -2003,6 +2005,7 @@ mod tests {
                     .system
                     .shard_actor_of::<SupervisorShard>(),
                 account.clone(),
+                None,
             )
         };
 

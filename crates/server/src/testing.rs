@@ -196,6 +196,7 @@ impl TestStateBuilder {
         let shared = Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: crate::users::node_system(&db, None),
+            serving: None,
             db,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
             info: info(),
@@ -276,6 +277,7 @@ impl Deployment {
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: horsie_actor::ActorSystem::new(journal.clone()),
+            serving: None,
             db: crate::db::testing::db().await,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: info(),
@@ -317,6 +319,7 @@ impl Deployment {
                 .shard_actor_of::<crate::sessions::addressing::SessionShard>(),
             self.account.clone(),
             id,
+            None,
         )
     }
 

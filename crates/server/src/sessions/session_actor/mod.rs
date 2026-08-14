@@ -311,7 +311,7 @@ impl SessionActor {
 
     /// This session's own mailbox, as the thing that reaches it.
     pub(super) fn me(&self, ctx: &ActorContext<SessionInbox>) -> SessionRef {
-        SessionRef::new(ctx.self_ref(), self.account.clone(), self.id)
+        SessionRef::new(ctx.self_ref(), self.account.clone(), self.id, None)
     }
 
     /// Take up a spec, start the agents it calls for, and put right whatever

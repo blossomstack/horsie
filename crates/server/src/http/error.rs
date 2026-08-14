@@ -41,6 +41,16 @@ impl Api {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
+
+    /// This node cannot serve the request, but another one can.
+    ///
+    /// A clustered node that has lost touch with a quorum: it cannot know
+    /// whether its instances have been handed to somebody else, so it must not
+    /// answer from them. Distinct from a 500 because nothing is broken and the
+    /// caller should retry rather than report a fault.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
+    }
 }
 
 /// A spec that could not be assembled: the caller's fault is a 422, ours a 500.

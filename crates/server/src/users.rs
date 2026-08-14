@@ -58,6 +58,12 @@ pub struct Shared {
     pub db: Db,
     /// Every actor this node hosts, for every account. See [`node_system`].
     pub system: ActorSystem,
+    /// Whether this node may still act on the actors it hosts.
+    ///
+    /// `None` unclustered. On a clustered node it goes false while the node
+    /// cannot see a leader, and every account's supervisor reference reads it
+    /// before sending.
+    pub serving: crate::sessions::addressing::Serving,
     /// Where a frame goes to reach another node.
     ///
     /// One per deployment, not one per account: a topic name already carries
@@ -267,6 +273,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let supervisor = SupervisorRef::new(
         shared.system.shard_actor_of::<SupervisorShard>(),
         user.clone(),
+        shared.serving.clone(),
     );
 
     // Destroy substrate left over from sessions that no longer exist. Deleting a
@@ -405,9 +412,13 @@ pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> 
             // The supervisor is reached as a *name* for its whole type, so a
             // session built on a host that never saw the request creating it
             // still has one to report to.
+            // Ungated on purpose: this reference is held by a session actor,
+            // and a node that stands down has its hosted actors stopped for it.
+            // The gate belongs on the reference a *request* arrives through.
             let supervisor = SupervisorRef::new(
                 system.shard_actor_of::<SupervisorShard>(),
                 entity.entity_id.account.clone(),
+                None,
             );
             system.persistent(SessionActor::new(
                 entity.entity_id.clone(),
@@ -489,6 +500,7 @@ mod tests {
         let users = Arc::new(UserRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: node_system(&db, None),
+            serving: None,
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: test_info(),
