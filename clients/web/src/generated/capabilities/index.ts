@@ -7,5 +7,6 @@ export * from './networkPolicy';
 export * from './dirGrant';
 export * from './fileGrant';
 export * from './workingDirGrant';
+export * from './tempDirGrant';
 export * from './grant';
 export * from './capabilitySpec';

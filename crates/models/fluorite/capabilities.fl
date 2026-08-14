@@ -39,6 +39,11 @@ struct FileGrant { path: String, access: Access }
 /// The runtime working directory, resolved to `--working-dir` at apply time.
 struct WorkingDirGrant { access: Access }
 
+/// The process temp directory, resolved at apply time rather than written as a
+/// path: on macOS `TMPDIR` is a per-user `/var/folders/…/T` that no static spec
+/// can name, and the runtime inherits it through the env allowlist.
+struct TempDirGrant { access: Access }
+
 /// A single capability grant. The kind is explicit so directory-vs-file intent is
 /// unambiguous; `nono`'s `allow_path` is directory-only and `allow_file` single-file.
 #[type_tag = "type"]
@@ -46,6 +51,7 @@ union Grant {
     Dir(DirGrant),
     File(FileGrant),
     WorkingDir(WorkingDirGrant),
+    TempDir(TempDirGrant),
 }
 
 /// A full sandbox capability specification. Either authored as a capability file or

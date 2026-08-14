@@ -1305,7 +1305,7 @@ mod tests {
         // Another runtime's directory is not granted.
         assert!(grant("/state/plugins/rt-2").is_none());
         // The baseline's own grants survive alongside them.
-        assert!(grant("/usr").is_some());
+        assert!(grant("/").is_some());
     }
 
     /// With no host library there is nothing to merge, and the written file is
