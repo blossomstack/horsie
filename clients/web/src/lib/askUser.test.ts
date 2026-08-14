@@ -3,7 +3,7 @@ import { composeAnswer, isAskCall, pickedChoices } from "./askUser";
 
 describe("isAskCall", () => {
   it("recognises the session tool", () => {
-    expect(isAskCall("ask_user", { question: "which?" })).toBe(true);
+    expect(isAskCall("ask_user")).toBe(true);
   });
 
   /** A step asks with the same tool a conversation does. It used to ask
@@ -11,18 +11,18 @@ describe("isAskCall", () => {
    * and a step that *submitted* looked enough like a question to need telling
    * apart. Neither is true any more: the name is the whole test. */
   it("recognises a step's question by the same name", () => {
-    expect(isAskCall("ask_user", { question: "p0 or p2?" })).toBe(true);
+    expect(isAskCall("ask_user")).toBe(true);
   });
 
   it("does not treat a submitted result as a question", () => {
-    expect(isAskCall("submit_result", { outcome: "p0", description: "did it" })).toBe(
+    expect(isAskCall("submit_result")).toBe(
       false,
     );
   });
 
   it("leaves every other tool alone", () => {
-    expect(isAskCall("bash", { command: "ls" })).toBe(false);
-    expect(isAskCall("conclude", null)).toBe(false);
+    expect(isAskCall("bash")).toBe(false);
+    expect(isAskCall("submit_result")).toBe(false);
   });
 });
 

@@ -69,7 +69,7 @@ export function buildSegments(
   };
 
   const pushToolCall = (call: RenderedToolCall) => {
-    if (isAskCall(call.name, call.input)) {
+    if (isAskCall(call.name)) {
       flushWork(false);
       segments.push({ kind: "ask", key: `ask${seq++}`, call });
     } else {

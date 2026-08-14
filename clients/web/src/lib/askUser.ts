@@ -22,7 +22,7 @@ export function askInputOf(input: unknown): AskInput {
  * rendered as a collapsed row with no answer box, and the run could not be
  * unblocked from the browser at all. A step asks with `ask_user` now, like
  * everything else. */
-export function isAskCall(name: string, _input?: unknown): boolean {
+export function isAskCall(name: string): boolean {
   return name === ASK_USER_TOOL;
 }
 

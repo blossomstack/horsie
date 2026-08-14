@@ -295,7 +295,7 @@ function entriesOf(m: RenderedMessage, nowMs: number): Entry[] {
   )) {
     const took = Math.max(0, (call.endedAtMs ?? nowMs) - ended);
     out.push({
-      kind: isAskCall(call.name, call.input) ? "ask" : "tool",
+      kind: isAskCall(call.name) ? "ask" : "tool",
       entryId: m.id,
       startMs: issuedAt,
       endMs: issuedAt + took,

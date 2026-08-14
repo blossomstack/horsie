@@ -50,10 +50,7 @@ function inputPreview(input: unknown): string | null {
  * came to read exactly what the machine sent and got back. */
 export function ToolCallCard({ call }: { call: RenderedToolCall }) {
   const [open, setOpen] = useState(false);
-  // A workflow step asks through `conclude`, not `ask_user`, so matching on one
-  // tool name left a parked step's question rendered as a collapsed tool row
-  // with nothing to answer it with.
-  if (isAskCall(call.name, call.input)) return <AskUserCard call={call} />;
+  if (isAskCall(call.name)) return <AskUserCard call={call} />;
   const preview = inputPreview(call.input);
   const hasOutput = call.output !== undefined && call.output.length > 0;
   // A denial the model saw as an error is the one hook outcome that changes what
