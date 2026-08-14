@@ -3,6 +3,7 @@ import type { HookRecord } from "../api/types";
 import { cn } from "../lib/cn";
 import type {
   RenderedCompaction,
+  RenderedCompactionSkip,
   RenderedFork,
   RenderedMessage,
   RenderedToolCall,
@@ -10,6 +11,7 @@ import type {
 } from "../hooks/useSessionStream";
 import { buildSegments, type Segment } from "../lib/transcriptSegments";
 import { CompactionDivider } from "./CompactionDivider";
+import { CompactionNotice } from "./CompactionNotice";
 import { ForkMarker } from "./ForkMarker";
 import { HookNoticeRow } from "./HookNoticeRow";
 import { Prose } from "./Prose";
@@ -191,6 +193,14 @@ export type TurnGroup =
   // the assistant thread: the messages either side of it belong to different
   // working sets, and running them together would read as one exchange.
   | { kind: "compaction"; id: string; value: RenderedCompaction }
+  // A `/compact` that folded nothing. Like a boundary in that nobody said it,
+  // unlike one in that the thread does *not* break here — the working set is
+  // exactly what it was, so the messages either side belong together.
+  | {
+      kind: "compaction-skipped";
+      id: string;
+      value: RenderedCompactionSkip;
+    }
   // Where a conversation branched off. Not something anyone said, and not a
   // break in the thread either — the conversation carried on here, and this
   // marks the point another one left from.
@@ -220,6 +230,17 @@ export function groupTurns(items: TranscriptItem[]): TurnGroup[] {
       turns.push({
         kind: "compaction",
         id: `compaction:${item.value.seq}`,
+        value: item.value,
+      });
+      continue;
+    }
+    if (item.kind === "compaction-skipped") {
+      // Keyed by time: nothing was written to the log that this could take a
+      // seq from, and two of them a millisecond apart is not a thing that
+      // happens — a `/compact` is a turn, and turns are serial.
+      turns.push({
+        kind: "compaction-skipped",
+        id: `compact-skipped:${item.value.atMs}`,
         value: item.value,
       });
       continue;
@@ -279,6 +300,8 @@ export function Transcript({
           <HookNoticeRow key={t.id} record={t.record} />
         ) : t.kind === "compaction" ? (
           <CompactionDivider key={t.id} value={t.value} />
+        ) : t.kind === "compaction-skipped" ? (
+          <CompactionNotice key={t.id} value={t.value} />
         ) : t.kind === "fork" ? (
           <ForkMarker key={t.id} value={t.value} sessionId={sessionId} />
         ) : t.kind === "user" ? (
