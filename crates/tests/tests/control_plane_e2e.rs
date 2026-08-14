@@ -290,3 +290,27 @@ async fn the_workflows_tool_creates_a_definition() {
     assert_eq!(status, 200, "the tool call must have reached the service");
     assert_eq!(workflow["start"], "review");
 }
+
+#[tokio::test]
+async fn the_sessions_tool_lists_and_reads_its_own_transcript() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call("horsie_sessions", serde_json::json!({"action": "list"}));
+    mock.queue_response("listed the sessions");
+    let h = Harness::start(&mock).await;
+
+    let id = h.session(true, "what is running?").await;
+    h.wait_for_reply(&id, "listed the sessions").await;
+
+    // The tool answered from the same supervisor the API reads, and the
+    // session it ran in is in that answer.
+    let (status, sessions) = h.get("/api/sessions").await;
+    assert_eq!(status, 200);
+    assert!(
+        sessions["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == serde_json::json!(id)),
+        "the running session must appear in its own list: {sessions}"
+    );
+}

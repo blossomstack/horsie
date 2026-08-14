@@ -6,12 +6,10 @@
 //! actually said. It is [`Expose::ToolOnly`] because the route it shares a path
 //! with is a stream — see `read` below.
 
-use crate::control::{
-    ControlError, Expose, Method, Operation, Resource, ask, op,
-};
+use crate::control::{ControlError, Expose, Method, Operation, Resource, ask, op};
 use crate::http::handlers;
-use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::supervisor::RenameSessionError;
+use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::users::UserServices;
 use horsie_models::session::SessionSummary;
 use horsie_models::session_api::{Ack, GetSessionResponse, ListSessionsResponse, MessagesPage};
@@ -143,9 +141,12 @@ impl Resource for Sessions {
                 "Delete a session and everything it recorded.",
                 Expose::ApiAndTool,
                 |s: Arc<UserServices>, i: SessionRef| async move {
-                    ask(&s, |reply| SessionSupervisorCommand::Delete { id: i.id, reply })
-                        .await?
-                        .map_err(ControlError::NotFound)?;
+                    ask(&s, |reply| SessionSupervisorCommand::Delete {
+                        id: i.id,
+                        reply,
+                    })
+                    .await?
+                    .map_err(ControlError::NotFound)?;
                     Ok::<Ack, ControlError>(Ack {})
                 },
             ),
@@ -188,10 +189,12 @@ async fn list(
 }
 
 async fn rename(services: &UserServices, input: RenameSession) -> Result<Ack, ControlError> {
-    ask(services, |reply| SessionSupervisorCommand::SetSessionTitle {
-        id: input.id,
-        name: input.name,
-        reply,
+    ask(services, |reply| {
+        SessionSupervisorCommand::SetSessionTitle {
+            id: input.id,
+            name: input.name,
+            reply,
+        }
     })
     .await?
     .map_err(|e| match e {
