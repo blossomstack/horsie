@@ -53,6 +53,7 @@ pub(super) fn agent_settings_fixture() -> AgentSettings {
         max_concurrent_subagents: None,
         auto_compact: None,
         control_plane: None,
+        plugins: Vec::new(),
     }
 }
 

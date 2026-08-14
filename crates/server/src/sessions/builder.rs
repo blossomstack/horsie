@@ -168,7 +168,7 @@ pub async fn build_session_spec(
     // agent as well as on the spec because provisioning is per agent now, and
     // the two readers want different things: the spec's copy is the union the
     // command catalogue is read against, the agent's is what gets installed.
-    agent.plugins.clone_from(&plugins);
+    agent.plugins.clone_from(&common.plugins);
     // Resolve the effective thinking effort once, here: session choice wins,
     // else the model's configured default, else nothing. Effort is fixed for a
     // session's lifetime (changing it mid-conversation invalidates the prompt
