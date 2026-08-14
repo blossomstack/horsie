@@ -29,9 +29,7 @@ use crate::runtime_vendor::velos_api::{ContainerApi, ContainerLaunchSpec, VelosE
 use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
-use horsie_runtime_host::{
-    RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
-};
+use horsie_runtime_host::{RuntimeEvent, RuntimeProgress, RuntimeProgressSink};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -99,11 +97,7 @@ pub struct VelosRuntimeVendor<A: ContainerApi> {
 }
 
 impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
-    pub fn new(
-        name: String,
-        api: Arc<A>,
-        settings: VelosSettings,
-        ) -> Self {
+    pub fn new(name: String, api: Arc<A>, settings: VelosSettings) -> Self {
         Self {
             name,
             api,
@@ -183,6 +177,54 @@ impl<A: ContainerApi + 'static> VelosRuntimeVendor<A> {
         Ok(())
     }
 
+    /// Watch the container until it dies, and say so on the sink.
+    ///
+    /// Spawned only after the calling operation has returned, which is the
+    /// ordering rule the vendor contract requires.
+    ///
+    /// This is the *substrate* half of an acquisition, and the only half this
+    /// vendor can see: whether the runtime inside came up is the runtime's own
+    /// report on its out topic, which the acquiring node is subscribed to and
+    /// this vendor cannot observe at all. What nothing else in the system can
+    /// observe is a container that crashed on a bad image — it will never
+    /// publish anything, ever — so without this poll an acquisition would burn
+    /// its whole window before saying why. The manager's `Gone` leg has no other
+    /// source.
+    fn watch_substrate(&self, runtime_id: &str, progress: RuntimeProgressSink) {
+        let api = self.api.clone();
+        let id = runtime_id.to_string();
+        tokio::spawn(async move {
+            let name = container_name(&id);
+            // Bounded by the window a container has to come up in. Past that
+            // the watch stops rather than reporting anything: an acquisition
+            // has its own deadline, and a container still alive out here is one
+            // this vendor has nothing left to say about.
+            let died = tokio::time::timeout(READY_WINDOW, async {
+                let mut poll =
+                    tokio::time::interval_at(tokio::time::Instant::now() + PHASE_POLL, PHASE_POLL);
+                loop {
+                    poll.tick().await;
+                    // Only a *dead* phase ends the wait. `Unknown` is a worker
+                    // whose lease went briefly stale, and treating it as death
+                    // would destroy a container that was about to connect.
+                    if let Ok(Some(phase)) = api.container_phase(&name).await
+                        && phase.is_dead()
+                    {
+                        return format!("the container reached {phase:?} before connecting");
+                    }
+                }
+            })
+            .await;
+            let Ok(reason) = died else { return };
+            // It is not coming back, and leaving it costs a slot on a worker for
+            // nothing.
+            let _ = api.delete_container(&name).await;
+            let _ = progress.try_send(RuntimeEvent {
+                runtime_id: id,
+                progress: RuntimeProgress::Gone { reason },
+            });
+        });
+    }
 }
 
 #[async_trait]
@@ -230,9 +272,10 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
         self.schedule(runtime_id, spec).await?;
-        // Nothing is waited on here: whether the runtime came up is its own
-        // report on its out topic, and the acquiring node is subscribed to it.
-        let _ = progress;
+        // Nothing waits for a dial-back here: whether the runtime came up is its
+        // own report on its out topic, and the acquiring node is subscribed to
+        // it. What is watched is the container.
+        self.watch_substrate(runtime_id, progress);
         Ok(RuntimeProgress::Starting {
             detail: "the container is being scheduled".to_string(),
         })
@@ -265,7 +308,7 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
             .await?
             .is_some_and(|phase| !phase.is_dead());
         if alive || provisioning {
-            let _ = progress;
+            self.watch_substrate(runtime_id, progress);
             return Ok(RuntimeProgress::Starting {
                 detail: "the container is up; waiting for it to dial back".to_string(),
             });
@@ -283,7 +326,7 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
 
     async fn hibernate(
         &self,
-        runtime_id: &str,
+        _runtime_id: &str,
         _progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
         // Declined, and that is a correct implementation of an advisory
@@ -292,10 +335,10 @@ impl<A: ContainerApi + 'static> RuntimeVendor for VelosRuntimeVendor<A> {
         // workspace and everything in flight to save a slot on a worker.
         // Keeping the runtime running costs compute; the alternative costs the
         // user's work.
+        //
         // Never `Stopped`: nothing was stopped. The container was left exactly
         // as it was, and a later `get` is what discovers whether it is still
         // coming up or gone.
-        let _ = runtime_id;
         Ok(RuntimeProgress::Starting {
             detail: "velos cannot suspend; the container was left as it is".to_string(),
         })
@@ -378,28 +421,19 @@ mod tests {
         }
     }
 
-    fn vendor(
-        api: FakeVelos,
-    ) -> (
-        Arc<VelosRuntimeVendor<FakeVelos>>,
-        Arc<ConnectedRuntimeRegistry>,
-    ) {
-        let connected = Arc::new(ConnectedRuntimeRegistry::new());
-        (
-            Arc::new(VelosRuntimeVendor::new(
-                "velos".to_string(),
-                Arc::new(api),
-                VelosSettings {
-                    image: "ghcr.io/o/runtime:1".to_string(),
-                    runtime_bin: "horsie-runtime".to_string(),
-                    workspace_root: "/workspaces".to_string(),
-                    callback_url: "ws://horsie:8080/api/runtime/connect".to_string(),
-                    cpu: 1,
-                    memory_bytes: 1 << 30,
-                },
-                connected.clone(),
-            )),
-        )
+    fn vendor(api: FakeVelos) -> Arc<VelosRuntimeVendor<FakeVelos>> {
+        Arc::new(VelosRuntimeVendor::new(
+            "velos".to_string(),
+            Arc::new(api),
+            VelosSettings {
+                image: "ghcr.io/o/runtime:1".to_string(),
+                runtime_bin: "horsie-runtime".to_string(),
+                workspace_root: "/workspaces".to_string(),
+                callback_url: "ws://horsie:8080/api/runtime/connect".to_string(),
+                cpu: 1,
+                memory_bytes: 1 << 30,
+            },
+        ))
     }
 
     fn spec() -> RuntimeSpec {
@@ -421,7 +455,7 @@ mod tests {
     async fn a_create_reclaims_the_name_before_scheduling() {
         // velos rejects a duplicate name, so without the delete a re-create
         // after a crash could never succeed.
-        let (v, _reg) = vendor(FakeVelos::default());
+        let v = vendor(FakeVelos::default());
         let (tx, _rx) = sink();
         let progress = v.create("s1", &spec(), tx).await.unwrap();
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
@@ -436,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_schedule_is_a_provisioning_failure() {
-        let (v, _reg) = vendor(FakeVelos {
+        let v = vendor(FakeVelos {
             reject_create: true,
             ..FakeVelos::default()
         });
@@ -447,19 +481,23 @@ mod tests {
         ));
     }
 
+    /// This vendor never says how to reach a runtime, and that is the whole of
+    /// D2 on its side. A velos runtime is addressed by topic — the acquiring
+    /// node subscribes to it, and this vendor cannot see that topic at all, so
+    /// the most it can honestly report is that its container is up. A `Ready`
+    /// from here would be a pipe held by whichever node happened to run the
+    /// create, which is exactly the node-local handle this work removes.
     #[tokio::test]
-    async fn a_get_for_a_connected_runtime_hands_it_straight_back() {
-        let (v, reg) = vendor(FakeVelos::default());
+    async fn a_get_reports_the_container_is_up_and_never_how_to_reach_it() {
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
+        let v = vendor(api);
         let (tx, _rx) = sink();
-        reg.register_transport(
-            "s1".to_string(),
-            Arc::new(horsie_runtime_host::MockTransport::ok("")),
-        )
-        .await;
-        assert!(matches!(
-            v.get("s1", &spec(), tx).await,
-            Ok(RuntimeProgress::Ready(_))
-        ));
+        let progress = v.get("s1", &spec(), false, tx).await.unwrap();
+        assert!(
+            matches!(progress, RuntimeProgress::Starting { .. }),
+            "a live container is Starting, never Ready: {progress:?}"
+        );
         assert!(
             v.api.calls().is_empty(),
             "a live runtime must not be rebuilt"
@@ -471,9 +509,14 @@ mod tests {
         // Nothing takes a container away but a delete, so an absent one died.
         // Scheduling a replacement would hand the session an empty workspace
         // and call it the one it had.
-        let (v, _reg) = vendor(FakeVelos::default());
+        //
+        // The other side of this is
+        // `a_get_told_a_create_is_outstanding_waits_rather_than_rebuilding`:
+        // same absent phase, and the answer turns on whether a create is still
+        // outstanding.
+        let v = vendor(FakeVelos::default());
         let (tx, _rx) = sink();
-        let Err(err) = v.get("s1", &spec(), tx).await else {
+        let Err(err) = v.get("s1", &spec(), false, tx).await else {
             panic!("a get must never provision")
         };
         assert!(matches!(err, RuntimeVendorError::Gone(_)), "{err:?}");
@@ -492,14 +535,14 @@ mod tests {
     async fn a_get_never_destroys_a_container_that_is_still_booting() {
         let api = FakeVelos::default();
         *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
-        let (v, _reg) = vendor(api);
+        let v = vendor(api);
 
         let (tx, _rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
         let after_create = v.api.calls();
 
         let (tx, _rx) = sink();
-        let progress = v.get("s1", &spec(), tx).await.unwrap();
+        let progress = v.get("s1", &spec(), false, tx).await.unwrap();
 
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
         assert_eq!(
@@ -509,62 +552,31 @@ mod tests {
         );
     }
 
-    /// The same protection when the substrate has not caught up: velos may not
-    /// report a phase for a container it accepted moments ago, and the create
-    /// already waiting for the dial-back is what says one exists.
+    /// The same protection when the substrate has not caught up — and the
+    /// reason it is a parameter (D5). velos may report no phase at all for a
+    /// container it accepted moments ago, so "nothing there" and "not there
+    /// yet" look identical from here. The party that can tell them apart is the
+    /// session, which journalled `Provisioning`, and it says so on the call: a
+    /// node-local table cannot answer it once a session may be acquired from a
+    /// node that never ran its create.
     #[tokio::test]
-    async fn a_get_joins_a_create_that_is_already_waiting() {
-        let (v, reg) = vendor(FakeVelos::default());
+    async fn a_get_told_a_create_is_outstanding_waits_rather_than_rebuilding() {
+        let v = vendor(FakeVelos::default());
         let (tx, _rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
         let after_create = v.api.calls();
-        assert!(reg.is_awaited("s1").await);
 
         let (tx, _rx) = sink();
-        v.get("s1", &spec(), tx).await.unwrap();
+        let progress = v.get("s1", &spec(), true, tx).await.unwrap();
 
+        assert!(
+            matches!(progress, RuntimeProgress::Starting { .. }),
+            "an outstanding create must be waited out, got {progress:?}"
+        );
         assert_eq!(
             v.api.calls(),
             after_create,
-            "an acquisition must join the create's wait, not start a rival container"
-        );
-    }
-
-    /// And both waiters are answered — the create's background task must not
-    /// see the acquisition's waiter as *its own* being cancelled, which is how
-    /// it used to conclude the runtime was unwanted and delete the container.
-    #[tokio::test]
-    async fn a_dial_back_answers_the_create_and_the_acquisition_alike() {
-        let (v, reg) = vendor(FakeVelos::default());
-        let (create_tx, mut create_rx) = sink();
-        v.create("s1", &spec(), create_tx).await.unwrap();
-        let (get_tx, mut get_rx) = sink();
-        v.get("s1", &spec(), get_tx).await.unwrap();
-        // Everything up to here, so the assertion below is about what the
-        // dial-back caused and not about the create's own name reclaim.
-        let scheduled = v.api.calls();
-
-        reg.register_transport(
-            "s1".to_string(),
-            Arc::new(horsie_runtime_host::MockTransport::ok("")),
-        )
-        .await;
-
-        for rx in [&mut create_rx, &mut get_rx] {
-            let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-                .await
-                .expect("both waiters must be answered")
-                .expect("the sink must stay open");
-            assert!(
-                matches!(event.progress, RuntimeProgress::Ready(_)),
-                "expected Ready, got {:?}",
-                event.progress
-            );
-        }
-        assert_eq!(
-            v.api.calls(),
-            scheduled,
-            "a runtime that dialled back must not be touched again"
+            "an acquisition must join the outstanding create, not start a rival container"
         );
     }
 
@@ -574,33 +586,26 @@ mod tests {
         // the honest implementation of an advisory one is to decline — the
         // contract says as much, and the alternative trades the user's work for
         // a slot on a worker.
-        let (v, reg) = vendor(FakeVelos::default());
-        reg.register_transport(
-            "s1".to_string(),
-            Arc::new(horsie_runtime_host::MockTransport::ok("")),
-        )
-        .await;
-
+        let v = vendor(FakeVelos::default());
         let (tx, _rx) = sink();
-        assert!(matches!(
-            v.hibernate("s1", tx).await,
-            Ok(RuntimeProgress::Ready(_))
-        ));
-
-        assert!(v.api.calls().is_empty(), "nothing may be destroyed here");
+        let progress = v.hibernate("s1", tx).await.unwrap();
         assert!(
-            reg.runtime_transport("s1").await.is_some(),
-            "a declined hibernate must leave the runtime reachable"
+            matches!(progress, RuntimeProgress::Starting { .. }),
+            "nothing was stopped, so nothing may report Stopped: {progress:?}"
         );
+        assert!(v.api.calls().is_empty(), "nothing may be destroyed here");
     }
 
     #[tokio::test]
     async fn a_dead_container_fails_the_acquisition_without_waiting_out_the_window() {
         // Without the phase poll this would burn the full 15-minute window on a
         // container that crashed on a bad image seconds after being scheduled.
+        // Nothing else in the system can see this: a container that never came
+        // up never publishes on its topic, so the vendor's sink is the only
+        // place the news can arrive.
         let api = FakeVelos::default();
         *api.phase.lock().unwrap() = Some(ContainerPhase::Failed);
-        let (v, _reg) = vendor(api);
+        let v = vendor(api);
         let (tx, mut rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
 
@@ -615,13 +620,33 @@ mod tests {
         );
     }
 
+    /// And the same watch on an acquisition, which is the path a session takes
+    /// after a restart: the create that scheduled this container ran on another
+    /// node, or in another process, so an acquisition is the only thing left
+    /// watching it.
+    #[tokio::test]
+    async fn a_container_that_dies_during_an_acquisition_is_reported_gone() {
+        let api = FakeVelos::default();
+        *api.phase.lock().unwrap() = Some(ContainerPhase::Running);
+        let v = vendor(api);
+        let (tx, mut rx) = sink();
+        v.get("s1", &spec(), false, tx).await.unwrap();
+
+        *v.api.phase.lock().unwrap() = Some(ContainerPhase::Failed);
+        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("an acquisition must be told its container died")
+            .expect("the sink must stay open");
+        assert!(matches!(event.progress, RuntimeProgress::Gone { .. }));
+    }
+
     #[tokio::test]
     async fn a_container_in_an_unknown_phase_is_given_more_time() {
         // `Unknown` is a worker whose lease went briefly stale. Treating it as
         // death would destroy a container that was about to connect.
         let api = FakeVelos::default();
         *api.phase.lock().unwrap() = Some(ContainerPhase::Unknown);
-        let (v, _reg) = vendor(api);
+        let v = vendor(api);
         let (tx, mut rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
         assert!(
@@ -638,7 +663,7 @@ mod tests {
     /// helper needs the same address, so it is no longer optional.
     #[test]
     fn a_container_learns_where_to_reach_the_server() {
-        let (v, _reg) = vendor(FakeVelos::default());
+        let v = vendor(FakeVelos::default());
         let launch = v.launch_spec("s1", &spec()).unwrap();
         assert_eq!(
             launch
@@ -660,7 +685,7 @@ mod tests {
     /// environment rather than argv.
     #[test]
     fn the_dial_token_rides_the_environment_and_never_argv() {
-        let (v, _reg) = vendor(FakeVelos::default());
+        let v = vendor(FakeVelos::default());
         let launch = v
             .launch_spec(
                 "s1",
@@ -689,7 +714,7 @@ mod tests {
 
     #[test]
     fn provision_steps_ride_the_environment() {
-        let (v, _reg) = vendor(FakeVelos::default());
+        let v = vendor(FakeVelos::default());
         let launch = v
             .launch_spec(
                 "s1",
@@ -717,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_preflight_asks_velos_who_we_are_and_schedules_nothing() {
-        let (v, _reg) = vendor(FakeVelos::default());
+        let v = vendor(FakeVelos::default());
         assert!(v.preflight().await.is_ok());
         assert_eq!(v.api.calls(), vec!["preflight".to_string()]);
     }
@@ -728,7 +753,7 @@ mod tests {
         // Reading its 404 as "your token is wrong" would refuse a save for a
         // deployment that works perfectly.
         for (status, terminal) in [(401, true), (403, true), (404, false), (500, false)] {
-            let (v, _reg) = vendor(FakeVelos {
+            let v = vendor(FakeVelos {
                 whoami_status: Some(status),
                 ..FakeVelos::default()
             });

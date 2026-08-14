@@ -6,17 +6,20 @@
 //! fails when the far node dies — the connection terminates here and the session
 //! reaches it by name.
 //!
-//! So this node owns exactly two loops: whatever arrives on `rt:<s>:<i>:in` is
-//! written to the socket, and whatever the socket says is published to
-//! `rt:<s>:<i>:out`. Nothing is registered globally, and no other node learns
-//! this one's identity.
+//! So this node owns exactly two loops: whatever arrives on
+//! `rt:<account>:<runtime>:<incarnation>:in` is written to the socket, and
+//! whatever the socket says is published to the matching `:out`. Nothing is
+//! registered globally, and no other node learns this one's identity.
 //!
-//! **The incarnation comes from the token, never from the connection.** A
-//! sandbox announces its own runtime id in its handshake, and a sandbox left
-//! over from an earlier provision announces the same one — they are the same
-//! session. What separates them is the incarnation in the signed token, so
-//! reading it from anywhere else would put both sandboxes on one topic and have
-//! both run every tool call.
+//! **Every segment of those names comes from the token, never from the
+//! connection.** A sandbox announces its own runtime id in its handshake, and a
+//! sandbox left over from an earlier provision announces the same one — they are
+//! the same session. What separates them is the incarnation in the signed token,
+//! so reading it from anywhere else would put both sandboxes on one topic and
+//! have both run every tool call. The account is on the same footing: one bus
+//! serves the deployment, and a runtime id may be a vendor-minted label rather
+//! than a UUID, so it is the account segment that keeps two accounts' sandboxes
+//! of the same name apart.
 
 use crate::bus::{Bus, topics};
 use futures_util::{SinkExt, StreamExt};
@@ -24,31 +27,39 @@ use horsie_models::runtime::RuntimeOutboundMessage;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
-use uuid::Uuid;
 
 /// Run the two loops until either end goes away.
 ///
 /// Returns when the socket closes or the in-topic ends, so the caller's spawned
 /// task finishes with the connection rather than outliving it.
-pub async fn pump<S>(ws: WebSocketStream<S>, bus: Arc<dyn Bus>, session: Uuid, incarnation: &str)
-where
+///
+/// `runtime` is a `&str` and not a `Uuid`: the dial token's format admits a
+/// session UUID *or* a vendor-minted label, so parsing here would refuse a
+/// legitimate runtime at the door.
+pub async fn pump<S>(
+    ws: WebSocketStream<S>,
+    bus: Arc<dyn Bus>,
+    account: &str,
+    runtime: &str,
+    incarnation: &str,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Subscribed before a single frame is written anywhere. A session that
     // publishes a tool call the instant it sees `Ready` would otherwise publish
     // into a topic this node is not yet reading, and the bus keeps nothing for a
     // subscriber that has not arrived — the call would simply not exist.
-    let inbound = match topics::runtime_in(bus.clone(), session, incarnation)
+    let inbound = match topics::runtime_in(bus.clone(), account, runtime, incarnation)
         .subscribe()
         .await
     {
         Ok(reader) => reader,
         Err(e) => {
-            tracing::error!(error = %e, %session, "a runtime dialled in but its topic could not be read");
+            tracing::error!(error = %e, %runtime, "a runtime dialled in but its topic could not be read");
             return;
         }
     };
-    let outbound = topics::runtime_out(bus, session, incarnation);
+    let outbound = topics::runtime_out(bus, account, runtime, incarnation);
 
     let (mut sink, mut stream) = ws.split();
 
@@ -94,6 +105,9 @@ mod tests {
     use crate::bus::MemoryBus;
     use horsie_models::runtime::{CancelCallRequest, RuntimeInboundMessage};
     use tokio_tungstenite::tungstenite::protocol::Role;
+    use uuid::Uuid;
+
+    const ACCOUNT: &str = "acct-1";
 
     fn cancel(call_id: &str) -> RuntimeInboundMessage {
         RuntimeInboundMessage::CancelCall(CancelCallRequest {
@@ -109,19 +123,22 @@ mod tests {
     #[tokio::test]
     async fn a_pump_only_carries_the_incarnation_its_token_named() {
         let bus: Arc<dyn Bus> = Arc::new(MemoryBus::new());
-        let session = Uuid::new_v4();
+        let session = Uuid::new_v4().to_string();
 
         let (server, client) = tokio::io::duplex(64 * 1024);
         let server_ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
         let mut client_ws = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
 
         let pumped_bus = bus.clone();
-        tokio::spawn(async move { pump(server_ws, pumped_bus, session, "1").await });
+        let pumped_session = session.clone();
+        tokio::spawn(
+            async move { pump(server_ws, pumped_bus, ACCOUNT, &pumped_session, "1").await },
+        );
         // Give the pump its subscription before anything is published: the bus
         // keeps nothing for a subscriber that has not arrived yet.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        topics::runtime_in(bus.clone(), session, "2")
+        topics::runtime_in(bus.clone(), ACCOUNT, &session, "2")
             .publish(&cancel("from-another-provision"))
             .await
             .unwrap();
@@ -134,7 +151,7 @@ mod tests {
 
         // And it does carry its own, so the test above is not passing because
         // the pump is simply broken.
-        topics::runtime_in(bus, session, "1")
+        topics::runtime_in(bus, ACCOUNT, &session, "1")
             .publish(&cancel("for-this-provision"))
             .await
             .unwrap();

@@ -20,7 +20,6 @@ use crate::runtime_vendor::fly_api::{FlyHttpApi, FlyMachineSize};
 use crate::runtime_vendor::velos::{VelosRuntimeVendor, VelosSettings};
 use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError, WebsocketVendorTable};
 use crate::sessions::spec::RuntimeVendorMap;
-use horsie_runtime_host::ConnectedRuntimeRegistry;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::sync::{Arc, PoisonError};
@@ -494,7 +493,6 @@ pub struct RuntimeVendorConfigService {
     /// Which names belong to a dialled-in agent. Consulted so a save cannot
     /// take a live agent's name out from under it.
     websockets: WebsocketVendorTable,
-    connected: Arc<ConnectedRuntimeRegistry>,
     /// The Fly Machines API root every Fly vendor here is built against.
     ///
     /// A value rather than the constant because a save now *calls* this API,
@@ -510,13 +508,11 @@ impl RuntimeVendorConfigService {
         store: RuntimeVendorStore,
         vendors: RuntimeVendorMap,
         websockets: WebsocketVendorTable,
-        connected: Arc<ConnectedRuntimeRegistry>,
     ) -> Self {
         Self {
             store,
             vendors,
             websockets,
-            connected,
             fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
         }
     }
@@ -870,7 +866,6 @@ mod tests {
             RuntimeVendorStore::new(db, UserId::new("u1")),
             vendors,
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            Arc::new(ConnectedRuntimeRegistry::new()),
         )
         // Saving a fly vendor now calls the Machines API. Every test that is
         // not *about* that answer points it at a port nothing listens on, so
@@ -1347,7 +1342,6 @@ mod tests {
             RuntimeVendorStore::new(db, UserId::new("u1")),
             empty_map(),
             websockets.clone(),
-            Arc::new(ConnectedRuntimeRegistry::new()),
         );
         // A real dialled-in agent holding the name.
         let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("fly")

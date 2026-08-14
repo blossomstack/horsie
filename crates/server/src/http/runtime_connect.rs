@@ -90,19 +90,12 @@ pub async fn runtime_connect(
         Err(_) => return refused(),
     };
 
-    // Verified: now, and only now, is it this account's own runtime asking.
-    let services = match state.users.get(&account).await {
-        Ok(services) => services,
-        Err(e) => {
-            tracing::error!(error = %e, "building an account for its runtime failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not accept the runtime",
-            )
-                .into_response();
-        }
-    };
-
+    // The account's services are deliberately *not* built here any more. They
+    // were, to reach that account's connected-runtime registry; a pump needs
+    // only a bus and three names off the token, so materialising an entire
+    // account — a supervisor, a dial secret, a sweep task — on a dial-back is
+    // now pure cost. The account is already known to exist: the dial secret
+    // read above is what proved it.
     let Some(key) = req
         .headers()
         .get(header::SEC_WEBSOCKET_KEY)
@@ -116,18 +109,25 @@ pub async fn runtime_connect(
     };
     let accept = derive_accept_key(key.as_bytes());
 
-    let registry = services.connected_runtimes.clone();
+    let bus = state.shared.bus.clone();
+    let account = claims.user_id;
     let runtime_id = claims.runtime_id;
+    let incarnation = claims.incarnation;
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
                 let ws =
                     WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None)
                         .await;
-                // The verified id, never the announced one: a token authorises
-                // exactly one runtime, and this is what stops an authenticated
-                // peer registering as a different one.
-                horsie_runtime_host::handle_runtime_connection(ws, registry, runtime_id).await;
+                // Every name comes from the *verified token*, never from what
+                // the peer announces. A token authorises exactly one runtime,
+                // which is what stops an authenticated peer answering as a
+                // different one; exactly one provision of it, which is what
+                // stops a sandbox left over from an earlier attempt sharing the
+                // live one's topic and running every tool call twice; and
+                // exactly one account, which is what keeps two accounts' equally
+                // named sandboxes off each other's topics.
+                crate::http::runtime_pump::pump(ws, bus, &account, &runtime_id, &incarnation).await;
             }
             Err(e) => tracing::warn!(error = %e, "a runtime connection failed to upgrade"),
         }

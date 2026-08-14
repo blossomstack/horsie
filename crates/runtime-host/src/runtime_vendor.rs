@@ -316,6 +316,7 @@ mod tests {
             &self,
             runtime_id: &str,
             _: &RuntimeSpec,
+            _: bool,
             _: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
             Ok(RuntimeProgress::Ready(Arc::new(StubTransport(
@@ -384,7 +385,7 @@ mod tests {
             &self,
             runtime_id: &str,
             spec: &RuntimeSpec,
-            provisioning: bool,
+            _provisioning: bool,
             progress: RuntimeProgressSink,
         ) -> Result<RuntimeProgress, RuntimeVendorError> {
             self.create(runtime_id, spec, progress).await
