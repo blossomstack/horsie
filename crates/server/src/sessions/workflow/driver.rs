@@ -211,7 +211,9 @@ mod tests {
             name: name.into(),
             agent: "a".into(),
             prompt: format!("Do {name}."),
-            output_schema: Some(serde_json::json!({"type": "object"})),
+            outcomes: crate::sessions::workflow::default_outcomes(),
+            fields: Vec::new(),
+            interactive: false,
             transitions,
             settings: settings(),
         }

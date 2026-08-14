@@ -62,7 +62,6 @@ use async_trait::async_trait;
 use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
-use serde_json::Value;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
@@ -188,9 +187,9 @@ struct AgentPlan {
     /// Whose settings this agent runs under: the session's, or a step's own
     /// preset. This is also where its model and thinking effort come from.
     settings: crate::sessions::spec::AgentSettings,
-    /// A step's declared output schema, which becomes its `conclude` tool's
-    /// input schema. `None` for every other kind.
-    step_output_schema: Option<Value>,
+    /// What a step promises to return, and whether it may ask. Default for
+    /// every other kind of agent.
+    step_result: crate::sessions::session_actor::context::StepResultDef,
     /// The plugin-declared agent type a typed subagent runs as.
     agent_type: Option<String>,
 }
@@ -496,7 +495,7 @@ impl SessionActor {
             registry: self.deps().provider_registry.clone(),
             mcp: self.deps().mcp.clone(),
             memory: self.deps().memory.clone(),
-            step_output_schema: plan.step_output_schema.clone(),
+            step_result: plan.step_result.clone(),
             session_id: self.id,
             kind: plan.kind,
             agent_type: plan.agent_type,
@@ -509,20 +508,14 @@ impl SessionActor {
         });
         let mut params = AgentParams::from_def(&AgentRunDef {
             system_prompt: None,
-            // The schema is what makes `conclude` typed, and typed output is
-            // what a transition condition reads.
-            output_schema: plan.step_output_schema.clone(),
-            // Asking rides on `conclude`, so only a step that already has one
-            // can ask. A step that declares no output ends its turn with plain
-            // text, and that text is its output — forcing a terminal tool on it
-            // would fail the run the moment the model simply answered.
-            allow_ask_user: plan.step_output_schema.is_some() && !self.spec().is_unattended(),
-            allow_timers: None,
             max_iterations: plan.settings.max_iterations,
             max_retries: Some(plan.settings.max_retries),
             allowed_tools: plan.settings.allowed_tools.clone(),
         });
         params.interactive = true;
+        // A step is the only agent that owes a structured result, and the only
+        // one for which a turn ending with plain text is not an answer.
+        params.requires_result = matches!(plan.kind, SessionAgentKind::Step(_));
         params.thinking_effort = plan
             .settings
             .thinking_effort
@@ -573,7 +566,7 @@ impl SessionActor {
             AgentPlan {
                 kind: SessionAgentKind::Main,
                 settings: self.spec().agent.clone(),
-                step_output_schema: None,
+                step_result: Default::default(),
                 agent_type: None,
             },
         );

@@ -2702,14 +2702,17 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
 /// vanished on reload, all shipped. This drives the wire: define a graph, start
 /// a run, watch it finish, read the projected graph, and retry a step.
 ///
-/// Both steps deliberately declare no output schema. Such a step has no
-/// `conclude` tool and ends its turn with plain text, which becomes its output —
-/// so a run is two ordinary completions rather than two hand-built tool calls.
+/// Every step ends by calling `submit_result`, so the mock answers each turn
+/// with that call rather than with prose — a turn of plain text is now a step
+/// that has not finished, and the actor would nudge it.
 #[tokio::test]
 async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     let mock = MockLlmServer::builder().build().await;
     for _ in 0..4 {
-        mock.queue_response("step done");
+        mock.queue_tool_call(
+            "submit_result",
+            serde_json::json!({"outcome": "success", "description": "step done"}),
+        );
     }
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -2891,8 +2894,15 @@ async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &st
 #[tokio::test]
 async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     let mock = MockLlmServer::builder().build().await;
+    // The queue is shared and answered in order: the ordinary conversation
+    // below speaks first, and only then do the run's steps. A step submits its
+    // result; a conversation just replies.
+    mock.queue_response("hello yourself");
     for _ in 0..4 {
-        mock.queue_response("step done");
+        mock.queue_tool_call(
+            "submit_result",
+            serde_json::json!({"outcome": "success", "description": "step done"}),
+        );
     }
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")

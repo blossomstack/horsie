@@ -1,54 +1,64 @@
-//! The terminal tool a workflow step finishes with.
+//! The tool a workflow step finishes with.
 //!
 //! An interactive agent ends its turn with plain text and asks through
-//! `ask_user`. A step does neither: it finishes by calling `conclude`, whose
-//! input schema *is* the step's declared output schema — which is what makes a
-//! transition condition able to read `output.severity` at all.
+//! `ask_user`. A step does neither to *finish*: it calls `submit_result`, whose
+//! input schema is compiled from the step's declared outcomes and fields, which
+//! is what lets a transition match on `outcome` at all.
 //!
-//! The tool is never executed. Naming it as the agent loop's handoff tool is
-//! what makes the call terminal, so reaching `execute` means something upstream
-//! stopped treating it as one.
+//! Calling it ends the run — the tool answers [`ToolOutcome::StopRun`] — and no
+//! result is recorded, so the call stays dangling exactly as a park does. The
+//! step is over; nothing will ever answer it.
+//!
+//! Validation happens here, on the way in. A rejected payload comes back as an
+//! ordinary [`ToolCallError::InvalidInput`], which the model sees as a tool
+//! result and re-issues against, bounded by the loop's retry budget. That is
+//! the only thing standing between an outcome the step never declared and a
+//! driver trying to route on it.
 
-use crate::agent_loop::{CONCLUDE_TOOL, conclude_tool_spec};
+use crate::sessions::workflow::result_schema::{
+    SUBMIT_RESULT_TOOL, result_schema, validate_result,
+};
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
+use horsie_models::workflow::{StepField, StepOutcome};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// Wraps a step's toolbox, adding `conclude`.
-pub struct StepConcludeToolbox {
+/// Wraps a step's toolbox, adding `submit_result`.
+pub struct StepResultToolbox {
     inner: Arc<dyn Toolbox>,
-    conclude: Option<ToolSpec>,
+    spec: ToolSpec,
+    outcomes: Vec<StepOutcome>,
+    fields: Vec<StepField>,
 }
 
-impl StepConcludeToolbox {
-    /// `output_schema` is the step's; `allow_ask` widens `conclude` into a
-    /// kind-tagged union so the step can pause for a question instead of
-    /// submitting. Returns the inner toolbox unchanged when the step declares
-    /// neither — such a step ends its turn with plain text, and that text is
-    /// its output.
+impl StepResultToolbox {
     pub fn wrap(
         inner: Arc<dyn Toolbox>,
-        output_schema: Option<&Value>,
-        allow_ask: bool,
+        outcomes: Vec<StepOutcome>,
+        fields: Vec<StepField>,
     ) -> Arc<dyn Toolbox> {
-        match conclude_tool_spec(output_schema, allow_ask, false) {
-            None => inner,
-            Some(conclude) => Arc::new(Self {
-                inner,
-                conclude: Some(conclude),
-            }),
-        }
+        let spec = ToolSpec {
+            name: SUBMIT_RESULT_TOOL.to_string(),
+            description: "Finish this step: deliver its result. Call this once the step's work \
+                 is done — it ends the step, and what you submit decides which step runs next."
+                .to_string(),
+            input_schema: result_schema(&outcomes, &fields),
+        };
+        Arc::new(Self {
+            inner,
+            spec,
+            outcomes,
+            fields,
+        })
     }
 }
 
 #[async_trait]
-impl Toolbox for StepConcludeToolbox {
+impl Toolbox for StepResultToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        if let Some(c) = &self.conclude {
-            specs.push(c.clone());
-        }
+        specs.push(self.spec.clone());
         specs
     }
 
@@ -64,8 +74,11 @@ impl Toolbox for StepConcludeToolbox {
         input: Value,
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
-        if name == CONCLUDE_TOOL && self.conclude.is_some() {
-            return Ok(ToolOutcome::StopRun);
+        if name == SUBMIT_RESULT_TOOL {
+            return match validate_result(&input, &self.outcomes, &self.fields) {
+                Ok(()) => Ok(ToolOutcome::StopRun),
+                Err(reason) => Err(ToolCallError::InvalidInput(reason)),
+            };
         }
         self.inner.execute(name, input, tool_call_id).await
     }
@@ -76,41 +89,88 @@ impl Toolbox for StepConcludeToolbox {
 mod tests {
     use super::*;
     use horsie_agentcore::ToolboxImpl;
+    use horsie_models::workflow::StepFieldType;
+
+    fn outcomes() -> Vec<StepOutcome> {
+        vec![StepOutcome {
+            value: "success".into(),
+            description: "done".into(),
+        }]
+    }
 
     fn base() -> Arc<dyn Toolbox> {
         Arc::new(ToolboxImpl::new())
     }
 
-    /// The tool the loop is told to watch for has to be in the toolbox, or the
-    /// run fails with "handoff tool 'conclude' is not present".
-    #[test]
-    fn a_step_with_an_output_schema_advertises_conclude() {
-        let schema = serde_json::json!({"type": "object"});
-        let tb = StepConcludeToolbox::wrap(base(), Some(&schema), false);
-        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
-        assert!(names.contains(&CONCLUDE_TOOL.to_string()));
+    fn submitted() -> Value {
+        serde_json::json!({"outcome": "success", "description": "did it"})
     }
 
-    /// With an output schema alone the payload *is* the output; adding the
-    /// ability to ask makes it a kind-tagged union, and the output nests.
     #[test]
-    fn allowing_an_ask_makes_the_payload_kind_tagged() {
-        let schema = serde_json::json!({"type": "object"});
-        let tb = StepConcludeToolbox::wrap(base(), Some(&schema), true);
+    fn a_step_advertises_submit_result_with_its_declared_schema() {
+        let fields = vec![StepField {
+            name: "files".into(),
+            kind: StepFieldType::StringList,
+            description: "what changed".into(),
+            required: Some(true),
+        }];
+        let tb = StepResultToolbox::wrap(base(), outcomes(), fields);
         let spec = tb
             .specs()
             .into_iter()
-            .find(|s| s.name == CONCLUDE_TOOL)
-            .unwrap();
-        assert_eq!(spec.input_schema["properties"]["kind"]["enum"][0], "submit");
-        assert!(spec.input_schema["properties"]["output"].is_object());
+            .find(|s| s.name == SUBMIT_RESULT_TOOL)
+            .expect("the step's terminal tool is offered");
+        assert_eq!(
+            spec.input_schema["properties"]["outcome"]["enum"],
+            serde_json::json!(["success"])
+        );
+        assert_eq!(spec.input_schema["properties"]["files"]["type"], "array");
     }
 
-    #[test]
-    fn a_step_with_neither_gets_no_conclude_and_ends_with_text() {
-        let tb = StepConcludeToolbox::wrap(base(), None, false);
-        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
-        assert!(!names.contains(&CONCLUDE_TOOL.to_string()));
+    #[tokio::test]
+    async fn submitting_stops_the_run() {
+        let tb = StepResultToolbox::wrap(base(), outcomes(), Vec::new());
+        let outcome = tb
+            .execute(SUBMIT_RESULT_TOOL, submitted(), "toolu_1")
+            .await
+            .unwrap();
+        assert_eq!(outcome, ToolOutcome::StopRun);
+    }
+
+    /// An undeclared outcome would otherwise reach the driver, match no
+    /// transition, and end the run as though the step had finished the graph.
+    /// Rejecting it here makes it an ordinary tool error the model can fix.
+    #[tokio::test]
+    async fn an_undeclared_outcome_is_an_input_error_the_model_can_retry() {
+        let tb = StepResultToolbox::wrap(base(), outcomes(), Vec::new());
+        let err = tb
+            .execute(
+                SUBMIT_RESULT_TOOL,
+                serde_json::json!({"outcome": "maybe", "description": "did it"}),
+                "toolu_1",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ToolCallError::InvalidInput(reason) if reason.contains("'maybe'")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_required_field_is_an_input_error() {
+        let fields = vec![StepField {
+            name: "files".into(),
+            kind: StepFieldType::StringList,
+            description: "what changed".into(),
+            required: Some(true),
+        }];
+        let tb = StepResultToolbox::wrap(base(), outcomes(), fields);
+        let err = tb
+            .execute(SUBMIT_RESULT_TOOL, submitted(), "toolu_1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)), "{err:?}");
     }
 
     /// The wrapped toolbox must see the model's own call id. Passing a literal
@@ -148,8 +208,7 @@ mod tests {
         }
 
         let inner = Arc::new(Recording(Mutex::new(Vec::new())));
-        let schema = serde_json::json!({"type": "object"});
-        let tb = StepConcludeToolbox::wrap(inner.clone(), Some(&schema), false);
+        let tb = StepResultToolbox::wrap(inner.clone(), outcomes(), Vec::new());
         tb.execute("noop", serde_json::json!({}), "toolu_real")
             .await
             .unwrap();
@@ -161,16 +220,5 @@ mod tests {
                 .as_slice(),
             ["toolu_real"]
         );
-    }
-
-    #[tokio::test]
-    async fn conclude_stops_the_run() {
-        let schema = serde_json::json!({"type": "object"});
-        let tb = StepConcludeToolbox::wrap(base(), Some(&schema), false);
-        let outcome = tb
-            .execute(CONCLUDE_TOOL, serde_json::json!({}), "tc1")
-            .await
-            .unwrap();
-        assert_eq!(outcome, ToolOutcome::StopRun);
     }
 }

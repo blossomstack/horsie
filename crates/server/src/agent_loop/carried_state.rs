@@ -77,11 +77,21 @@ pub fn render_carried_state(state: &AgentState) -> String {
     sections.join("\n\n")
 }
 
+/// Whether any subagent this agent spawned is still working — that is, whether
+/// a report is still owed to it.
+///
+/// The agent's own view, read off its own log: the session records every spawn
+/// and every ending on the *parent*, because the parent is what a person has
+/// open while it waits. So this is not a second copy of the session's tree.
+#[must_use]
+pub fn has_running_subagents(state: &AgentState) -> bool {
+    !running_subagents(state).is_empty()
+}
+
 /// Subagents this agent spawned that have not reported a terminal status.
 ///
 /// Read off the log's lifecycle entries rather than from a field, because that
-/// is where the fact lives: the session records a subagent's progress on its
-/// parent's log, and the newest entry for an id is its current status.
+/// is where the fact lives: the newest entry for an id is its current status.
 fn running_subagents(state: &AgentState) -> Vec<(String, String)> {
     let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
     for entry in &state.log {

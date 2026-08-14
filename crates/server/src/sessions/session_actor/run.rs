@@ -294,7 +294,11 @@ impl SessionActor {
                 kind: SessionAgentKind::Step(agent_id),
                 // A step runs under its own preset, not the session's.
                 settings: step.settings.clone(),
-                step_output_schema: step.output_schema.clone(),
+                step_result: crate::sessions::session_actor::context::StepResultDef {
+                    outcomes: step.outcomes.clone(),
+                    fields: step.fields.clone(),
+                    interactive: step.interactive,
+                },
                 agent_type: None,
             },
         )
@@ -459,17 +463,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
@@ -493,17 +490,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
@@ -547,19 +537,8 @@ mod tests {
     async fn a_non_matching_condition_takes_the_catch_all() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "filed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"severity": "p2"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let run = wait_for_run(&journal, id, |r| {
@@ -571,6 +550,80 @@ mod tests {
         assert!(run.steps[1].via.is_none());
     }
 
+    /// A step ends when it calls `submit_result` — a turn ending is not a step
+    /// ending. When nothing would wake the agent, the model is nudged rather
+    /// than the step failed outright: one forgetful turn should not kill a run
+    /// fifteen steps deep with real changes on the shared workspace.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_with_text_is_nudged_and_then_submits() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let text = || {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "I think that's everything.".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        };
+        let provider = MockProvider::scripted(
+            Script::of([
+                // The step believes it is done but says so in prose.
+                text(),
+                // Nudged, it submits.
+                Ok(concludes(serde_json::json!({"severity": "p2"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        assert_eq!(
+            run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Concluded,
+            "the nudged step still concluded: {:?}",
+            run.steps[0]
+        );
+        assert_eq!(
+            run.steps[0].output.as_ref().and_then(|o| o.get("severity")),
+            Some(&serde_json::json!("p2")),
+            "and the result it submitted after the nudge is the one that routed"
+        );
+    }
+
+    /// A model that never submits fails its step rather than looping for ever.
+    /// The second nudge forces `submit_result` in `tool_choice`, so reaching
+    /// this means the provider ignored a constraint it is required to honour.
+    #[tokio::test]
+    async fn a_step_that_never_submits_fails_the_run() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(Script::of([]).then_repeating_with(|| {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "done I think".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }));
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Failed
+        })
+        .await;
+        let error = run.error.unwrap_or_default();
+        assert!(
+            error.contains("submit_result"),
+            "the failure has to name what was missing: {error}"
+        );
+    }
+
     /// Retrying appends an attempt rather than replacing one, so the earlier
     /// attempt stays readable and the graph can stack them.
     #[tokio::test]
@@ -578,17 +631,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
@@ -671,17 +717,7 @@ mod tests {
                 Ok(asks("p0 or p2?")),
                 Ok(concludes(serde_json::json!({"severity": "p0"}))),
             ])
-            .then_repeating_with(|| {
-                Ok(horsie_agentcore::CompletionResponse {
-                    parts: vec![horsie_agentcore::ContentPart::Text(
-                        horsie_agentcore::TextPart {
-                            text: "fixed".to_string(),
-                        },
-                    )],
-                    stop_reason: horsie_agentcore::StopReason::EndTurn,
-                    usage: horsie_agentcore::Usage::without_cache(1, 1),
-                })
-            }),
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
 
@@ -819,17 +855,10 @@ mod tests {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
             Script::of([Ok(concludes(serde_json::json!({"severity": "p0"})))]).then_repeating_with(
-                || {
-                    Ok(horsie_agentcore::CompletionResponse {
-                        parts: vec![horsie_agentcore::ContentPart::Text(
-                            horsie_agentcore::TextPart {
-                                text: "fixed".to_string(),
-                            },
-                        )],
-                        stop_reason: horsie_agentcore::StopReason::EndTurn,
-                        usage: horsie_agentcore::Usage::without_cache(1, 1),
-                    })
-                },
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is now a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
             ),
         );
         let (f, _session, id, journal) = spawn_run_with_provider(provider).await;

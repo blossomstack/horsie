@@ -3,6 +3,7 @@ use crate::agent_loop::context::{
 };
 use crate::agent_loop::inbox::Summarise;
 use crate::sessions::ask_tool::ASK_USER_TOOL;
+use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
     ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
@@ -26,12 +27,14 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AgentParams {
     pub system_prompt: Option<String>,
-    /// Whether the agent produces structured output via `conclude`.
-    pub has_output_schema: bool,
-    /// Whether the agent may pause to ask the user.
-    pub allow_ask_user: bool,
-    /// Whether the agent may arm timers and park itself to await them.
-    pub allow_timers: bool,
+    /// Whether this agent owes a structured result — true for a workflow step,
+    /// which ends only by calling `submit_result`. Everything else finishes a
+    /// turn with plain text, and that text *is* its answer.
+    ///
+    /// The one thing this decides: what a turn ending with text means. For a
+    /// step it is either a park (something will wake it) or a mistake (nothing
+    /// will); for anyone else it is the answer.
+    pub requires_result: bool,
     pub max_iterations: Option<u32>,
     pub max_retries: u32,
     /// Canonical thinking effort for this agent's runs, already resolved from
@@ -48,9 +51,7 @@ impl AgentParams {
     pub fn from_def(def: &AgentRunDef) -> Self {
         Self {
             system_prompt: def.system_prompt.clone(),
-            has_output_schema: def.output_schema.is_some(),
-            allow_ask_user: def.allow_ask_user,
-            allow_timers: def.allow_timers.unwrap_or(false),
+            requires_result: false,
             max_iterations: def.max_iterations,
             max_retries: def.max_retries.unwrap_or(0),
             thinking_effort: None,
@@ -58,6 +59,12 @@ impl AgentParams {
         }
     }
 }
+
+/// How many turns an agent that owes a result may end without one before the
+/// step is failed. Two: the first nudge is a plain message, the second forces
+/// `submit_result` in `tool_choice`, and a model that defeats both is not going
+/// to be talked round by a third.
+const MAX_RESULT_NUDGES: u32 = 2;
 
 /// Commands accepted by an [`AgentActor`].
 pub enum AgentCommand {
@@ -395,8 +402,14 @@ pub enum AgentDomainEvent {
         next_fire_at_unix_ms: Option<u64>,
         at_ms: u64,
     },
-    /// The agent parked itself awaiting its timers.
+    /// The agent parked, awaiting a timer or a subagent still working.
     Parked {
+        at_ms: u64,
+    },
+    /// A turn ended without the result this agent owed, and nothing would have
+    /// woken it. Journaled so the budget behind the nudge survives a restart —
+    /// otherwise a crash loop hands the model a fresh nudge for ever.
+    Nudged {
         at_ms: u64,
     },
     /// The task list changed (create/insert/update_status). Carries the full
@@ -518,6 +531,13 @@ pub struct AgentState {
     /// True while the agent has parked itself awaiting a timer (no run in flight).
     #[serde(default)]
     pub parked: bool,
+    /// Consecutive turns this agent ended without the result it owed.
+    ///
+    /// Durable, and reset by any turn that ends properly: it is the budget
+    /// behind the nudge, and a process that dies mid-nudge must not hand the
+    /// model a fresh one every restart.
+    #[serde(default)]
+    pub nudges: u32,
     /// True between a turn beginning and that turn reaching a boundary.
     ///
     /// Durable because only a crash can leave one open: every boundary an agent
@@ -753,6 +773,7 @@ impl AgentState {
             task_list: self.task_list.clone(),
             inbox: Vec::new(),
             asks: Vec::new(),
+            nudges: 0,
             timers: Vec::new(),
             parked: false,
             turn_in_flight: false,
@@ -1504,7 +1525,6 @@ impl AgentActor {
 
         let self_ref = ctx.self_ref();
         let context_provider = self.ctx.context_provider.clone();
-        let allow_timers = self.params.allow_timers;
         let configured_prompt = self.params.system_prompt.clone();
         // Normally `None`, meaning `Auto`: a turn may end with text, and which
         // tools end a run is the toolbox's business. Set only when this turn is
@@ -1569,16 +1589,13 @@ impl AgentActor {
                     return;
                 }
             };
-            // Timer-capable agents run with the timer control tools layered on; these
-            // execute by `ask`ing this actor and are never sent to the sandboxed runtime.
-            let toolbox: Arc<dyn Toolbox> = if allow_timers {
-                Arc::new(TimerToolbox {
-                    inner: contexts.toolbox,
-                    actor: self_ref.clone(),
-                })
-            } else {
-                contexts.toolbox
-            };
+            // Every agent gets the timer control tools, like `task_list`: they
+            // are a way of working, not a permission. They execute by `ask`ing
+            // this actor and are never sent to the sandboxed runtime.
+            let toolbox: Arc<dyn Toolbox> = Arc::new(TimerToolbox {
+                inner: contexts.toolbox,
+                actor: self_ref.clone(),
+            });
             // `task_list` is always available, like `skill`/`inspect_workspace` --
             // it's a working-memory aid every agent can reach for, not a permission
             // that needs gating per agent.
@@ -1708,13 +1725,15 @@ impl AgentActor {
 
         match report.outcome {
             RunOutcome::Completed { text } => {
-                // No conclude tool: treat the final text as the output.
                 parent
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
                         usage_total: state.usage_total,
                     })
                     .await;
+                if self.params.requires_result {
+                    return self.ended_without_result(state, ctx, agent, parent).await;
+                }
                 parent
                     .deliver(AgentOutcome::Concluded {
                         agent,
@@ -1731,7 +1750,7 @@ impl AgentActor {
                 self.persist_maybe_snapshot(drained)
             }
             RunOutcome::Stopped { calls } => {
-                match self.interpret(calls) {
+                match Self::interpret(calls) {
                     Conclusion::Output(output) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
@@ -1776,7 +1795,15 @@ impl AgentActor {
                         self.events_since_snapshot = 0;
                         CommandEffect::persist(events).and_snapshot()
                     }
-                    Conclusion::Park => self.park_or_resume(state, ctx, agent, parent).await,
+                    Conclusion::Contradiction(calls) => {
+                        parent
+                            .deliver(AgentOutcome::UsageRecorded {
+                                agent,
+                                usage_total: state.usage_total,
+                            })
+                            .await;
+                        self.correct_contradiction(calls, state, ctx).await
+                    }
                 }
             }
             RunOutcome::Cancelled => {
@@ -1856,13 +1883,17 @@ impl AgentActor {
         }
     }
 
-    /// Decide whether a handoff payload is a final output, an ask, or a park.
-    /// An `optional_handoff_tool` (e.g. the server crate's `ask_user` tool) is
-    /// single-purpose — always an ask — so it bypasses `classify_conclusion`'s
-    /// `has_output_schema`/`allow_ask_user`-based branching entirely, which
-    /// exists only to disambiguate the workflow crate's multi-purpose `conclude`
-    /// payload shape.
-    fn interpret(&self, calls: Vec<StoppedCall>) -> Conclusion {
+    /// What the tools that ended this run meant.
+    ///
+    /// A match on names, and nothing else. Each of these tools does exactly one
+    /// thing, so there is no payload shape to disambiguate — which is the whole
+    /// reason they are separate tools rather than one with a `kind` field.
+    fn interpret(calls: Vec<StoppedCall>) -> Conclusion {
+        if calls.is_empty() {
+            return Conclusion::Output(Value::Null);
+        }
+        // Several questions in one turn is ordinary: they are asked together and
+        // answered together.
         if calls.iter().all(|c| c.tool == ASK_USER_TOOL) {
             return Conclusion::Ask(
                 calls
@@ -1879,59 +1910,146 @@ impl AgentActor {
                     .collect(),
             );
         }
-        let Some(call) = calls.into_iter().next() else {
-            return Conclusion::Output(Value::Null);
-        };
-        classify_conclusion(
-            self.params.has_output_schema,
-            self.params.allow_ask_user,
-            self.params.allow_timers,
-            call.input,
-            Some(call.tool_call_id),
-        )
+        if let [only] = calls.as_slice()
+            && only.tool == SUBMIT_RESULT_TOOL
+        {
+            return Conclusion::Output(only.input.clone());
+        }
+        // Finishing *and* asking, or submitting twice: contradictory, and only
+        // the model can resolve it. Every call gets an error result, so nothing
+        // is left dangling, and the turn runs again.
+        Conclusion::Contradiction(calls)
     }
 
-    /// Decide what a `park` conclusion means: an illegal park (no timers fails
-    /// the run), an immediate resume (something is already queued), or a real
-    /// park (stay alive, status → Parked).
+    /// A step's turn ended with text instead of `submit_result`.
     ///
-    /// The immediate-resume case used to need a `pending_wake` flag, because a
-    /// timer that fired mid-run had nowhere to wait. It has a queue now, so this
-    /// is the ordinary drain and the wake carries the timer's own message rather
-    /// than a synthetic "re-check now".
-    async fn park_or_resume(
+    /// That is legitimate exactly when something will wake this agent again: a
+    /// queued message, an armed timer, or a subagent that still owes it a
+    /// report. Otherwise nothing would ever start another turn and the step
+    /// would sit "running" for ever, so the model is nudged — first with a plain
+    /// message, then with `submit_result` forced, and only then is the step
+    /// failed.
+    ///
+    /// All three facts are this actor's own: the queue and the timers are in its
+    /// state, and its log carries every subagent lifecycle record the session
+    /// wrote onto it. Nothing here asks the session anything.
+    async fn ended_without_result(
         &mut self,
         state: &AgentState,
         ctx: &ActorContext<AgentCommand>,
         agent: uuid::Uuid,
         parent: Arc<dyn AgentOutcomeSink>,
     ) -> CommandEffect<AgentDomainEvent> {
-        if state.timers.is_empty() {
+        // The queue first: a subagent report that landed while the turn was
+        // ending starts the next turn, and nothing needs classifying at all.
+        let drained = self.try_drain(state, ctx).await;
+        if !drained.is_empty() {
+            return self.persist_maybe_snapshot(drained);
+        }
+        if !state.timers.is_empty()
+            || crate::agent_loop::carried_state::has_running_subagents(state)
+        {
+            parent.deliver(AgentOutcome::Parked { agent }).await;
+            let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
+            self.events_since_snapshot = 0;
+            return CommandEffect::persist(vec![parked]).and_snapshot();
+        }
+        if state.nudges >= MAX_RESULT_NUDGES {
             parent
                 .deliver(AgentOutcome::Failed {
                     agent,
-                    error: "agent parked with no active timers — nothing would ever wake it"
-                        .to_string(),
+                    error: format!(
+                        "the step ended {} turns without calling `{SUBMIT_RESULT_TOOL}`, \
+                         and nothing would wake it",
+                        state.nudges + 1
+                    ),
                     recoverable: false,
                     terminal: false,
                 })
                 .await;
-            return CommandEffect::stop();
+            return CommandEffect::none();
         }
-        let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
-        let folded = Self::apply_event(state.clone(), parked.clone());
-        let mut events = vec![parked];
-        let drained = self.try_drain(&folded, ctx).await;
-        if !drained.is_empty() {
-            // Something was already waiting — a timer that fired while the run
-            // was busy, most likely. Go straight back to work instead of
-            // parking on a wake that has already happened.
-            events.extend(drained);
+        // The second attempt names the tool in `tool_choice`, so the model can
+        // emit nothing else. Not the first: a model that realises it is *not*
+        // finished must still be able to go back to work, and a forcing would
+        // forbid that.
+        if state.nudges + 1 >= MAX_RESULT_NUDGES {
+            self.pending_tool_choice = Some(horsie_agentcore::ToolChoice::Required(
+                SUBMIT_RESULT_TOOL.to_string(),
+            ));
+        }
+        let nudge = AgentDomainEvent::Received {
+            item: crate::agent_loop::Incoming::User {
+                id: format!("nudge-result:{}", state.nudges),
+                text: format!(
+                    "Your turn ended without calling `{SUBMIT_RESULT_TOOL}`, and nothing will \
+                     wake you — you have no armed timers and no subagents still running. If \
+                     the step's work is done, call `{SUBMIT_RESULT_TOOL}` now. If it is not, \
+                     carry on working."
+                ),
+            },
+            at_ms: now_ms(),
+        };
+        let nudged = AgentDomainEvent::Nudged { at_ms: now_ms() };
+        let mut folded = Self::apply_event(state.clone(), nudge.clone());
+        folded = Self::apply_event(folded, nudged.clone());
+        let mut events = vec![nudge, nudged];
+        events.extend(self.try_drain(&folded, ctx).await);
+        CommandEffect::persist(events)
+    }
+
+    /// The model called two turn-enders at once. Tell each call why, and run the
+    /// turn again.
+    ///
+    /// Error results rather than silence: every `tool_use` needs a
+    /// `tool_result` for the conversation to stay valid, and a call left
+    /// dangling is indistinguishable later from a question still waiting on the
+    /// user.
+    async fn correct_contradiction(
+        &mut self,
+        calls: Vec<StoppedCall>,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let named = calls
+            .iter()
+            .map(|c| c.tool.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reason = format!(
+            "You ended your turn with more than one finishing tool ({named}). Do one thing: \
+             either ask the user, or submit this step's result."
+        );
+        let at_ms = now_ms();
+        let mut events: Vec<AgentDomainEvent> = calls
+            .iter()
+            .map(|c| AgentDomainEvent::ToolComplete {
+                tool_call_id: c.tool_call_id.clone(),
+                output: reason.clone(),
+                is_error: true,
+                at_ms,
+            })
+            .collect();
+        let nudged = AgentDomainEvent::Nudged { at_ms };
+        events.push(nudged.clone());
+        let mut folded = state.clone();
+        for e in &events {
+            folded = Self::apply_event(folded, e.clone());
+        }
+        if folded.nudges > MAX_RESULT_NUDGES {
             return CommandEffect::persist(events);
         }
-        parent.deliver(AgentOutcome::Parked { agent }).await;
-        self.events_since_snapshot = 0;
-        CommandEffect::persist(events).and_snapshot()
+        let resume = AgentDomainEvent::Received {
+            item: crate::agent_loop::Incoming::Continue {
+                id: format!("contradiction:{}", folded.nudges),
+                reason,
+            },
+            at_ms,
+        };
+        folded = Self::apply_event(folded, resume.clone());
+        events.push(resume);
+        events.extend(self.try_drain(&folded, ctx).await);
+        CommandEffect::persist(events)
     }
 
     /// A timer's sleep elapsed. Re-arm a recurring timer, then queue the wake.
@@ -2021,64 +2139,13 @@ fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
     }
 }
 
-/// Classify a `conclude` payload into the agent's terminal intent. With timers the
-/// payload is always `kind`-tagged (`submit`/`park`/`ask`); without, it follows the
-/// legacy (has_output, allow_ask) shape.
-fn classify_conclusion(
-    has_output_schema: bool,
-    allow_ask_user: bool,
-    allow_timers: bool,
-    data: Value,
-    tool_call_id: Option<String>,
-) -> Conclusion {
-    let extract_question = |d: &Value| {
-        d.get("question")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string()
-    };
-    if allow_timers {
-        let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
-        return match kind {
-            "park" => Conclusion::Park,
-            "ask" => Conclusion::Ask(vec![AskedQuestion {
-                tool_call_id,
-                question: extract_question(&data),
-            }]),
-            _ => Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null)),
-        };
-    }
-    match (has_output_schema, allow_ask_user) {
-        // Kind-tagged union.
-        (true, true) => {
-            let kind = data.get("kind").and_then(Value::as_str).unwrap_or("submit");
-            if kind == "ask" {
-                Conclusion::Ask(vec![AskedQuestion {
-                    tool_call_id,
-                    question: extract_question(&data),
-                }])
-            } else {
-                Conclusion::Output(data.get("output").cloned().unwrap_or(Value::Null))
-            }
-        }
-        // Output only: the payload is the output.
-        (true, false) => Conclusion::Output(data),
-        // Ask only: the payload is a question.
-        (false, true) => Conclusion::Ask(vec![AskedQuestion {
-            tool_call_id,
-            question: extract_question(&data),
-        }]),
-        // No conclude tool registered — shouldn't be reached via a handoff.
-        (false, false) => Conclusion::Output(data),
-    }
-}
-
 #[derive(Debug)]
 enum Conclusion {
     Output(Value),
     /// One or more questions, all parked on together.
     Ask(Vec<AskedQuestion>),
-    Park,
+    /// Two turn-enders at once. The calls are named so each can be told why.
+    Contradiction(Vec<StoppedCall>),
 }
 
 #[async_trait]
@@ -2244,6 +2311,13 @@ impl EventSourcedActor for AgentActor {
             },
             AgentDomainEvent::Parked { .. } => {
                 state.parked = true;
+                state.turn_in_flight = false;
+                // Parking is a turn ending properly: the budget is for turns
+                // that end with nothing to wake them.
+                state.nudges = 0;
+            }
+            AgentDomainEvent::Nudged { .. } => {
+                state.nudges = state.nudges.saturating_add(1);
                 state.turn_in_flight = false;
             }
             AgentDomainEvent::TaskListChanged { snapshot, .. } => state.task_list = snapshot,
@@ -3475,9 +3549,6 @@ mod tests {
     pub(super) fn def_fixture() -> AgentRunDef {
         AgentRunDef {
             system_prompt: None,
-            output_schema: None,
-            allow_ask_user: false,
-            allow_timers: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,
@@ -3487,6 +3558,100 @@ mod tests {
     #[test]
     fn from_def_defaults_to_non_interactive() {
         assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    /// Only a step owes a result. For everyone else a turn ending with plain
+    /// text *is* the answer, and nudging one would be nonsense.
+    #[test]
+    fn from_def_owes_no_result() {
+        assert!(!AgentParams::from_def(&def_fixture()).requires_result);
+    }
+
+    fn stopped(calls: &[(&str, serde_json::Value)]) -> Vec<StoppedCall> {
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, (tool, input))| StoppedCall {
+                tool: (*tool).to_string(),
+                tool_call_id: format!("toolu_{i}"),
+                input: input.clone(),
+            })
+            .collect()
+    }
+
+    /// The whole of the interpretation: a match on the tool's name. There is no
+    /// payload shape to disambiguate, which is why these are separate tools
+    /// rather than one with a `kind` field.
+    #[test]
+    fn a_submit_is_the_steps_result_verbatim() {
+        let calls = stopped(&[(
+            SUBMIT_RESULT_TOOL,
+            serde_json::json!({"outcome": "p0", "description": "did it"}),
+        )]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Output(v) => {
+                assert_eq!(v["outcome"], "p0");
+                assert_eq!(v["description"], "did it");
+            }
+            other => panic!("expected the step's result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_ask_parks_on_one_question() {
+        let calls = stopped(&[(ASK_USER_TOOL, serde_json::json!({"question": "which?"}))]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Ask(asks) => {
+                assert_eq!(asks.len(), 1);
+                assert_eq!(asks[0].question, "which?");
+                assert_eq!(asks[0].tool_call_id.as_deref(), Some("toolu_0"));
+            }
+            other => panic!("expected an ask, got {other:?}"),
+        }
+    }
+
+    /// Several questions in one turn are ordinary — they are asked together and
+    /// answered together — so all of them are parked on.
+    #[test]
+    fn several_asks_park_on_all_of_them() {
+        let calls = stopped(&[
+            (ASK_USER_TOOL, serde_json::json!({"question": "first?"})),
+            (ASK_USER_TOOL, serde_json::json!({"question": "second?"})),
+        ]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Ask(asks) => {
+                let questions: Vec<&str> = asks.iter().map(|a| a.question.as_str()).collect();
+                assert_eq!(questions, vec!["first?", "second?"]);
+            }
+            other => panic!("expected two asks, got {other:?}"),
+        }
+    }
+
+    /// Finishing and asking at once has no honest reading, and neither does
+    /// submitting twice. Only the model can resolve it, so every call is told
+    /// why and the turn runs again.
+    #[test]
+    fn two_different_finishing_tools_are_a_contradiction() {
+        let calls = stopped(&[
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
+            (ASK_USER_TOOL, serde_json::json!({"question": "or?"})),
+        ]);
+        assert!(matches!(
+            AgentActor::interpret(calls),
+            Conclusion::Contradiction(c) if c.len() == 2
+        ));
+    }
+
+    #[test]
+    fn submitting_twice_is_a_contradiction() {
+        let calls = stopped(&[
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p2"})),
+        ]);
+        assert!(matches!(
+            AgentActor::interpret(calls),
+            Conclusion::Contradiction(_)
+        ));
     }
 
     /// Without a turn-boundary snapshot an agent that only converses — no ask,
@@ -5212,26 +5377,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_park_kind_when_timers_enabled() {
-        use serde_json::json;
-        // timers on: a kind=park payload classifies as Park.
-        let c = classify_conclusion(true, true, true, json!({"kind": "park"}), None);
-        assert!(matches!(c, Conclusion::Park));
-        // kind=submit classifies as Output(output field).
-        let c = classify_conclusion(
-            true,
-            true,
-            true,
-            json!({"kind": "submit", "output": {"x": 1}}),
-            None,
-        );
-        match c {
-            Conclusion::Output(v) => assert_eq!(v["x"], 1),
-            other => panic!("expected Output, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn timer_events_fold_into_state() {
         use crate::agent_loop::timers::{TimerKind, TimerRecord};
         use std::time::Duration;
@@ -5854,9 +5999,6 @@ mod fence_tests {
         };
         let mut params = AgentParams::from_def(&AgentRunDef {
             system_prompt: None,
-            output_schema: None,
-            allow_ask_user: false,
-            allow_timers: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,
@@ -5967,9 +6109,6 @@ mod fence_tests {
         };
         let mut params = AgentParams::from_def(&AgentRunDef {
             system_prompt: None,
-            output_schema: None,
-            allow_ask_user: false,
-            allow_timers: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,

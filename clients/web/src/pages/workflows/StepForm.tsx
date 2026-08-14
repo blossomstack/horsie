@@ -1,6 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
-import type { AgentView } from "../../api/types";
-import type { OutputField, StepDraft } from "./stepDraft";
+import type { AgentView, StepFieldType } from "../../api/types";
+import { emptyField, emptyOutcome, type StepDraft } from "./stepDraft";
 
 /**
  * One step's editor, as the right panel shows it.
@@ -81,75 +81,170 @@ export function StepForm({
       </section>
 
       <section className="panel p-4">
-        <h2 className="legend">Output fields</h2>
+        <h2 className="legend">Outcomes</h2>
         <p className="mt-1 text-xs text-faint">
-          A step needs these before a condition can read it. Leave empty and the
-          step ends with plain text.
+          How this step can end. The step picks one, and it is the only thing a
+          transition reads. Each needs a description — it is what the model
+          reads to choose between them.
         </p>
-        {step.rawSchema !== undefined ? (
-          <p className="mt-2 text-xs text-orange-ink">
-            This step’s schema was written elsewhere and is kept as it is.
-          </p>
-        ) : (
-          <div className="mt-3 space-y-2">
-            {step.fields.map((f, fi) => (
-              <div key={fi} className="flex items-center gap-2">
+        <div className="mt-3 space-y-2">
+          {step.outcomes.map((o, oi) => (
+            <div key={oi} className="flex items-center gap-2">
+              <input
+                className="field field-mono w-40"
+                value={o.value}
+                placeholder="success"
+                onChange={(e) =>
+                  onChange({
+                    outcomes: step.outcomes.map((x, j) =>
+                      j === oi ? { ...x, value: e.target.value } : x,
+                    ),
+                  })
+                }
+                data-testid="outcome-value"
+              />
+              <input
+                className="field flex-1"
+                value={o.description}
+                placeholder="what it means"
+                onChange={(e) =>
+                  onChange({
+                    outcomes: step.outcomes.map((x, j) =>
+                      j === oi ? { ...x, description: e.target.value } : x,
+                    ),
+                  })
+                }
+                data-testid="outcome-description"
+              />
+              <button
+                className="key key-danger !px-2 !py-1"
+                aria-label={`Remove outcome ${o.value || oi + 1}`}
+                onClick={() =>
+                  onChange({ outcomes: step.outcomes.filter((_, j) => j !== oi) })
+                }
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+          <button
+            className="key !px-2 !py-1 text-xs"
+            onClick={() => onChange({ outcomes: [...step.outcomes, emptyOutcome()] })}
+            data-testid="add-outcome"
+          >
+            <Plus size={13} />
+            Add outcome
+          </button>
+        </div>
+      </section>
+
+      <section className="panel p-4">
+        <h2 className="legend">Result fields</h2>
+        <p className="mt-1 text-xs text-faint">
+          Extra values this step returns, beyond its outcome and the markdown
+          summary every step writes. A description is required: an undocumented
+          field is one the model fills in by guessing.
+        </p>
+        <div className="mt-3 space-y-2">
+          {step.fields.map((f, fi) => (
+            <div key={fi} className="flex items-center gap-2">
+              <input
+                className="field flex-1"
+                value={f.name}
+                placeholder="severity"
+                onChange={(e) =>
+                  onChange({
+                    fields: step.fields.map((x, j) =>
+                      j === fi ? { ...x, name: e.target.value } : x,
+                    ),
+                  })
+                }
+                data-testid="output-field-name"
+              />
+              <select
+                className="field w-32"
+                value={f.kind}
+                onChange={(e) =>
+                  onChange({
+                    fields: step.fields.map((x, j) =>
+                      j === fi ? { ...x, kind: e.target.value as StepFieldType } : x,
+                    ),
+                  })
+                }
+                data-testid="output-field-type"
+              >
+                <option value="String">string</option>
+                <option value="Number">number</option>
+                <option value="Boolean">boolean</option>
+                <option value="StringList">string list</option>
+              </select>
+              <input
+                className="field flex-1"
+                value={f.description}
+                placeholder="what it holds"
+                onChange={(e) =>
+                  onChange({
+                    fields: step.fields.map((x, j) =>
+                      j === fi ? { ...x, description: e.target.value } : x,
+                    ),
+                  })
+                }
+                data-testid="output-field-description"
+              />
+              <label className="flex items-center gap-1 text-xs text-faint">
                 <input
-                  className="field flex-1"
-                  value={f.name}
-                  placeholder="severity"
+                  type="checkbox"
+                  checked={f.required ?? false}
                   onChange={(e) =>
                     onChange({
                       fields: step.fields.map((x, j) =>
-                        j === fi ? { ...x, name: e.target.value } : x,
+                        j === fi ? { ...x, required: e.target.checked } : x,
                       ),
                     })
                   }
-                  data-testid="output-field-name"
+                  data-testid="output-field-required"
                 />
-                <select
-                  className="field w-28"
-                  value={f.type}
-                  onChange={(e) =>
-                    onChange({
-                      fields: step.fields.map((x, j) =>
-                        j === fi
-                          ? { ...x, type: e.target.value as OutputField["type"] }
-                          : x,
-                      ),
-                    })
-                  }
-                  data-testid="output-field-type"
-                >
-                  <option value="string">string</option>
-                  <option value="number">number</option>
-                  <option value="boolean">boolean</option>
-                </select>
-                <button
-                  className="key key-danger !px-2 !py-1"
-                  aria-label={`Remove field ${f.name || fi + 1}`}
-                  onClick={() =>
-                    onChange({ fields: step.fields.filter((_, j) => j !== fi) })
-                  }
-                >
-                  <Trash2 size={13} />
-                </button>
-              </div>
-            ))}
-            <button
-              className="key !px-2 !py-1 text-xs"
-              onClick={() =>
-                onChange({
-                  fields: [...step.fields, { name: "", type: "string", description: "" }],
-                })
-              }
-              data-testid="add-output-field"
-            >
-              <Plus size={13} />
-              Add field
-            </button>
-          </div>
-        )}
+                required
+              </label>
+              <button
+                className="key key-danger !px-2 !py-1"
+                aria-label={`Remove field ${f.name || fi + 1}`}
+                onClick={() =>
+                  onChange({ fields: step.fields.filter((_, j) => j !== fi) })
+                }
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+          <button
+            className="key !px-2 !py-1 text-xs"
+            onClick={() => onChange({ fields: [...step.fields, emptyField()] })}
+            data-testid="add-output-field"
+          >
+            <Plus size={13} />
+            Add field
+          </button>
+        </div>
+      </section>
+
+      <section className="panel p-4">
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={step.interactive}
+            onChange={(e) => onChange({ interactive: e.target.checked })}
+            data-testid="step-interactive"
+          />
+          <span>
+            <span className="section-title">Can ask the person</span>
+            <span className="mt-1 block text-xs text-faint">
+              Gives this step the ask_user tool. Without it the step has no way
+              to ask, and must decide for itself.
+            </span>
+          </span>
+        </label>
       </section>
 
       <section className="panel p-4">

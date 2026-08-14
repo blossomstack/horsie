@@ -228,9 +228,6 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: None,
@@ -350,9 +347,6 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: None,
@@ -453,9 +447,6 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         };
         let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
             system_prompt: None,
-            output_schema: None,
-            allow_ask_user: false,
-            allow_timers: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: None,
@@ -535,9 +526,6 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     };
     let mut params = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: None,
@@ -595,9 +583,6 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     };
     let mut params2 = AgentParams::from_def(&horsie_server::agent_loop::AgentRunDef {
         system_prompt: None,
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: None,

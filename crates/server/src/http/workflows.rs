@@ -152,7 +152,11 @@ pub async fn start_run(
             name: step.name.clone(),
             agent: step.agent.clone(),
             prompt: step.prompt.clone(),
-            output_schema: step.output_schema.clone(),
+            // Defaulted here rather than at read time: the snapshot is what a
+            // run answers from, so it should not have to re-derive anything.
+            outcomes: crate::sessions::workflow::outcomes_or_default(step.outcomes.as_ref()),
+            fields: step.fields.clone().unwrap_or_default(),
+            interactive: step.interactive.unwrap_or(false),
             transitions: step
                 .transitions
                 .clone()

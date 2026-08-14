@@ -1,0 +1,13 @@
+-- A step no longer declares a raw JSON Schema and `eval` conditions: it
+-- declares the values its `outcome` may take, the fields its result carries,
+-- and transitions that match on that outcome.
+--
+-- Every saved definition is deleted rather than converted. The new model cannot
+-- express an arbitrary `eval` expression, so a converted row would be a guess
+-- about what its author meant — and a workflow that routes the wrong way is
+-- worse than one that is missing.
+--
+-- Runs are left alone. A run snapshots its graph at creation, so an old one
+-- carries its own copy and nothing here can change it; the storage spec
+-- defaults the new fields so a finished run still loads and reads.
+DELETE FROM workflows;

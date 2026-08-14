@@ -19,9 +19,6 @@ use horsie_server::agent_loop::{
 fn agent_def() -> AgentRunDef {
     AgentRunDef {
         system_prompt: Some("You are a coder.".into()),
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: None,
         max_retries: None,
         allowed_tools: Some(vec!["bash".into()]),

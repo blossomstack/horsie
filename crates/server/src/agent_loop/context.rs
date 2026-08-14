@@ -11,8 +11,6 @@ use uuid::Uuid;
 
 /// Name of the builtin terminal tool an agent calls to finish its turn — either
 /// delivering its structured output or asking the user a question.
-pub const CONCLUDE_TOOL: &str = "conclude";
-
 /// The subset of an agent's configuration that [`ToolboxFactory::for_agent`] and
 /// [`AgentParams::from_def`](crate::agent_loop::AgentParams::from_def) actually need: tool
 /// shape and turn-shape, and nothing about *where this agent sits*. A workflow
@@ -21,9 +19,6 @@ pub const CONCLUDE_TOOL: &str = "conclude";
 #[derive(Debug, Clone, Default)]
 pub struct AgentRunDef {
     pub system_prompt: Option<String>,
-    pub output_schema: Option<Value>,
-    pub allow_ask_user: bool,
-    pub allow_timers: Option<bool>,
     pub max_iterations: Option<u32>,
     pub max_retries: Option<u32>,
     pub allowed_tools: Option<Vec<String>>,
@@ -138,7 +133,7 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
-    /// The agent's permitted tools (runtime + MCP + `conclude`), already composed.
+    /// The agent's permitted tools (runtime + MCP), already composed.
     pub toolbox: Arc<dyn Toolbox>,
     /// The composed system prompt, when the context layer owns it (interactive
     /// sessions compose it from a live workspace scan). `None` means "use the
@@ -366,8 +361,9 @@ pub struct AgentRuntimeContext {
     pub ready: bool,
 }
 
-/// Builds the toolbox an agent runs with: its permitted runtime tools plus the
-/// synthesized `conclude` terminal tool.
+/// Builds the toolbox an agent runs with: its permitted runtime tools, and
+/// nothing about how its turn ends — a tool that ends a run says so itself, and
+/// the layer adding one is stacked by the caller.
 pub trait ToolboxFactory: Send + Sync + 'static {
     fn for_agent(
         &self,
@@ -380,7 +376,7 @@ pub trait ToolboxFactory: Send + Sync + 'static {
 }
 
 /// Default factory: exposes the standard runtime-backed tools narrowed to the
-/// agent's allowlist, plus the `conclude` tool when applicable.
+/// agent's allowlist.
 pub struct DefaultToolboxFactory;
 
 impl ToolboxFactory for DefaultToolboxFactory {
@@ -415,16 +411,8 @@ impl ToolboxFactory for DefaultToolboxFactory {
                 list.iter().cloned().collect(),
             )),
         };
-        // The timer tools themselves are layered on at run time by the AgentActor;
-        // here we only widen the `conclude` schema to offer `park`.
-        let conclude = conclude_tool_spec(
-            agent_def.output_schema.as_ref(),
-            agent_def.allow_ask_user,
-            agent_def.allow_timers.unwrap_or(false),
-        );
         Arc::new(AgentToolbox {
             base,
-            conclude,
             runtime_client: client,
             workspace_names,
             use_plugins,
@@ -432,110 +420,12 @@ impl ToolboxFactory for DefaultToolboxFactory {
     }
 }
 
-/// Synthesize the `conclude` tool's input schema for an agent. Returns `None` when
-/// the agent neither produces structured output, may ask, nor uses timers (it then
-/// ends its turn with a plain message).
-///
-/// With `allow_timers` the tool is always a `kind`-tagged union including `park`
-/// (suspend awaiting timers) and `submit` (deliver output), plus `ask` when
-/// permitted. Without timers, behavior is exactly as before.
-pub fn conclude_tool_spec(
-    output_schema: Option<&Value>,
-    allow_ask: bool,
-    allow_timers: bool,
-) -> Option<ToolSpec> {
-    let input_schema = if allow_timers {
-        timers_kind_schema(output_schema, allow_ask)
-    } else {
-        match (output_schema, allow_ask) {
-            (None, false) => return None,
-            // Output only: the tool input *is* the output schema.
-            (Some(out), false) => out.clone(),
-            // Ask only: the tool input is a question (+ optional choices).
-            (None, true) => ask_schema(),
-            // Both: a `kind`-tagged union of submit-output and ask.
-            (Some(out), true) => both_schema(out),
-        }
-    };
-    Some(ToolSpec {
-        name: CONCLUDE_TOOL.to_string(),
-        description:
-            "Finish your turn: deliver final output, ask the user, or park to await your timers."
-                .to_string(),
-        input_schema,
-    })
-}
-
-/// Kind-tagged conclude schema for timer-capable agents. Always offers `submit`
-/// and `park`; adds `ask` when permitted.
-fn timers_kind_schema(output_schema: Option<&Value>, allow_ask: bool) -> Value {
-    let mut kinds = vec![json!("submit"), json!("park")];
-    if allow_ask {
-        kinds.push(json!("ask"));
-    }
-    json!({
-        "type": "object",
-        "required": ["kind"],
-        "properties": {
-            "kind": {
-                "type": "string",
-                "enum": kinds,
-                "description": "submit: deliver final output. park: suspend until a timer fires. ask: pause for user input."
-            },
-            "output": output_schema.cloned().unwrap_or_else(|| json!({})),
-            "question": { "type": "string", "description": "Required when kind=ask." },
-            "choices": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional when kind=ask."
-            }
-        }
-    })
-}
-
-fn ask_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["question"],
-        "properties": {
-            "question": { "type": "string", "description": "The question to put to the user." },
-            "choices": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional suggested answers."
-            }
-        }
-    })
-}
-
-fn both_schema(output_schema: &Value) -> Value {
-    json!({
-        "type": "object",
-        "required": ["kind"],
-        "properties": {
-            "kind": {
-                "type": "string",
-                "enum": ["submit", "ask"],
-                "description": "submit to deliver final output; ask to pause for user input"
-            },
-            "output": output_schema,
-            "question": { "type": "string", "description": "Required when kind=ask." },
-            "choices": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional when kind=ask."
-            }
-        }
-    })
-}
-
-/// A toolbox = a base (permitted runtime tools), the optional `conclude` terminal
-/// tool, and the always-present `skill` / `list_skills` tools. The latter two re-scan
-/// the workspace live on each call (no cached skill set), so a skill added mid-run is
-/// immediately loadable. `conclude`, `skill`, and `list_skills` bypass the allowlist.
+/// A toolbox = a base (permitted runtime tools) plus the always-present `skill`
+/// and `inspect_workspace` tools. Those two re-scan the workspace live on each
+/// call (no cached skill set), so a skill added mid-run is immediately loadable,
+/// and both bypass the allowlist.
 struct AgentToolbox {
     base: Arc<dyn Toolbox>,
-    conclude: Option<ToolSpec>,
     runtime_client: RuntimeClient,
     /// Names of the job's workspaces (stable for the job); used to apply the
     /// "optional iff single" rule and to list valid names in errors. The runtime owns
@@ -575,9 +465,6 @@ impl AgentToolbox {
 impl Toolbox for AgentToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.base.specs();
-        if let Some(c) = &self.conclude {
-            specs.push(c.clone());
-        }
         specs.push(ToolSpec {
             name: SKILL_TOOL.to_string(),
             description:
@@ -613,11 +500,6 @@ impl Toolbox for AgentToolbox {
         input: Value,
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
-        if let Some(c) = &self.conclude
-            && name == c.name
-        {
-            return Ok(ToolOutcome::StopRun);
-        }
         if name == SKILL_TOOL {
             let requested = input
                 .get("name")
@@ -779,12 +661,9 @@ mod tests {
     }
     use horsie_runtime_host::MockTransport;
 
-    fn def(allowed: Option<Vec<String>>, output: Option<Value>, ask: bool) -> AgentRunDef {
+    fn def(allowed: Option<Vec<String>>) -> AgentRunDef {
         AgentRunDef {
             system_prompt: None,
-            output_schema: output,
-            allow_ask_user: ask,
-            allow_timers: None,
             max_iterations: None,
             max_retries: None,
             allowed_tools: allowed,
@@ -808,73 +687,10 @@ mod tests {
     }
 
     #[test]
-    fn conclude_not_registered_without_output_or_ask() {
-        assert!(conclude_tool_spec(None, false, false).is_none());
-    }
-
-    #[test]
-    fn conclude_output_only_uses_output_schema_as_input() {
-        let out = json!({"type": "object", "properties": {"answer": {"type": "number"}}});
-        let spec = conclude_tool_spec(Some(&out), false, false).unwrap();
-        assert_eq!(spec.input_schema, out);
-    }
-
-    #[test]
-    fn conclude_ask_only_requires_question() {
-        let spec = conclude_tool_spec(None, true, false).unwrap();
-        assert_eq!(spec.input_schema["required"][0], "question");
-    }
-
-    #[test]
-    fn conclude_both_is_kind_tagged() {
-        let out = json!({"type": "object"});
-        let spec = conclude_tool_spec(Some(&out), true, false).unwrap();
-        assert_eq!(spec.input_schema["properties"]["kind"]["enum"][0], "submit");
-    }
-
-    #[test]
-    fn conclude_without_timers_is_unchanged() {
-        // Backward-compat: the no-timers signature still returns None when neither
-        // output nor ask is set.
-        assert!(conclude_tool_spec(None, false, false).is_none());
-    }
-
-    #[test]
-    fn conclude_with_timers_offers_park_and_submit() {
-        let out = json!({"type": "object"});
-        let spec = conclude_tool_spec(Some(&out), false, true).unwrap();
-        let kinds: Vec<&str> = spec.input_schema["properties"]["kind"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        assert!(kinds.contains(&"submit"));
-        assert!(kinds.contains(&"park"));
-        assert!(!kinds.contains(&"ask"));
-    }
-
-    #[test]
-    fn conclude_with_timers_and_ask_offers_all_three() {
-        let out = json!({"type": "object"});
-        let spec = conclude_tool_spec(Some(&out), true, true).unwrap();
-        let kinds: Vec<&str> = spec.input_schema["properties"]["kind"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
-        for k in ["submit", "ask", "park"] {
-            assert!(kinds.contains(&k), "missing kind {k}");
-        }
-    }
-
-    #[test]
-    fn toolbox_includes_conclude_and_filters_runtime_tools() {
+    fn the_toolbox_filters_runtime_tools_to_the_allowlist() {
         let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
-        let out = json!({"type": "object"});
         let tb = DefaultToolboxFactory.for_agent(
-            &def(Some(vec!["bash".into()]), Some(out), false),
+            &def(Some(vec!["bash".into()])),
             client,
             vec!["october".into()],
             false,
@@ -882,30 +698,14 @@ mod tests {
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
-        assert!(names.contains(&CONCLUDE_TOOL.to_string()));
         assert!(!names.contains(&"read_file".to_string()));
-    }
-
-    #[tokio::test]
-    async fn the_conclude_tool_stops_the_run() {
-        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
-        let out = json!({"type": "object"});
-        let tb = DefaultToolboxFactory.for_agent(
-            &def(None, Some(out), false),
-            client,
-            vec!["october".into()],
-            false,
-            crate::agent_loop::McpToolboxes::default(),
-        );
-        let outcome = tb.execute(CONCLUDE_TOOL, json!({}), "tc1").await.unwrap();
-        assert_eq!(outcome, ToolOutcome::StopRun);
     }
 
     #[tokio::test]
     async fn skill_and_inspect_always_present() {
         let client = RuntimeClient::new(MockTransport::ok(""), "test-agent"); // empty scan
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -923,7 +723,7 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -973,7 +773,7 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["alpha".into(), "beta".into()],
             false,
@@ -1014,7 +814,7 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["october".into()],
             true,
@@ -1047,7 +847,7 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -1071,7 +871,7 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client.clone(),
             vec!["october".into()],
             true,
@@ -1088,7 +888,7 @@ mod tests {
 
         // Opted-out agent never sees the shared section.
         let tb_off = DefaultToolboxFactory.for_agent(
-            &def(None, None, false),
+            &def(None),
             client,
             vec!["october".into()],
             false,

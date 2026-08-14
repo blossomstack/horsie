@@ -193,6 +193,7 @@ impl WorkflowService {
                     step.name
                 )));
             }
+            validate_result_contract(step)?;
         }
         if !seen.contains(input.start.as_str()) {
             return Err(WorkflowError::Invalid(format!(
@@ -208,26 +209,16 @@ impl WorkflowService {
                         step.name, t.to
                     )));
                 }
-                // A condition reads `output`; with no schema the step ends its
-                // turn with plain text and there is nothing to read.
-                if let Some(condition) = &t.condition {
-                    if step.output_schema.is_none() {
-                        return Err(WorkflowError::Invalid(format!(
-                            "step '{}' has a conditional transition but no output schema — \
-                             a condition reads the step's structured output",
-                            step.name
-                        )));
-                    }
-                    // Parseability only: whether it is *true* depends on output
-                    // this workflow has not produced yet. Worth checking here
-                    // because an unparseable expression unwinds the evaluator,
-                    // and catching it at save beats failing a run halfway.
-                    if let Err(e) =
+                // Parseability only: whether it is *true* depends on output
+                // this workflow has not produced yet. Worth checking here
+                // because an unparseable expression unwinds the evaluator, and
+                // catching it at save beats failing a run halfway.
+                if let Some(condition) = &t.condition
+                    && let Err(e) =
                         crate::sessions::workflow::eval_condition(condition, &serde_json::json!({}))
-                        && e.contains("not a valid expression")
-                    {
-                        return Err(WorkflowError::Invalid(format!("step '{}': {e}", step.name)));
-                    }
+                    && e.contains("not a valid expression")
+                {
+                    return Err(WorkflowError::Invalid(format!("step '{}': {e}", step.name)));
                 }
             }
             // Checked here so a workflow cannot be saved broken; resolved
@@ -241,6 +232,70 @@ impl WorkflowService {
         }
         Ok(())
     }
+}
+
+/// What a step promises to return has to hold together on its own, before any
+/// transition reads it.
+///
+/// Every rule here is a run-time failure moved to save time. An outcome value
+/// nobody described is one the model picks between blind; a field with no
+/// description is one it fills in by guessing; and a name colliding with
+/// `outcome` or `description` would silently overwrite the two fields the
+/// contract guarantees.
+fn validate_result_contract(step: &WorkflowStepDef) -> Result<(), WorkflowError> {
+    let invalid = |m: String| WorkflowError::Invalid(format!("step '{}': {m}", step.name));
+    if let Some(outcomes) = &step.outcomes {
+        if outcomes.is_empty() {
+            return Err(invalid(
+                "declare at least one outcome, or leave `outcomes` unset for success/failure"
+                    .to_string(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for o in outcomes {
+            if o.value.trim().is_empty() {
+                return Err(invalid("an outcome needs a value".to_string()));
+            }
+            if o.description.trim().is_empty() {
+                return Err(invalid(format!(
+                    "outcome '{}' needs a description — it is what the model reads to \
+                     choose between them",
+                    o.value
+                )));
+            }
+            if !seen.insert(o.value.as_str()) {
+                return Err(invalid(format!(
+                    "two outcomes are both '{}'; a transition addresses them by value",
+                    o.value
+                )));
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for f in step.fields.iter().flatten() {
+        if f.name.trim().is_empty() {
+            return Err(invalid("a result field needs a name".to_string()));
+        }
+        if f.name == crate::sessions::workflow::OUTCOME_FIELD
+            || f.name == crate::sessions::workflow::DESCRIPTION_FIELD
+        {
+            return Err(invalid(format!(
+                "'{}' is one of the two fields every result carries; name it something else",
+                f.name
+            )));
+        }
+        if f.description.trim().is_empty() {
+            return Err(invalid(format!(
+                "field '{}' needs a description — an undocumented field is one the model \
+                 fills in by guessing",
+                f.name
+            )));
+        }
+        if !seen.insert(f.name.as_str()) {
+            return Err(invalid(format!("two fields are both named '{}'", f.name)));
+        }
+    }
+    Ok(())
 }
 
 fn to_view(row: WorkflowRow) -> WorkflowView {
@@ -344,7 +399,9 @@ mod tests {
             name: name.into(),
             agent: agent.into(),
             prompt: "do it".into(),
-            output_schema: None,
+            outcomes: None,
+            fields: None,
+            interactive: None,
             transitions: None,
             max_iterations: None,
             max_retries: None,
@@ -418,27 +475,12 @@ mod tests {
     /// A condition reads `output`. Without a schema the step ends its turn with
     /// plain text, so the condition could only ever fail to evaluate — which is
     /// a run failure, and much better caught here.
-    #[tokio::test]
-    async fn a_condition_without_an_output_schema_is_refused() {
-        let s = service().await;
-        let mut i = input("a");
-        i.steps[0].transitions = Some(vec![WorkflowTransition {
-            to: "fix".into(),
-            condition: Some("output.severity == \"p0\"".into()),
-        }]);
-        assert!(matches!(
-            s.create(i, 1).await,
-            Err(WorkflowError::Invalid(m)) if m.contains("no output schema")
-        ));
-    }
-
     /// An unparseable expression unwinds the evaluator at run time. Catching
     /// it at save turns a run that dies halfway into a 422 on the form.
     #[tokio::test]
     async fn an_unparseable_condition_is_refused() {
         let s = service().await;
         let mut i = input("a");
-        i.steps[0].output_schema = Some(serde_json::json!({"type": "object"}));
         i.steps[0].transitions = Some(vec![WorkflowTransition {
             to: "fix".into(),
             condition: Some("!!!".into()),
@@ -455,7 +497,6 @@ mod tests {
     async fn a_condition_reading_an_absent_field_is_allowed() {
         let s = service().await;
         let mut i = input("a");
-        i.steps[0].output_schema = Some(serde_json::json!({"type": "object"}));
         i.steps[0].transitions = Some(vec![WorkflowTransition {
             to: "fix".into(),
             condition: Some("output.severity == \"p0\"".into()),

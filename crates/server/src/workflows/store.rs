@@ -160,10 +160,18 @@ mod tests {
                     name: "triage".into(),
                     agent: "bug-triager".into(),
                     prompt: "Triage it.".into(),
-                    output_schema: Some(serde_json::json!({
-                        "type": "object",
-                        "properties": { "severity": { "type": "string" } }
-                    })),
+                    outcomes: Some(vec![
+                        horsie_models::workflow::StepOutcome {
+                            value: "p0".into(),
+                            description: "drop everything".into(),
+                        },
+                        horsie_models::workflow::StepOutcome {
+                            value: "p2".into(),
+                            description: "file it".into(),
+                        },
+                    ]),
+                    fields: None,
+                    interactive: None,
                     transitions: Some(vec![
                         WorkflowTransition {
                             to: "fix".into(),
@@ -181,7 +189,9 @@ mod tests {
                     name: "fix".into(),
                     agent: "coder".into(),
                     prompt: "Fix it.".into(),
-                    output_schema: None,
+                    outcomes: None,
+                    fields: None,
+                    interactive: None,
                     transitions: None,
                     max_iterations: None,
                     max_retries: None,
@@ -190,7 +200,9 @@ mod tests {
                     name: "file".into(),
                     agent: "writer".into(),
                     prompt: "File it.".into(),
-                    output_schema: None,
+                    outcomes: None,
+                    fields: None,
+                    interactive: None,
                     transitions: None,
                     max_iterations: None,
                     max_retries: None,

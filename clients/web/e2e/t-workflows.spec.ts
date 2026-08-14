@@ -1,10 +1,10 @@
 // Group T — workflows: the editor builds a two-step definition through its
 // sidebar, reorders it, visualizes it, and the new-session page runs it.
 //
-// The steps deliberately declare no output schema. Such a step has no
-// `conclude` tool and ends its turn with plain text, which becomes its output —
-// so a run is two ordinary queued texts rather than a hand-built tool call.
-// T4 is the exception: asking needs `conclude`, so that workflow declares one.
+// Every step ends by calling `submit_result`, so a run is two queued tool calls
+// rather than two texts: a step that ends a turn with prose has not finished,
+// and the server nudges it. T4 adds a step that asks, which is now the ordinary
+// `ask_user` tool rather than a second meaning on the finishing one.
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 import { expectStatus } from "./helpers";
@@ -107,10 +107,16 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   mock,
 }) => {
   await mock.reset();
-  // One text per step: with no output schema, a step's turn ends with text and
-  // that text is its output.
-  await mock.queueText("hello");
-  await mock.queueText("goodbye");
+  // One submission per step: a step ends by calling `submit_result`, and both
+  // steps here take the default success/failure outcomes.
+  await mock.queueToolCall("submit_result", {
+    outcome: "success",
+    description: "hello",
+  });
+  await mock.queueToolCall("submit_result", {
+    outcome: "success",
+    description: "goodbye",
+  });
 
   await page.goto(`${appBase}/workflows/${WORKFLOW}`);
   await page.getByTestId("run-workflow").click();
@@ -175,9 +181,8 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   await expect(runStatus).toHaveText("Finished");
 });
 
-/** A one-step workflow whose step can ask. A step never gets `ask_user`;
- * `conclude` is synthesized only once the step declares an output schema, and
- * only then does that tool also carry `kind: "ask"`. */
+/** A one-step workflow whose step may ask. `interactive` is what grants
+ * `ask_user`; without it the step has no way to ask at all. */
 async function seedAskWorkflow(page: Page, appBase: string): Promise<void> {
   await seedAgent(page, appBase);
   const body = {
@@ -189,11 +194,11 @@ async function seedAskWorkflow(page: Page, appBase: string): Promise<void> {
         name: "triage",
         agent: AGENT,
         prompt: "triage the report",
-        outputSchema: {
-          type: "object",
-          required: ["severity"],
-          properties: { severity: { type: "string" } },
-        },
+        interactive: true,
+        outcomes: [
+          { value: "p0", description: "drop everything" },
+          { value: "p2", description: "file it" },
+        ],
       },
     ],
   };
@@ -216,12 +221,14 @@ test("T4: a step's question and its answer stand in the step's transcript", asyn
   // a question sharing a turn with other tool calls used to be folded into the
   // collapsed "Ran 2 tools" row, so neither it nor the answer was readable.
   await mock.queueToolCall("bash", { command: "echo triaging" });
-  await mock.queueToolCall("conclude", {
-    kind: "ask",
+  await mock.queueToolCall("ask_user", {
     question: "How bad is it?",
     choices: ["p0", "p2"],
   });
-  await mock.queueToolCall("conclude", { kind: "submit", output: { severity: "p0" } });
+  await mock.queueToolCall("submit_result", {
+    outcome: "p0",
+    description: "It is a p0.",
+  });
 
   await page.goto(`${appBase}/workflows/${ASK_WORKFLOW}`);
   await page.getByTestId("run-workflow").click();

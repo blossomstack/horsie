@@ -24,21 +24,55 @@ struct WorkflowTransition {
     condition: Option<String>,
 }
 
+/// One value a step's `outcome` may take, and what choosing it means.
+///
+/// The description is not decoration: it is what the model reads to pick
+/// between values, and it is the only thing standing between "failure" meaning
+/// *the work failed* and meaning *I could not finish*.
+struct StepOutcome {
+    value: String,
+    description: String,
+}
+
+/// The type of one declared result field.
+enum StepFieldType {
+    String,
+    Number,
+    Boolean,
+    StringList,
+}
+
+/// One field a step's result carries beyond `outcome` and `description`.
+struct StepField {
+    name: String,
+    kind: StepFieldType,
+    /// Required. An undocumented field is one the model fills in by guessing.
+    description: String,
+    /// Whether the step must always supply it. Absent → optional.
+    required: Option<bool>,
+}
+
 /// One step in a workflow graph.
 struct WorkflowStepDef {
     name: String,
     /// Agent preset this step runs as.
     agent: String,
     /// The step's instruction. Whatever the step is handed — the run's input
-    /// for the start step, the previous step's output for every other — is
+    /// for the start step, the previous step's result for every other — is
     /// appended below it under a header.
     prompt: String,
-    /// JSON Schema for the step's structured output. When present, the step
-    /// finishes by calling the builtin terminal tool with output conforming to
-    /// it. Required when the step has any conditional transition, since there
-    /// would otherwise be nothing for the condition to read.
-    output_schema: Option<Any>,
-    /// Outgoing transitions, evaluated against this step's output.
+    /// The values this step's `outcome` may take. Absent → success / failure.
+    ///
+    /// A step finishes by calling `submit_result`, whose input schema is
+    /// compiled from these plus `fields` and a required markdown `description`.
+    /// Transitions read `outcome` and nothing else.
+    outcomes: Option<Vec<StepOutcome>>,
+    /// Extra result fields, beyond `outcome` and `description`.
+    fields: Option<Vec<StepField>>,
+    /// Whether this step may ask the person a question. Absent → false, and
+    /// the step has no `ask_user` tool at all.
+    interactive: Option<bool>,
+    /// Outgoing transitions, matched against this step's `outcome`.
     transitions: Option<Vec<WorkflowTransition>>,
     /// Cap on agent-loop iterations for this step.
     max_iterations: Option<u32>,

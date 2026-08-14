@@ -1,4 +1,6 @@
 
+import { StepField } from './stepField';
+import { StepOutcome } from './stepOutcome';
 import { WorkflowTransition } from './workflowTransition';
 /**
  * One step in a workflow graph.
@@ -11,19 +13,29 @@ export interface WorkflowStepDef {
   agent: string;
   /**
    * The step's instruction. Whatever the step is handed — the run's input
-   * for the start step, the previous step's output for every other — is
+   * for the start step, the previous step's result for every other — is
    * appended below it under a header.
    */
   prompt: string;
   /**
-   * JSON Schema for the step's structured output. When present, the step
-   * finishes by calling the builtin terminal tool with output conforming to
-   * it. Required when the step has any conditional transition, since there
-   * would otherwise be nothing for the condition to read.
+   * The values this step's `outcome` may take. Absent → success / failure.
+   *
+   * A step finishes by calling `submit_result`, whose input schema is
+   * compiled from these plus `fields` and a required markdown `description`.
+   * Transitions read `outcome` and nothing else.
    */
-  outputSchema?: unknown;
+  outcomes?: StepOutcome[];
   /**
-   * Outgoing transitions, evaluated against this step's output.
+   * Extra result fields, beyond `outcome` and `description`.
+   */
+  fields?: StepField[];
+  /**
+   * Whether this step may ask the person a question. Absent → false, and
+   * the step has no `ask_user` tool at all.
+   */
+  interactive?: boolean;
+  /**
+   * Outgoing transitions, matched against this step's `outcome`.
    */
   transitions?: WorkflowTransition[];
   /**

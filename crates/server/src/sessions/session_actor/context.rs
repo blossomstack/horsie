@@ -36,7 +36,6 @@ use horsie_models::{
     },
 };
 use horsie_runtime_host::RuntimeClient;
-use serde_json::Value;
 use std::sync::{Arc, Mutex, PoisonError};
 use uuid::Uuid;
 
@@ -93,9 +92,6 @@ const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
 pub(super) fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
     AgentRunDef {
         system_prompt: None,
-        output_schema: None,
-        allow_ask_user: false,
-        allow_timers: None,
         max_iterations: settings.max_iterations,
         max_retries: Some(settings.max_retries),
         allowed_tools: settings.allowed_tools.clone(),
@@ -124,6 +120,16 @@ async fn build_memory_layer(
         spaces.clone(),
     ));
     Ok((toolbox, index))
+}
+
+/// What a workflow step promises to return, carried to the toolbox that builds
+/// its `submit_result` tool. Default (empty outcomes, no fields, not
+/// interactive) for every agent that is not a step; those never get the layer.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StepResultDef {
+    pub(crate) outcomes: Vec<horsie_models::workflow::StepOutcome>,
+    pub(crate) fields: Vec<horsie_models::workflow::StepField>,
+    pub(crate) interactive: bool,
 }
 
 /// Which of a session's agents a [`SessionContextProvider`] serves. The kind
@@ -186,16 +192,25 @@ when the user requests a progress update or to diagnose a suspected runtime or \
 result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
 report that instead.";
 
-/// Appended to a workflow step's system prompt: what a step is, and that its
-/// structured output is what decides where the run goes next. Deliberately
-/// short — the `conclude` tool carries its own schema.
+/// Appended to a workflow step's system prompt: what a step is, how it ends,
+/// and that its result is what decides where the run goes next. Deliberately
+/// short — `submit_result` carries its own schema.
+///
+/// The paragraph about ending a turn earns its length. A step ends when it
+/// calls `submit_result`, but a turn may legitimately end without one — parked
+/// on a question, on a timer, or waiting for subagents — and a model that does
+/// not know the difference either submits early to be safe or stops with
+/// nothing to wake it.
 const STEP_PROMPT_SUFFIX: &str = "\n\n# Workflow step\n\
 You are one step of a workflow, not a conversation. Your instruction and the previous \
-step's result are in the message above. Finish by calling `conclude` — what you submit \
-is both this step's result and what the workflow reads to decide which step runs next, \
-so make it accurate and self-contained. You share one workspace with every other step: \
+step's result are in the message above. You share one workspace with every other step: \
 what you change on disk is what the next step sees. You may spawn subagents with \
-spawn_agent. You cannot rename the session.";
+spawn_agent. You cannot rename the session.\n\n\
+Finish by calling `submit_result`. What you submit is this step's result *and* what the \
+workflow reads to decide which step runs next, so make it accurate and self-contained. \
+Ending a turn without it is only safe while something will wake you — a question you \
+asked, a timer you armed, or a subagent still running. If nothing will, and the work is \
+done, submit.";
 
 /// Appended to a fork's system prompt.
 ///
@@ -230,9 +245,10 @@ pub(super) struct SessionContextProvider {
     pub(super) mcp: Option<Arc<crate::mcp::McpService>>,
     pub(super) memory: Option<Arc<crate::memory::MemoryService>>,
     pub(super) settings: AgentSettings,
-    /// A workflow step's declared output schema, which becomes the input
-    /// schema of its `conclude` tool. `None` for every other kind of agent.
-    pub(super) step_output_schema: Option<Value>,
+    /// What a workflow step promises to return, and whether it may ask. Empty
+    /// and false for every other kind of agent, which never gets the
+    /// `submit_result` layer at all.
+    pub(super) step_result: StepResultDef,
     pub(super) session_id: Uuid,
     pub(super) kind: SessionAgentKind,
     /// The plugin-declared agent type this agent runs as, for a subagent that
@@ -759,16 +775,22 @@ impl ContextProvider for SessionContextProvider {
                 let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
                 Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
             }
-            // A step gets `conclude` instead of the ask and title layers: it
-            // asks through `conclude(kind=ask)`, and its title belongs to the
-            // run rather than to one step.
-            SessionAgentKind::Step(_) => crate::sessions::workflow::StepConcludeToolbox::wrap(
-                with_spawn,
-                self.step_output_schema.as_ref(),
-                // Same rule as the run def: asking rides on `conclude`, which
-                // only a step with a declared output has.
-                self.step_output_schema.is_some() && !self.unattended,
-            ),
+            // A step gets `submit_result` instead of the title layer — its
+            // title belongs to the run rather than to one step — and `ask_user`
+            // only when the definition says it is interactive and somebody is
+            // there to answer.
+            SessionAgentKind::Step(_) => {
+                let result = crate::sessions::workflow::StepResultToolbox::wrap(
+                    with_spawn,
+                    self.step_result.outcomes.clone(),
+                    self.step_result.fields.clone(),
+                );
+                if self.step_result.interactive && !self.unattended {
+                    Arc::new(AskUserToolbox::new(result))
+                } else {
+                    result
+                }
+            }
             // A fork takes the main agent's arms: it is a conversation, so
             // it can ask the user — and it names *itself*, not the session.
             SessionAgentKind::Fork(id) => {
@@ -873,7 +895,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
-            step_output_schema: None,
+            step_result: StepResultDef::default(),
             session_id: id,
             kind,
             unattended: false,
@@ -935,7 +957,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings,
-            step_output_schema: None,
+            step_result: StepResultDef::default(),
             session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
@@ -978,7 +1000,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
-            step_output_schema: None,
+            step_result: StepResultDef::default(),
             session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
@@ -1301,7 +1323,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
-            step_output_schema: None,
+            step_result: StepResultDef::default(),
             session_id: id,
             kind: SessionAgentKind::Sub(Uuid::new_v4()),
             agent_type: Some("uninstalled-agent".to_string()),
@@ -1496,7 +1518,7 @@ mod tests {
             mcp: None,
             memory: None,
             settings: actor_spec_fixture().agent,
-            step_output_schema: None,
+            step_result: StepResultDef::default(),
             session_id: id,
             kind,
             unattended: false,

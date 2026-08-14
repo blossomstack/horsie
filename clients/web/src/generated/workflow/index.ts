@@ -1,5 +1,8 @@
 
 export * from './workflowTransition';
+export * from './stepOutcome';
+export * from './stepFieldType';
+export * from './stepField';
 export * from './workflowStepDef';
 export * from './workflowView';
 export * from './workflowInput';
