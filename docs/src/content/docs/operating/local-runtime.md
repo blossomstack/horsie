@@ -65,9 +65,20 @@ prints this warning on startup. If you want a filesystem per session, use a
 [cloud vendor](/operating/cloud-vendors/).
 
 **Sandboxing is on by default.** Each runtime is confined with the vendor's
-baseline capability spec — workspaces read-write, system toolchain read-only,
-network allowed. Sandbox support is probed at startup, and the process refuses
-to start on a host that cannot confine a child unless you pass `--no-sandbox`.
+baseline capability spec: the whole filesystem is readable, writes are fenced to
+your workspaces and the temp directory, and the network is open. Reads are wide
+because a toolchain is wherever its installer put it — `~/.cargo`, `~/.rustup`,
+`~/.nvm` — and an agent that cannot run your compiler cannot do the work.
+Sandbox support is probed at startup, and the process refuses to start on a host
+that cannot confine a child unless you pass `--no-sandbox`.
+
+Be clear about what that buys you. The sandbox stops an agent from **changing**
+anything outside your workspaces. It does not stop one from **reading** your
+files, and with the network open it does not stop one from sending what it read
+somewhere. A prompt injection hidden in a repository you cloned can still reach
+`~/.ssh`. If that matters for what you are running, use a
+[cloud vendor](/operating/cloud-vendors/), which does not have your home
+directory to read in the first place.
 
 **There is no `--background`.** It is a long-lived supervisor with child
 processes, so run it under a process manager — systemd, launchd, tmux — where
