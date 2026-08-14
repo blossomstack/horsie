@@ -1,3 +1,4 @@
+use crate::tool::ToolOutcome;
 use crate::{
     error::{AgentBuildError, AgentError},
     events::EventSink,
@@ -5,8 +6,8 @@ use crate::{
     tool::Toolbox,
 };
 use horsie_models::agent::{
-    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, HandoffCall, HandoffOutput,
-    Message, Role, ToolResultPart, Usage,
+    AgentInput, AgentOutput, AgentResult, CompletedOutput, ContentPart, Message, Role, StoppedCall,
+    StoppedOutput, ToolResultPart, Usage,
 };
 use horsie_models::events::{
     AgentEvent, InputMessageEvent, MessageCompleteEvent, MessageStartEvent, MessageStopEvent,
@@ -27,10 +28,6 @@ pub struct AgentConfig {
     pub max_tokens: Option<u32>,
     /// Canonical thinking effort for this run; `None` sends no control.
     pub thinking_effort: Option<crate::thinking::ThinkingEffort>,
-    /// How many times the model may be nudged to re-issue a malformed handoff call
-    /// (called alongside other tools, or with input that fails schema validation)
-    /// before the run fails.
-    pub handoff_max_retries: u32,
     /// How much context this agent has, and when to compact it. `None` means it
     /// never compacts on its own — see [`crate::CompactionBudget`].
     pub compaction: Option<crate::compaction::CompactionBudget>,
@@ -44,7 +41,6 @@ impl Default for AgentConfig {
             nudge_threshold: 3,
             max_tokens: None,
             thinking_effort: None,
-            handoff_max_retries: 2,
             compaction: None,
         }
     }
@@ -61,21 +57,13 @@ pub struct Agent {
     pub(crate) conversation_id: String,
     pub(crate) system_prompt: String,
     pub(crate) toolbox: Arc<dyn Toolbox>,
-    /// The tool whose invocation ends the run and returns control to the caller as
-    /// a `Handoff`, rather than being executed. Validated to exist in the toolbox
-    /// at build time.
-    pub(crate) handoff_tool: Option<String>,
-    /// Whether the model is *forced* to call `handoff_tool` (`tool_choice: any`,
-    /// and a text-only turn is nudged/rejected). `false` means the tool is offered
-    /// but purely voluntary — the model may end its turn with plain text just as
-    /// freely as with any other tool (`tool_choice: auto`); calling the tool is
-    /// still recognized as a handoff rather than executed, for tools the agent may
-    /// choose to use to pause (e.g. asking a clarifying question) rather than ones
-    /// it must call to finish. See [`with_handoff_tool_optional`](AgentBuilder::with_handoff_tool_optional).
-    pub(crate) force_handoff_choice: bool,
-    /// Validator for the handoff tool's input, compiled from its declared
-    /// `input_schema`. `None` when there is no handoff tool.
-    pub(crate) handoff_validator: Option<Arc<jsonschema::Validator>>,
+    /// What this run tells the provider about tool use. `Auto` for every
+    /// ordinary run: a turn may end with text, which is how an agent waiting on
+    /// a timer or a subagent stops without finishing. A caller nudging an agent
+    /// that ended without producing its result passes
+    /// `Required("submit_result")`, which is safe only because that agent has
+    /// already declared itself done.
+    pub(crate) tool_choice: ToolChoice,
     pub(crate) config: AgentConfig,
     pub(crate) history: Vec<Message>,
     /// Supplies what compaction needs and the agent cannot know. `None` means
@@ -95,8 +83,7 @@ pub struct AgentBuilder {
     conversation_id: String,
     system_prompt: String,
     toolbox: Arc<dyn Toolbox>,
-    handoff_tool: Option<String>,
-    force_handoff_choice: bool,
+    tool_choice: ToolChoice,
     config: AgentConfig,
     history: Vec<Message>,
     compaction: Option<std::sync::Arc<dyn crate::compaction::CompactionPolicy>>,
@@ -114,8 +101,7 @@ impl AgentBuilder {
             conversation_id: conversation_id.into(),
             system_prompt: String::new(),
             toolbox,
-            handoff_tool: None,
-            force_handoff_choice: true,
+            tool_choice: ToolChoice::Auto,
             config: AgentConfig::default(),
             history: Vec::new(),
             compaction: None,
@@ -146,27 +132,17 @@ impl AgentBuilder {
         self
     }
 
-    /// Register the tool that ends the run as a `Handoff`. The model is forced to
-    /// call it (`tool_choice: any`) — for a workflow sub-agent that must terminate
-    /// via a specific tool. The tool must be present in the toolbox (checked by
-    /// [`build`](Self::build)).
-    pub fn with_handoff_tool(mut self, n: impl Into<String>) -> Self {
-        self.handoff_tool = Some(n.into());
-        self.force_handoff_choice = true;
-        self
-    }
-
-    /// Like [`with_handoff_tool`](Self::with_handoff_tool), but the model is never
-    /// forced to call it: `tool_choice` stays `auto`, and the model may end its
-    /// turn with plain text exactly as if the tool weren't registered. A call to
-    /// the tool is still recognized as a handoff (not executed as a regular tool
-    /// call) when the model does choose to make one. For an interactive agent
-    /// whose only "must finish" state is the next user message, and which may
-    /// optionally pause to ask a clarifying question rather than being made to
-    /// route every ordinary reply through a tool call.
-    pub fn with_handoff_tool_optional(mut self, n: impl Into<String>) -> Self {
-        self.handoff_tool = Some(n.into());
-        self.force_handoff_choice = false;
+    /// Override what this run tells the provider about tool use. Defaults to
+    /// `Auto`, which is right for every ordinary run — a turn ending with text
+    /// is legitimate, and which tools may end a run is the toolbox's business,
+    /// not the provider's.
+    ///
+    /// `Required(name)` is for one case only: re-running a turn that ended
+    /// without the result it owed. It cannot be used from the start, because it
+    /// applies to *every* call in the loop — an agent forced to submit on its
+    /// first iteration submits having done no work.
+    pub fn with_tool_choice(mut self, choice: ToolChoice) -> Self {
+        self.tool_choice = choice;
         self
     }
 
@@ -188,37 +164,12 @@ impl AgentBuilder {
             });
         }
 
-        // A handoff tool must be advertised in the toolbox — otherwise the model is
-        // never told it exists and could never call it.
-        let handoff_validator = match &self.handoff_tool {
-            None => None,
-            Some(name) => {
-                let spec = self
-                    .toolbox
-                    .specs()
-                    .into_iter()
-                    .find(|s| &s.name == name)
-                    .ok_or_else(|| AgentBuildError::HandoffToolNotRegistered {
-                        tool: name.clone(),
-                    })?;
-                let validator = jsonschema::validator_for(&spec.input_schema).map_err(|e| {
-                    AgentBuildError::InvalidHandoffSchema {
-                        tool: name.clone(),
-                        reason: e.to_string(),
-                    }
-                })?;
-                Some(Arc::new(validator))
-            }
-        };
-
         Ok(Agent {
             provider: self.provider,
             conversation_id: self.conversation_id,
             system_prompt: self.system_prompt,
             toolbox: self.toolbox,
-            handoff_tool: self.handoff_tool,
-            force_handoff_choice: self.force_handoff_choice,
-            handoff_validator,
+            tool_choice: self.tool_choice,
             config: self.config,
             history: self.history,
             compaction: self.compaction,
@@ -312,48 +263,6 @@ impl Agent {
         AgentBuilder::new(provider, toolbox, conversation_id)
     }
 
-    /// Returns `Some(reason)` when a handoff turn must be rejected: a *forced*
-    /// handoff issued more than once or alongside other tool calls, or any
-    /// handoff whose input fails the tool's schema.
-    ///
-    /// An *optional* handoff is a park, not a conclusion: the run resumes on this
-    /// very history once the park is answered, so tools called in the same turn
-    /// are ordinary work — they run, and their results are recorded (see
-    /// [`Self::run`]) — and several parks may be issued at once, since they are
-    /// answered together. A forced handoff ends the run for good: a sibling's
-    /// result would never be read by anyone, and a run has only one conclusion.
-    fn validate_handoff(
-        &self,
-        handoff_name: &str,
-        tool_calls: &[(String, String, Value)],
-        handoffs: &[HandoffCall],
-    ) -> Option<String> {
-        if self.force_handoff_choice && handoffs.len() > 1 {
-            return Some(format!(
-                "Call '{handoff_name}' once: a run has one conclusion."
-            ));
-        }
-        if self.force_handoff_choice && tool_calls.len() > 1 {
-            return Some(format!(
-                "The '{handoff_name}' tool must be called on its own, with no other tool calls in the same turn."
-            ));
-        }
-        if let Some(validator) = &self.handoff_validator {
-            for call in handoffs {
-                if validator.is_valid(&call.data) {
-                    continue;
-                }
-                let detail = validator
-                    .validate(&call.data)
-                    .err()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "input does not match the tool's schema".to_string());
-                return Some(format!("Invalid '{handoff_name}' input: {detail}"));
-            }
-        }
-        None
-    }
-
     /// The messages this agent would send a provider right now.
     ///
     /// Test-only: the run owns its history and nothing outside it has any
@@ -420,19 +329,9 @@ impl Agent {
 
         let mut iteration: u32 = 0;
         let mut recent_fingerprints: VecDeque<String> = VecDeque::new();
-        let mut handoff_retries: u32 = 0;
-        let mut handoff_missing_retries: u32 = 0;
-        // With a *forced* handoff tool, require a tool call every turn (`Any`) so
-        // the model can never end with bare text — it must keep working or call the
-        // handoff tool to finish. Without one (or with an optional handoff tool —
-        // see `with_handoff_tool_optional`), the model may end its turn with text
-        // (`Auto`) exactly as freely as it may call any other tool. Honoring
+        // Whatever the caller chose, for every call this run makes. Honoring
         // `tool_choice` is a hard requirement of every provider.
-        let tool_choice = if self.handoff_tool.is_some() && self.force_handoff_choice {
-            ToolChoice::Any
-        } else {
-            ToolChoice::Auto
-        };
+        let tool_choice = self.tool_choice.clone();
 
         loop {
             if cancel.is_cancelled() {
@@ -545,37 +444,10 @@ impl Agent {
             let tool_calls = extract_tool_calls(&response.parts);
 
             if tool_calls.is_empty() {
-                // A *forced* handoff agent must finish by *calling* its handoff tool,
-                // never by ending its turn with plain text. `tool_choice: any` already
-                // pushes the model toward a tool call; this is the safety net if a
-                // provider returns text anyway — nudge and retry, then fail rather
-                // than silently accept it. An optional handoff tool (`force_handoff_choice
-                // = false`) skips this entirely: plain text is a perfectly normal way
-                // to finish, exactly as if the tool weren't registered.
-                if let Some(handoff_name) = self.handoff_tool.clone()
-                    && self.force_handoff_choice
-                {
-                    if handoff_missing_retries >= self.config.handoff_max_retries {
-                        return Err(AgentError::HandoffValidationFailed {
-                            tool: handoff_name,
-                            reason:
-                                "model ended its turn with text instead of calling the handoff tool"
-                                    .to_string(),
-                        });
-                    }
-                    handoff_missing_retries += 1;
-                    self.history.push(Message::user(
-                        format!("nudge-handoff-missing:{iteration}"),
-                        format!(
-                            "You ended your turn without finishing. Call the '{handoff_name}' tool to \
-                             deliver your output or ask the user; if there is more work to do, call a \
-                             tool to do it."
-                        ),
-                        now_ms(),
-                    ));
-                    continue;
-                }
-
+                // Plain text is a legitimate way for a turn to end. Whether it
+                // *should* have ended that way is the caller's question — only
+                // it knows whether a timer or a subagent will wake this agent —
+                // so the loop reports the completion and says nothing about it.
                 events
                     .emit(AgentEvent::RunComplete(RunCompleteEvent {
                         message_id: run_id.to_string(),
@@ -591,106 +463,6 @@ impl Agent {
                     }),
                     usage: spent.usage.clone(),
                 });
-            }
-
-            // Handoff handling: a call to the handoff tool ends the run — as a
-            // conclusion when forced, as a park when optional. Whatever else the
-            // model asked for in the same turn is run first for a park, since the
-            // run resumes on this same history once the park is answered. What
-            // `validate_handoff` still rejects is nudged (via tool-result errors)
-            // for the model to re-issue, bounded by `handoff_max_retries`.
-            let handoffs: Vec<HandoffCall> = match &self.handoff_tool {
-                Some(name) => tool_calls
-                    .iter()
-                    .filter(|(_, n, _)| n == name)
-                    .map(|(id, _, input)| HandoffCall {
-                        tool_call_id: id.clone(),
-                        data: input.clone(),
-                    })
-                    .collect(),
-                None => Vec::new(),
-            };
-            if let Some(handoff_name) = self.handoff_tool.clone()
-                && !handoffs.is_empty()
-            {
-                let rejection = self.validate_handoff(&handoff_name, &tool_calls, &handoffs);
-                match rejection {
-                    None => {
-                        // A park's siblings are ordinary work: run them, record
-                        // their results, and only then hand off. (A forced handoff
-                        // never gets here with siblings — `validate_handoff`
-                        // rejects that turn.)
-                        let siblings: Vec<(String, String, Value)> = tool_calls
-                            .iter()
-                            .filter(|(_, n, _)| n != &handoff_name)
-                            .cloned()
-                            .collect();
-                        for message in self.execute_tool_calls(&siblings, events, &cancel).await? {
-                            self.history.push(message);
-                        }
-                        events
-                            .emit(AgentEvent::RunComplete(RunCompleteEvent {
-                                message_id: run_id.to_string(),
-                                usage: spent.usage.clone(),
-                                iterations: iteration,
-                                context_tokens: spent.context_tokens,
-                                at_ms: now_ms(),
-                            }))
-                            .await?;
-                        return Ok(AgentOutput {
-                            result: AgentResult::Handoff(HandoffOutput {
-                                tool_name: handoff_name,
-                                calls: handoffs,
-                            }),
-                            usage: spent.usage.clone(),
-                        });
-                    }
-                    Some(reason) => {
-                        if handoff_retries >= self.config.handoff_max_retries {
-                            return Err(AgentError::HandoffValidationFailed {
-                                tool: handoff_name,
-                                reason,
-                            });
-                        }
-                        handoff_retries += 1;
-                        // Every tool_use in this turn needs a tool_result for the
-                        // conversation to stay valid; tell the model what to fix.
-                        //
-                        // Emitted, not merely pushed onto the in-memory history:
-                        // the caller's journal is built from these events, and a
-                        // call it never hears a result for is indistinguishable
-                        // later from one still waiting on the user — which is how
-                        // a rejected `ask_user` came back as a second, dead
-                        // question card in the transcript.
-                        for (tool_call_id, n, _) in &tool_calls {
-                            let content = if n == &handoff_name {
-                                reason.clone()
-                            } else {
-                                format!(
-                                    "Ignored: call '{handoff_name}' on its own to finish, with no other tools."
-                                )
-                            };
-                            let message_id = format!("result:{tool_call_id}");
-                            let at_ms = now_ms();
-                            events
-                                .emit(AgentEvent::ToolComplete(ToolCompleteEvent {
-                                    message_id,
-                                    tool_call_id: tool_call_id.clone(),
-                                    output: content.clone(),
-                                    is_error: true,
-                                    at_ms,
-                                }))
-                                .await?;
-                            self.history.push(Message::tool_result(
-                                tool_call_id.clone(),
-                                content,
-                                true,
-                                at_ms,
-                            ));
-                        }
-                        continue;
-                    }
-                }
             }
 
             let fingerprint = tool_fingerprint(&tool_calls);
@@ -733,29 +505,55 @@ impl Agent {
                 return Err(AgentError::Cancelled);
             }
 
-            for message in self
+            // The whole batch is dispatched, including any call that ends the
+            // run. A model may ask a question in the same turn as it starts
+            // real work, and the run resumes on this same history — so a
+            // dispatched call whose result was never recorded would leave a
+            // `tool_use` with no `tool_result`, which every provider rejects.
+            let (messages, stopped) = self
                 .execute_tool_calls(&tool_calls, events, &cancel)
-                .await?
-            {
+                .await?;
+            for message in messages {
                 self.history.push(message);
+            }
+            if !stopped.is_empty() {
+                events
+                    .emit(AgentEvent::RunComplete(RunCompleteEvent {
+                        message_id: run_id.to_string(),
+                        usage: spent.usage.clone(),
+                        iterations: iteration,
+                        context_tokens: spent.context_tokens,
+                        at_ms: now_ms(),
+                    }))
+                    .await?;
+                return Ok(AgentOutput {
+                    result: AgentResult::Stopped(StoppedOutput { calls: stopped }),
+                    usage: spent.usage.clone(),
+                });
             }
         }
     }
 
     /// Execute `calls` concurrently, emitting each one's start and result, and
-    /// return the result messages in request order.
+    /// return the result messages in request order together with any call that
+    /// ended the run.
     ///
     /// The model may request several tools at once (parallel tool use); running
     /// them in parallel cuts a turn's latency to its slowest call rather than the
     /// sum. Request order is preserved so the history stays deterministic.
+    ///
+    /// A call answering [`ToolOutcome::StopRun`] produces no message and no
+    /// `ToolComplete` event: its `tool_use` must stay dangling, because that is
+    /// what an answer arrives against later. Recording a result here would give
+    /// an answered `ask_user` two of them.
     async fn execute_tool_calls(
         &self,
         calls: &[(String, String, Value)],
         events: &dyn EventSink,
         cancel: &CancellationToken,
-    ) -> Result<Vec<Message>, AgentError> {
+    ) -> Result<(Vec<Message>, Vec<StoppedCall>), AgentError> {
         if calls.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let toolbox = &self.toolbox;
         let executions = calls.iter().map(|(tool_call_id, name, input)| async move {
@@ -774,12 +572,19 @@ impl Agent {
                 // would wrap it in quotes and escape every newline, wasting
                 // tokens and hurting readability. Non-string values are rendered
                 // as compact JSON.
-                Ok(v) => (
+                Ok(ToolOutcome::Result(v)) => (
                     v.as_str()
                         .map(str::to_string)
                         .unwrap_or_else(|| v.to_string()),
                     false,
                 ),
+                Ok(ToolOutcome::StopRun) => {
+                    return Ok(Dispatched::Stopped(StoppedCall {
+                        tool: name.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        input: input.clone(),
+                    }));
+                }
                 Err(e) => (e.to_string(), true),
             };
 
@@ -796,7 +601,7 @@ impl Agent {
                 }))
                 .await?;
 
-            Ok::<Message, AgentError>(Message {
+            Ok::<Dispatched, AgentError>(Dispatched::Result(Message {
                 id: result_msg_id,
                 role: Role::Tool,
                 parts: vec![ContentPart::ToolResult(ToolResultPart {
@@ -806,7 +611,7 @@ impl Agent {
                 })],
                 created_at_ms: finished_ms,
                 started_at_ms: None,
-            })
+            }))
         });
 
         // Cancellation stops *waiting* for the batch (dropping the in-flight
@@ -819,8 +624,23 @@ impl Agent {
             () = cancel.cancelled() => return Err(AgentError::Cancelled),
             results = futures_util::future::join_all(executions) => results,
         };
-        results.into_iter().collect()
+        let mut messages = Vec::new();
+        let mut stopped = Vec::new();
+        for dispatched in results {
+            match dispatched? {
+                Dispatched::Result(message) => messages.push(message),
+                Dispatched::Stopped(call) => stopped.push(call),
+            }
+        }
+        Ok((messages, stopped))
     }
+}
+
+/// What one dispatched call produced: a result to record, or the fact that it
+/// ended the run.
+enum Dispatched {
+    Result(Message),
+    Stopped(StoppedCall),
 }
 
 #[cfg(test)]
@@ -1227,21 +1047,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_tool_returns_handoff_result() {
-        let provider = MockProvider::new(vec![CompletionResponse {
-            parts: vec![ContentPart::ToolCall(ToolCallPart {
-                id: "hc1".to_string(),
-                name: "handoff".to_string(),
-                input: json!({"answer": 42}),
-            })],
-            stop_reason: StopReason::ToolUse,
-            usage: Usage::without_cache(10, 5),
-        }]);
-        // The handoff tool must be advertised in the toolbox.
-        let mut agent = Agent::builder(provider, MockToolbox::echo("handoff"), "test-conversation")
-            .with_handoff_tool("handoff")
-            .build()
-            .unwrap();
+    async fn a_stopping_tool_ends_the_run_and_reports_its_call() {
+        let provider = MockProvider::new(vec![calls_response(vec![(
+            "hc1",
+            "stop",
+            json!({"answer": 42}),
+        )])]);
+        let mut agent = Agent::builder(
+            provider,
+            MockToolbox::with_stopper("stop"),
+            "test-conversation",
+        )
+        .build()
+        .unwrap();
         let sink = CollectingEventSink::new();
 
         let output = agent
@@ -1254,70 +1072,81 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
-                assert_eq!(tool_name, "handoff");
-                let data = &calls[0].data;
-                assert_eq!(data["answer"], 42);
+            AgentResult::Stopped(StoppedOutput { calls }) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].tool, "stop");
+                assert_eq!(calls[0].tool_call_id, "hc1");
+                assert_eq!(calls[0].input["answer"], 42);
             }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+            other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
         }
     }
 
+    /// The dangling `tool_use` *is* the parked state. Recording a result for it
+    /// would give an answered `ask_user` two of them, and would make a parked
+    /// call indistinguishable from a finished one on reload.
     #[tokio::test]
-    async fn build_fails_when_handoff_tool_missing() {
-        let agent = Agent::builder(
-            MockProvider::text("x"),
-            Arc::new(EmptyToolbox),
+    async fn a_stopping_call_records_no_tool_result() {
+        let provider = MockProvider::new(vec![calls_response(vec![("hc1", "stop", json!({}))])]);
+        let mut agent = Agent::builder(
+            provider,
+            MockToolbox::with_stopper("stop"),
             "test-conversation",
         )
-        .with_handoff_tool("nope")
-        .build();
-        assert!(matches!(
-            agent,
-            Err(AgentBuildError::HandoffToolNotRegistered { .. })
-        ));
+        .build()
+        .unwrap();
+        let sink = CollectingEventSink::new();
+
+        agent
+            .run(
+                AgentInput::user_message("m", "go"),
+                &sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            tool_results(&sink).is_empty(),
+            "no completion event for a call that ended the run"
+        );
+        let results = agent
+            .history_for_test()
+            .iter()
+            .flat_map(|m| m.parts.iter())
+            .filter(|p| matches!(p, ContentPart::ToolResult(_)))
+            .count();
+        assert_eq!(results, 0, "and nothing in history either");
     }
 
+    /// A tool that ends the run may still refuse the input it was given. That is
+    /// an ordinary tool error: the model sees it and re-issues, and nothing about
+    /// the run has ended.
     #[tokio::test]
-    async fn handoff_schema_validation_retries_then_succeeds() {
-        // First call: invalid handoff input (missing required field). Second: valid.
-        let toolbox = {
-            let spec = ToolSpec {
-                name: "finish".to_string(),
-                description: "finish".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["answer"],
-                    "properties": { "answer": { "type": "number" } }
-                }),
-            };
-            MockToolbox::new(vec![spec], Arc::new(|_, input| Ok(input)))
-        };
+    async fn an_input_error_from_a_stopping_tool_is_an_ordinary_tool_error() {
+        let toolbox = MockToolbox::new(
+            vec![ToolSpec {
+                name: "stop".to_string(),
+                description: "stop".to_string(),
+                input_schema: json!({ "type": "object" }),
+            }],
+            Arc::new(|_, input: Value| {
+                if input.get("answer").is_some() {
+                    Ok(ToolOutcome::StopRun)
+                } else {
+                    Err(ToolCallError::InvalidInput("answer is required".into()))
+                }
+            }),
+        );
         let provider = MockProvider::new(vec![
-            CompletionResponse {
-                parts: vec![ContentPart::ToolCall(ToolCallPart {
-                    id: "h1".into(),
-                    name: "finish".into(),
-                    input: json!({"wrong": true}),
-                })],
-                stop_reason: StopReason::ToolUse,
-                usage: Usage::without_cache(1, 1),
-            },
-            CompletionResponse {
-                parts: vec![ContentPart::ToolCall(ToolCallPart {
-                    id: "h2".into(),
-                    name: "finish".into(),
-                    input: json!({"answer": 7}),
-                })],
-                stop_reason: StopReason::ToolUse,
-                usage: Usage::without_cache(1, 1),
-            },
+            calls_response(vec![("h1", "stop", json!({"wrong": true}))]),
+            calls_response(vec![("h2", "stop", json!({"answer": 7}))]),
         ]);
         let mut agent = Agent::builder(provider, toolbox, "test-conversation")
-            .with_handoff_tool("finish")
             .build()
             .unwrap();
         let sink = CollectingEventSink::new();
+
         let output = agent
             .run(
                 AgentInput::user_message("m", "go"),
@@ -1326,57 +1155,16 @@ mod tests {
             )
             .await
             .unwrap();
-        match output.result {
-            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
-                assert_eq!(calls[0].data["answer"], 7)
-            }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
-        }
-    }
 
-    #[tokio::test]
-    async fn handoff_validation_fails_after_max_retries() {
-        let toolbox = {
-            let spec = ToolSpec {
-                name: "finish".to_string(),
-                description: "finish".to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["answer"],
-                    "properties": { "answer": { "type": "number" } }
-                }),
-            };
-            MockToolbox::new(vec![spec], Arc::new(|_, input| Ok(input)))
-        };
-        // Always returns invalid input.
-        let provider = MockProvider::always(CompletionResponse {
-            parts: vec![ContentPart::ToolCall(ToolCallPart {
-                id: "h".into(),
-                name: "finish".into(),
-                input: json!({"wrong": true}),
-            })],
-            stop_reason: StopReason::ToolUse,
-            usage: Usage::without_cache(1, 1),
-        });
-        let config = AgentConfig {
-            handoff_max_retries: 1,
-            ..AgentConfig::default()
-        };
-        let mut agent = Agent::builder(provider, toolbox, "test-conversation")
-            .with_handoff_tool("finish")
-            .with_config(config)
-            .build()
-            .unwrap();
-        let sink = CollectingEventSink::new();
-        let err = agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AgentError::HandoffValidationFailed { .. }));
+        match output.result {
+            AgentResult::Stopped(StoppedOutput { calls }) => {
+                assert_eq!(calls[0].tool_call_id, "h2", "the accepted retry")
+            }
+            other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
+        }
+        let recorded = tool_results(&sink);
+        assert_eq!(recorded.len(), 1, "only the rejection: {recorded:?}");
+        assert!(recorded[0].2, "and it is an error result");
     }
 
     /// Every `(tool_call_id, output, is_error)` the sink was told about.
@@ -1390,8 +1178,9 @@ mod tests {
             .collect()
     }
 
-    /// A toolbox of `names`, where executing `never` is a test failure.
-    fn toolbox_where(names: &[&str], never: &'static str) -> Arc<MockToolbox> {
+    /// A toolbox of `names`, where `stopper` ends the run and everything else
+    /// answers "done".
+    fn toolbox_where(names: &[&str], stopper: &'static str) -> Arc<MockToolbox> {
         let specs = names
             .iter()
             .map(|n| ToolSpec {
@@ -1403,8 +1192,11 @@ mod tests {
         MockToolbox::new(
             specs,
             Arc::new(move |name: &str, _input| {
-                assert_ne!(name, never, "handoff tools are never executed");
-                Ok(json!("done"))
+                if name == stopper {
+                    Ok(ToolOutcome::StopRun)
+                } else {
+                    Ok(ToolOutcome::Result(json!("done")))
+                }
             }),
         )
     }
@@ -1427,12 +1219,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_optional_handoff_alongside_other_tools_runs_them_then_hands_off() {
-        // A park (`ask_user`) is not a conclusion: the run resumes on this very
-        // history once the answer arrives, so a tool the model called in the same
-        // turn is still meaningful work. Run it, record its result, then park —
-        // rejecting the turn instead is what left a session showing two questions,
-        // only one of them answerable.
+    async fn siblings_execute_before_the_run_stops() {
+        // A question is not a conclusion: the run resumes on this very history
+        // once the answer arrives, so a tool called in the same turn is real
+        // work. It runs and its result is recorded — and it must be, or the
+        // resumed conversation carries a `tool_use` with no `tool_result`.
         let provider = MockProvider::new(vec![calls_response(vec![
             ("t1", "notes", json!({"text": "todo"})),
             ("h1", "ask", json!({"question": "which shape?"})),
@@ -1442,7 +1233,6 @@ mod tests {
             toolbox_where(&["notes", "ask"], "ask"),
             "test-conversation",
         )
-        .with_handoff_tool_optional("ask")
         .build()
         .unwrap();
         let sink = CollectingEventSink::new();
@@ -1457,12 +1247,12 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
-                assert_eq!(tool_name, "ask");
+            AgentResult::Stopped(StoppedOutput { calls }) => {
                 assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].data["question"], "which shape?");
+                assert_eq!(calls[0].tool, "ask");
+                assert_eq!(calls[0].input["question"], "which shape?");
             }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+            other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
         }
         assert_eq!(
             tool_results(&sink),
@@ -1477,57 +1267,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejected_handoff_records_a_result_for_every_call_in_the_turn() {
-        // A rejection still has to reach the sink. Pushing it to the in-memory
-        // history alone leaves the caller's journal holding tool calls that never
-        // got a result — indistinguishable, later, from a question still waiting
-        // on the user.
-        let provider = MockProvider::new(vec![
-            calls_response(vec![
-                ("t1", "notes", json!({})),
-                ("h1", "finish", json!({"answer": 1})),
-            ]),
-            calls_response(vec![("h2", "finish", json!({"answer": 2}))]),
-        ]);
-        let mut agent = Agent::builder(
-            provider,
-            toolbox_where(&["notes", "finish"], "finish"),
-            "test-conversation",
-        )
-        .with_handoff_tool("finish")
-        .build()
-        .unwrap();
-        let sink = CollectingEventSink::new();
-
-        let output = agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-
-        match output.result {
-            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
-                assert_eq!(calls[0].data["answer"], 2)
-            }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
-        }
-        let recorded = tool_results(&sink);
-        let ids: Vec<&str> = recorded.iter().map(|(id, _, _)| id.as_str()).collect();
-        assert_eq!(ids, vec!["t1", "h1"], "both calls of the rejected turn");
-        assert!(
-            recorded.iter().all(|(_, _, is_error)| *is_error),
-            "a rejection is an error result: {recorded:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn several_asks_in_one_turn_park_together() {
+    async fn several_stopping_calls_are_all_returned() {
         // A park may be issued more than once in a turn: each question is a
         // separate tool call, they are answered together, and the run resumes
-        // once every one of them has a result.
+        // once every one of them has a result. The loop reports all of them and
+        // leaves what that means to the caller.
         let provider = MockProvider::new(vec![calls_response(vec![
             ("h1", "ask", json!({"question": "first?"})),
             ("t1", "notes", json!({})),
@@ -1538,7 +1282,6 @@ mod tests {
             toolbox_where(&["notes", "ask"], "ask"),
             "test-conversation",
         )
-        .with_handoff_tool_optional("ask")
         .build()
         .unwrap();
         let sink = CollectingEventSink::new();
@@ -1553,39 +1296,49 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
-                assert_eq!(tool_name, "ask");
+            AgentResult::Stopped(StoppedOutput { calls }) => {
                 let ids: Vec<&str> = calls.iter().map(|c| c.tool_call_id.as_str()).collect();
                 assert_eq!(ids, vec!["h1", "h2"], "in the order the model asked them");
-                assert_eq!(calls[0].data["question"], "first?");
-                assert_eq!(calls[1].data["question"], "second?");
+                assert_eq!(calls[0].input["question"], "first?");
+                assert_eq!(calls[1].input["question"], "second?");
             }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+            other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
         }
         assert_eq!(
             tool_results(&sink),
             vec![("t1".to_string(), "done".to_string(), false)],
-            "the sibling still runs; neither ask is executed"
+            "the sibling still runs; neither ask records a result"
         );
     }
 
+    /// Two different stopping tools in one turn is a contradiction, but not one
+    /// the loop can resolve — it does not know what either tool means. Both are
+    /// reported, and the caller decides.
     #[tokio::test]
-    async fn two_calls_to_a_forced_handoff_tool_are_rejected() {
-        // A run has one conclusion, so a second `finish` in the same turn has no
-        // honest reading. Nudge instead — and journal both rejections.
-        let provider = MockProvider::new(vec![
-            calls_response(vec![
-                ("h1", "finish", json!({"answer": "first"})),
-                ("h2", "finish", json!({"answer": "second"})),
-            ]),
-            calls_response(vec![("h3", "finish", json!({"answer": "just one"}))]),
-        ]);
+    async fn stopping_calls_to_different_tools_are_both_reported() {
+        let provider = MockProvider::new(vec![calls_response(vec![
+            ("h1", "submit", json!({"outcome": "success"})),
+            ("h2", "ask", json!({"question": "or should I?"})),
+        ])]);
         let mut agent = Agent::builder(
             provider,
-            toolbox_where(&["finish"], "finish"),
+            MockToolbox::new(
+                vec![
+                    ToolSpec {
+                        name: "submit".into(),
+                        description: "submit".into(),
+                        input_schema: json!({ "type": "object" }),
+                    },
+                    ToolSpec {
+                        name: "ask".into(),
+                        description: "ask".into(),
+                        input_schema: json!({ "type": "object" }),
+                    },
+                ],
+                Arc::new(|_, _| Ok(ToolOutcome::StopRun)),
+            ),
             "test-conversation",
         )
-        .with_handoff_tool("finish")
         .build()
         .unwrap();
         let sink = CollectingEventSink::new();
@@ -1600,17 +1353,12 @@ mod tests {
             .unwrap();
 
         match output.result {
-            AgentResult::Handoff(HandoffOutput { calls, .. }) => {
-                assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].data["answer"], "just one");
+            AgentResult::Stopped(StoppedOutput { calls }) => {
+                let tools: Vec<&str> = calls.iter().map(|c| c.tool.as_str()).collect();
+                assert_eq!(tools, vec!["submit", "ask"]);
             }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
+            other => panic!("expected Stopped, got {:?}", std::mem::discriminant(&other)),
         }
-        let ids: Vec<String> = tool_results(&sink)
-            .into_iter()
-            .map(|(id, _, _)| id)
-            .collect();
-        assert_eq!(ids, vec!["h1".to_string(), "h2".to_string()]);
     }
 
     #[tokio::test]
@@ -1896,7 +1644,7 @@ mod tests {
             _name: &str,
             _input: Value,
             _tool_call_id: &str,
-        ) -> Result<Value, ToolCallError> {
+        ) -> Result<ToolOutcome, ToolCallError> {
             let _ = self.entered.send(());
             std::future::pending().await
         }
@@ -2039,71 +1787,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_agent_forces_tool_choice_any() {
-        // A handoff agent concludes immediately; assert the call used tool_choice=Any.
-        let provider = Arc::new(RecordingProvider {
-            seen: Mutex::new(None),
-            response: CompletionResponse {
-                parts: vec![ContentPart::ToolCall(ToolCallPart {
-                    id: "h1".into(),
-                    name: "finish".into(),
-                    input: json!({}),
-                })],
-                stop_reason: StopReason::ToolUse,
-                usage: Usage::without_cache(1, 1),
-            },
-        });
-        let mut agent = Agent::builder(
-            provider.clone(),
-            MockToolbox::echo("finish"),
-            "test-conversation",
-        )
-        .with_handoff_tool("finish")
-        .build()
-        .unwrap();
-        let sink = CollectingEventSink::new();
-        agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            provider.seen.lock().unwrap().clone(),
-            Some(ToolChoice::Any)
-        ));
-    }
-
-    #[tokio::test]
-    async fn handoff_agent_errors_on_plain_text_completion() {
-        // Provider ignores tool_choice and keeps returning plain text. A handoff
-        // agent must not silently complete — it nudges then fails.
-        let provider = MockProvider::text("just chatting, no tool");
-        let config = AgentConfig {
-            handoff_max_retries: 1,
-            ..AgentConfig::default()
-        };
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
-            .with_handoff_tool("finish")
-            .with_config(config)
-            .build()
-            .unwrap();
-        let sink = CollectingEventSink::new();
-        let err = agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, AgentError::HandoffValidationFailed { .. }));
-    }
-
-    #[tokio::test]
-    async fn non_handoff_agent_uses_tool_choice_auto() {
+    async fn a_run_uses_tool_choice_auto_by_default() {
         let provider = Arc::new(RecordingProvider {
             seen: Mutex::new(None),
             response: CompletionResponse {
@@ -2136,15 +1820,17 @@ mod tests {
         ));
     }
 
+    /// The one case for naming a tool: re-running a turn that ended without the
+    /// result it owed. It cannot be set from the start — `tool_choice` applies to
+    /// every call in the loop, so an agent forced to submit on its first
+    /// iteration submits having done no work.
     #[tokio::test]
-    async fn optional_handoff_tool_uses_tool_choice_auto() {
-        // An *optional* handoff tool must not force tool_choice=Any, even though
-        // one is registered — the model stays free to respond with plain text.
+    async fn a_caller_can_force_one_tool_for_a_whole_run() {
         let provider = Arc::new(RecordingProvider {
             seen: Mutex::new(None),
             response: CompletionResponse {
                 parts: vec![ContentPart::Text(TextPart {
-                    text: "just chatting, no tool".into(),
+                    text: "done".into(),
                 })],
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::without_cache(1, 1),
@@ -2152,10 +1838,10 @@ mod tests {
         });
         let mut agent = Agent::builder(
             provider.clone(),
-            MockToolbox::echo("finish"),
+            MockToolbox::with_stopper("submit_result"),
             "test-conversation",
         )
-        .with_handoff_tool_optional("finish")
+        .with_tool_choice(ToolChoice::Required("submit_result".into()))
         .build()
         .unwrap();
         let sink = CollectingEventSink::new();
@@ -2169,68 +1855,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             provider.seen.lock().unwrap().clone(),
-            Some(ToolChoice::Auto)
+            Some(ToolChoice::Required(name)) if name == "submit_result"
         ));
-    }
-
-    #[tokio::test]
-    async fn optional_handoff_tool_accepts_plain_text_completion() {
-        // Unlike a forced handoff tool, an optional one never nudges/rejects a
-        // text-only turn — it's accepted immediately as `Completed`.
-        let provider = MockProvider::text("just chatting, no tool");
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
-            .with_handoff_tool_optional("finish")
-            .build()
-            .unwrap();
-        let sink = CollectingEventSink::new();
-        let output = agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(matches!(
-            output.result,
-            AgentResult::Completed(CompletedOutput { text }) if text == "just chatting, no tool"
-        ));
-    }
-
-    #[tokio::test]
-    async fn optional_handoff_tool_still_recognized_when_voluntarily_called() {
-        // A voluntary call to the optional handoff tool is still interpreted as a
-        // Handoff (not executed as a regular tool), exactly as a forced one would be.
-        let provider = MockProvider::new(vec![CompletionResponse {
-            parts: vec![ContentPart::ToolCall(ToolCallPart {
-                id: "h1".to_string(),
-                name: "finish".to_string(),
-                input: json!({"answer": 42}),
-            })],
-            stop_reason: StopReason::ToolUse,
-            usage: Usage::without_cache(1, 1),
-        }]);
-        let mut agent = Agent::builder(provider, MockToolbox::echo("finish"), "test-conversation")
-            .with_handoff_tool_optional("finish")
-            .build()
-            .unwrap();
-        let sink = CollectingEventSink::new();
-        let output = agent
-            .run(
-                AgentInput::user_message("m", "go"),
-                &sink,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        match output.result {
-            AgentResult::Handoff(HandoffOutput { tool_name, calls }) => {
-                assert_eq!(tool_name, "finish");
-                let data = &calls[0].data;
-                assert_eq!(data["answer"], 42);
-            }
-            other => panic!("expected Handoff, got {:?}", std::mem::discriminant(&other)),
-        }
     }
 
     #[tokio::test]
@@ -2244,7 +1870,11 @@ mod tests {
                 description: "cat".to_string(),
                 input_schema: json!({ "type": "object" }),
             }],
-            Arc::new(|_, _| Ok(Value::String("line1\nline2".to_string()))),
+            Arc::new(|_, _| {
+                Ok(ToolOutcome::Result(Value::String(
+                    "line1\nline2".to_string(),
+                )))
+            }),
         );
         let mut agent = Agent::builder(provider, toolbox, "test-conversation")
             .build()
@@ -2292,7 +1922,7 @@ mod tests {
             _name: &str,
             input: Value,
             _tool_call_id: &str,
-        ) -> Result<Value, ToolCallError> {
+        ) -> Result<ToolOutcome, ToolCallError> {
             // Concurrent execution => both calls reach the barrier and proceed at
             // once. Sequential execution => the first call blocks here until the
             // timeout fires, flagging the regression.
@@ -2303,7 +1933,7 @@ mod tests {
                 self.timed_out
                     .store(true, std::sync::atomic::Ordering::SeqCst);
             }
-            Ok(input)
+            Ok(ToolOutcome::Result(input))
         }
     }
 

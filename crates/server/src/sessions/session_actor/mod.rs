@@ -52,7 +52,6 @@ use crate::agent_loop::{
 };
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
-    ask_tool::ASK_USER_TOOL,
     orchestrator::{AgentAction, Delivery},
     spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::{ForkRow, SessionSupervisorCommand},
@@ -194,9 +193,6 @@ struct AgentPlan {
     step_output_schema: Option<Value>,
     /// The plugin-declared agent type a typed subagent runs as.
     agent_type: Option<String>,
-    /// A tool whose call ends the turn without ending the run. Only the main
-    /// agent has one, and only when someone is there to answer it.
-    handoff_tool: Option<String>,
 }
 
 pub struct SessionActor {
@@ -527,12 +523,6 @@ impl SessionActor {
             allowed_tools: plan.settings.allowed_tools.clone(),
         });
         params.interactive = true;
-        // Named only when the tool exists: naming a handoff tool the toolbox
-        // does not carry would leave the loop watching for a call that can never
-        // come. A step deliberately has none — its terminal tool is `conclude`,
-        // and naming `ask_user` beside it would stop the loop treating
-        // `conclude` as terminal.
-        params.optional_handoff_tool = plan.handoff_tool;
         params.thinking_effort = plan
             .settings
             .thinking_effort
@@ -585,9 +575,6 @@ impl SessionActor {
                 settings: self.spec().agent.clone(),
                 step_output_schema: None,
                 agent_type: None,
-                // An unattended session is not offered `ask_user`: nobody is
-                // there to answer, so a question would park the run forever.
-                handoff_tool: (!self.spec().is_unattended()).then(|| ASK_USER_TOOL.to_string()),
             },
         );
     }

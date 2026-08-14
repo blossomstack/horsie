@@ -377,7 +377,6 @@ impl SessionActor {
                 settings: self.spec().agent.clone(),
                 step_output_schema: None,
                 agent_type: None,
-                handoff_tool: None,
             },
         )
         .map(|resident| resident.actor)

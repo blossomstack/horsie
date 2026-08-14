@@ -6,7 +6,7 @@
 //! calls execute in the server process and never reach the sandbox.
 
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use horsie_support::mcp::{McpClient, McpError, McpToolDef};
 use serde_json::Value;
 use std::sync::Arc;
@@ -120,7 +120,7 @@ impl Toolbox for CompositeToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         for b in &self.boxes {
             if b.specs().iter().any(|s| s.name == name) {
                 return b.execute(name, input, tool_call_id).await;
@@ -187,7 +187,7 @@ impl Toolbox for PluginMcpToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         if !self.tools.iter().any(|t| t.name == name) {
             return Err(ToolCallError::InvalidInput(format!(
                 "no plugin MCP tool named '{name}'"
@@ -196,7 +196,7 @@ impl Toolbox for PluginMcpToolbox {
         self.client
             .mcp_invoke(tool_call_id, name, input.to_string())
             .await
-            .map(Value::String)
+            .map(|text| ToolOutcome::Result(Value::String(text)))
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))
     }
 }
@@ -251,7 +251,7 @@ impl Toolbox for McpToolbox {
         name: &str,
         input: Value,
         _tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         let prefix = self.prefix();
         let tool = name.strip_prefix(&prefix).ok_or_else(|| {
             ToolCallError::InvalidInput(format!(
@@ -261,7 +261,7 @@ impl Toolbox for McpToolbox {
         })?;
         match self.client.call_tool(tool, input).await {
             Ok(outcome) if outcome.is_error => Err(ToolCallError::ExecutionFailed(outcome.text)),
-            Ok(outcome) => Ok(Value::String(outcome.text)),
+            Ok(outcome) => Ok(ToolOutcome::Result(Value::String(outcome.text))),
             Err(e) => Err(ToolCallError::ExecutionFailed(e.to_string())),
         }
     }
@@ -348,8 +348,8 @@ mod tests {
             name: &str,
             _input: Value,
             _tool_call_id: &str,
-        ) -> Result<Value, ToolCallError> {
-            Ok(Value::String(format!("ran {name}")))
+        ) -> Result<ToolOutcome, ToolCallError> {
+            Ok(ToolOutcome::Result(Value::String(format!("ran {name}"))))
         }
     }
 
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(names, vec!["alpha", "beta"]);
         assert_eq!(
             tb.execute("beta", json!({}), "tc1").await.unwrap(),
-            json!("ran beta")
+            ToolOutcome::Result(json!("ran beta"))
         );
         assert!(matches!(
             tb.execute("gamma", json!({}), "tc1").await,
@@ -475,7 +475,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, json!("PR #7 opened"));
+        assert_eq!(out, ToolOutcome::Result(json!("PR #7 opened")));
 
         // A name outside this server's namespace is rejected without a call.
         assert!(matches!(
@@ -536,7 +536,7 @@ mod tests {
             tb.execute("mcp__github__open_pr", json!({}), "tc1")
                 .await
                 .unwrap(),
-            json!("from the admin server")
+            ToolOutcome::Result(json!("from the admin server"))
         );
     }
 

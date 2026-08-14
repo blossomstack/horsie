@@ -9,6 +9,45 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// What dispatching a tool call did.
+///
+/// A tool that returns [`StopRun`](ToolOutcome::StopRun) ends the run it was
+/// called in. Nothing is recorded for the call — no result message, no
+/// completion event — so the `tool_use` stays dangling, and that dangling call
+/// *is* the shape of a parked agent: an answer can arrive against it later, or
+/// never.
+///
+/// Declaring it here rather than in the agent's configuration is deliberate.
+/// The object that advertises a tool's spec is the object that decides the
+/// stop, so the two can never disagree — and a wrapper that filters a spec out
+/// removes its ability to stop a run along with it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolOutcome {
+    /// An ordinary result: it goes back to the model and the run continues.
+    Result(Value),
+    /// The run ends here.
+    StopRun,
+}
+
+#[cfg(any(test, feature = "test-util"))]
+#[allow(clippy::panic)]
+impl ToolOutcome {
+    /// The value an ordinary call answered with, for tests that exercise tools
+    /// which never end a run. Panics on [`ToolOutcome::StopRun`].
+    pub fn expect_value(self) -> Value {
+        match self {
+            Self::Result(v) => v,
+            Self::StopRun => panic!("expected a value, got a call that ended the run"),
+        }
+    }
+}
+
+impl From<Value> for ToolOutcome {
+    fn from(value: Value) -> Self {
+        Self::Result(value)
+    }
+}
+
 #[async_trait]
 pub trait Toolbox: Send + Sync {
     fn specs(&self) -> Vec<ToolSpec>;
@@ -21,10 +60,15 @@ pub trait Toolbox: Send + Sync {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError>;
+    ) -> Result<ToolOutcome, ToolCallError>;
 }
 
 /// A single named tool.
+///
+/// Always ordinary: a tool registered here returns a value the model reads.
+/// Ending a run is a property of a whole toolbox layer (`ask_user`,
+/// `submit_result`), which is why it is [`Toolbox`] that can answer
+/// [`ToolOutcome::StopRun`] and this trait cannot.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
@@ -68,9 +112,12 @@ impl Toolbox for ToolboxImpl {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         match self.tools.iter().find(|t| t.spec().name == name) {
-            Some(tool) => tool.execute(input, tool_call_id).await,
+            Some(tool) => tool
+                .execute(input, tool_call_id)
+                .await
+                .map(ToolOutcome::from),
             None => Err(ToolCallError::InvalidInput(format!(
                 "no tool named '{name}'"
             ))),
@@ -91,7 +138,7 @@ impl Toolbox for EmptyToolbox {
         name: &str,
         _input: Value,
         _tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         Err(ToolCallError::InvalidInput(format!(
             "no tool named '{name}'"
         )))
@@ -125,11 +172,14 @@ mod tests {
         }
     }
 
+    /// A registered [`Tool`] is never terminal: its value is wrapped as an
+    /// ordinary result, which is what keeps "this call ends the run" a decision
+    /// only a whole toolbox layer can take.
     #[tokio::test]
-    async fn toolbox_impl_routes_by_name() {
+    async fn toolbox_impl_routes_by_name_and_wraps_the_result() {
         let tb = ToolboxImpl::new().add(EchoTool);
         let result = tb.execute("echo", json!({"x": 1}), "tc1").await.unwrap();
-        assert_eq!(result, json!({"x": 1}));
+        assert_eq!(result, ToolOutcome::Result(json!({"x": 1})));
     }
 
     #[tokio::test]

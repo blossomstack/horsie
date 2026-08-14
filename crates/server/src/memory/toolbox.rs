@@ -10,7 +10,7 @@
 
 use crate::memory::{MAX_DESCRIPTION_CHARS, MemoryRow, MemoryService};
 use async_trait::async_trait;
-use horsie_agentcore::{ToolCallError, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use horsie_models::memory::{MemoryCreateInput, MemoryUpdateInput};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -159,13 +159,13 @@ impl Toolbox for MemoryToolbox {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<Value, ToolCallError> {
+    ) -> Result<ToolOutcome, ToolCallError> {
         match name {
-            LOAD => self.load(input).await,
-            CREATE => self.create(input).await,
-            UPDATE => self.update(input).await,
-            DELETE => self.delete(input).await,
-            LIST => self.list(input).await,
+            LOAD => self.load(input).await.map(ToolOutcome::Result),
+            CREATE => self.create(input).await.map(ToolOutcome::Result),
+            UPDATE => self.update(input).await.map(ToolOutcome::Result),
+            DELETE => self.delete(input).await.map(ToolOutcome::Result),
+            LIST => self.list(input).await.map(ToolOutcome::Result),
             _ => self.inner.execute(name, input, tool_call_id).await,
         }
     }
@@ -445,10 +445,15 @@ mod tests {
                 "tc1",
             )
             .await
-            .unwrap();
+            .unwrap()
+            .expect_value();
         assert_eq!(created["ref"], "default/alpha");
 
-        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
+        let listed = tb
+            .execute("memory_list", json!({}), "tc1")
+            .await
+            .unwrap()
+            .expect_value();
         let items = listed["memories"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["ref"], "default/alpha");
@@ -461,7 +466,8 @@ mod tests {
         let loaded = tb
             .execute("memory_load", json!({"refs": ["default/alpha"]}), "tc1")
             .await
-            .unwrap();
+            .unwrap()
+            .expect_value();
         let mems = loaded["memories"].as_array().unwrap();
         assert_eq!(mems[0]["content"], "the body");
     }
@@ -501,7 +507,8 @@ mod tests {
         let args = json!({"name": "alpha", "description": "d", "content": "c"});
         tb.execute("memory_create", args.clone(), "tc1")
             .await
-            .unwrap();
+            .unwrap()
+            .expect_value();
         let err = tb.execute("memory_create", args, "tc1").await.unwrap_err();
         assert!(err.to_string().contains("memory_update"));
     }
@@ -515,7 +522,8 @@ mod tests {
             "tc1",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect_value();
         let out = tb
             .execute(
                 "memory_load",
@@ -523,7 +531,8 @@ mod tests {
                 "tc1",
             )
             .await
-            .unwrap();
+            .unwrap()
+            .expect_value();
         assert_eq!(out["memories"].as_array().unwrap().len(), 1);
         assert_eq!(
             out["not_found"].as_array().unwrap(),
@@ -553,18 +562,24 @@ mod tests {
             "tc1",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect_value();
         tb.execute(
             "memory_create",
             json!({"space": "default", "name": "kept", "description": "d", "content": "c"}),
             "tc2",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect_value();
 
         tb.service.delete_space("project").await.unwrap();
 
-        let listed = tb.execute("memory_list", json!({}), "tc3").await.unwrap();
+        let listed = tb
+            .execute("memory_list", json!({}), "tc3")
+            .await
+            .unwrap()
+            .expect_value();
         let warning = listed["warning"].as_str().unwrap_or_default();
         assert!(
             warning.contains("project"),
@@ -581,7 +596,11 @@ mod tests {
     #[tokio::test]
     async fn an_empty_but_live_space_carries_no_warning() {
         let (tb, _t) = toolbox(&["default"]).await;
-        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
+        let listed = tb
+            .execute("memory_list", json!({}), "tc1")
+            .await
+            .unwrap()
+            .expect_value();
         assert!(listed["memories"].as_array().unwrap().is_empty());
         assert!(listed.get("warning").is_none(), "unexpected: {listed}");
     }
@@ -595,7 +614,8 @@ mod tests {
             "tc1",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect_value();
 
         tb.execute(
             "memory_update",
@@ -603,18 +623,25 @@ mod tests {
             "tc1",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect_value();
         let loaded = tb
             .execute("memory_load", json!({"refs": ["default/alpha"]}), "tc1")
             .await
-            .unwrap();
+            .unwrap()
+            .expect_value();
         assert_eq!(loaded["memories"][0]["content"], "rewritten");
         assert_eq!(loaded["memories"][0]["description"], "d");
 
         tb.execute("memory_delete", json!({"ref": "default/alpha"}), "tc1")
             .await
-            .unwrap();
-        let listed = tb.execute("memory_list", json!({}), "tc1").await.unwrap();
+            .unwrap()
+            .expect_value();
+        let listed = tb
+            .execute("memory_list", json!({}), "tc1")
+            .await
+            .unwrap()
+            .expect_value();
         assert!(listed["memories"].as_array().unwrap().is_empty());
     }
 

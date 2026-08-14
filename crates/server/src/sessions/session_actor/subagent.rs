@@ -252,9 +252,6 @@ impl SessionActor {
                 settings: self.spec().agent.clone(),
                 step_output_schema: None,
                 agent_type,
-                // No handoff tool: a subagent ends its turn with plain text,
-                // which becomes the output its parent is notified with.
-                handoff_tool: None,
             },
         )
         .map(|resident| resident.actor)
