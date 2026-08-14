@@ -1761,8 +1761,26 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { agent, output })
                             .await;
-                        let drained = self.try_drain(state, ctx).await;
-                        self.persist_maybe_snapshot(drained)
+                        // Submitting says the work is done, which makes any
+                        // armed timer moot: nothing is left for it to wake.
+                        // Dropping them here rather than calling it a
+                        // contradiction keeps one rule — the agent decides when
+                        // it is finished — and avoids a failure mode the agent
+                        // could not have been warned about at the tool
+                        // boundary, where its own timers are invisible.
+                        let mut events = Vec::new();
+                        if !state.timers.is_empty() {
+                            events.push(AgentDomainEvent::TimerCancelled {
+                                ids: state.timers.iter().map(|t| t.id.clone()).collect(),
+                                at_ms: now_ms(),
+                            });
+                        }
+                        let mut folded = state.clone();
+                        for e in &events {
+                            folded = Self::apply_event(folded, e.clone());
+                        }
+                        events.extend(self.try_drain(&folded, ctx).await);
+                        self.persist_maybe_snapshot(events)
                     }
                     Conclusion::Ask(asks) => {
                         parent

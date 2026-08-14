@@ -595,6 +595,60 @@ mod tests {
         );
     }
 
+    /// Submitting says the work is done, which makes an armed timer moot. Left
+    /// armed it would fire an hour later into a step the run has long moved
+    /// past, waking an agent with nothing left to do.
+    #[tokio::test]
+    async fn submitting_cancels_the_timers_the_step_had_armed() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let arm = || {
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "t-1".into(),
+                        name: "set_timer".into(),
+                        input: serde_json::json!({
+                            "kind": "one_shot",
+                            "after_secs": 3600,
+                            "label": "check back",
+                            "message": "see whether CI went green",
+                        }),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        };
+        let provider = MockProvider::scripted(
+            Script::of([arm(), Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+        })
+        .await;
+        let step = crate::sessions::events::fold_agent_state(&journal, run.steps[0].agent).await;
+        // The timer really was armed — otherwise this test passes by testing
+        // nothing, which is exactly what it did the first time it was written.
+        assert!(
+            step.log.iter().any(|e| matches!(
+                &e.body,
+                horsie_agentcore::AgentLogBody::Llm(m)
+                    if m.parts.iter().any(|p| matches!(
+                        p,
+                        horsie_agentcore::ContentPart::ToolCall(c) if c.name == "set_timer"
+                    ))
+            )),
+            "the step never armed a timer, so cancelling one proves nothing"
+        );
+        assert!(
+            step.timers.is_empty(),
+            "the concluded step still holds {} armed timer(s)",
+            step.timers.len()
+        );
+    }
+
     /// A model that never submits fails its step rather than looping for ever.
     /// The second nudge forces `submit_result` in `tool_choice`, so reaching
     /// this means the provider ignored a constraint it is required to honour.
