@@ -255,28 +255,6 @@ pub enum SessionSupervisorCommand {
         name: String,
         reply: ReplyTo<Result<String, RenameSessionError>>,
     },
-    /// Register a group. `created_at` is unix epoch millis (caller-supplied for
-    /// deterministic tests, like `Create`).
-    CreateGroup {
-        name: String,
-        created_at: u64,
-        reply: ReplyTo<Result<(), GroupError>>,
-    },
-    /// Rename a registered *or annotation-only* group; sessions follow.
-    RenameGroup {
-        old: String,
-        new: String,
-        reply: ReplyTo<Result<(), GroupError>>,
-    },
-    /// Delete a group and strip its annotation from every session.
-    DeleteGroup {
-        name: String,
-        reply: ReplyTo<Result<(), GroupError>>,
-    },
-    /// The group registry, name-sorted.
-    ListGroups {
-        reply: ReplyTo<Vec<(String, GroupRecord)>>,
-    },
     /// Merge-update one session's annotations. Err when the session is unknown.
     SetSessionAnnotations {
         id: SessionId,
@@ -311,20 +289,6 @@ pub enum SessionSupervisorEvent {
         id: SessionId,
         status: SessionStatus,
     },
-    GroupCreated {
-        name: String,
-        created_at: u64,
-    },
-    /// Renames the registry key and rewrites `group=<old>` annotations; both
-    /// ride one event so the fixup is atomic with the rename.
-    GroupRenamed {
-        old: String,
-        new: String,
-    },
-    /// Removes the registry key and strips `group=<name>` annotations.
-    GroupDeleted {
-        name: String,
-    },
     /// A session's forks, as the list now holds them.
     SessionForksChanged {
         id: SessionId,
@@ -355,52 +319,6 @@ impl std::fmt::Display for RenameSessionError {
     }
 }
 
-/// Why a group command was refused.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GroupError {
-    /// Neither registered nor referenced by any session annotation.
-    NotFound(String),
-    /// The name is already taken (create, or rename target).
-    NameTaken(String),
-    /// Empty or over-long.
-    Invalid(String),
-}
-
-impl std::fmt::Display for GroupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            GroupError::NotFound(name) => write!(f, "no such group: {name}"),
-            GroupError::NameTaken(name) => write!(f, "group already exists: {name}"),
-            GroupError::Invalid(reason) => write!(f, "invalid group name: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for GroupError {}
-
-const GROUP_NAME_MAX_LEN: usize = 128;
-
-fn validate_group_name(name: &str) -> Result<(), GroupError> {
-    if name.is_empty() {
-        return Err(GroupError::Invalid("empty".into()));
-    }
-    if name.len() > GROUP_NAME_MAX_LEN {
-        return Err(GroupError::Invalid(format!(
-            "longer than {GROUP_NAME_MAX_LEN} characters"
-        )));
-    }
-    Ok(())
-}
-
-/// Whether the group is registered or any session carries `group=<name>`.
-fn group_exists(state: &SessionSupervisorState, name: &str) -> bool {
-    state.groups.contains_key(name)
-        || state
-            .sessions
-            .values()
-            .any(|rec| rec.annotations.get("group").is_some_and(|g| g == name))
-}
-
 /// One fork under a session, as the session list holds it.
 ///
 /// A projection of the session's own `ForkRecord`, not a second source of
@@ -429,8 +347,9 @@ pub struct ForkRow {
 pub struct SessionRecord {
     pub spec: SessionSpec,
     pub created_at: u64,
-    /// User-set key-value metadata (group, future provenance keys). Field-level
-    /// default so pre-annotations journal rows load with an empty map.
+    /// User-set key-value metadata: a `tag.<name>` key per tag, plus any
+    /// future provenance keys. Field-level default so pre-annotations
+    /// journal rows load with an empty map.
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
     /// What this session last reported it was doing.
@@ -447,14 +366,6 @@ pub struct SessionRecord {
     pub forks: Vec<ForkRow>,
 }
 
-/// One registered group. Registration is optional metadata: a group can exist
-/// with zero sessions, and an annotation can name a group that was never
-/// registered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupRecord {
-    pub created_at: u64,
-}
-
 /// Persisted supervisor state — which sessions exist, nothing more.
 ///
 /// `#[serde(default)]` on the container: snapshotted state is a durability
@@ -463,9 +374,6 @@ pub struct GroupRecord {
 #[serde(default)]
 pub struct SessionSupervisorState {
     pub sessions: BTreeMap<SessionId, SessionRecord>,
-    /// Registered groups, name-keyed.
-    #[serde(default)]
-    pub groups: BTreeMap<String, GroupRecord>,
 }
 
 pub struct SessionSupervisor {
@@ -728,27 +636,6 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorEvent::SessionStatusChanged { id, status } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
                     rec.status = status;
-                }
-            }
-            SessionSupervisorEvent::GroupCreated { name, created_at } => {
-                state.groups.insert(name, GroupRecord { created_at });
-            }
-            SessionSupervisorEvent::GroupRenamed { old, new } => {
-                if let Some(rec) = state.groups.remove(&old) {
-                    state.groups.insert(new.clone(), rec);
-                }
-                for rec in state.sessions.values_mut() {
-                    if rec.annotations.get("group") == Some(&old) {
-                        rec.annotations.insert("group".to_string(), new.clone());
-                    }
-                }
-            }
-            SessionSupervisorEvent::GroupDeleted { name } => {
-                state.groups.remove(&name);
-                for rec in state.sessions.values_mut() {
-                    if rec.annotations.get("group") == Some(&name) {
-                        rec.annotations.remove("group");
-                    }
                 }
             }
             SessionSupervisorEvent::SessionAnnotationsSet { id, set, remove } => {
@@ -1233,61 +1120,6 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::CreateGroup {
-                name,
-                created_at,
-                reply,
-            } => {
-                if let Err(e) = validate_group_name(&name) {
-                    let _ = reply.send(Err(e));
-                    return CommandEffect::none();
-                }
-                if state.groups.contains_key(&name) {
-                    let _ = reply.send(Err(GroupError::NameTaken(name)));
-                    return CommandEffect::none();
-                }
-                let _ = reply.send(Ok(()));
-                CommandEffect::persist(vec![SessionSupervisorEvent::GroupCreated {
-                    name,
-                    created_at,
-                }])
-            }
-            SessionSupervisorCommand::RenameGroup { old, new, reply } => {
-                if let Err(e) = validate_group_name(&new) {
-                    let _ = reply.send(Err(e));
-                    return CommandEffect::none();
-                }
-                // The fold inserts `new` unconditionally; without this guard a
-                // rename onto an existing group silently overwrites it.
-                if state.groups.contains_key(&new) {
-                    let _ = reply.send(Err(GroupError::NameTaken(new)));
-                    return CommandEffect::none();
-                }
-                if !group_exists(state, &old) {
-                    let _ = reply.send(Err(GroupError::NotFound(old)));
-                    return CommandEffect::none();
-                }
-                let _ = reply.send(Ok(()));
-                CommandEffect::persist(vec![SessionSupervisorEvent::GroupRenamed { old, new }])
-            }
-            SessionSupervisorCommand::DeleteGroup { name, reply } => {
-                if !group_exists(state, &name) {
-                    let _ = reply.send(Err(GroupError::NotFound(name)));
-                    return CommandEffect::none();
-                }
-                let _ = reply.send(Ok(()));
-                CommandEffect::persist(vec![SessionSupervisorEvent::GroupDeleted { name }])
-            }
-            SessionSupervisorCommand::ListGroups { reply } => {
-                let _ = reply.send(
-                    state
-                        .groups
-                        .iter()
-                        .map(|(name, rec)| (name.clone(), rec.clone()))
-                        .collect(),
-                );
-                CommandEffect::none()
-            }
             SessionSupervisorCommand::SetSessionAnnotations {
                 id,
                 set,
@@ -1505,81 +1337,22 @@ mod tests {
             s,
             SessionSupervisorEvent::SessionAnnotationsSet {
                 id: "s1".into(),
-                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                set: BTreeMap::from([("tag.web".to_string(), String::new())]),
                 remove: vec![],
             },
         );
         assert_eq!(
-            s.sessions.get("s1").unwrap().annotations.get("group"),
-            Some(&"web".to_string())
+            s.sessions.get("s1").unwrap().annotations.get("tag.web"),
+            Some(&String::new())
         );
         let s = SessionSupervisor::apply_event(
             s,
             SessionSupervisorEvent::SessionAnnotationsSet {
                 id: "s1".into(),
                 set: BTreeMap::new(),
-                remove: vec!["group".to_string()],
+                remove: vec!["tag.web".to_string()],
             },
         );
-        assert!(s.sessions.get("s1").unwrap().annotations.is_empty());
-    }
-
-    #[test]
-    fn group_rename_rewrites_annotations() {
-        let s = created_session(SessionSupervisorState::default(), "s1");
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::GroupCreated {
-                name: "web".into(),
-                created_at: 1,
-            },
-        );
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::SessionAnnotationsSet {
-                id: "s1".into(),
-                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
-                remove: vec![],
-            },
-        );
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::GroupRenamed {
-                old: "web".into(),
-                new: "frontend".into(),
-            },
-        );
-        assert!(s.groups.contains_key("frontend"));
-        assert!(!s.groups.contains_key("web"));
-        assert_eq!(
-            s.sessions.get("s1").unwrap().annotations.get("group"),
-            Some(&"frontend".to_string())
-        );
-    }
-
-    #[test]
-    fn group_delete_strips_annotations() {
-        let s = created_session(SessionSupervisorState::default(), "s1");
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::GroupCreated {
-                name: "web".into(),
-                created_at: 1,
-            },
-        );
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::SessionAnnotationsSet {
-                id: "s1".into(),
-                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
-                remove: vec![],
-            },
-        );
-        let s = SessionSupervisor::apply_event(
-            s,
-            SessionSupervisorEvent::GroupDeleted { name: "web".into() },
-        );
-        assert!(s.groups.is_empty());
         assert!(s.sessions.get("s1").unwrap().annotations.is_empty());
     }
 
@@ -1590,7 +1363,7 @@ mod tests {
             s,
             SessionSupervisorEvent::SessionAnnotationsSet {
                 id: "s1".into(),
-                set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+                set: BTreeMap::from([("tag.web".to_string(), String::new())]),
                 remove: vec![],
             },
         );
@@ -1599,6 +1372,31 @@ mod tests {
             SessionSupervisorEvent::SessionDeleted { id: "s1".into() },
         );
         assert!(s.sessions.is_empty());
+    }
+
+    /// Groups were deleted outright rather than migrated, which splits the
+    /// upgrade in two — and only one half is safe.
+    ///
+    /// A *snapshot* taken while groups existed still loads: serde ignores the
+    /// field the struct no longer knows, so the sessions in it survive. A
+    /// surviving `Group*` *event* does not. `recover_state` decodes every
+    /// replayed event with `serde_json::from_slice` and turns a failure into a
+    /// hard `JournalError::Serialization`, so a single un-compacted group event
+    /// stops the supervisor loading at all — and the supervisor is the session
+    /// list. Hence the upgrade note: clear supervisor state, or snapshot past
+    /// those events, before deploying this.
+    #[test]
+    fn a_snapshot_that_still_names_groups_loads_without_them() {
+        let snapshot = serde_json::json!({
+            "sessions": {},
+            "groups": { "web": { "created_at": 1 } },
+        });
+        let state: SessionSupervisorState =
+            serde_json::from_value(snapshot).expect("a snapshot from before tags must still load");
+        assert!(state.sessions.is_empty());
+
+        let event = serde_json::json!({ "GroupCreated": { "name": "web", "created_at": 1 } });
+        assert!(serde_json::from_value::<SessionSupervisorEvent>(event).is_err());
     }
 
     #[tokio::test]
@@ -2378,75 +2176,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_create_list_and_duplicate_conflict() {
-        let f = fixture().await;
-        let sup = f.supervisor().await;
-
-        sup.ask(|reply| SessionSupervisorCommand::CreateGroup {
-            name: "web".into(),
-            created_at: 1,
-            reply,
-        })
-        .await
-        .unwrap()
-        .unwrap();
-
-        let dup = sup
-            .ask(|reply| SessionSupervisorCommand::CreateGroup {
-                name: "web".into(),
-                created_at: 2,
-                reply,
-            })
-            .await
-            .unwrap();
-        assert_eq!(dup, Err(GroupError::NameTaken("web".into())));
-
-        let groups = sup
-            .ask(|reply| SessionSupervisorCommand::ListGroups { reply })
-            .await
-            .unwrap();
-        assert_eq!(
-            groups,
-            vec![("web".to_string(), GroupRecord { created_at: 1 })]
-        );
-    }
-
-    #[tokio::test]
-    async fn group_validation_rejects_empty_and_overlong_names() {
-        let f = fixture().await;
-        let sup = f.supervisor().await;
-        for bad in ["", &"x".repeat(129)] {
-            let err = sup
-                .ask(|reply| SessionSupervisorCommand::CreateGroup {
-                    name: bad.to_string(),
-                    created_at: 1,
-                    reply,
-                })
-                .await
-                .unwrap();
-            assert!(matches!(err, Err(GroupError::Invalid(_))));
-        }
-    }
-
-    #[tokio::test]
-    async fn rename_unregistered_group_rewrites_annotations() {
+    async fn a_tag_rides_the_session_list_and_comes_off_again() {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
         sup.ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
             id: id.clone(),
-            set: BTreeMap::from([("group".to_string(), "web".to_string())]),
+            set: BTreeMap::from([("tag.web".to_string(), String::new())]),
             remove: vec![],
-            reply,
-        })
-        .await
-        .unwrap()
-        .unwrap();
-
-        // "web" was never registered; the rename still fixes the annotation.
-        sup.ask(|reply| SessionSupervisorCommand::RenameGroup {
-            old: "web".into(),
-            new: "frontend".into(),
             reply,
         })
         .await
@@ -2458,38 +2195,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            sessions[0].1.annotations.get("group"),
-            Some(&"frontend".to_string())
+            sessions[0].1.annotations.get("tag.web"),
+            Some(&String::new())
         );
-        assert!(
-            sup.ask(|reply| SessionSupervisorCommand::ListGroups { reply })
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
 
-    #[tokio::test]
-    async fn unknown_group_rename_and_delete_are_not_found() {
-        let f = fixture().await;
-        let sup = f.supervisor().await;
-        let err = sup
-            .ask(|reply| SessionSupervisorCommand::RenameGroup {
-                old: "nope".into(),
-                new: "x".into(),
-                reply,
-            })
+        // No registry to clean up: dropping the key from the last session
+        // carrying it is the whole of deleting a tag.
+        sup.ask(|reply| SessionSupervisorCommand::SetSessionAnnotations {
+            id: id.clone(),
+            set: BTreeMap::new(),
+            remove: vec!["tag.web".to_string()],
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let sessions = sup
+            .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
-        assert_eq!(err, Err(GroupError::NotFound("nope".into())));
-        let err = sup
-            .ask(|reply| SessionSupervisorCommand::DeleteGroup {
-                name: "nope".into(),
-                reply,
-            })
-            .await
-            .unwrap();
-        assert_eq!(err, Err(GroupError::NotFound("nope".into())));
+        assert!(sessions[0].1.annotations.is_empty());
     }
 
     #[tokio::test]

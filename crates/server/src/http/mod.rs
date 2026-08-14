@@ -3,13 +3,13 @@
 
 mod admin;
 mod agents;
+mod annotations;
 pub mod auth;
 mod chatgpt;
 mod config;
 mod environments;
 pub mod error;
 pub(crate) mod github;
-mod groups;
 mod handlers;
 mod marketplaces;
 mod mcp;
@@ -176,15 +176,7 @@ pub fn app(state: AppState) -> Router {
         )
         .route(
             "/api/sessions/{id}/annotations",
-            put(groups::set_annotations),
-        )
-        .route(
-            "/api/session-groups",
-            get(groups::list_groups).post(groups::create_group),
-        )
-        .route(
-            "/api/session-groups/{name}",
-            put(groups::rename_group).delete(groups::delete_group),
+            put(annotations::set_annotations),
         )
         .route("/api/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
@@ -1114,80 +1106,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_crud_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
-        let app = app(state);
-
-        // Create → 201, listed.
-        let res = app
-            .clone()
-            .oneshot(post_json(
-                "/api/session-groups",
-                &serde_json::json!({ "name": "web" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CREATED);
-
-        let res = app
-            .clone()
-            .oneshot(get("/api/session-groups"))
-            .await
-            .unwrap();
-        let body: serde_json::Value = read_json(res).await;
-        assert_eq!(body["groups"][0]["name"], "web");
-
-        // Duplicate → 409.
-        let res = app
-            .clone()
-            .oneshot(post_json(
-                "/api/session-groups",
-                &serde_json::json!({ "name": "web" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::CONFLICT);
-
-        // Rename → 200, new name listed.
-        let res = app
-            .clone()
-            .oneshot(put_json(
-                "/api/session-groups/web",
-                &serde_json::json!({ "name": "frontend" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-
-        // Delete → 200, gone; deleting again → 404.
-        let res = app
-            .clone()
-            .oneshot(delete("/api/session-groups/frontend"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let res = app
-            .clone()
-            .oneshot(delete("/api/session-groups/frontend"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn annotations_ride_the_session_list_and_follow_group_edits() {
+    async fn annotations_ride_the_session_list_and_survive_a_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
         let app = app(state);
         let id = create_session_via_api(&app).await;
 
-        // Assign a group; the list carries it.
+        // Tag it; the list carries the annotation.
         let res = app
             .clone()
             .oneshot(put_json(
                 &format!("/api/sessions/{id}/annotations"),
-                &serde_json::json!({ "set": [{ "key": "group", "value": "web" }], "remove": [] }),
+                &serde_json::json!({ "set": [{ "key": "tag.web", "value": "" }], "remove": [] }),
             ))
             .await
             .unwrap();
@@ -1197,30 +1127,17 @@ mod tests {
         let body: serde_json::Value = read_json(res).await;
         assert_eq!(
             body["sessions"][0]["annotations"],
-            serde_json::json!([{ "key": "group", "value": "web" }])
+            serde_json::json!([{ "key": "tag.web", "value": "" }])
         );
 
-        // Rename the (unregistered) group; the annotation follows.
+        // Removing the key is how a tag is unassigned — and, once no session
+        // carries it, how the tag itself ceases to exist.
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/session-groups/web",
-                &serde_json::json!({ "name": "frontend" }),
+                &format!("/api/sessions/{id}/annotations"),
+                &serde_json::json!({ "set": [], "remove": ["tag.web"] }),
             ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
-        let body: serde_json::Value = read_json(res).await;
-        assert_eq!(
-            body["sessions"][0]["annotations"],
-            serde_json::json!([{ "key": "group", "value": "frontend" }])
-        );
-
-        // Delete strips it; the session detail agrees.
-        let res = app
-            .clone()
-            .oneshot(delete("/api/session-groups/frontend"))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1242,7 +1159,7 @@ mod tests {
             .clone()
             .oneshot(put_json(
                 "/api/sessions/nope/annotations",
-                &serde_json::json!({ "set": [], "remove": ["group"] }),
+                &serde_json::json!({ "set": [], "remove": ["tag.web"] }),
             ))
             .await
             .unwrap();
