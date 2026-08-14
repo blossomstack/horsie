@@ -83,9 +83,13 @@ pub struct DeclaredServer {
 /// select different bundles that declare the same server name, and a cache keyed
 /// on the name would hand the second agent the first agent's process — running
 /// out of the wrong plugin root, with the wrong environment.
+/// One agent's connection to one named server, claimed before it is built —
+/// see the `OnceCell` note above.
+type ClientSlot = Arc<OnceCell<Arc<McpClient>>>;
+
 #[derive(Default)]
 pub struct McpRegistry {
-    clients: Mutex<BTreeMap<(String, String), Arc<OnceCell<Arc<McpClient>>>>>,
+    clients: Mutex<BTreeMap<(String, String), ClientSlot>>,
 }
 
 /// What one discovery pass produced.

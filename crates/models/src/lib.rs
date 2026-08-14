@@ -929,8 +929,8 @@ mod tests {
     fn scan_workspace_inbound_round_trips() {
         use crate::runtime::{RuntimeInboundMessage, ScanRequest};
         let msg = RuntimeInboundMessage::ScanWorkspace(ScanRequest {
-            include_shared: false,
             call_id: "c1".into(),
+            agent_id: "a1".into(),
             workspace: None,
             instruction_candidates: vec!["AGENTS.md".into()],
             skills_glob: ".claude/skills/*/SKILL.md".into(),

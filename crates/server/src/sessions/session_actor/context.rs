@@ -364,6 +364,55 @@ impl SessionContextProvider {
         self.settings.use_plugins.unwrap_or(true)
     }
 
+    /// Install this agent's own plugin bundles into its own tree on the runtime.
+    ///
+    /// The bundles come from the agent's settings, which a workflow step fills
+    /// from its own preset — that is what makes a step able to run with skills
+    /// its siblings do not have. It used to be the session's union, installed
+    /// once for everyone.
+    ///
+    /// Retryable on failure. The bundles come from the artifact store over the
+    /// runtime's own connection, and a store that is briefly unreachable is the
+    /// ordinary transient — not a reason to make the session terminal.
+    async fn provision_agent(&self, client: &RuntimeClient) -> Result<(), ContextError> {
+        if !self.use_plugins() {
+            // Provisioned with nothing, deliberately, rather than skipped: the
+            // runtime refuses requests naming an agent it has never been told
+            // about, and "this agent takes no plugins" is a thing to be told.
+            return client
+                .provision_agent(Vec::new())
+                .await
+                .map(|_| ())
+                .map_err(|e| ContextError::retryable(e.to_string()));
+        }
+        let mut names = self.settings.plugins.clone();
+        if names.is_empty() {
+            // Nothing selected falls back to the account's default-enabled set,
+            // exactly as session-wide provisioning did.
+            if let Some(library) = &self.plugin_library {
+                names = library.default_names().await;
+            }
+        }
+        let bundles = match &self.plugin_library {
+            Some(library) if !names.is_empty() => library
+                .resolve(&names)
+                .await
+                .map_err(ContextError::retryable)?
+                .iter()
+                .map(|r| horsie_models::runtime::BundleRef {
+                    name: r.name.clone(),
+                    hash: r.hash.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        client
+            .provision_agent(bundles)
+            .await
+            .map(|_| ())
+            .map_err(|e| ContextError::retryable(e.to_string()))
+    }
+
     /// Acquire this agent's runtime handle, scoped to it. Sink-less: `provide`
     /// attaches one for the tool hooks that report themselves mid-call, while
     /// `start_hooks` returns its records to the agent, which journals them
@@ -604,6 +653,21 @@ impl ContextProvider for SessionContextProvider {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
 
+        // Before anything reads this agent's plugins — the hooks its bundles
+        // declare, the skills the scan finds, the MCP servers discovery starts.
+        // Sent on every load rather than once: the runtime is the only party
+        // that knows what is already on its disk, and it absorbs the repeat.
+        if broadcast {
+            emit_progress(
+                &self.session,
+                self.kind.agent_key(),
+                "installing_plugins",
+                None,
+            )
+            .await;
+        }
+        self.provision_agent(&runtime_client).await?;
+
         if broadcast {
             emit_progress(
                 &self.session,
@@ -613,7 +677,7 @@ impl ContextProvider for SessionContextProvider {
             )
             .await;
         }
-        let (ws, shared_scan) = scan_workspace(&runtime_client, None, use_plugins).await;
+        let (ws, shared_scan) = scan_workspace(&runtime_client, None).await;
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
         // hook, always reporting `source: "startup"`. It now fires once per
@@ -947,6 +1011,7 @@ mod tests {
             instructions: None,
             auto_compact: None,
             control_plane: None,
+            plugins: Vec::new(),
         };
         let (toolbox, index) = build_control_layer(
             base.clone(),

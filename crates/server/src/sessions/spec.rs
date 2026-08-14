@@ -88,6 +88,17 @@ pub struct AgentSettings {
     /// deserialize.
     #[serde(default)]
     pub instructions: Option<String>,
+    /// The plugin bundles *this agent* runs with, resolved from its preset.
+    ///
+    /// Per agent rather than per session, which is what lets a workflow step
+    /// run with its own skills. It used to be session-wide: every step's
+    /// bundles were unioned at run creation and installed once, so a step got
+    /// its siblings' skills as well as its own and could not be given fewer.
+    /// `#[serde(default)]` so pre-per-agent journal rows deserialize — they
+    /// come back empty, and an empty set is now honestly "this agent has no
+    /// bundles" rather than a stand-in for the session's.
+    #[serde(default)]
+    pub plugins: Vec<String>,
     /// Whether this session compacts automatically once its context fills.
     /// `#[serde(default)]` so pre-compaction journal rows deserialize; `None`
     /// means yes, so every existing session gains the behaviour.
@@ -221,6 +232,7 @@ impl SessionSpec {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     control_plane: None,
+                    plugins: Vec::new(),
                 },
             },
             workspaces: vec![],

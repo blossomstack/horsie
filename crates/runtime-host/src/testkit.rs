@@ -596,7 +596,7 @@ mod tests {
         let scan = {
             let t = t.clone();
             tokio::spawn(async move {
-                t.scan_workspace("c1", None, vec![], "*.md".into(), false)
+                t.scan_workspace("c1", "a1", None, vec![], "*.md".into())
                     .await
             })
         };

@@ -87,8 +87,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::ToolCallResponse(resp) => Ok((resp.result, resp.hooks)),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ScanResult(_)
@@ -123,8 +122,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -206,8 +204,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::AgentProvisioned(resp) => Ok((resp.result, resp.root)),
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
@@ -244,8 +241,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::ScanResult(resp) => Ok(resp),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -278,8 +274,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::HookRecords(resp) => Ok(resp.records),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -309,8 +304,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::McpTools(resp) => Ok(resp),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)
@@ -341,8 +335,7 @@ pub trait RuntimeTransport: Send + Sync {
             RuntimeOutboundMessage::Cancelled(_) => Err(TransportError::Cancelled),
             RuntimeOutboundMessage::RequestRefused(r) => Err(TransportError::Refused(r.reason)),
             RuntimeOutboundMessage::McpResult(resp) => Ok(resp.result),
-            RuntimeOutboundMessage::RequestRefused(_)
-            | RuntimeOutboundMessage::Ready(_)
+            RuntimeOutboundMessage::Ready(_)
             | RuntimeOutboundMessage::ProvisionResult(_)
             | RuntimeOutboundMessage::AgentProvisioned(_)
             | RuntimeOutboundMessage::ToolCallResponse(_)

@@ -183,25 +183,26 @@ impl FromIterator<Skill> for SkillSet {
 }
 
 /// Scan workspaces over the runtime and interpret them. `workspace` filters which
-/// roots to scan (`None` = all, `Some(name)` = one); `include_shared` also pulls the
-/// shared plugin library's skills. On a transport error, warn and return empty —
-/// the feature is additive and must not sink a run.
+/// roots to scan (`None` = all, `Some(name)` = one).
+///
+/// The plugin half comes back unconditionally now, and it is *this agent's* —
+/// the client carries the agent id, and the runtime answers from that agent's
+/// own tree. There is no `include_shared` to pass: an agent that loads no
+/// plugins was provisioned with an empty bundle set, so its tree is empty and
+/// the scan naturally returns nothing.
+///
+/// On a transport error, warn and return empty — the feature is additive and
+/// must not sink a run.
 pub async fn scan(
     client: &RuntimeClient,
     workspace: Option<String>,
-    include_shared: bool,
 ) -> (WorkspaceContext, SharedScan) {
     let candidates = INSTRUCTION_CANDIDATES
         .iter()
         .map(|s| s.to_string())
         .collect();
     match client
-        .scan_workspace(
-            workspace,
-            candidates,
-            SKILLS_GLOB.to_string(),
-            include_shared,
-        )
+        .scan_workspace(workspace, candidates, SKILLS_GLOB.to_string())
         .await
     {
         Ok(resp) => {

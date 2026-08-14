@@ -19,8 +19,8 @@
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::executor::{ProvisionStep, StepParam};
 use horsie_models::runtime::{
-    PingRequest, ProvisionResult, ProvisionWorkspaceRequest, RuntimeInboundMessage,
-    RuntimeOutboundMessage,
+    PingRequest, ProvisionAgentRequest, ProvisionResult, ProvisionWorkspaceRequest,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest,
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -116,6 +116,80 @@ async fn ready_arrives_without_anyone_asking_for_provisioning() {
     let ws = tempfile::tempdir().unwrap();
     let _rt = Runtime::spawn(ws.path(), "rt-prov-none").await;
     // `spawn` asserts the handshake; reaching here is the assertion.
+}
+
+/// The fail-closed check. A request naming an agent nobody provisioned is
+/// refused rather than answered emptily.
+///
+/// Answering emptily is the failure mode this exists to prevent: a scan for an
+/// unprovisioned agent finds no skills, which is indistinguishable from an agent
+/// that legitimately selected no bundles. A sequencing bug would then present as
+/// a model that has quietly forgotten how to do its job.
+#[tokio::test]
+async fn a_request_for_an_unprovisioned_agent_is_refused_not_answered_empty() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut rt = Runtime::spawn(ws.path(), "rt-unprovisioned").await;
+
+    rt.send(RuntimeInboundMessage::ScanWorkspace(ScanRequest {
+        call_id: "s1".to_string(),
+        agent_id: "nobody-provisioned-me".to_string(),
+        workspace: None,
+        instruction_candidates: vec!["AGENTS.md".to_string()],
+        skills_glob: ".claude/skills/*/SKILL.md".to_string(),
+    }))
+    .await;
+
+    match rt.next_outbound().await {
+        RuntimeOutboundMessage::RequestRefused(r) => {
+            assert_eq!(r.call_id, "s1");
+            assert!(
+                r.reason.contains("not been provisioned"),
+                "the refusal has to name the cause: {}",
+                r.reason
+            );
+        }
+        RuntimeOutboundMessage::ScanResult(_) => {
+            panic!("an unprovisioned agent must be refused, not handed an empty scan")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// An agent that selected nothing is still provisioned, and its requests are
+/// answered. "Nothing was asked for" and "nobody asked" must stay distinct.
+#[tokio::test]
+async fn an_agent_provisioned_with_no_bundles_is_served_normally() {
+    let ws = tempfile::tempdir().unwrap();
+    let mut rt = Runtime::spawn(ws.path(), "rt-empty-set").await;
+
+    rt.send(RuntimeInboundMessage::ProvisionAgent(
+        ProvisionAgentRequest {
+            call_id: "p1".to_string(),
+            agent_id: "a1".to_string(),
+            bundles: Vec::new(),
+        },
+    ))
+    .await;
+    assert!(matches!(
+        rt.next_outbound().await,
+        RuntimeOutboundMessage::AgentProvisioned(_)
+    ));
+
+    rt.send(RuntimeInboundMessage::ScanWorkspace(ScanRequest {
+        call_id: "s1".to_string(),
+        agent_id: "a1".to_string(),
+        workspace: None,
+        instruction_candidates: vec!["AGENTS.md".to_string()],
+        skills_glob: ".claude/skills/*/SKILL.md".to_string(),
+    }))
+    .await;
+    match rt.next_outbound().await {
+        RuntimeOutboundMessage::ScanResult(r) => {
+            assert_eq!(r.call_id, "s1");
+            assert!(r.shared_skills.is_empty(), "it selected no bundles");
+        }
+        other => panic!("expected a scan result, got {other:?}"),
+    }
 }
 
 // --- harness ---------------------------------------------------------------

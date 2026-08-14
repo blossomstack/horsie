@@ -304,39 +304,12 @@ impl RuntimeManager {
         // scoped to the same repositories this would have covered, but at the
         // moment of use rather than an hour before it.
 
-        // Resolve the session's selected bundles to fetch refs plus a scoped
-        // token; the runtime reads both from its environment at startup.
-        //
-        // Every vendor participates, including one that cannot provision a
-        // workspace. Bundles are not a workspace: the runtime fetches them over
-        // its own outbound connection into its own plugins dir, which it can do
-        // over a directory it did not create. `horsie connect` announces
-        // `supports_provisioning: false` yet already wires `with_bundles`, so
-        // gating here was the one thing keeping skills off the most common
-        // self-hosted vendor.
-        //
-        // The runtime resolves the overlap with a host `--plugins-dir` library:
-        // fetched bundles win, the host library is the fallback. So selecting
-        // bundles replaces the host library for that session, and selecting
-        // none leaves it in place.
-        if let Some(prov) = self.deps.plugins.as_ref() {
-            let mut names = spec.plugins.clone();
-            if names.is_empty() {
-                names = prov.default_names().await;
-            }
-            if !names.is_empty() {
-                let refs = prov
-                    .resolve(&names)
-                    .await
-                    .map_err(RuntimeError::Provision)?;
-                let manifest = serde_json::to_string(&refs)
-                    .map_err(|e| RuntimeError::Provision(e.to_string()))?;
-                rt_spec.env.push(horsie_models::executor::EnvVar {
-                    name: horsie_models::ENV_PLUGIN_MANIFEST.to_string(),
-                    value: manifest,
-                });
-            }
-        }
+        // No plugin manifest here any more. Bundles are per *agent* now — a
+        // workflow step runs with its own preset's skills — so they travel on
+        // `ProvisionAgent` at agent load rather than being baked into the
+        // runtime's environment at create time. That baking was also why a
+        // vendor whose substrate cannot rewrite a running machine's environment
+        // froze whichever set the session was created with, forever.
 
         Ok(rt_spec)
     }
@@ -1027,14 +1000,17 @@ mod tests {
         }
     }
 
-    /// A vendor that cannot provision a workspace still gets the bundle
-    /// manifest. Bundles are not a workspace: the runtime fetches them over its
-    /// own outbound connection into its own plugins dir, which works over a
-    /// directory it did not create. `horsie connect` announces
-    /// `supports_provisioning: false` and is exactly this case — gating here is
-    /// what used to keep skills off the most common self-hosted vendor.
+    /// The runtime's environment carries no bundle manifest at all.
+    ///
+    /// It used to carry the session's, baked in at create time, which is what
+    /// made every agent in a session share one plugin set. Bundles now travel on
+    /// `ProvisionAgent` at agent load, so a workflow step can run with its own.
+    ///
+    /// The dial token stays, and it is still what authorises the fetch — a
+    /// runtime reaches the artifact store over its own outbound connection with
+    /// the one credential it holds.
     #[tokio::test]
-    async fn a_vendor_that_cannot_provision_still_receives_the_bundle_manifest() {
+    async fn no_bundle_manifest_is_baked_into_the_runtimes_environment() {
         let agent = FakeRuntimeVendor::builder("v")
             .supports_provisioning(false)
             .serve_in_process()
@@ -1059,14 +1035,14 @@ mod tests {
                 .find(|e| e.name == name)
                 .map(|e| e.value.clone())
         };
-        let manifest = env(horsie_models::ENV_PLUGIN_MANIFEST)
-            .expect("a non-provisioning vendor must still be sent the manifest");
         assert!(
-            manifest.contains("hash-of-superpowers"),
-            "the manifest names the selected bundle: {manifest}"
+            !sent
+                .env
+                .iter()
+                .any(|e| e.value.contains("hash-of-superpowers")),
+            "no bundle may be named in the spec: {:?}",
+            sent.env
         );
-        // No bundle credential travels beside it any more: the runtime
-        // authenticates its fetch with the dial token it already holds.
         assert!(
             env(horsie_models::ENV_CONNECT_TOKEN).is_some(),
             "the dial token is what authorizes the fetch now"

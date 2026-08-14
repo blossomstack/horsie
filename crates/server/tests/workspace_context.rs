@@ -51,7 +51,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
         MockTransport::ok("").with_scan(vec![scan_payload()]),
         "test-agent",
     );
-    let (ws, _shared) = scan_workspace(&client, None, false).await;
+    let (ws, _shared) = scan_workspace(&client, None).await;
 
     // Prompt: role first, then a `# Workspaces` block per root, then its skill listing.
     let prompt =
@@ -111,7 +111,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
 #[tokio::test]
 async fn empty_workspace_yields_plain_prompt_but_tools_present() {
     let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent"); // default empty scan
-    let (ws, _shared) = scan_workspace(&client, None, false).await;
+    let (ws, _shared) = scan_workspace(&client, None).await;
     let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws, None, None);
     assert_eq!(prompt.as_deref(), Some("You are a coder."));
     let tb = DefaultToolboxFactory.for_agent(

@@ -217,10 +217,10 @@ mod tests {
         let resp = t
             .scan_workspace(
                 "s1",
+                "a1",
                 None,
                 vec!["AGENTS.md".into()],
                 ".claude/skills/*/SKILL.md".into(),
-                false,
             )
             .await
             .unwrap();

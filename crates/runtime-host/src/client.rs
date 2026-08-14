@@ -411,9 +411,7 @@ mod tests {
         })
         .await;
         assert_tracked("scan_workspace", |c| async move {
-            let _ = c
-                .scan_workspace(None, Vec::new(), "*.md".to_string(), false)
-                .await;
+            let _ = c.scan_workspace(None, Vec::new(), "*.md".to_string()).await;
         })
         .await;
         assert_tracked("run_hooks", |c| async move {
@@ -708,7 +706,6 @@ mod tests {
                 None,
                 vec!["AGENTS.md".into()],
                 ".claude/skills/*/SKILL.md".into(),
-                false,
             )
             .await
             .unwrap();

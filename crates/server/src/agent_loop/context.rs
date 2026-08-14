@@ -516,7 +516,7 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
+                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
                 return match shared.skills.get(requested) {
                     Some(skill) => Ok(ToolOutcome::Result(Value::String(skill_body(skill)))),
                     None => Err(ToolCallError::InvalidInput(format!(
@@ -526,12 +526,9 @@ impl Toolbox for AgentToolbox {
                 };
             }
             let ws_name = self.resolve_workspace(requested_ws)?;
-            let (ws, _) = crate::agent_loop::workspace::scan(
-                &self.runtime_client,
-                Some(ws_name.clone()),
-                false,
-            )
-            .await;
+            let (ws, _) =
+                crate::agent_loop::workspace::scan(&self.runtime_client, Some(ws_name.clone()))
+                    .await;
             let Some(info) = ws.find(&ws_name) else {
                 return Err(ToolCallError::InvalidInput(format!(
                     "workspace '{ws_name}' is not available"
@@ -559,7 +556,7 @@ impl Toolbox for AgentToolbox {
                     ));
                 }
                 let (_, shared) =
-                    crate::agent_loop::workspace::scan(&self.runtime_client, None, true).await;
+                    crate::agent_loop::workspace::scan(&self.runtime_client, None).await;
                 return Ok(ToolOutcome::Result(Value::String(
                     crate::agent_loop::workspace::shared_inspect(
                         &shared.skills,
@@ -567,12 +564,8 @@ impl Toolbox for AgentToolbox {
                     ),
                 )));
             }
-            let (ws, shared) = crate::agent_loop::workspace::scan(
-                &self.runtime_client,
-                filter.clone(),
-                self.use_plugins,
-            )
-            .await;
+            let (ws, shared) =
+                crate::agent_loop::workspace::scan(&self.runtime_client, filter.clone()).await;
             let mut out = crate::agent_loop::workspace::inspect_result(&ws);
             // Append the shared library when listing everything for an opted-in agent.
             if self.use_plugins && filter.is_none() {
