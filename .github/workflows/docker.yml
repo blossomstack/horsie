@@ -1,7 +1,8 @@
 name: Docker
 
-# Builds and publishes the three horsie images to GitHub Container Registry on
-# every push to main and every v* release tag:
+# Builds and publishes the three horsie images to GitHub Container Registry for
+# every push to main and every v* release tag whose CI run went green — ci.yml
+# calls this workflow as its last step:
 #   - ghcr.io/<owner>/horsie                (session server: HTTP/SSE API + web UI)
 #   - ghcr.io/<owner>/horsie-runtime        (sandbox scheduled onto velos)
 #
@@ -17,9 +18,14 @@ name: Docker
 # the tags. The runtime image's arm64 variant is the one velos schedules onto
 # the Apple-Containerization Mac workers.
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
+  # Pushes reach this workflow only through ci.yml, which calls it after every
+  # one of its jobs is green — see the `publish-images` job there. It is not
+  # triggered by `push` directly: it used to be, which meant a red main
+  # published images anyway.
+  #
+  # The `github` context inside a called workflow is the CALLER's, so every
+  # condition below still reads the push's own event and ref.
+  workflow_call:
   pull_request:
     # Every base: see ci.yml — a stacked PR targets its parent, not `main`.
     branches: ["**"]

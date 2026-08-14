@@ -64,7 +64,8 @@ fly secrets set HORSIE_DATABASE_URL=postgres://user:password@host/horsie
 ## Which image tag
 
 All three paths above run `ghcr.io/blossomstack/horsie:latest`, which moves
-with the default branch.
+with the default branch. Images are only published for a commit whose full test
+suite passed, so `latest` never moves to a broken build.
 
 Every build also publishes an immutable `sha-<short>` tag, and a release
 publishes `<version>` and `v<version>`. Pin to one of those if you want an

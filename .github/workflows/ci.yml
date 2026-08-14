@@ -3,6 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags run the full suite too: the publish job below is what builds
+    # and pushes the versioned images, and a tag can be cut from a commit whose
+    # CI never ran or was cancelled.
+    tags: ["v*"]
   pull_request:
     # Every base, not only `main`. A stacked PR targets its parent branch, so
     # gating on `main` gave every PR in a stack but the bottom one *zero* checks
@@ -16,10 +20,13 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded runs on the same ref to save CI minutes.
+# Cancel superseded runs on the same ref to save CI minutes — but only for pull
+# requests. A push run now ends in the image publish, and cancelling that
+# midway can land the per-arch digests in GHCR without ever assembling the
+# manifest list that gives them a tag, leaving blobs nothing points at.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -252,3 +259,33 @@ jobs:
         env:
           HORSIE_E2E_SKIP_BUILD: "1"
         run: ./node_modules/.bin/playwright test
+
+  # The gate. Docker used to publish from its own workflow on the same push,
+  # concurrently with this one, so a red main still shipped images — and ops,
+  # which polls GHCR every 15 minutes and opens a tag-bump PR, pinned
+  # deployments to them. Every job above must be green before anything reaches
+  # the registry.
+  #
+  # Listing the jobs by hand is the only way GitHub expresses "all of them";
+  # a new job added above must be added here too or it silently stops gating.
+  #
+  # docker.yml still owns the build itself, and still gates pull requests on
+  # its own (a no-push build of every image). It is `workflow_call`-only for
+  # pushes now. The `github` context inside a called workflow is the CALLER's,
+  # so its existing conditions still read the right event and ref: `latest`
+  # tracks main, and a `v*` tag still gets its semver tags.
+  publish-images:
+    name: Publish images
+    if: github.event_name == 'push'
+    needs: [check, postgres, cargo-deny, ts-types, docs, web-unit, web-e2e]
+    uses: ./.github/workflows/docker.yml
+    # A called workflow's permissions are capped by the calling job's, so the
+    # full set the publish needs has to be granted here: packages to push,
+    # id-token for keyless cosign signing, attestations for provenance.
+    # No `secrets: inherit`: GITHUB_TOKEN reaches a called workflow on its own,
+    # and it is the only secret docker.yml reads.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
