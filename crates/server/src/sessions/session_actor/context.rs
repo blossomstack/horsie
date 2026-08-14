@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn a_subagent_gets_its_own_runtime_identity() {
-        let client = horsie_runtime_host::RuntimeClient::new(
+        let client = horsie_runtime_host::RuntimeClient::detached(
             horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );

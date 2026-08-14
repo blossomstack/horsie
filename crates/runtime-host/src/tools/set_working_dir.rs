@@ -61,7 +61,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_path() {
         let probe = crate::testkit::TransportProbe::new();
-        let tool = SetWorkingDirTool::new(RuntimeClient::new(
+        let tool = SetWorkingDirTool::new(RuntimeClient::detached(
             MockTransport::ok("/ws/sub").observed_by(&probe),
             "test-agent",
         ));
@@ -76,7 +76,7 @@ mod tests {
     #[tokio::test]
     async fn an_omitted_path_stays_none_for_reset() {
         let probe = crate::testkit::TransportProbe::new();
-        let tool = SetWorkingDirTool::new(RuntimeClient::new(
+        let tool = SetWorkingDirTool::new(RuntimeClient::detached(
             MockTransport::ok("").observed_by(&probe),
             "test-agent",
         ));
@@ -89,7 +89,8 @@ mod tests {
 
     #[test]
     fn spec_shape() {
-        let tool = SetWorkingDirTool::new(RuntimeClient::new(MockTransport::ok(""), "test-agent"));
+        let tool =
+            SetWorkingDirTool::new(RuntimeClient::detached(MockTransport::ok(""), "test-agent"));
         let spec = tool.spec();
         assert_eq!(spec.name, "set_working_dir");
         assert!(spec.input_schema["required"].is_null());

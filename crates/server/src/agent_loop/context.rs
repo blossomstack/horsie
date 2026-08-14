@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn the_toolbox_filters_runtime_tools_to_the_allowlist() {
-        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
+        let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent");
         let tb = DefaultToolboxFactory.for_agent(
             &def(Some(vec!["bash".into()])),
             client,
@@ -703,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_and_inspect_always_present() {
-        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent"); // empty scan
+        let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent"); // empty scan
         let tb = DefaultToolboxFactory.for_agent(
             &def(None),
             client,
@@ -718,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_fetches_live_for_single_workspace_default() {
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("").with_scan(vec![scan_with_skill("october")]),
             "test-agent",
         );
@@ -768,7 +768,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_requires_workspace_when_multiple() {
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("").with_scan(vec![scan_with_skill("october")]),
             "test-agent",
         );
@@ -807,7 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_skill_loads_with_resource_hint_when_opted_in() {
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("")
                 .with_shared_skills(vec![shared_skill()])
                 .with_shared_root("/opt/plugins"),
@@ -842,7 +842,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_skill_rejected_when_opted_out() {
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
             "test-agent",
         );
@@ -866,7 +866,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_includes_shared_section_only_when_opted_in() {
-        let client = RuntimeClient::new(
+        let client = RuntimeClient::detached(
             MockTransport::ok("").with_shared_skills(vec![shared_skill()]),
             "test-agent",
         );

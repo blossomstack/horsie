@@ -314,7 +314,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
 
     // The client a run would hold: bound to the vendor's name, resolved through
     // the same registry the server keeps.
-    let client = RuntimeClient::from_arc(
+    let client = RuntimeClient::from_arc_detached(
         Arc::new(RuntimeVendorTransport::new(
             links.clone(),
             "test-vendor".to_string(),

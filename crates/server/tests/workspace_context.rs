@@ -47,7 +47,7 @@ fn scan_payload() -> WorkspaceScan {
 
 #[tokio::test]
 async fn scan_composes_prompt_and_exposes_skill_tool() {
-    let client = RuntimeClient::new(
+    let client = RuntimeClient::detached(
         MockTransport::ok("").with_scan(vec![scan_payload()]),
         "test-agent",
     );
@@ -110,7 +110,7 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
 
 #[tokio::test]
 async fn empty_workspace_yields_plain_prompt_but_tools_present() {
-    let client = RuntimeClient::new(MockTransport::ok(""), "test-agent"); // default empty scan
+    let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent"); // default empty scan
     let (ws, _shared) = scan_workspace(&client, None, false).await;
     let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws, None, None);
     assert_eq!(prompt.as_deref(), Some("You are a coder."));

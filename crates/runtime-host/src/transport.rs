@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use horsie_models::hooks::HookRecord;
 use horsie_models::runtime::{
-    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, RunHooksRequest,
-    RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse, ServerHookEvent,
-    ToolCall, ToolCallRequest, ToolResult,
+    CancelCallRequest, McpDiscoverRequest, McpDiscoverResponse, McpInvokeRequest, PingRequest,
+    RunHooksRequest, RuntimeInboundMessage, RuntimeOutboundMessage, ScanRequest, ScanResponse,
+    ServerHookEvent, ToolCall, ToolCallRequest, ToolResult,
 };
 use thiserror::Error;
 
@@ -77,7 +77,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a tool call")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a tool call")),
         }
     }
 
@@ -86,6 +87,46 @@ pub trait RuntimeTransport: Send + Sync {
             call_id: call_id.to_string(),
         }))
         .await
+    }
+
+    /// Ask the runtime what it is currently executing.
+    ///
+    /// The only call in this trait with a bound worth acting on. A tool has no
+    /// natural bound — a file read and a twenty-minute build ride the same
+    /// `invoke` — but a ping is answered concurrently by the runtime's
+    /// dispatcher, so one that goes unanswered says something no slow tool ever
+    /// could. The caller supplies the bound; this method just asks.
+    async fn ping(&self, call_id: &str) -> Result<Vec<String>, TransportError> {
+        let reply = self
+            .relay(RuntimeInboundMessage::Ping(PingRequest {
+                call_id: call_id.to_string(),
+            }))
+            .await?;
+        match reply {
+            RuntimeOutboundMessage::Pong(pong) => Ok(pong.in_flight),
+            RuntimeOutboundMessage::Ready(_)
+            | RuntimeOutboundMessage::Provisioning(_)
+            | RuntimeOutboundMessage::ProvisionFailed(_)
+            | RuntimeOutboundMessage::ToolCallResponse(_)
+            | RuntimeOutboundMessage::ScanResult(_)
+            | RuntimeOutboundMessage::HookRecords(_)
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a ping")),
+        }
+    }
+
+    /// Give up waiting for `call_id`, so whoever is awaiting it fails now.
+    ///
+    /// Local only, and that is the whole point: it is what a caller does when the
+    /// runtime cannot be reached at all, where a `cancel` would be published into
+    /// a pipe nothing is reading. A reply that arrives afterwards has no waiter
+    /// and is dropped, which is the behaviour an uncorrelated reply already gets.
+    ///
+    /// Defaulted to nothing, because a transport that keeps no correlation table
+    /// of its own has no wait to abandon — a vendor-relayed transport is answered
+    /// by the vendor link's table, not by one here.
+    async fn abandon(&self, call_id: &str) {
+        let _ = call_id;
     }
 
     /// Scan the selected workspaces (`workspace`: `None` = all, `Some(name)` = one),
@@ -118,7 +159,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::HookRecords(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a workspace scan")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a workspace scan")),
         }
     }
 
@@ -146,7 +188,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::McpTools(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("a hook run")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("a hook run")),
         }
     }
 
@@ -168,7 +211,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
-            | RuntimeOutboundMessage::McpResult(_) => Err(wrong_reply("MCP discovery")),
+            | RuntimeOutboundMessage::McpResult(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("MCP discovery")),
         }
     }
 
@@ -194,7 +238,8 @@ pub trait RuntimeTransport: Send + Sync {
             | RuntimeOutboundMessage::ToolCallResponse(_)
             | RuntimeOutboundMessage::ScanResult(_)
             | RuntimeOutboundMessage::HookRecords(_)
-            | RuntimeOutboundMessage::McpTools(_) => Err(wrong_reply("an MCP tool call")),
+            | RuntimeOutboundMessage::McpTools(_)
+            | RuntimeOutboundMessage::Pong(_) => Err(wrong_reply("an MCP tool call")),
         }
     }
 }
@@ -241,6 +286,7 @@ pub fn inbound_call_id(message: &RuntimeInboundMessage) -> &str {
         RuntimeInboundMessage::RunHooks(req) => &req.call_id,
         RuntimeInboundMessage::McpDiscover(req) => &req.call_id,
         RuntimeInboundMessage::McpInvoke(req) => &req.call_id,
+        RuntimeInboundMessage::Ping(req) => &req.call_id,
     }
 }
 
@@ -254,6 +300,7 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::HookRecords(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::McpTools(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::McpResult(resp) => Some(&resp.call_id),
+        RuntimeOutboundMessage::Pong(resp) => Some(&resp.call_id),
         RuntimeOutboundMessage::Ready(_)
         | RuntimeOutboundMessage::Provisioning(_)
         | RuntimeOutboundMessage::ProvisionFailed(_) => None,

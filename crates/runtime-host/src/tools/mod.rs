@@ -79,7 +79,7 @@ mod tests {
     /// sent to the model on every request, so no runtime tool may grow one back.
     #[test]
     fn no_runtime_tool_advertises_a_workspace_property() {
-        let client = RuntimeClient::new(MockTransport::ok(""), "test-agent");
+        let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent");
         let toolbox = add_runtime_tools(ToolboxImpl::default(), client);
         for spec in toolbox.specs() {
             let has_workspace = spec

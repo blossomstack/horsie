@@ -8,9 +8,9 @@ use crate::transport::{RuntimeTransport, TransportError};
 use async_trait::async_trait;
 use horsie_agentcore::testkit::Script;
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, PluginSkill, RunHooksResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse, ToolError, ToolOutput,
-    ToolResult, WorkspaceScan,
+    McpDiscoverResponse, McpInvokeResponse, PluginSkill, PongResponse, RunHooksResponse,
+    RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse, ToolCall, ToolCallResponse,
+    ToolError, ToolOutput, ToolResult, WorkspaceScan,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Notify;
@@ -131,6 +131,18 @@ pub struct MockTransport {
     /// Hook records every tool response carries back, as a runtime that ran
     /// plugin hooks would report them.
     hooks: Vec<horsie_models::hooks::HookRecord>,
+    /// What a `Pong` reports as executing. Settable after construction, because
+    /// a reconciler test's whole subject is this list changing under it.
+    in_flight: Arc<Mutex<Vec<String>>>,
+    /// When set, a `Ping` never answers — the shape of a runtime whose dispatcher
+    /// is wedged, which no reply and no tool result can be told apart from.
+    swallow_pings: bool,
+    /// Every `Ping` this transport was asked, so a test can prove an idle runtime
+    /// is not polled at all.
+    pings: Arc<Mutex<usize>>,
+    /// Every call a caller gave up waiting for, in order — how a test sees a
+    /// reconciler fail a request rather than merely log about it.
+    abandoned: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -149,7 +161,40 @@ impl MockTransport {
             invocations: Arc::new(Mutex::new(Vec::new())),
             agent_ids: Arc::new(Mutex::new(Vec::new())),
             call_ids: Arc::new(Mutex::new(Vec::new())),
+            in_flight: Arc::new(Mutex::new(Vec::new())),
+            swallow_pings: false,
+            pings: Arc::new(Mutex::new(0)),
+            abandoned: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Every call whoever held this transport gave up waiting for, in order.
+    pub fn abandoned(&self) -> Vec<String> {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The ids a `Pong` from this transport reports, and the handle to change
+    /// them: a reconciler is watching for exactly that change.
+    #[must_use]
+    pub fn in_flight(&self) -> Arc<Mutex<Vec<String>>> {
+        self.in_flight.clone()
+    }
+
+    /// How many pings this transport has been asked.
+    pub fn pings(&self) -> usize {
+        *self.pings.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Never answer a ping — a runtime whose dispatcher is wedged, or a bus that
+    /// stopped carrying its replies. The two are indistinguishable from here,
+    /// which is the point of reconciling rather than probing.
+    #[must_use]
+    pub fn swallowing_pings(mut self) -> Self {
+        self.swallow_pings = true;
+        self
     }
 
     /// Report `hooks` on every tool response, the way a runtime that ran plugin
@@ -389,6 +434,20 @@ impl RuntimeTransport for MockTransport {
                     }),
                 }))
             }
+            RuntimeInboundMessage::Ping(req) => {
+                *self.pings.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+                if self.swallow_pings {
+                    std::future::pending::<()>().await;
+                }
+                Ok(RuntimeOutboundMessage::Pong(PongResponse {
+                    call_id: req.call_id,
+                    in_flight: self
+                        .in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone(),
+                }))
+            }
             // A cancel draws no reply, so relaying one would hang a real
             // transport; a test that does it has a bug worth surfacing.
             RuntimeInboundMessage::CancelCall(_) => Err(TransportError::SendFailed(
@@ -405,6 +464,13 @@ impl RuntimeTransport for MockTransport {
                 .push(req.call_id);
         }
         Ok(())
+    }
+
+    async fn abandon(&self, call_id: &str) {
+        self.abandoned
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(call_id.to_string());
     }
 }
 

@@ -14,7 +14,7 @@
 use crate::runtime_vendor::{RuntimeSpec, WebsocketRuntimeVendor, WorkspaceSpec};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
+    PongResponse, RunHooksResponse, RuntimeInboundMessage, RuntimeOutboundMessage, ScanResponse,
     ToolCallResponse, ToolOutput, ToolResult, WorkspaceScan,
 };
 use horsie_models::runtime_vendor::{
@@ -778,6 +778,16 @@ async fn run_agent<S>(
                             hooks: Vec::new(),
                         }))
                     }
+                    RuntimeInboundMessage::Ping(req) => {
+                        // Answered without touching the gate, which is what a
+                        // real runtime's concurrent dispatch amounts to here: a
+                        // ping must be answerable while a tool call sits blocked
+                        // on that same gate.
+                        Some(RuntimeOutboundMessage::Pong(PongResponse {
+                            call_id: req.call_id,
+                            in_flight: Vec::new(),
+                        }))
+                    }
                     RuntimeInboundMessage::CancelCall(req) => {
                         recorder.record("cancel");
                         recorder
@@ -994,7 +1004,7 @@ mod tests {
             "test-agent".to_string(),
             "rt-1".to_string(),
         );
-        let client = RuntimeClient::from_arc(std::sync::Arc::new(transport), "main-agent");
+        let client = RuntimeClient::from_arc_detached(std::sync::Arc::new(transport), "main-agent");
 
         client
             .invoke(
