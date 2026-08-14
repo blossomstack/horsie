@@ -19,6 +19,7 @@ horsie-llm-providers   = { path = "../llm-providers" }
 horsie-runtime-host    = { path = "../runtime-host" }
 clap              = { version = "4", features = ["derive"] }
 sqlx              = { workspace = true }
+redis             = { workspace = true }
 axum              = { workspace = true }
 hyper             = "1"
 hyper-util        = { version = "0.1", features = ["tokio"] }

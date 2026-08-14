@@ -378,13 +378,30 @@ async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want:
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
-        let got = turns_ended(&messages_page(client, addr, id, "main").await);
-        if got >= want {
+        // A read can answer "no such agent" while a just-restarted server is
+        // still recovering the session, and this loop exists precisely to wait
+        // that out — so an unreadable page is *not ready yet*, never a failure.
+        // Handing it straight to `turns_ended`, which panics on a page with no
+        // entries, made that transient fatal to the one helper written to
+        // survive it.
+        let page = messages_page(client, addr, id, "main").await;
+        let got = page["entries"].is_array().then(|| turns_ended(&page));
+        if let Some(got) = got
+            && got >= want
+        {
             assert_eq!(got, want, "more turns ran than the test expected");
             return;
         }
         if start.elapsed() > deadline {
-            panic!("timed out waiting for {want} finished turns; the agent has finished {got}");
+            match got {
+                Some(got) => panic!(
+                    "timed out waiting for {want} finished turns; the agent has finished {got}"
+                ),
+                None => panic!(
+                    "timed out waiting for {want} finished turns; the agent never became \
+                     readable, last answer: {page}"
+                ),
+            }
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
@@ -2819,7 +2836,23 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
             .then_some(())
     })
     .await;
-    let before = agent.signals();
+    // Only this run's signals, on both sides of the request. The other session
+    // goes cold on the same tick and its offload lands independently — and may
+    // not land at all, since `offload_idle` skips a session still `Running` or
+    // `Provisioning` and the test fires exactly one tick. Comparing whole
+    // signal vectors therefore failed for a reason the assertion then
+    // misreported as "listing woke a run".
+    //
+    // Filtering to `id` is also the property this test is named for: a cold
+    // *run* must survive being listed without its vendor hearing anything.
+    let signals_for_run = |agent: &FakeRuntimeVendor| -> Vec<String> {
+        agent
+            .signals()
+            .into_iter()
+            .filter(|s| s.ends_with(&format!(":{id}")))
+            .collect()
+    };
+    let before = signals_for_run(&agent);
 
     let res = client
         .get(format!("{base}/api/sessions?workflow=e2e-flow"))
@@ -2848,7 +2881,7 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
         "the filter must leave out everything that is not a run of it: {body}"
     );
     assert_eq!(
-        agent.signals(),
+        signals_for_run(&agent),
         before,
         "listing runs woke one, which re-attempts its provision"
     );
@@ -2973,6 +3006,13 @@ async fn a_compacted_session_keeps_every_message_readable() {
 
     let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
     wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    // The reply's text lands several entries before the turn's `TurnEnded`, so
+    // waiting for it is not waiting for the turn. Snapshotting `before` in that
+    // gap counts zero finished turns, which makes the `+ 1` below satisfied by
+    // the *first* turn ending — and the compaction assertion then runs while
+    // the second turn is still in flight, blaming compaction for not having
+    // happened yet.
+    wait_turns(&client, &server.addr, &id, 1).await;
     let before = messages_page(&client, &server.addr, &id, "main").await;
     let count_before = page_messages(&before).len();
     assert!(

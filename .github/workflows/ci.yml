@@ -63,13 +63,21 @@ jobs:
         run: cargo test --locked --workspace --all-features
 
   postgres:
+    # Named for PostgreSQL alone for now because this is a *required* status
+    # check, and the required set is declared elsewhere as infrastructure —
+    # renaming the job without changing that in the same breath leaves a
+    # required check permanently pending and blocks every merge. What it runs
+    # is already broader than the name: the backends a clustered deployment
+    # uses.
     name: Tests (PostgreSQL)
     runs-on: ubuntu-latest
-    # The same suite as `check`, against PostgreSQL instead of SQLite. Every
-    # test that touches storage goes through `db::testing::db()`, which picks
-    # its backend from HORSIE_TEST_POSTGRES_URL — so this is a portability run
-    # over the whole suite, not just the tests written with two backends in
-    # mind. A query that works on SQLite and breaks here fails in whichever
+    # The same suite as `check`, against the services a cluster runs on rather
+    # than the single-node defaults. Every test that touches storage goes
+    # through `db::testing::db()` and every test that touches the bus resolves
+    # one, and both pick their backend from the environment — so this is a
+    # portability run over the whole suite, not just the tests written with two
+    # backends in mind. A query that works on SQLite and breaks here, or a
+    # publish that works in-process and is lost over Redis, fails in whichever
     # test already covers that code path.
     services:
       postgres:
@@ -83,6 +91,15 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      redis:
+        image: redis:8-alpine@sha256:978f0e01593e65eed801f2402944efcd936d43b5027e4908a7897baf88ed6241
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -99,6 +116,10 @@ jobs:
           # Each test creates its own database on this server, so the suite's
           # tests stay isolated from one another.
           HORSIE_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+          # Tests that need two nodes talking to one another skip themselves
+          # without this, so an unset value is a quietly weaker run rather than
+          # a failure — which is exactly why it is set here and nowhere else.
+          HORSIE_TEST_REDIS_URL: redis://127.0.0.1:6379
         run: cargo test --locked --workspace --all-features
 
   cargo-deny:

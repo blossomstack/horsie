@@ -22,6 +22,10 @@ tokio-stream      = { version = "0.1", features = ["sync"] }
 # self-hosted server behind a private CA works once that CA is trusted here.
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 futures-util      = "0.3"
+# The bus a clustered deployment publishes through. Default features off: the
+# defaults pull a synchronous connection stack this never uses, and everything
+# here goes through the async multiplexed client on tokio.
+redis             = { version = "1.5", default-features = false, features = ["tokio-comp"] }
 uuid              = { version = "1", features = ["v4", "v5", "serde"] }
 rand              = "0.10"
 argon2            = "0.5"
