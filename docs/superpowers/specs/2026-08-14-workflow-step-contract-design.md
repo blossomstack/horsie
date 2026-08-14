@@ -64,7 +64,7 @@ struct StepField {
     name: String,
     type: StepFieldType,
     description: String,
-    required: Option<Bool>,
+    required: Option<bool>,
 }
 
 struct WorkflowStepDef {
@@ -76,7 +76,7 @@ struct WorkflowStepDef {
     /// Extra result fields, beyond `outcome` and `description`.
     fields: Option<Vec<StepField>>,
     /// Grants this step the `ask_user` tool. Default false.
-    interactive: Option<Bool>,
+    interactive: Option<bool>,
     transitions: Option<Vec<WorkflowTransition>>,
     max_iterations: Option<u32>,
     max_retries: Option<u32>,
@@ -190,9 +190,13 @@ Deleted from agentcore: `handoff_tool`, `force_handoff_choice`,
 Deleted from the server: `AgentParams::{has_output_schema, allow_ask_user,
 allow_timers, optional_handoff_tool}`, `handoff_tool()`, `handoff_tools()`,
 `AgentPlan::handoff_tool`, `conclude_tool_spec`, `CONCLUDE_TOOL`,
-`classify_conclusion`, `Conclusion::Park`, `park_or_resume`,
-`StepConcludeToolbox`, and the "this tool is terminal and is not executed" error
-arms — being dispatched is the mechanism now, not the bug.
+`classify_conclusion`, `Conclusion::Park` and `StepConcludeToolbox`, and the
+"this tool is terminal and is not executed" error arms — being dispatched is the mechanism now, not the bug.
+
+`park_or_resume` is kept but re-keyed: it no longer answers a `park`
+conclusion, it answers a turn that ended with text while timers were armed. Its
+"parked with no active timers" failure branch goes away — that case is now the
+stuck turn, and it nudges rather than killing the agent.
 
 **Validation moves into the tool.** `submit_result::execute` checks its own
 input — required fields present, `outcome` within the declared enum — and
