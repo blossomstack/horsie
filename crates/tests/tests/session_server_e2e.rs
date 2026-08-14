@@ -1493,7 +1493,15 @@ async fn last_event_id_replay_is_gap_free() {
     send_message(&client, &server.addr, &id, "three").await;
     let streamed = live.await.unwrap();
 
-    let all_ids: Vec<String> = streamed.iter().filter_map(|e| e.id.clone()).collect();
+    // Journaled entries only. A live stream may also carry `N.M` cursors —
+    // positions *inside* a message, emitted as it is generated — and those are
+    // unjournaled by design, so a backfill served from the agent's state can
+    // never contain one. Comparing them would assert that a reconnect replays
+    // a partial message, which is the opposite of what this stream promises.
+    // Whether one lands inside the sampled window is pure timing, and it does
+    // land on a busy runner.
+    let journaled = |e: &Ev| -> Option<String> { e.id.clone().filter(|i| !i.contains('.')) };
+    let all_ids: Vec<String> = streamed.iter().filter_map(journaled).collect();
     assert!(
         all_ids.len() >= 2,
         "the turn must append at least a user and an assistant message: {all_ids:?}"
@@ -1510,10 +1518,10 @@ async fn last_event_id_replay_is_gap_free() {
         .cloned()
         .collect();
     let after = collect_sse(&client, &url, Some(&mid), |evs| {
-        evs.iter().filter_map(|e| e.id.clone()).count() >= expected_tail.len()
+        evs.iter().filter_map(journaled).count() >= expected_tail.len()
     })
     .await;
-    let after_ids: Vec<String> = after.iter().filter_map(|e| e.id.clone()).collect();
+    let after_ids: Vec<String> = after.iter().filter_map(journaled).collect();
     assert_eq!(
         after_ids, expected_tail,
         "reconnect must resume exactly after the cursor"
