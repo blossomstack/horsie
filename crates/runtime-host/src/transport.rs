@@ -37,6 +37,20 @@ pub trait RuntimeTransport: Send + Sync {
     /// today, and a caller that is tearing a turn down must not block on it.
     async fn send_oneway(&self, message: RuntimeInboundMessage) -> Result<(), TransportError>;
 
+    /// Resolves once this runtime can no longer be reached.
+    ///
+    /// The unifying signal for a runtime going away, whatever noticed first: a
+    /// vendor link reporting a state change, a WebSocket closing, or a
+    /// substrate that reported a dead machine.
+    ///
+    /// Defaulted to *never*, which is the honest answer for a transport that
+    /// tracks nothing. Saying "I cannot tell you" costs a parked task; saying
+    /// "it is dead" costs a live runtime, since whoever holds the transport
+    /// drops it. A transport with a real signal overrides this.
+    async fn closed(&self) {
+        std::future::pending().await
+    }
+
     /// `agent_id` keys the runtime's per-agent cwd/env state. It is a required
     /// parameter rather than transport state so the single place that builds a
     /// [`ToolCallRequest`] cannot omit it — an unkeyed call would share mutable
@@ -220,5 +234,27 @@ pub fn outbound_call_id(message: &RuntimeOutboundMessage) -> Option<&str> {
         RuntimeOutboundMessage::Ready(_)
         | RuntimeOutboundMessage::Provisioning(_)
         | RuntimeOutboundMessage::ProvisionFailed(_) => None,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::MockTransport;
+
+    /// A transport that tracks nothing must never claim its runtime died.
+    ///
+    /// Saying "I cannot tell you" costs a parked task; saying "it is dead"
+    /// costs a live runtime, because whoever holds the transport drops it.
+    #[tokio::test]
+    async fn a_transport_that_tracks_nothing_never_reports_a_closure() {
+        let transport = MockTransport::ok("");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), transport.closed())
+                .await
+                .is_err(),
+            "an untracked transport must not resolve `closed`"
+        );
     }
 }
