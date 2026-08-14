@@ -32,7 +32,7 @@ const _: () = assert!(TOOL_PAGE_DEFAULT < crate::http::messages::PAGE_DEFAULT);
 /// The main agent, when a caller names no other.
 const MAIN_AGENT: &str = "main";
 
-#[derive(serde::Deserialize, schemars::JsonSchema)]
+#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
 pub struct ListSessions {
     /// Only runs of this workflow.
     pub workflow: Option<String>,
@@ -175,7 +175,12 @@ impl Resource for Sessions {
     }
 }
 
-async fn list(
+/// The session list, exactly as `GET /api/sessions` answers it.
+///
+/// `pub(crate)` because the live feed sends this same projection: a frame that
+/// filtered or ordered differently from the route would have a reader replace
+/// its list with a set it could never have fetched.
+pub(crate) async fn list(
     services: &UserServices,
     input: ListSessions,
 ) -> Result<ListSessionsResponse, ControlError> {

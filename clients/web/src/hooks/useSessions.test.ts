@@ -1,8 +1,8 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import type { ForkView, ListSessionsResponse } from "../api/types";
+import type { ForkView, ListSessionsResponse, SessionSummary } from "../api/types";
 import { SessionStatusKind } from "../api/types";
-import { applyGlobalEvent, qk } from "./useSessions";
+import { applySessionList, qk } from "./useSessions";
 
 vi.mock("../api/client", () => ({ api: { sessions: {} } }));
 
@@ -16,83 +16,85 @@ function fork(id: string, title?: string): ForkView {
   };
 }
 
-function listWith(forks: ForkView[]): ListSessionsResponse {
+function session(id: string, over: Partial<SessionSummary> = {}): SessionSummary {
   return {
-    sessions: [
-      {
-        id: "s1",
-        status: SessionStatusKind.Idle,
-        createdAt: 1,
-        annotations: [],
-        forks,
-      },
-    ],
+    id,
+    status: SessionStatusKind.Idle,
+    createdAt: 1,
+    annotations: [],
+    forks: [],
+    ...over,
   };
 }
 
-describe("a ForksChanged frame", () => {
-  it("puts a new fork into the session list without a refetch", () => {
+function list(...sessions: SessionSummary[]): ListSessionsResponse {
+  return { sessions };
+}
+
+describe("a session-list frame", () => {
+  it("is taken as the whole truth, not merged into what is held", () => {
+    // The property that makes a missed frame harmless: whatever arrives is the
+    // list, so a reader cannot end up holding a half-applied change.
     const client = new QueryClient();
-    client.setQueryData(qk.sessions, listWith([]));
+    client.setQueryData(qk.sessions, list(session("s1"), session("s2")));
+
+    applySessionList(client, list(session("s2", { name: "renamed" })));
+
+    const held = client.getQueryData<ListSessionsResponse>(qk.sessions);
+    expect(held?.sessions.map((s) => s.id)).toEqual(["s2"]);
+    expect(held?.sessions[0].name).toBe("renamed");
+  });
+
+  it("carries a new fork without a refetch", () => {
+    // What the three per-field frames existed to do, now falling out of the
+    // list itself: no invalidation, so no round trip.
+    const client = new QueryClient();
+    client.setQueryData(qk.sessions, list(session("s1")));
     const invalidate = vi.spyOn(client, "invalidateQueries");
 
-    applyGlobalEvent(client, {
-      type: "ForksChanged",
-      value: { sessionId: "s1", forks: [fork("f1", "The other direction")] },
-    });
+    applySessionList(
+      client,
+      list(session("s1", { forks: [fork("f1", "The other direction")] })),
+    );
 
-    const list = client.getQueryData<ListSessionsResponse>(qk.sessions);
-    expect(list?.sessions[0].forks).toEqual([fork("f1", "The other direction")]);
+    const held = client.getQueryData<ListSessionsResponse>(qk.sessions);
+    expect(held?.sessions[0].forks).toEqual([fork("f1", "The other direction")]);
     expect(invalidate).not.toHaveBeenCalled();
   });
 
-  it("replaces the roster rather than merging into it", () => {
+  it("carries a session it has never seen", () => {
+    // Previously this needed a refetch, because a delta about an unknown
+    // session had nothing to attach to.
     const client = new QueryClient();
-    client.setQueryData(qk.sessions, listWith([fork("f1"), fork("f2")]));
-
-    applyGlobalEvent(client, {
-      type: "ForksChanged",
-      value: { sessionId: "s1", forks: [fork("f2")] },
-    });
-
-    const list = client.getQueryData<ListSessionsResponse>(qk.sessions);
-    expect(list?.sessions[0].forks.map((f) => f.id)).toEqual(["f2"]);
-  });
-
-  it("refetches the list when the session is not in it yet", () => {
-    const client = new QueryClient();
-    client.setQueryData(qk.sessions, listWith([]));
+    client.setQueryData(qk.sessions, list());
     const invalidate = vi.spyOn(client, "invalidateQueries");
 
-    applyGlobalEvent(client, {
-      type: "ForksChanged",
-      value: { sessionId: "unknown", forks: [fork("f1")] },
-    });
+    applySessionList(client, list(session("brand-new")));
 
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: qk.sessions });
+    const held = client.getQueryData<ListSessionsResponse>(qk.sessions);
+    expect(held?.sessions.map((s) => s.id)).toEqual(["brand-new"]);
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it("updates an open session detail too", () => {
+    // So a session's own page cannot disagree with its row in the sidebar.
     const client = new QueryClient();
-    client.setQueryData(qk.sessions, listWith([]));
-    client.setQueryData(qk.session("s1"), {
-      session: {
-        id: "s1",
-        status: SessionStatusKind.Idle,
-        createdAt: 1,
-        annotations: [],
-        forks: [],
-      },
-    });
+    client.setQueryData(qk.sessions, list(session("s1")));
+    client.setQueryData(qk.session("s1"), { session: session("s1") });
 
-    applyGlobalEvent(client, {
-      type: "ForksChanged",
-      value: { sessionId: "s1", forks: [fork("f1")] },
-    });
+    applySessionList(client, list(session("s1", { forks: [fork("f1")] })));
 
-    const detail = client.getQueryData<{
-      session: { forks: ForkView[] };
-    }>(qk.session("s1"));
-    expect(detail?.session.forks.map((f) => f.id)).toEqual(["f1"]);
+    const detail = client.getQueryData<{ session: SessionSummary }>(
+      qk.session("s1"),
+    );
+    expect(detail?.session.forks).toEqual([fork("f1")]);
+  });
+
+  it("leaves a detail it holds nothing for alone", () => {
+    // Writing one would put a session into the cache that no query asked for.
+    const client = new QueryClient();
+    applySessionList(client, list(session("s1")));
+
+    expect(client.getQueryData(qk.session("s1"))).toBeUndefined();
   });
 });

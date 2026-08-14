@@ -107,22 +107,14 @@ impl ActorFixture {
         session
     }
 
-    /// Everything this account's sessions publish about themselves from now on.
-    /// What a supervisor stand-in used to be watched for.
-    pub(super) async fn reports(&self) -> ReportedStatuses {
-        let seen: ReportedStatuses = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut rx = self.node.services().await.global_events.subscribe();
-        let sink = seen.clone();
-        tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                if let horsie_models::session::GlobalSessionEvent::StatusChanged(status) = event {
-                    sink.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(status.status);
-                }
-            }
-        });
-        seen
+    /// Where this account's session list stands right now.
+    ///
+    /// What a supervisor stand-in used to be watched for. A session reporting
+    /// its status is what moves this, so "did it report?" is "did this move?".
+    /// The counter replaced a broadcast of every status in order — nothing here
+    /// needed the order, only that something arrived.
+    pub(super) async fn list_revision(&self) -> crate::sessions::Revision {
+        *self.node.services().await.revisions.list().borrow()
     }
 }
 
@@ -207,21 +199,22 @@ pub(super) async fn fixture_on(
 }
 
 /// Every status a session published about itself, in order.
-pub(super) type ReportedStatuses =
-    Arc<std::sync::Mutex<Vec<horsie_models::session::SessionStatusKind>>>;
-
 /// Poll until the session has reported anything at all (2s cap).
+/// Wait for the session list to move past `from`.
+///
+/// Returns whether it did, rather than what it became: the caller is asking
+/// whether the session said anything at all.
 pub(super) async fn wait_for_report(
-    seen: &ReportedStatuses,
-) -> Vec<horsie_models::session::SessionStatusKind> {
+    fixture: &ActorFixture,
+    from: crate::sessions::Revision,
+) -> bool {
     for _ in 0..200 {
-        let got = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        if !got.is_empty() {
-            return got;
+        if fixture.list_revision().await != from {
+            return true;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    Vec::new()
+    false
 }
 
 pub(super) fn answer(id: &str, text: &str) -> AskAnswer {

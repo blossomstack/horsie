@@ -383,11 +383,11 @@ mod tests {
         .await;
         drop(session);
 
-        let seen = f.reports().await;
+        let before = f.list_revision().await;
         f.node.restart().await;
         let _revived = f.start(id, actor_spec_fixture()).await;
         assert!(
-            !wait_for_report(&seen).await.is_empty(),
+            wait_for_report(&f, before).await,
             "a loaded session must report a status, repairs or not"
         );
     }

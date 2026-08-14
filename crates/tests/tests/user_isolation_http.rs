@@ -272,33 +272,32 @@ async fn the_same_vendor_name_in_two_accounts_is_two_runtimes() {
     f.shutdown().await;
 }
 
-/// `/api/events` carries session titles and status transitions. One channel per
-/// account, so there is no path between them for a filter to have to police.
+/// `/api/events` reports one account's session list and never another's.
+///
+/// One revision per account, so there is no path between them for a filter to
+/// have to police. The counter replaced a per-account broadcast channel; the
+/// isolation argument is unchanged and so is this test's shape — two objects,
+/// not one object and a scope check.
 #[tokio::test]
-async fn the_global_event_stream_carries_only_its_own_accounts_frames() {
-    use horsie_models::session::{GlobalSessionEvent, GlobalSessionTitleEvent};
-
+async fn the_global_event_stream_carries_only_its_own_accounts_changes() {
     let f = fixture().await;
-    let watching_b = f.services(&f.b).await.global_events.subscribe();
-    let mut watching_a = f.services(&f.a).await.global_events.subscribe();
+    let a = f.services(&f.a).await;
+    let b = f.services(&f.b).await;
 
-    f.services(&f.a)
-        .await
-        .global_events
-        .send(GlobalSessionEvent::TitleChanged(GlobalSessionTitleEvent {
-            session_id: "s-1".into(),
-            name: "a's private title".into(),
-        }))
-        .expect("a subscriber is listening");
+    let a_before = *a.revisions.list().borrow();
+    let b_before = *b.revisions.list().borrow();
 
-    match watching_a.try_recv() {
-        Ok(GlobalSessionEvent::TitleChanged(e)) => assert_eq!(e.name, "a's private title"),
-        other => panic!("the owner must see their own frame, got {other:?}"),
-    }
+    create_session(&f, &f.a).await;
+
+    assert_ne!(
+        *a.revisions.list().borrow(),
+        a_before,
+        "the owner's list must move"
+    );
     assert_eq!(
-        watching_b.len(),
-        0,
-        "another account's stream must be empty, not filtered"
+        *b.revisions.list().borrow(),
+        b_before,
+        "another account's list must not move, not merely be filtered"
     );
 
     f.shutdown().await;
