@@ -1206,6 +1206,7 @@ pub(super) fn catalog_provider(
         runtimes: f.deps.runtimes.provider(
             id.to_string(),
             "i1".to_string(),
+            false,
             "mock".to_string(),
             crate::sessions::spec::SessionSpec::for_vendor("mock"),
         ),
@@ -1308,6 +1309,7 @@ pub(super) fn typed_provider(
         runtimes: f.deps.runtimes.provider(
             id.to_string(),
             "i1".to_string(),
+            false,
             "mock".to_string(),
             crate::sessions::spec::SessionSpec::for_vendor("mock"),
         ),
@@ -1496,6 +1498,7 @@ impl crate::runtime_vendor::RuntimeVendor for BootingVendor {
         &self,
         runtime_id: &str,
         _: &horsie_models::runtime_vendor::RuntimeSpec,
+        _provisioning: bool,
         progress: horsie_runtime_host::RuntimeProgressSink,
     ) -> Result<horsie_runtime_host::RuntimeProgress, crate::runtime_vendor::RuntimeVendorError>
     {

@@ -62,11 +62,12 @@ impl BusTransport {
     /// simply not exist.
     pub async fn open(
         bus: Arc<dyn Bus>,
+        account: &str,
         runtime: &str,
         incarnation: &str,
     ) -> Result<Self, TransportError> {
-        let inbound = topics::runtime_in(bus.clone(), runtime, incarnation);
-        let mut replies = topics::runtime_out(bus, runtime, incarnation)
+        let inbound = topics::runtime_in(bus.clone(), account, runtime, incarnation);
+        let mut replies = topics::runtime_out(bus, account, runtime, incarnation)
             .subscribe()
             .await
             .map_err(|e| TransportError::SendFailed(e.to_string()))?;
@@ -147,6 +148,8 @@ mod tests {
     use horsie_models::runtime::{BashInput, ToolCall, ToolCallResponse, ToolOutput, ToolResult};
     use uuid::Uuid;
 
+    const ACCOUNT: &str = "acct-1";
+
     fn bash() -> ToolCall {
         ToolCall::Bash(BashInput {
             command: "true".to_string(),
@@ -169,11 +172,11 @@ mod tests {
     /// Stand in for the pump: echo a response for whatever arrives on the in
     /// topic, so a relay completes end to end over the two names.
     async fn echo(bus: Arc<dyn Bus>, session: &str, incarnation: &str) {
-        let mut inbound = topics::runtime_in(bus.clone(), session, incarnation)
+        let mut inbound = topics::runtime_in(bus.clone(), ACCOUNT, session, incarnation)
             .subscribe()
             .await
             .unwrap();
-        let out = topics::runtime_out(bus, session, incarnation);
+        let out = topics::runtime_out(bus, ACCOUNT, session, incarnation);
         tokio::spawn(async move {
             while let Some(message) = inbound.recv().await {
                 let call_id = horsie_runtime_host::inbound_call_id(&message).to_string();
@@ -186,7 +189,7 @@ mod tests {
     async fn a_call_is_answered_across_the_two_topics() {
         let bus: Arc<dyn Bus> = Arc::new(MemoryBus::new());
         let session = Uuid::new_v4().to_string();
-        let transport = BusTransport::open(bus.clone(), &session, "1")
+        let transport = BusTransport::open(bus.clone(), ACCOUNT, &session, "1")
             .await
             .unwrap();
         echo(bus, &session, "1").await;
@@ -209,11 +212,11 @@ mod tests {
     async fn a_reply_nobody_is_waiting_for_is_dropped() {
         let bus: Arc<dyn Bus> = Arc::new(MemoryBus::new());
         let session = Uuid::new_v4().to_string();
-        let transport = BusTransport::open(bus.clone(), &session, "1")
+        let transport = BusTransport::open(bus.clone(), ACCOUNT, &session, "1")
             .await
             .unwrap();
 
-        topics::runtime_out(bus.clone(), &session, "1")
+        topics::runtime_out(bus.clone(), ACCOUNT, &session, "1")
             .publish(&answered("a-call-from-a-previous-life", "stale"))
             .await
             .unwrap();
@@ -235,7 +238,7 @@ mod tests {
     async fn a_reply_from_another_incarnation_never_reaches_this_one() {
         let bus: Arc<dyn Bus> = Arc::new(MemoryBus::new());
         let session = Uuid::new_v4().to_string();
-        let transport = BusTransport::open(bus.clone(), &session, "2")
+        let transport = BusTransport::open(bus.clone(), ACCOUNT, &session, "2")
             .await
             .unwrap();
         echo(bus.clone(), &session, "1").await;
@@ -246,6 +249,38 @@ mod tests {
                 .await
                 .is_err(),
             "incarnation 1's echo must not answer incarnation 2's call"
+        );
+    }
+
+    /// And the same fence between accounts. One bus serves the deployment, and a
+    /// runtime id may be a vendor-minted label rather than a UUID — so two
+    /// accounts naming a sandbox `my-laptop` is ordinary, not contrived.
+    #[tokio::test]
+    async fn a_reply_for_another_accounts_runtime_never_reaches_this_one() {
+        let bus: Arc<dyn Bus> = Arc::new(MemoryBus::new());
+        let transport = BusTransport::open(bus.clone(), ACCOUNT, "my-laptop", "1")
+            .await
+            .unwrap();
+
+        // Another account's pump, answering for a runtime of the same name.
+        let mut theirs = topics::runtime_in(bus.clone(), "acct-2", "my-laptop", "1")
+            .subscribe()
+            .await
+            .unwrap();
+        let out = topics::runtime_out(bus, "acct-2", "my-laptop", "1");
+        tokio::spawn(async move {
+            while let Some(message) = theirs.recv().await {
+                let call_id = horsie_runtime_host::inbound_call_id(&message).to_string();
+                let _ = out.publish(&answered(&call_id, "theirs")).await;
+            }
+        });
+
+        let call = transport.invoke("c1", "a1", bash());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), call)
+                .await
+                .is_err(),
+            "another account's sandbox must never answer this account's call"
         );
     }
 }

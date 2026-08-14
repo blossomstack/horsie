@@ -141,13 +141,6 @@ pub struct UserServices {
     /// in. A cloud vendor has nothing to announce itself from, so its row is
     /// the only record it exists; this service is what rebuilds it at boot.
     pub runtime_vendors: Arc<crate::runtime_vendor::RuntimeVendorConfigService>,
-    /// Where this account's runtimes land when they dial `/api/runtime/connect`.
-    ///
-    /// One per account rather than one per server: the dial token names the
-    /// account, so there is no lookup to get wrong, and a transport can never
-    /// be resolved across accounts even if two of them somehow shared a
-    /// runtime id.
-    pub connected_runtimes: Arc<horsie_runtime_host::ConnectedRuntimeRegistry>,
     /// Signs this account's dial-back tokens. See [`OpenedConfig::dial_secret`].
     ///
     /// [`OpenedConfig::dial_secret`]: crate::config::store::OpenedConfig::dial_secret
@@ -224,7 +217,6 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     let connected_vendors = Arc::new(crate::runtime_vendor::RuntimeVendorRegistry::new(
         opened.vendors.clone(),
     ));
-    let connected_runtimes = Arc::new(horsie_runtime_host::ConnectedRuntimeRegistry::new());
     let runtime_vendors = Arc::new(
         crate::runtime_vendor::RuntimeVendorConfigService::new(
             crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
@@ -232,7 +224,6 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             // The registry's own table, so the two publishers of one map can see
             // each other's names rather than silently overwriting them.
             connected_vendors.links(),
-            connected_runtimes.clone(),
         )
         .with_fly_api_base(shared.fly_api_base.clone()),
     );
@@ -246,6 +237,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
             dial_secret: opened.dial_secret.clone(),
             account: user.as_str().to_string(),
+            bus: shared.bus.clone(),
         },
     ));
     let deps = ServerDeps {
@@ -326,7 +318,6 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         workflows,
         connected_vendors,
         runtime_vendors,
-        connected_runtimes,
         dial_secret: opened.dial_secret.clone(),
     }))
 }

@@ -10,27 +10,21 @@
 //! and `create` is idempotent against a machine that already exists. That is
 //! what lets `RuntimeManager` hold no durable state and still recover.
 //!
-//! **A machine is not a runtime.** Fly reports `started` when the VM is up; the
-//! runtime inside it still has to boot, run its provision steps, and dial back.
-//! Only the dial-back means `Ready`, which is why `create` returns `Starting`
-//! and finishes on the progress sink.
+//! **A machine is not a runtime, and this vendor only ever speaks about the
+//! machine.** Fly reports `started` when the VM is up; the runtime inside it
+//! still has to boot, run its provision steps, and dial back — and the dial-back
+//! does not come here. A runtime announces itself on its own topic, which the
+//! acquiring node subscribes to and this vendor cannot see, so the most this
+//! vendor can honestly report is `Starting`. It never returns `Ready`: a pipe
+//! handed back from here would be one held by whichever node happened to run the
+//! create.
 
 use crate::runtime_vendor::runtime_command::{build_runtime_command, workspace_paths};
 use crate::runtime_vendor::{RuntimeVendor, RuntimeVendorError};
 use async_trait::async_trait;
 use horsie_models::runtime_vendor::{RuntimeSpec, RuntimeVendorCapabilities};
-use horsie_runtime_host::{
-    ConnectedRuntimeRegistry, RuntimeEvent, RuntimeProgress, RuntimeProgressSink,
-};
-use std::sync::Arc;
+use horsie_runtime_host::{RuntimeProgress, RuntimeProgressSink};
 use std::time::Duration;
-
-/// How long a runtime has to boot, provision and dial back before its
-/// acquisition is written off.
-///
-/// Matches the vendor protocol's request ceiling rather than a typical HTTP
-/// timeout: a create with `git_checkout` steps legitimately runs for minutes.
-const READY_WINDOW: Duration = Duration::from_secs(900);
 
 /// How long the settings check waits for Fly before calling it unreachable.
 ///
@@ -187,22 +181,14 @@ pub struct FlyRuntimeVendor<A: FlyApi> {
     name: String,
     api: A,
     settings: FlySettings,
-    /// Where this account's runtimes land when they dial back.
-    connected: Arc<ConnectedRuntimeRegistry>,
 }
 
 impl<A: FlyApi> FlyRuntimeVendor<A> {
-    pub fn new(
-        name: String,
-        api: A,
-        settings: FlySettings,
-        connected: Arc<ConnectedRuntimeRegistry>,
-    ) -> Self {
+    pub fn new(name: String, api: A, settings: FlySettings) -> Self {
         Self {
             name,
             api,
             settings,
-            connected,
         }
     }
 
@@ -299,43 +285,6 @@ impl<A: FlyApi> FlyRuntimeVendor<A> {
             mount: volume.map(|id| (id, self.settings.workspace_root.clone())),
         })
     }
-
-    /// Wait for the runtime to dial back, then report `Ready` on the sink.
-    ///
-    /// Spawned only after the calling operation has returned, which is the
-    /// ordering rule the vendor contract requires: the return value is the
-    /// caller's first observation, and nothing may precede it.
-    fn finish_in_background(
-        &self,
-        runtime_id: &str,
-        waiter: tokio::sync::oneshot::Receiver<Result<(), String>>,
-        progress: RuntimeProgressSink,
-    ) {
-        let connected = self.connected.clone();
-        let id = runtime_id.to_string();
-        tokio::spawn(async move {
-            let outcome = tokio::time::timeout(READY_WINDOW, waiter).await;
-            let event = match outcome {
-                Ok(Ok(Ok(()))) => match connected.runtime_transport(&id).await {
-                    Some(transport) => RuntimeProgress::Ready(transport),
-                    None => RuntimeProgress::Gone {
-                        reason: "the runtime announced itself and then vanished".to_string(),
-                    },
-                },
-                Ok(Ok(Err(message))) => RuntimeProgress::Gone { reason: message },
-                Ok(Err(_)) => RuntimeProgress::Gone {
-                    reason: "nothing is waiting for this runtime any more".to_string(),
-                },
-                Err(_) => RuntimeProgress::Gone {
-                    reason: "the runtime never dialed back".to_string(),
-                },
-            };
-            let _ = progress.try_send(RuntimeEvent {
-                runtime_id: id,
-                progress: event,
-            });
-        });
-    }
 }
 
 #[async_trait]
@@ -381,11 +330,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         spec: &RuntimeSpec,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        // Registered BEFORE the machine is asked for. A machine that boots and
-        // dials back faster than this call returns would otherwise find nobody
-        // waiting, and the acquisition would hang until its window expired.
-        let waiter = self.connected.notify_when_ready(runtime_id).await;
-
         let volume = if self.settings.volumes {
             Some(
                 self.api
@@ -399,7 +343,11 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             .create_machine(&self.spec_for(runtime_id, spec, volume)?)
             .await?;
 
-        self.finish_in_background(runtime_id, waiter, progress);
+        // Nothing is waited on here. Whether the runtime came up is the
+        // runtime's own report, announced on its out topic, and the acquiring
+        // node is subscribed to it — this vendor's job ends once the substrate
+        // has accepted the machine.
+        let _ = progress;
         Ok(RuntimeProgress::Starting {
             detail: "the machine is booting".to_string(),
         })
@@ -409,12 +357,14 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         &self,
         runtime_id: &str,
         spec: &RuntimeSpec,
+        // Nothing for this vendor to reconcile. `create_machine` does not return
+        // until Fly has the machine, so an outstanding create is one whose
+        // machine `machine_by_name` already finds — there is no window here in
+        // which "not there yet" and "not there" look alike. velos has that
+        // window, which is what the flag exists for.
+        _provisioning: bool,
         progress: RuntimeProgressSink,
     ) -> Result<RuntimeProgress, RuntimeVendorError> {
-        if let Some(transport) = self.connected.runtime_transport(runtime_id).await {
-            return Ok(RuntimeProgress::Ready(transport));
-        }
-
         let Some(machine) = self.api.machine_by_name(&machine_name(runtime_id)).await? else {
             // Terminal, and deliberately not a create: rebuilding here would
             // silently replace a workspace the user believes still holds work.
@@ -423,7 +373,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             )));
         };
 
-        let waiter = self.connected.notify_when_ready(runtime_id).await;
         // A started machine is a *live* runtime, always. The runtime is PID 1
         // under `restart: no`, so a machine outlives its runtime process by
         // nothing — and the runtime now re-dials rather than exiting when its
@@ -453,7 +402,7 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         // resuming one needs nothing rebuilt from the spec.
         let _ = spec;
 
-        self.finish_in_background(runtime_id, waiter, progress);
+        let _ = progress;
         Ok(RuntimeProgress::Starting {
             detail: detail.to_string(),
         })
@@ -484,7 +433,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             }
             match self.api.destroy(&machine.id).await {
                 Ok(()) => {
-                    self.connected.remove(runtime_id).await;
                     swept.push(runtime_id.to_string());
                 }
                 Err(e) => failure = Some(e),
@@ -521,7 +469,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
             return Ok(RuntimeProgress::Stopped);
         };
         self.api.stop(&machine.id).await?;
-        self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Stopped)
     }
 
@@ -538,7 +485,6 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
         // gone — a volume survives its machine, and one nobody deletes bills
         // for its full size forever.
         self.delete_volumes_of(runtime_id).await?;
-        self.connected.remove(runtime_id).await;
         Ok(RuntimeProgress::Gone {
             reason: "the owning session was deleted".to_string(),
         })
@@ -554,6 +500,7 @@ impl<A: FlyApi> RuntimeVendor for FlyRuntimeVendor<A> {
 )]
 mod tests {
     use super::*;
+    use horsie_runtime_host::RuntimeEvent;
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -684,20 +631,8 @@ mod tests {
         }
     }
 
-    fn vendor(
-        api: FakeFly,
-        volumes: bool,
-    ) -> (FlyRuntimeVendor<FakeFly>, Arc<ConnectedRuntimeRegistry>) {
-        let connected = Arc::new(ConnectedRuntimeRegistry::new());
-        (
-            FlyRuntimeVendor::new(
-                "fly-iad".to_string(),
-                api,
-                settings(volumes),
-                connected.clone(),
-            ),
-            connected,
-        )
+    fn vendor(api: FakeFly, volumes: bool) -> FlyRuntimeVendor<FakeFly> {
+        FlyRuntimeVendor::new("fly-iad".to_string(), api, settings(volumes))
     }
 
     fn spec() -> RuntimeSpec {
@@ -719,7 +654,7 @@ mod tests {
     async fn create_returns_starting_because_a_machine_is_not_a_runtime() {
         // Fly reports `started` when the VM is up; the runtime inside still has
         // to boot, provision and dial back. Only the dial-back is Ready.
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let (tx, _rx) = sink();
         let progress = v.create("s1", &spec(), tx).await.unwrap();
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
@@ -729,7 +664,7 @@ mod tests {
     async fn a_volume_is_created_before_its_machine() {
         // Fly rejects attaching a volume to an existing machine, so the order
         // is not a preference.
-        let (v, _reg) = vendor(FakeFly::default(), true);
+        let v = vendor(FakeFly::default(), true);
         let (tx, _rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
         assert_eq!(
@@ -743,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_destroys_only_machines_whose_session_is_gone() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default()
                 .with_machine("s1", MachineState::Started)
                 .with_machine("s2", MachineState::Stopped),
@@ -769,7 +704,7 @@ mod tests {
                 state: MachineState::Started,
             },
         ));
-        let (v, _reg) = vendor(fake, false);
+        let v = vendor(fake, false);
         let live = std::collections::HashSet::new();
         assert!(v.sweep_orphans(&live).await.unwrap().is_empty());
         assert!(v.api.calls().is_empty(), "got {:?}", v.api.calls());
@@ -780,7 +715,7 @@ mod tests {
         // The case that makes a naive sweep destructive: a stopped machine and
         // an orphan are indistinguishable on the substrate. Only the server's
         // own list of sessions tells them apart.
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default().with_machine("s1", MachineState::Stopped),
             false,
         );
@@ -793,7 +728,7 @@ mod tests {
     /// billing at its full size, for every runtime, forever.
     #[tokio::test]
     async fn deleting_a_runtime_deletes_its_volume_too() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default()
                 .with_machine("s1", MachineState::Stopped)
                 .with_volume("s1"),
@@ -813,7 +748,7 @@ mod tests {
     /// failed to make the machine leaves one nothing else ever names.
     #[tokio::test]
     async fn a_volume_with_no_machine_is_still_deleted() {
-        let (v, _reg) = vendor(FakeFly::default().with_volume("s1"), true);
+        let v = vendor(FakeFly::default().with_volume("s1"), true);
         let (tx, _rx) = sink();
         v.delete("s1", tx).await.unwrap();
         assert!(v.api.volume_names().is_empty());
@@ -821,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_reclaims_orphaned_volumes_and_keeps_live_ones() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default()
                 .with_machine("s2", MachineState::Stopped)
                 .with_volume("s1")
@@ -841,7 +776,7 @@ mod tests {
     async fn a_sweep_never_touches_a_volume_that_is_not_ours() {
         let fake = FakeFly::default();
         fake.volumes.lock().unwrap().push("pgdata".to_string());
-        let (v, _reg) = vendor(fake, true);
+        let v = vendor(fake, true);
         let live = std::collections::HashSet::new();
         v.sweep_orphans(&live).await.unwrap();
         assert_eq!(v.api.volume_names(), vec!["pgdata".to_string()]);
@@ -853,7 +788,7 @@ mod tests {
     /// kept every other orphan alive indefinitely.
     #[tokio::test]
     async fn a_sweep_that_cannot_destroy_one_machine_still_destroys_the_others() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly {
                 undeletable: vec!["m-s2".to_string()],
                 ..FakeFly::default()
@@ -891,7 +826,7 @@ mod tests {
         // The same channel the process provider uses, so the runtime binary
         // needs no Fly-specific path — and without it a provisioned session
         // would come up with an empty workspace and no error.
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let spec = RuntimeSpec {
             provision: vec![horsie_models::executor::ProvisionStep {
                 name: "checkout".to_string(),
@@ -916,7 +851,7 @@ mod tests {
     /// helper needs the same address, so it is no longer optional.
     #[test]
     fn a_machine_learns_where_to_reach_the_server() {
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let machine = v.spec_for("s1", &spec(), None).unwrap();
         let env: std::collections::HashMap<_, _> = machine.env.into_iter().collect();
         assert_eq!(
@@ -937,7 +872,7 @@ mod tests {
     /// the host.
     #[test]
     fn the_dial_token_rides_the_environment_and_never_argv() {
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let spec = RuntimeSpec {
             env: vec![horsie_models::executor::EnvVar {
                 name: horsie_models::ENV_CONNECT_TOKEN.to_string(),
@@ -961,7 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rejected_create_is_retryable_but_an_unreachable_api_is_not_the_sessions_fault() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly {
                 reject_create: true,
                 ..FakeFly::default()
@@ -974,7 +909,7 @@ mod tests {
             Err(RuntimeVendorError::Provision(_))
         ));
 
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly {
                 unreachable: true,
                 ..FakeFly::default()
@@ -992,10 +927,10 @@ mod tests {
     async fn a_get_for_a_machine_that_does_not_exist_is_gone_not_a_create() {
         // Rebuilding here would silently replace a workspace the user believes
         // still holds their work.
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let (tx, _rx) = sink();
         assert!(matches!(
-            v.get("s1", &spec(), tx).await,
+            v.get("s1", &spec(), false, tx).await,
             Err(RuntimeVendorError::Gone(_))
         ));
         assert!(v.api.calls().is_empty(), "a gone runtime must not be built");
@@ -1007,12 +942,12 @@ mod tests {
         // drops, so a started machine is a live runtime mid-retry — this server
         // restarted, or the network blinked. Bouncing it would kill a runtime
         // seconds from reconnecting and take its in-flight work with it.
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default().with_machine("s1", MachineState::Started),
             false,
         );
         let (tx, _rx) = sink();
-        let progress = v.get("s1", &spec(), tx).await.unwrap();
+        let progress = v.get("s1", &spec(), false, tx).await.unwrap();
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
         assert!(
             v.api.calls().is_empty(),
@@ -1023,12 +958,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_get_for_a_stopped_machine_starts_it() {
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default().with_machine("s1", MachineState::Stopped),
             false,
         );
         let (tx, _rx) = sink();
-        v.get("s1", &spec(), tx).await.unwrap();
+        v.get("s1", &spec(), false, tx).await.unwrap();
         assert_eq!(v.api.calls(), vec!["start:m-s1".to_string()]);
     }
 
@@ -1039,12 +974,12 @@ mod tests {
         // 'created'`. A fresh machine sits in `created` for about six seconds,
         // `parse_state` maps that to `Other`, and `get` used to group `Other`
         // with `Stopped` and start it — which Fly rejects, every time.
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly::default().with_machine("s1", MachineState::Other),
             false,
         );
         let (tx, _rx) = sink();
-        let progress = v.get("s1", &spec(), tx).await.unwrap();
+        let progress = v.get("s1", &spec(), false, tx).await.unwrap();
         assert!(matches!(progress, RuntimeProgress::Starting { .. }));
         assert!(
             v.api.calls().is_empty(),
@@ -1057,7 +992,7 @@ mod tests {
     async fn hibernating_a_runtime_with_no_machine_is_not_an_error() {
         // Advisory: a vendor that has nothing to stop has already achieved what
         // was asked.
-        let (v, _reg) = vendor(FakeFly::default(), false);
+        let v = vendor(FakeFly::default(), false);
         let (tx, _rx) = sink();
         assert!(matches!(
             v.hibernate("s1", tx).await.unwrap(),
@@ -1066,8 +1001,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_destroys_the_machine_and_forgets_the_runtime() {
-        let (v, _reg) = vendor(
+    async fn deleting_destroys_the_machine() {
+        let v = vendor(
             FakeFly::default().with_machine("s1", MachineState::Started),
             false,
         );
@@ -1080,20 +1015,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_runtime_that_never_dials_back_is_reported_gone_rather_than_hanging() {
-        // A session parked forever on a create is indistinguishable from a
-        // deadlock, so the window has to end in an answer.
-        let (v, reg) = vendor(FakeFly::default(), false);
+    async fn a_create_says_nothing_further_because_the_dial_back_is_not_its_news() {
+        // This used to end in `Gone` after a dial-back window of its own, driven
+        // by a waiter table this vendor consulted on whichever node ran the
+        // create. There is no such window here any more: whether the runtime came
+        // up is the runtime's own announcement on its topic, and the acquisition
+        // subscribed to it owns the deadline (see the manager's
+        // `an_acquisition_told_nothing_by_its_vendor_waits_for_the_runtime_itself`).
+        //
+        // So what is asserted is the silence, deliberately: an empty sink, rather
+        // than a `Gone` invented from a timeout this vendor no longer has.
+        let v = vendor(FakeFly::default(), false);
         let (tx, mut rx) = sink();
         v.create("s1", &spec(), tx).await.unwrap();
-        reg.fail_pending("s1", "it died".to_string()).await;
-
-        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("an outcome must arrive")
-            .expect("the sink must stay open");
-        assert_eq!(event.runtime_id, "s1");
-        assert!(matches!(event.progress, RuntimeProgress::Gone { .. }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rx.recv())
+                .await
+                .expect("the sink must be released rather than held open")
+                .is_none(),
+            "this vendor has nothing to say about a machine Fly already accepted"
+        );
     }
 
     #[test]
@@ -1103,7 +1044,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_preflight_lists_the_apps_machines_and_creates_nothing() {
-        let (v, _reg) = vendor(FakeFly::default(), true);
+        let v = vendor(FakeFly::default(), true);
         assert!(v.preflight().await.is_ok());
         assert!(
             v.api.calls().is_empty(),
@@ -1116,7 +1057,7 @@ mod tests {
     async fn a_refused_listing_is_the_configurations_own_fault() {
         // The whole point: a bad token and an app that does not exist both come
         // back from this one call, and both are terminal — no retry fixes them.
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly {
                 reject_list: true,
                 ..FakeFly::default()
@@ -1139,7 +1080,7 @@ mod tests {
         // The distinction the caller acts on: refusing to store a vendor
         // because Fly is having an outage would be worse than storing one that
         // may be wrong.
-        let (v, _reg) = vendor(
+        let v = vendor(
             FakeFly {
                 unreachable: true,
                 ..FakeFly::default()

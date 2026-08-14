@@ -246,7 +246,7 @@ async fn get_after_create_returns_a_runtime() {
         .expect("create");
     agent
         .link
-        .get("rt-1", &agent.spec().to_wire(), sink())
+        .get("rt-1", &agent.spec().to_wire(), false, sink())
         .await
         .expect("get after create");
 }
@@ -256,7 +256,7 @@ async fn get_without_create_is_gone_and_provisions_nothing() {
     let (_machine, agent) = start_agent(None).await;
     let err = agent
         .link
-        .get("rt-unknown", &agent.spec().to_wire(), sink())
+        .get("rt-unknown", &agent.spec().to_wire(), false, sink())
         .await
         .expect_err("a get must never provision");
     assert!(
@@ -268,7 +268,7 @@ async fn get_without_create_is_gone_and_provisions_nothing() {
     assert!(matches!(
         agent
             .link
-            .get("rt-unknown", &agent.spec().to_wire(), sink())
+            .get("rt-unknown", &agent.spec().to_wire(), false, sink())
             .await,
         Err(RuntimeVendorError::Gone(_))
     ));
@@ -287,7 +287,7 @@ async fn hibernate_is_advisory_and_this_agent_declines_it() {
     // runtime — and the session it belongs to is still resumable.
     agent
         .link
-        .get("rt-1", &agent.spec().to_wire(), sink())
+        .get("rt-1", &agent.spec().to_wire(), false, sink())
         .await
         .expect("get after an advisory hibernate");
 }
@@ -428,7 +428,7 @@ async fn a_respawnable_runtime_outlives_the_agent_process() {
     let second = machine.start(None, true).await;
     second
         .link
-        .get("rt-1", &second.spec().to_wire(), sink())
+        .get("rt-1", &second.spec().to_wire(), false, sink())
         .await
         .expect("a get after an agent restart must rebuild, not report it gone");
     assert!(second.is_live("rt-1").await);
@@ -451,7 +451,7 @@ async fn a_non_respawnable_agent_still_reports_it_gone_after_a_restart() {
     let second = machine.start(None, false).await;
     let err = second
         .link
-        .get("rt-1", &second.spec().to_wire(), sink())
+        .get("rt-1", &second.spec().to_wire(), false, sink())
         .await
         .expect_err("a provisioning vendor must not silently rebuild a workspace");
     assert!(matches!(err, RuntimeVendorError::Gone(_)), "{err:?}");
@@ -478,7 +478,7 @@ async fn hibernate_frees_the_process_and_a_get_brings_it_back() {
 
     agent
         .link
-        .get("rt-1", &agent.spec().to_wire(), sink())
+        .get("rt-1", &agent.spec().to_wire(), false, sink())
         .await
         .expect("a get resumes it");
     assert!(agent.is_live("rt-1").await);
@@ -524,7 +524,7 @@ async fn a_get_revives_from_the_spec_it_carries() {
 
     agent
         .link
-        .get("rt-1", &agent.spec().to_wire(), sink())
+        .get("rt-1", &agent.spec().to_wire(), false, sink())
         .await
         .expect("the carried spec is enough to revive it");
     assert!(agent.is_live("rt-1").await);
@@ -549,7 +549,10 @@ async fn get_during_an_in_flight_create_waits_for_it() {
 
     let getting = {
         let link = agent.link.clone();
-        tokio::spawn(async move { link.get("rt-1", &agent.spec().to_wire(), sink()).await })
+        tokio::spawn(async move {
+            link.get("rt-1", &agent.spec().to_wire(), false, sink())
+                .await
+        })
     };
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(

@@ -888,6 +888,7 @@ mod tests {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
                 "i1".to_string(),
+                false,
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -950,6 +951,7 @@ mod tests {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
                 "i1".to_string(),
+                false,
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -993,6 +995,7 @@ mod tests {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
                 "i1".to_string(),
+                false,
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -1316,6 +1319,7 @@ mod tests {
             runtimes: f.deps.runtimes.provider(
                 id.to_string(),
                 "i1".to_string(),
+                false,
                 "mock".to_string(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),
@@ -1511,6 +1515,7 @@ mod tests {
             runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
                 id.to_string(),
                 "i1".to_string(),
+                false,
                 "mock".into(),
                 crate::sessions::spec::SessionSpec::for_vendor("mock"),
             ),

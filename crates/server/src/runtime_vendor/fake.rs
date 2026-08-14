@@ -1088,9 +1088,14 @@ mod tests {
         )
         .await
         .expect("create");
-        link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
-            .await
-            .expect("get must find the runtime");
+        link.get(
+            "rt-1",
+            &runtime_spec_fixture("main").to_wire(),
+            false,
+            progress,
+        )
+        .await
+        .expect("get must find the runtime");
         assert_eq!(
             agent.signals(),
             vec!["create:rt-1".to_string(), "get:rt-1".to_string()]
@@ -1106,7 +1111,12 @@ mod tests {
         let (progress, _rx) = tokio::sync::mpsc::channel(8);
         let err = agent
             .link()
-            .get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
+            .get(
+                "rt-1",
+                &runtime_spec_fixture("main").to_wire(),
+                false,
+                progress,
+            )
             .await
             .expect_err("a get must never provision");
         assert!(
@@ -1135,9 +1145,14 @@ mod tests {
             .expect("hibernate");
         // Hibernate is advisory; this vendor keeps the runtime, so the session
         // it belongs to is still resumable.
-        link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
-            .await
-            .expect("get after hibernate");
+        link.get(
+            "rt-1",
+            &runtime_spec_fixture("main").to_wire(),
+            false,
+            progress,
+        )
+        .await
+        .expect("get after hibernate");
     }
 
     #[tokio::test]
@@ -1163,8 +1178,13 @@ mod tests {
             let link = link.clone();
             tokio::spawn(async move {
                 let (progress, _rx) = tokio::sync::mpsc::channel(8);
-                link.get("rt-1", &runtime_spec_fixture("main").to_wire(), progress)
-                    .await
+                link.get(
+                    "rt-1",
+                    &runtime_spec_fixture("main").to_wire(),
+                    false,
+                    progress,
+                )
+                .await
             })
         };
         assert!(

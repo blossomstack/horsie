@@ -21,6 +21,13 @@ use std::sync::Arc;
 /// label", and typing this segment more narrowly than the id it names refuses a
 /// legitimate runtime at the door.
 ///
+/// **The account is in the name, and it is load-bearing precisely because a
+/// runtime id is not always a UUID.** One bus serves the whole deployment, so
+/// without this segment two accounts that minted the same vendor label would
+/// share a topic — each one's tool calls reaching the other's sandbox. This is
+/// the guarantee the per-account connected registry used to provide by being
+/// per account; the topic namespace is where it lives now.
+///
 /// The incarnation is in the name and not merely in the session id, so a
 /// sandbox from a previous provision of the same session subscribes to a topic
 /// nobody publishes to and is inert. Without it, two sandboxes claiming one
@@ -28,20 +35,22 @@ use std::sync::Arc;
 #[must_use]
 pub fn runtime_in(
     bus: Arc<dyn Bus>,
+    account: &str,
     runtime: &str,
     incarnation: &str,
 ) -> Topic<RuntimeInboundMessage> {
-    Topic::new(bus, format!("rt:{runtime}:{incarnation}:in"))
+    Topic::new(bus, format!("rt:{account}:{runtime}:{incarnation}:in"))
 }
 
 /// What a runtime sends back: its handshake, and one reply per request.
 #[must_use]
 pub fn runtime_out(
     bus: Arc<dyn Bus>,
+    account: &str,
     runtime: &str,
     incarnation: &str,
 ) -> Topic<RuntimeOutboundMessage> {
-    Topic::new(bus, format!("rt:{runtime}:{incarnation}:out"))
+    Topic::new(bus, format!("rt:{account}:{runtime}:{incarnation}:out"))
 }
 
 #[cfg(test)]
@@ -63,8 +72,8 @@ mod tests {
     fn the_two_directions_of_one_runtime_are_different_topics() {
         let (session, incarnation) = (Uuid::new_v4().to_string(), "1755043200000");
         assert_ne!(
-            runtime_in(bus(), &session, incarnation).name(),
-            runtime_out(bus(), &session, incarnation).name()
+            runtime_in(bus(), "acct-1", &session, incarnation).name(),
+            runtime_out(bus(), "acct-1", &session, incarnation).name()
         );
     }
 
@@ -75,8 +84,8 @@ mod tests {
     fn a_topic_names_the_incarnation_the_session_actually_minted() {
         let session = Uuid::new_v4().to_string();
         assert_eq!(
-            runtime_in(bus(), &session, "1755043200000").name(),
-            format!("rt:{session}:1755043200000:in")
+            runtime_in(bus(), "acct-1", &session, "1755043200000").name(),
+            format!("rt:acct-1:{session}:1755043200000:in")
         );
     }
 
@@ -87,8 +96,8 @@ mod tests {
     fn a_second_incarnation_of_one_session_is_a_different_topic() {
         let session = Uuid::new_v4().to_string();
         assert_ne!(
-            runtime_in(bus(), &session, "1755043200000").name(),
-            runtime_in(bus(), &session, "1755043200001").name()
+            runtime_in(bus(), "acct-1", &session, "1755043200000").name(),
+            runtime_in(bus(), "acct-1", &session, "1755043200001").name()
         );
     }
 
@@ -97,8 +106,21 @@ mod tests {
     fn two_sessions_never_share_a_topic() {
         let incarnation = "1755043200000";
         assert_ne!(
-            runtime_in(bus(), &Uuid::new_v4().to_string(), incarnation).name(),
-            runtime_in(bus(), &Uuid::new_v4().to_string(), incarnation).name()
+            runtime_in(bus(), "acct-1", &Uuid::new_v4().to_string(), incarnation).name(),
+            runtime_in(bus(), "acct-1", &Uuid::new_v4().to_string(), incarnation).name()
+        );
+    }
+
+    /// One bus serves every account, and a runtime id is not always a UUID —
+    /// the dial token admits a vendor-minted label, and two accounts are free
+    /// to mint the same one. Without the account segment they would share a
+    /// topic, and one account's tool calls would reach the other's sandbox.
+    /// This is what the per-account connected registry used to guarantee.
+    #[test]
+    fn two_accounts_that_minted_the_same_runtime_label_do_not_share_a_topic() {
+        assert_ne!(
+            runtime_in(bus(), "acct-1", "my-laptop", "1755043200000").name(),
+            runtime_in(bus(), "acct-2", "my-laptop", "1755043200000").name()
         );
     }
 }

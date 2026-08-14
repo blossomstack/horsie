@@ -20,6 +20,7 @@ mod plugins;
 mod routines;
 pub mod runtime_connect;
 mod runtime_credentials;
+mod runtime_pump;
 mod runtime_vendors;
 mod sse;
 mod vendor_connect;
@@ -2020,34 +2021,51 @@ mod tests {
         addr
     }
 
+    /// Subscribe to a runtime's out topic *before* anything dials, because the
+    /// bus keeps nothing for a subscriber that has not arrived yet.
+    async fn listening_to(
+        state: &AppState,
+        account: &str,
+        runtime: &str,
+    ) -> crate::bus::Reader<horsie_models::runtime::RuntimeOutboundMessage> {
+        crate::bus::topics::runtime_out(state.shared.bus.clone(), account, runtime, "i1")
+            .subscribe()
+            .await
+            .expect("subscribing to a runtime's out topic")
+    }
+
+    /// The runtime is reachable when its announcement reaches its topic — there
+    /// is no registry to consult any more, and that is the point: the acquiring
+    /// node need not be this one.
     #[tokio::test]
-    async fn a_runtime_that_dials_in_is_registered_for_its_own_account() {
+    async fn a_runtime_that_dials_in_is_reachable_on_its_own_topic() {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
         let services = services(&state).await;
+        let account = services.user.as_str().to_string();
         let token = horsie_support::dial_token::mint(
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
-                user_id: services.user.as_str().to_string(),
+                user_id: account.clone(),
                 runtime_id: "s1".to_string(),
                 incarnation: "i1".to_string(),
             },
         );
+        let mut announced = listening_to(&state, &account, "s1").await;
         let addr = serve_state(state).await;
 
         let _ws = dial_runtime(addr, &token, "s1").await.expect("dial");
-        for _ in 0..100 {
-            if services
-                .connected_runtimes
-                .runtime_transport("s1")
-                .await
-                .is_some()
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("the runtime never registered");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), announced.recv())
+            .await
+            .expect("a dialled runtime must announce itself within the window")
+            .expect("the topic must stay open");
+        assert!(
+            matches!(
+                frame,
+                horsie_models::runtime::RuntimeOutboundMessage::Ready(_)
+            ),
+            "expected a handshake on the runtime's out topic, got {frame:?}"
+        );
     }
 
     #[tokio::test]
@@ -2069,27 +2087,39 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = test_state(&tmp).await;
         let services = services(&state).await;
+        let account = services.user.as_str().to_string();
         let token = horsie_support::dial_token::mint(
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
-                user_id: services.user.as_str().to_string(),
+                user_id: account.clone(),
                 runtime_id: "mine".to_string(),
                 incarnation: "i1".to_string(),
             },
         );
+        let mut mine = listening_to(&state, &account, "mine").await;
+        let mut theirs = listening_to(&state, &account, "someone-elses").await;
         let addr = serve_state(state).await;
 
         let _ws = dial_runtime(addr, &token, "someone-elses")
             .await
             .expect("dial");
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // The announcement lands on the topic the *token* names, which bounds the
+        // negative assertion below on something real rather than on a sleep: by
+        // the time `mine` has the frame, the pump has already routed it.
+        let landed = tokio::time::timeout(std::time::Duration::from_secs(5), mine.recv())
+            .await
+            .expect("the token's own runtime must hear the announcement")
+            .expect("the topic must stay open");
+        assert!(matches!(
+            landed,
+            horsie_models::runtime::RuntimeOutboundMessage::Ready(_)
+        ));
         assert!(
-            services
-                .connected_runtimes
-                .runtime_transport("someone-elses")
+            tokio::time::timeout(std::time::Duration::from_millis(200), theirs.recv())
                 .await
-                .is_none(),
-            "a token for 'mine' must not register 'someone-elses'"
+                .is_err(),
+            "a token for 'mine' must not put anything on 'someone-elses' topic"
         );
     }
 
@@ -2124,25 +2154,18 @@ mod tests {
                     incarnation: "i1".to_string(),
                 },
             );
+            let mut announced = listening_to(&state, services.user.as_str(), "s1").await;
             let addr = serve_state(state).await;
 
             let _ws = dial_runtime(addr, &token, "s1")
                 .await
                 .unwrap_or_else(|e| panic!("a dial under {mode:?} must be accepted: {e}"));
-            let mut registered = false;
-            for _ in 0..100 {
-                if services
-                    .connected_runtimes
-                    .runtime_transport("s1")
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), announced.recv())
                     .await
-                    .is_some()
-                {
-                    registered = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            assert!(registered, "the runtime never registered under {mode:?}");
+                    .is_ok_and(|frame| frame.is_some()),
+                "the runtime never reached its topic under {mode:?}"
+            );
         }
     }
 
