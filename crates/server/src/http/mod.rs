@@ -2,22 +2,20 @@
 //! `SessionSupervisor`. All request/response bodies are fluorite wire types.
 
 mod admin;
-mod agents;
+
 mod annotations;
 pub mod auth;
 mod chatgpt;
 mod config;
-mod environments;
 pub mod error;
 pub(crate) mod github;
-mod handlers;
+pub(crate) mod handlers;
 mod marketplaces;
 mod mcp;
 mod memory;
 mod messages;
 mod model_cards;
 mod plugins;
-mod routines;
 pub mod runtime_connect;
 mod runtime_credentials;
 mod runtime_pump;
@@ -289,17 +287,9 @@ pub fn app(state: AppState) -> Router {
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
         )
-        .route(
-            "/api/agents",
-            get(agents::list_agents).post(agents::create_agent),
-        )
-        .route(
-            "/api/agents/{name}",
-            get(agents::get_agent)
-                .put(agents::replace_agent)
-                .delete(agents::delete_agent),
-        )
-        .route("/api/agents/{name}/invoke", post(agents::invoke_agent))
+        // Every JSON management route is mounted from the operation table
+        // instead of listed here, so a new operation cannot exist without one.
+        .merge(crate::control::http::router(&crate::control::operations()))
         .route(
             "/api/runtime-vendors",
             get(runtime_vendors::list_runtime_vendors),
@@ -312,27 +302,6 @@ pub fn app(state: AppState) -> Router {
             "/api/runtime-vendors/{name}/test",
             post(runtime_vendors::test_runtime_vendor),
         )
-        .route(
-            "/api/environments",
-            get(environments::list_environments).post(environments::create_environment),
-        )
-        .route(
-            "/api/environments/{name}",
-            get(environments::get_environment)
-                .put(environments::replace_environment)
-                .delete(environments::delete_environment),
-        )
-        .route(
-            "/api/routines",
-            get(routines::list_routines).post(routines::create_routine),
-        )
-        .route(
-            "/api/routines/{name}",
-            get(routines::get_routine)
-                .put(routines::replace_routine)
-                .delete(routines::delete_routine),
-        )
-        .route("/api/routines/{name}/run", post(routines::run_routine))
         .route(
             "/api/workflows",
             get(workflows::list_workflows).post(workflows::create_workflow),

@@ -43,16 +43,14 @@ pub async fn health() -> impl IntoResponse {
 }
 
 /// Ask the supervisor a question, mapping a closed mailbox to a 500.
+///
+/// The HTTP rendering of [`crate::control::ask`], which both surfaces share.
 pub(crate) async fn ask<T, F>(state: &crate::users::UserServices, make: F) -> Result<T, Api>
 where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> SessionSupervisorCommand,
     T: Send + 'static,
 {
-    state
-        .supervisor
-        .ask(make)
-        .await
-        .map_err(|_| Api::internal("session supervisor unavailable"))
+    crate::control::ask(state, make).await.map_err(Api::from)
 }
 
 pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
