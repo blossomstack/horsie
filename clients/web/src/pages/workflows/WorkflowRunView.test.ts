@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { SessionStatusKind, type WorkflowRunGraph } from "../../api/types";
-import { formatOutput, parkedStep, resumePoint } from "./WorkflowRunView";
+import {
+  formatOutput,
+  parkedStep,
+  resumePoint,
+  retryUnavailable,
+} from "./WorkflowRunView";
 
 /** A two-node run whose second node holds the execution at log index 1. */
 function graph(over: Partial<WorkflowRunGraph> = {}): WorkflowRunGraph {
@@ -89,6 +94,25 @@ describe("resumePoint", () => {
 
   it("is silent while the newest execution is still going", () => {
     expect(resumePoint(graph())).toBeUndefined();
+  });
+});
+
+describe("retryUnavailable", () => {
+  it("keeps all retries disabled while the run is active", () => {
+    expect(retryUnavailable(SessionStatusKind.Running, false)).toBe(true);
+  });
+
+  it("covers a running attempt while the session document catches up", () => {
+    expect(retryUnavailable(SessionStatusKind.Finished, false, graph().nodes[0]?.runs[0])).toBe(
+      true,
+    );
+  });
+
+  it("allows retries once the run has settled", () => {
+    const finished = graph().nodes[0]?.runs[0];
+    if (finished) finished.status = { type: "Concluded", value: {} };
+    expect(retryUnavailable(SessionStatusKind.Finished, false, finished)).toBe(false);
+    expect(retryUnavailable(SessionStatusKind.Finished, true, finished)).toBe(true);
   });
 });
 
