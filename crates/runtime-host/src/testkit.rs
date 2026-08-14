@@ -123,7 +123,8 @@ pub struct MockTransport {
     server_hook_records: Vec<horsie_models::hooks::HookRecord>,
     /// When set, `invoke` waits on this gate before answering.
     invoke_gate: Option<Arc<Notify>>,
-    /// When set, `scan_workspace` and `run_hooks` wait on this gate.
+    /// When set, every server-initiated preparation command — provisioning,
+    /// scans, hooks and MCP discovery — waits on this gate.
     prep_gate: Option<Arc<Notify>>,
     cancels: Arc<Mutex<Vec<String>>>,
     invocations: Arc<Mutex<Vec<ToolCall>>>,
@@ -269,7 +270,7 @@ impl MockTransport {
         t
     }
 
-    /// A transport whose `scan_workspace` and `run_hooks` block until
+    /// A transport whose server-initiated preparation commands block until
     /// `handle` is released — the shape that wedges `provide()` (#61 item 5).
     #[must_use]
     pub fn gated_prep(handle: &BlockHandle) -> Self {
@@ -437,6 +438,13 @@ impl RuntimeTransport for MockTransport {
             // and nothing to call. A test needing plugin MCP drives the real
             // runtime, where the servers actually are.
             RuntimeInboundMessage::McpDiscover(req) => {
+                // Behind the prep gate like the scan: discovery starts a fleet
+                // of server processes and is the slowest thing a session does
+                // before its first turn, so a test that wants to observe
+                // preparation mid-flight wants this one most of all.
+                if let Some(gate) = &self.prep_gate {
+                    gate.notified().await;
+                }
                 Ok(RuntimeOutboundMessage::McpTools(McpDiscoverResponse {
                     call_id: req.call_id,
                     tools: Vec::new(),

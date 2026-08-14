@@ -7,8 +7,10 @@ use horsie_models::runtime::{
     ToolOutput, ToolResult,
 };
 use std::sync::Arc;
-// Still minted for the calls that have no model tool_call_id to borrow —
-// `scan_workspace` and `run_hooks` are server-initiated, not tool calls.
+// Minted for every server-initiated command — provisioning, scans, hooks and
+// MCP discovery have no model `tool_call_id` to borrow. They are still tracked
+// under it: the reconciler cancels any call the runtime reports that nothing
+// here claims, so an untracked id is a live call with a target on its back.
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -273,7 +275,9 @@ impl RuntimeClient {
         include_shared: bool,
     ) -> Result<ScanResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        self.inner
+        self.track(&call_id);
+        let outcome = self
+            .inner
             .scan_workspace(
                 &call_id,
                 workspace,
@@ -281,8 +285,9 @@ impl RuntimeClient {
                 skills_glob,
                 include_shared,
             )
-            .await
-            .map_err(RuntimeCallError::Transport)
+            .await;
+        self.untrack(&call_id);
+        outcome.map_err(RuntimeCallError::Transport)
     }
 
     /// Run every hook matching a server-initiated event.
@@ -299,11 +304,10 @@ impl RuntimeClient {
         event: ServerHookEvent,
     ) -> Result<Vec<HookRecord>, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        let records = self
-            .inner
-            .run_hooks(&call_id, &event)
-            .await
-            .map_err(RuntimeCallError::Transport)?;
+        self.track(&call_id);
+        let outcome = self.inner.run_hooks(&call_id, &event).await;
+        self.untrack(&call_id);
+        let records = outcome.map_err(RuntimeCallError::Transport)?;
         if let Some(sink) = &self.hook_sink
             && !records.is_empty()
         {
@@ -318,10 +322,10 @@ impl RuntimeClient {
         &self,
     ) -> Result<horsie_models::runtime::McpDiscoverResponse, RuntimeCallError> {
         let call_id = Uuid::new_v4().to_string();
-        self.inner
-            .mcp_discover(&call_id)
-            .await
-            .map_err(RuntimeCallError::Transport)
+        self.track(&call_id);
+        let outcome = self.inner.mcp_discover(&call_id).await;
+        self.untrack(&call_id);
+        outcome.map_err(RuntimeCallError::Transport)
     }
 
     /// Call one namespaced plugin MCP tool.
@@ -357,6 +361,80 @@ mod tests {
             command: "true".into(),
             timeout_secs: None,
         })
+    }
+
+    /// Every server-initiated command has to be visible to the reconciler while
+    /// it runs — not just tool calls.
+    ///
+    /// The runtime registers `ScanWorkspace`, `RunHooks` and `McpDiscover` in its
+    /// own in-flight map and reports all of them in a `Pong`. The reconciler
+    /// cancels every id the runtime reports that has no issuer here, as the
+    /// orphan a node restart leaves behind. So a command the client never
+    /// tracked is a *live* call the reconciler cancels out from under its own
+    /// caller — an MCP discovery that starts a fleet of servers, or a
+    /// `SessionStart` hook, killed mid-flight the moment a sibling agent happens
+    /// to have a tool call outstanding on the same runtime.
+    ///
+    /// One assertion per command rather than one for the set, so adding a
+    /// command without deciding whether it is tracked shows up as a missing
+    /// line here.
+    #[tokio::test]
+    async fn every_server_initiated_command_is_tracked_while_it_runs() {
+        assert_tracked("provision_workspace", |c| async move {
+            let _ = c.provision_workspace(Vec::new()).await;
+        })
+        .await;
+        assert_tracked("scan_workspace", |c| async move {
+            let _ = c
+                .scan_workspace(None, Vec::new(), "*.md".to_string(), false)
+                .await;
+        })
+        .await;
+        assert_tracked("run_hooks", |c| async move {
+            let _ = c
+                .run_hooks(ServerHookEvent::SessionStart(
+                    horsie_models::runtime::SessionStartInput {
+                        source: horsie_models::runtime::SessionStartSource::Startup,
+                    },
+                ))
+                .await;
+        })
+        .await;
+        assert_tracked("mcp_discover", |c| async move {
+            let _ = c.mcp_discover().await;
+        })
+        .await;
+    }
+
+    /// Run `call` against a gated transport and assert it is tracked for exactly
+    /// as long as it is in flight.
+    async fn assert_tracked<F, Fut>(label: &str, call: F)
+    where
+        F: FnOnce(RuntimeClient) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let gate = crate::testkit::BlockHandle::new();
+        let in_flight = Arc::new(InFlight::new());
+        let c = RuntimeClient::new(
+            crate::testkit::MockTransport::gated_prep(&gate),
+            "test-agent",
+            in_flight.clone(),
+        );
+
+        let running = tokio::spawn(call(c));
+        // Let it reach the transport and register.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(
+            in_flight.of_agent("test-agent").len(),
+            1,
+            "{label} must be visible to the reconciler while it runs, or it is \
+             cancelled as an orphan"
+        );
+
+        gate.release();
+        let _ = running.await;
+        assert_eq!(in_flight.len(), 0, "{label} must untrack once it answers");
     }
 
     #[tokio::test]

@@ -11,10 +11,10 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use horsie_models::runtime::{
-    McpDiscoverResponse, McpInvokeResponse, PongResponse, ProvisionError, ProvisionOk,
-    ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse, RuntimeInboundMessage,
-    RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse, ToolError, ToolOutput,
-    ToolResult,
+    CancelledResponse, McpDiscoverResponse, McpInvokeResponse, PongResponse, ProvisionError,
+    ProvisionOk, ProvisionResult, ProvisionWorkspaceResponse, RunHooksResponse,
+    RuntimeInboundMessage, RuntimeOutboundMessage, RuntimeReady, ScanResponse, ToolCallResponse,
+    ToolError, ToolOutput, ToolResult,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -704,17 +704,17 @@ async fn run_loop<S>(
                         if let Some(handle) = in_flight.lock().await.remove(&req.call_id) {
                             handle.abort();
                         }
-                        let response = serde_json::to_string(
-                            &RuntimeOutboundMessage::ToolCallResponse(ToolCallResponse {
+                        // Its own reply, not a tool-shaped one. Every
+                        // server-initiated command is cancellable now, and a
+                        // synthetic `ToolCallResponse` resolved five of their
+                        // waiters with "the runtime answered a workspace scan
+                        // with the wrong message" — a protocol confusion
+                        // reported in place of the cancellation that happened.
+                        let response = serde_json::to_string(&RuntimeOutboundMessage::Cancelled(
+                            CancelledResponse {
                                 call_id: req.call_id,
-                                result: ToolResult::Err(ToolError {
-                                    reason: "cancelled".to_string(),
-                                }),
-                                // A cancelled call ran no hooks worth reporting:
-                                // whatever was in flight was aborted with it.
-                                hooks: Vec::new(),
-                            }),
-                        );
+                            },
+                        ));
                         if let Ok(json) = response {
                             let _ = sink.lock().await.send(Message::Text(json.into())).await;
                         }
