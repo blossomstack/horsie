@@ -1,6 +1,7 @@
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, CONCLUDE_TOOL,
 };
+use crate::agent_loop::inbox::Summarise;
 use async_trait::async_trait;
 use horsie_actor::{
     ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
@@ -17,6 +18,7 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Per-agent configuration distilled from an [`AgentRunDef`]. Runtime only.
 #[derive(Clone)]
@@ -210,11 +212,6 @@ pub enum AgentCommand {
     ForkSeed {
         at_seq: u64,
         reply: ReplyTo<Box<AgentState>>,
-    },
-    /// Summarise this agent's whole history, changing nothing. What
-    /// `/summary-n-fork` runs against the conversation it branches from.
-    SummariseAll {
-        reply: ReplyTo<Result<String, String>>,
     },
     /// Adopt `state` as this agent's whole history, append `seed` after it, and
     /// queue `message` — all in one write.
@@ -1054,6 +1051,23 @@ pub struct RunReport {
     /// run's handle and delivering the old run's outcome as if it were its own.
     run_id: u64,
     outcome: RunOutcome,
+    /// A summary this run was asked to take for forks waiting on it, and how
+    /// that went.
+    ///
+    /// Beside the outcome rather than inside it because the two are independent:
+    /// a turn that summarises for a fork can still go on to answer a message
+    /// queued alongside it, exactly as a queued `/compact` does. `None` means
+    /// nothing asked.
+    fork_summary: Option<ForkSummary>,
+}
+
+/// What a run produced for the forks waiting on it.
+#[derive(Debug, Clone)]
+pub struct ForkSummary {
+    /// Every fork seeded from this one summary. They share a branch point, so
+    /// they are entitled to share the provider call.
+    pub forks: Vec<Uuid>,
+    pub result: Result<String, String>,
 }
 
 /// The in-flight run: its identity and the token that cancels it.
@@ -1220,28 +1234,6 @@ impl AgentActor {
         }
         self.events_since_snapshot = 0;
         true
-    }
-
-    /// Summarise this agent's whole conversation, off the mailbox.
-    ///
-    /// Detached because it is a provider call: a fork of a long conversation
-    /// takes as long as any other completion, and holding this agent's mailbox
-    /// for it would stall the very conversation being summarised. The session
-    /// keeps itself loaded meanwhile — see `ForkedAgents::busy`.
-    ///
-    /// Nothing is journaled and nothing is streamed. The summary is not this
-    /// agent's turn; it is a reading of it, for somebody else.
-    async fn summarise_all(&mut self, state: &AgentState, reply: ReplyTo<Result<String, String>>) {
-        let context_provider = self.ctx.context_provider.clone();
-        let history = state.prompt_messages();
-        let conversation_id = self.ctx.journal_id.to_string();
-        let thinking_effort = self.params.thinking_effort;
-        tokio::spawn(async move {
-            let answer =
-                summarise_history(context_provider, history, conversation_id, thinking_effort)
-                    .await;
-            let _ = reply.send(answer);
-        });
     }
 
     /// Persist `events`, taking a snapshot too if enough have accrued. The
@@ -1415,13 +1407,13 @@ impl AgentActor {
             message,
             subagent_results,
             results,
-            compact,
+            summarise,
             ..
         } = turn;
-        // A turn that carries only a `/compact` has nothing to say to the
+        // A turn that carries only a summarisation has nothing to say to the
         // model. Running it would spend a provider call answering a message
-        // nobody sent, so the compaction *is* the turn.
-        let compact_only = compact.is_some()
+        // nobody sent, so the summary *is* the turn.
+        let summarise_only = summarise.is_some()
             && message.is_none()
             && subagent_results.is_empty()
             && results.is_empty();
@@ -1491,12 +1483,12 @@ impl AgentActor {
         // turn-restarting provider retry that re-emits it can never
         // double-persist it into two consecutive user messages.
         //
-        // A compact-only turn is the one case with no input at all: nothing was
-        // typed and nothing is owed, so this would journal the empty `Tool`
+        // A summarise-only turn is the one case with no input at all: nothing
+        // was typed and nothing is owed, so this would journal the empty `Tool`
         // message `AgentInput::tool_results(vec![])` builds — which the run
         // below never reads, but which every *later* turn would then carry in
         // its prompt.
-        if !compact_only {
+        if !summarise_only {
             events.push(AgentDomainEvent::InputMessage {
                 message: agent_input.to_message(now_ms()),
             });
@@ -1506,8 +1498,8 @@ impl AgentActor {
             ctx,
             history,
             folded.context_tokens,
-            compact.clone(),
-            compact_only,
+            summarise.clone(),
+            summarise_only,
         );
         events
     }
@@ -1519,10 +1511,10 @@ impl AgentActor {
         history: Vec<Message>,
         // The prompt size the previous turn left behind, from durable state.
         context_tokens: u32,
-        // A `/compact` this turn carries, and its focus instructions.
-        compact: Option<Option<String>>,
-        // Whether the compaction is all this turn is.
-        compact_only: bool,
+        // A summary this turn was asked for, and what becomes of it.
+        summarise: Option<Summarise>,
+        // Whether that summary is all this turn is.
+        summarise_only: bool,
     ) {
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
@@ -1574,6 +1566,7 @@ impl AgentActor {
                         .tell(AgentCommand::RunFinished(Box::new(RunReport {
                             run_id,
                             outcome: RunOutcome::Cancelled,
+                            fork_summary: None,
                         })))
                         .await;
                     return;
@@ -1595,6 +1588,7 @@ impl AgentActor {
                         .tell(AgentCommand::RunFinished(Box::new(RunReport {
                             run_id,
                             outcome: RunOutcome::AlreadyReported,
+                            fork_summary: None,
                         })))
                         .await;
                     return;
@@ -1640,7 +1634,7 @@ impl AgentActor {
                         trigger_at_percent: COMPACT_AT_PERCENT,
                         retain_percent: COMPACT_RETAIN_PERCENT,
                     });
-            let outcome = run_with_retries(
+            let (outcome, fork_summary) = run_with_retries(
                 contexts.provider,
                 toolbox,
                 sink,
@@ -1662,8 +1656,8 @@ impl AgentActor {
                     ),
                 ),
                 context_tokens,
-                compact,
-                compact_only,
+                summarise,
+                summarise_only,
             )
             .await;
             // All coarse events were already persisted (each `emit` awaited its ack),
@@ -1672,6 +1666,7 @@ impl AgentActor {
                 .tell(AgentCommand::RunFinished(Box::new(RunReport {
                     run_id,
                     outcome,
+                    fork_summary,
                 })))
                 .await;
         });
@@ -1722,6 +1717,20 @@ impl AgentActor {
         }
         let agent = self.ctx.journal_id;
         let parent = self.ctx.parent.clone();
+
+        // Before the turn's own outcome, and unconditionally: the forks waiting
+        // on this are a different conversation's business, and whether this turn
+        // then went on to succeed, fail or be cancelled says nothing about
+        // whether their summary was taken.
+        if let Some(ForkSummary { forks, result }) = report.fork_summary {
+            parent
+                .deliver(AgentOutcome::ForkSummary {
+                    agent,
+                    forks,
+                    result,
+                })
+                .await;
+        }
 
         match report.outcome {
             RunOutcome::Completed { text } => {
@@ -2504,10 +2513,6 @@ impl EventSourcedActor for AgentActor {
                 let _ = reply.send(Box::new(state.scrub_for_fork(at_seq)));
                 CommandEffect::none()
             }
-            AgentCommand::SummariseAll { reply } => {
-                self.summarise_all(state, reply).await;
-                CommandEffect::none()
-            }
             AgentCommand::SeedFrom {
                 state: seeded,
                 seed,
@@ -3198,31 +3203,112 @@ const COMPACT_AT_PERCENT: u32 = 80;
 /// part-way through, and those live in the last few messages.
 const COMPACT_RETAIN_PERCENT: u32 = 20;
 
-/// Build a throwaway `Agent` over this history and ask it to summarise itself.
-///
-/// A full `provide()` for a call that needs only the provider, because that is
-/// the one way to resolve it — and a fork is seeded once, so the toolbox this
-/// builds and discards costs nothing anybody notices.
-async fn summarise_history(
-    context_provider: Arc<dyn crate::agent_loop::ContextProvider>,
-    history: Vec<Message>,
+#[allow(clippy::too_many_arguments)]
+async fn run_with_retries(
+    provider: Arc<dyn LlmProvider>,
+    toolbox: Arc<dyn Toolbox>,
+    sink: Arc<dyn EventSink>,
     conversation_id: String,
+    system_prompt: String,
+    handoff_tool: Option<String>,
+    force_handoff_choice: bool,
+    max_iterations: Option<u32>,
+    max_retries: u32,
+    thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
+    history: Vec<Message>,
+    input: AgentInput,
+    cancel: CancellationToken,
+    compaction: Option<horsie_agentcore::CompactionBudget>,
+    compaction_policy: Arc<dyn horsie_agentcore::CompactionPolicy>,
+    context_tokens: u32,
+    summarise: Option<Summarise>,
+    summarise_only: bool,
+) -> (RunOutcome, Option<ForkSummary>) {
+    // Whatever a fork is waiting on is taken first, before this turn can say
+    // anything to the model: the summary has to describe the history the branch
+    // marker was written into, not one this turn went on to extend.
+    let (compact, fork_summary) = match summarise {
+        Some(Summarise::Compact(instructions)) => (Some(instructions), None),
+        Some(Summarise::Fork(forks)) => {
+            let result = summarise_for_forks(
+                &provider,
+                &toolbox,
+                &conversation_id,
+                &history,
+                thinking_effort,
+            )
+            .await;
+            if let Err(e) = &result {
+                tracing::warn!(error = %e, "summarising a conversation for a fork failed");
+            }
+            (None, Some(ForkSummary { forks, result }))
+        }
+        None => (None, None),
+    };
+    // A turn whose whole job was that summary is over: there is nothing to send.
+    // The compaction case cannot short-circuit here, because it needs the agent
+    // the loop below builds.
+    if summarise_only && compact.is_none() {
+        return (
+            RunOutcome::Completed {
+                text: String::new(),
+            },
+            fork_summary,
+        );
+    }
+    (
+        run_turn_attempts(
+            provider,
+            toolbox,
+            sink,
+            conversation_id,
+            system_prompt,
+            handoff_tool,
+            force_handoff_choice,
+            max_iterations,
+            max_retries,
+            thinking_effort,
+            history,
+            input,
+            cancel,
+            compaction,
+            compaction_policy,
+            context_tokens,
+            compact,
+            summarise_only,
+        )
+        .await,
+        fork_summary,
+    )
+}
+
+/// Summarise a conversation for the forks branching off it.
+///
+/// A throwaway `Agent` over the same provider and history: the summary is a
+/// *reading* of this conversation for somebody else, so nothing is journaled,
+/// nothing is streamed, and this agent's own history is left exactly as it was.
+async fn summarise_for_forks(
+    provider: &Arc<dyn LlmProvider>,
+    toolbox: &Arc<dyn Toolbox>,
+    conversation_id: &str,
+    history: &[Message],
     thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
 ) -> Result<String, String> {
-    let contexts = context_provider.provide().await.map_err(|e| e.message)?;
-    let agent = Agent::builder(contexts.provider, contexts.toolbox, &conversation_id)
+    let agent = Agent::builder(provider.clone(), toolbox.clone(), conversation_id)
         .with_config(AgentConfig {
             thinking_effort,
             ..AgentConfig::default()
         })
-        .with_history(history)
+        .with_history(history.to_vec())
         .build()
         .map_err(|e| e.to_string())?;
     agent.summarise_all(None).await.map_err(|e| e.to_string())
 }
 
+/// The retry loop proper: everything a turn does once its summarisation, if it
+/// had one, has been dealt with.
 #[allow(clippy::too_many_arguments)]
-async fn run_with_retries(
+async fn run_turn_attempts(
     provider: Arc<dyn LlmProvider>,
     toolbox: Arc<dyn Toolbox>,
     sink: Arc<dyn EventSink>,
@@ -3623,7 +3709,9 @@ mod tests {
         // terminal outcome, so read past both until the run itself reports.
         loop {
             match rx.recv().await.expect("the run must report an outcome") {
-                AgentOutcome::Started { .. } | AgentOutcome::UsageRecorded { .. } => continue,
+                AgentOutcome::Started { .. }
+                | AgentOutcome::UsageRecorded { .. }
+                | AgentOutcome::ForkSummary { .. } => continue,
                 AgentOutcome::Concluded { .. } => break,
                 other => panic!("expected the turn to conclude, got {other:?}"),
             }
@@ -3784,7 +3872,9 @@ mod tests {
         async fn terminal_outcome(rx: &mut Outcomes) -> AgentOutcome {
             loop {
                 match rx.recv().await.expect("the turn must report an outcome") {
-                    AgentOutcome::Started { .. } | AgentOutcome::UsageRecorded { .. } => continue,
+                    AgentOutcome::Started { .. }
+                    | AgentOutcome::UsageRecorded { .. }
+                    | AgentOutcome::ForkSummary { .. } => continue,
                     outcome => return outcome,
                 }
             }
@@ -5561,7 +5651,7 @@ mod retry_tests {
         max_retries: u32,
     ) -> (RunOutcome, usize) {
         let sink: Arc<dyn EventSink> = Arc::new(CollectingEventSink::new());
-        let outcome = run_with_retries(
+        let outcome = run_turn_attempts(
             provider.clone(),
             toolbox,
             sink,
@@ -5646,7 +5736,7 @@ mod retry_tests {
         sink: Arc<dyn EventSink>,
         max_retries: u32,
     ) -> (RunOutcome, usize) {
-        let outcome = run_with_retries(
+        let outcome = run_turn_attempts(
             provider.clone(),
             Arc::new(EmptyToolbox),
             sink,
@@ -5845,6 +5935,7 @@ mod fence_tests {
                 outcome: RunOutcome::Completed {
                     text: "from a run that is over".into(),
                 },
+                fork_summary: None,
             })))
             .await
             .unwrap();

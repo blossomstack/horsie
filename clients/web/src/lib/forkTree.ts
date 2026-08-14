@@ -80,3 +80,23 @@ export function forkTree(forks: ForkView[]): PlacedFork[] {
   }
   return out;
 }
+
+/**
+ * Whether a freshly branched fork is worth opening yet.
+ *
+ * `/summary-n-fork` is a turn on the conversation being branched, so the fork
+ * exists — and is listed — before it has any history at all. Navigating on the
+ * ack would open a blank transcript for as long as a provider call takes, which
+ * is what this exists to prevent.
+ *
+ * Absent counts as not ready: the roster reaches a client on the global feed, so
+ * a fork nobody has heard of yet is one to keep waiting for, not one to give up
+ * on. A `/fork`, whose seed is a local copy, passes this within a frame.
+ */
+export function forkReadyToOpen(
+  forks: ForkView[] | undefined,
+  id: string,
+): boolean {
+  const row = forks?.find((f) => f.id === id);
+  return !!row && row.status !== "provisioning";
+}

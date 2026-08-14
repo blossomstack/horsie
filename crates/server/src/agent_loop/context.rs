@@ -105,6 +105,21 @@ pub enum AgentOutcome {
         agent: Uuid,
         usage_total: UsageTotal,
     },
+    /// A `/summary-n-fork` turn produced the summary the forks branching off
+    /// this agent are waiting on.
+    ///
+    /// Not a terminal outcome, and not about this agent at all: its own history
+    /// is untouched, and this turn still ends however it was going to. Delivered
+    /// as its own report because the summary belongs to a *different*
+    /// conversation, and the owner is the only thing that can reach it.
+    ///
+    /// `forks` is a list because forks queued into one turn share a branch
+    /// point, so one provider call serves all of them.
+    ForkSummary {
+        agent: Uuid,
+        forks: Vec<Uuid>,
+        result: Result<String, String>,
+    },
 }
 
 /// Where an [`AgentActor`](crate::agent_loop::AgentActor) delivers its [`AgentOutcome`].

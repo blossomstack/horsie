@@ -936,6 +936,18 @@ impl SessionActor {
             Err((agent, NotAnEnd::Started)) => {
                 return self.on_agent_started(state, agent).await;
             }
+            // A summary taken for somebody else. Not this agent's turn ending —
+            // it may still be running — so it is answered here and the routing
+            // below never sees it.
+            Err((_, NotAnEnd::ForkSummary { forks, result })) => {
+                return ForkedAgents::handle(
+                    self,
+                    state,
+                    ForkCommand::Summarised { forks, result },
+                    ctx,
+                )
+                .await;
+            }
         };
         // In a run, an outcome is a step's or one of a step's subagents'.
         if let Some(run) = state.run.as_ref() {
