@@ -210,7 +210,14 @@ typed `ProvisionError`.
 
 ## Ordering, and a fail-closed check
 
-Per agent load, in `session_actor/context.rs`:
+Once per acquisition, before any agent runs:
+
+0. `ProvisionWorkspace { steps }` — the workspaces must exist before an agent can
+   be scanned against them or run a tool in them. Fails whole, like
+   `ProvisionAgent`: a session whose checkout did not happen has nothing to work
+   on, and every later failure would be a confusing consequence of this one.
+
+Then per agent load, in `session_actor/context.rs`:
 
 1. `ProvisionAgent { agent_id, bundles }` — bundles resolved from that agent's
    own preset, falling back to the session's
