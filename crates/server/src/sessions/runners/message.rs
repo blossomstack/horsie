@@ -7,9 +7,15 @@
 //! plugin library scan discovered, and no static list can name it. A child's
 //! outcome is *addressed*, because exactly one capability created that child
 //! and there is nothing to guess.
+//!
+//! **There is no arm for an arriving answer.** There was, and it was routed to
+//! whichever capability held a pending ask — but an answer arrives naming the
+//! agent it is for, and `SessionState.agents` already maps an agent to its
+//! runner. The routing question that arm existed to answer is one the session
+//! can answer without asking any capability, so the arm, the pending entry it
+//! was routed by, and the third routing mode they needed are all gone.
 
 use super::ids::{AgentId, RunnerId};
-use crate::agent_loop::AskAnswer;
 use serde_json::Value;
 
 /// Something addressed to one of a runner's capabilities.
@@ -23,8 +29,6 @@ pub enum Message {
     Command(Command),
     /// A runner I created moved.
     Child(ChildMsg),
-    /// An answer arrived for a question one of my agents asked.
-    Ask(AskMsg),
 }
 
 /// One tool call, unparsed. A capability deserialises the input into its own
@@ -99,25 +103,22 @@ pub enum WorkflowOutcome {
     Failed { error: String },
 }
 
-/// The person answered.
-#[derive(Debug, Clone)]
-pub enum AskMsg {
-    Answered { answers: Vec<AskAnswer> },
-}
-
 /// How a message finds its capability.
 ///
 /// The variant decides, so the discipline lives in the type: there is no table
 /// above this to keep in step, and no way to offer a child's outcome around by
 /// accident.
+///
+/// Two modes, not three. The third was for an arriving answer, routed to
+/// whichever capability had recorded the ask — but an answer names its agent,
+/// and the session maps an agent to its runner already, so it never needed to
+/// be offered around at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Routing {
     /// Offer it to each capability in order until one takes it.
     Offer,
     /// Hand it to whichever capability holds this child.
     Owner(RunnerId),
-    /// Hand it to whichever capability recorded the pending question.
-    PendingAsk,
 }
 
 impl Message {
@@ -126,7 +127,6 @@ impl Message {
         match self {
             Self::Tool(_) | Self::Command(_) => Routing::Offer,
             Self::Child(m) => Routing::Owner(m.child()),
-            Self::Ask(_) => Routing::PendingAsk,
         }
     }
 
@@ -138,7 +138,6 @@ impl Message {
             Self::Tool(t) => format!("tool call `{}`", t.name),
             Self::Command(c) => format!("command `/{}`", c.name),
             Self::Child(m) => format!("child {}", m.child()),
-            Self::Ask(_) => "answers".to_string(),
         }
     }
 }
@@ -187,9 +186,6 @@ mod tests {
             Message::Child(ChildMsg::Ready { child }).routing(),
             Routing::Owner(child)
         );
-
-        let ask = Message::Ask(AskMsg::Answered { answers: vec![] });
-        assert_eq!(ask.routing(), Routing::PendingAsk);
     }
 
     /// Every `ChildMsg` names its child, whichever arm it is — that is what

@@ -372,7 +372,6 @@ impl<'de> Deserialize<'de> for Capabilities {
 /// change fails to compile where it should.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapEvent {
-    AskUser(ask_user::Event),
     Title(title::Event),
     SubAgent(sub_agent::Event),
     Workflow(workflow::Event),

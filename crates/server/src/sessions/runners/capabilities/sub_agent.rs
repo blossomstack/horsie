@@ -266,7 +266,7 @@ impl Capability for SubAgentCapability {
         match msg {
             Message::Tool(t) => self.on_tool(caller, t),
             Message::Child(m) => self.on_child(m),
-            Message::Command(_) | Message::Ask(_) => None,
+            Message::Command(_) => None,
         }
     }
 
@@ -292,7 +292,6 @@ impl Capability for SubAgentCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::runners::message::AskMsg;
 
     fn cap() -> SubAgentCapability {
         SubAgentCapability::new(settings())
@@ -591,7 +590,10 @@ mod tests {
         assert!(
             c.handle(
                 caller(),
-                &Message::Ask(AskMsg::Answered { answers: vec![] })
+                &Message::Command(crate::sessions::runners::message::Command {
+                    name: "fork".into(),
+                    args: String::new(),
+                })
             )
             .is_none()
         );

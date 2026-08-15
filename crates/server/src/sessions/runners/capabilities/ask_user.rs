@@ -1,22 +1,30 @@
 //! `ask_user`: the agent stopping to put a question to the person.
 //!
-//! The state here is only *who is parked*, because that is the one fact the
-//! session cannot recover by looking anywhere else: an answer arrives addressed
-//! to whichever capability recorded the ask, and with nothing recorded there is
-//! no addressee. Parking the agent is the agent's own doing — this capability
-//! neither cancels a run nor resumes one, so there is no second place that can
-//! disagree with the runtime about whether a turn is waiting.
+//! **This capability holds no state at all.** It is pure config: it decides
+//! what to equip, and it answers for the tool name.
 //!
-//! An unattended session equips no `ask_user` at all rather than equipping it
-//! and refusing the call. Offering a tool whose answer will never come is how a
-//! routine run ends up parked for ever against nobody, and a layer that is not
-//! pushed cannot be called.
+//! It used to hold the agent parked on a question, as the addressee an arriving
+//! answer would be routed to. That entry could never be written —
+//! [`AskUserToolbox`] stops the run rather than sending a command, so a
+//! `Tool("ask_user")` never reaches this `handle` — and it was never needed
+//! either: an answer arrives naming the agent it is for, and the session maps
+//! an agent to its runner already. Synthesising a tool call to populate the
+//! field would have put a lie in the journal to keep a redundant index alive,
+//! so the field went instead, and with it `ask_user::Event`, the `CapEvent`
+//! arm, and the third routing mode they needed.
+//!
+//! A muted agent equips no `ask_user` layer at all rather than equipping one
+//! that refuses: a tool that is not pushed cannot be called, whereas one that
+//! is equipped and refused costs the model a turn to discover that. The call is
+//! still *claimed* here, though — a plugin or a resumed transcript can put one
+//! in front of us anyway, and declining it would hand it to the open-namespace
+//! runtime capability behind us, which claims every name. The model would then
+//! be answered by the sandbox instead of being told why it may not ask.
 
-use super::{CapEvent, CapSlice, Capability, Decision, SetupError, or_empty};
+use super::{CapSlice, Capability, Decision, SetupError, or_empty};
 use crate::sessions::ask_tool::AskUserToolbox;
-use crate::sessions::runners::ids::AgentId;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
-use crate::sessions::runners::message::{AskMsg, Caller, Message};
+use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -56,20 +64,33 @@ pub enum Mute {
     NotInteractive,
 }
 
+/// Pure config: one field, and no folded state whatsoever.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AskUserCapability {
-    /// The agent waiting on an answer, if one is. Also the addressee an
-    /// arriving answer is routed to.
-    pub pending: Option<AgentId>,
     /// `Some` when this agent may not ask, and why. `None` is the ordinary
     /// conversation that can.
     pub mute: Option<Mute>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
-    Asked { agent: AgentId },
-    Answered,
+impl Mute {
+    /// What the model is told when it calls a tool it was not given.
+    ///
+    /// Short, and it names the reason: a refusal the model cannot act on is a
+    /// retry loop, and these two are the only reasons there are.
+    const fn refusal(self) -> &'static str {
+        match self {
+            Self::Unattended => {
+                "`ask_user` is not available: this session was started by a routine and nobody is \
+                 reading it, so a question would park the run for ever. Make the reasonable \
+                 choice, say which you made and why, and carry on."
+            }
+            Self::NotInteractive => {
+                "`ask_user` is not available in this step, which did not declare itself \
+                 interactive. Work from the input you were given, make the reasonable choice, say \
+                 which you made and why, and carry on."
+            }
+        }
+    }
 }
 
 impl AskUserCapability {
@@ -82,7 +103,6 @@ impl AskUserCapability {
     #[must_use]
     pub fn unattended() -> Self {
         Self {
-            pending: None,
             mute: Some(Mute::Unattended),
         }
     }
@@ -91,7 +111,6 @@ impl AskUserCapability {
     #[must_use]
     pub fn not_interactive() -> Self {
         Self {
-            pending: None,
             mute: Some(Mute::NotInteractive),
         }
     }
@@ -119,35 +138,26 @@ impl Capability for AskUserCapability {
         Ok(())
     }
 
-    fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision> {
-        // Unattended declines by both routes, not just by not equipping the
-        // layer: a plugin or a resumed transcript could still put the call in
-        // front of us, and taking it would park an agent nobody can free.
-        if self.mute.is_some() {
-            return None;
-        }
+    /// Claims `ask_user`, and journals nothing whichever way it answers.
+    ///
+    /// A muted agent is told why, rather than declined. Declining hands the
+    /// call to the next capability, and the last one is the open-namespace
+    /// runtime that claims every name — so the model would be answered by the
+    /// sandbox and never told it may not ask.
+    ///
+    /// An unmuted one is claimed and nothing more. Parking is the agent's own
+    /// doing, and an arriving answer names its agent rather than being routed
+    /// to a pending entry here, so there is no fact left for this to record. In
+    /// practice the call does not arrive at all — [`AskUserToolbox`] stops the
+    /// run instead of sending a command — and claiming the name is what stops
+    /// the sandbox layer from taking it if it ever does.
+    fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
         match msg {
-            Message::Tool(t) if t.name == TOOL => {
-                Some(Decision::record(vec![CapEvent::AskUser(Event::Asked {
-                    agent: caller.agent,
-                })]))
-            }
-            // An answer with no question is not ours. Returning `None` lets it
-            // fall through to the one place that shouts about an unclaimed
-            // message, rather than being swallowed as a no-op here.
-            Message::Ask(AskMsg::Answered { .. }) if self.pending.is_some() => {
-                Some(Decision::record(vec![CapEvent::AskUser(Event::Answered)]))
-            }
-            Message::Tool(_) | Message::Command(_) | Message::Child(_) | Message::Ask(_) => None,
-        }
-    }
-
-    fn apply(&mut self, event: &CapEvent) {
-        if let CapEvent::AskUser(mine) = event {
-            match mine {
-                Event::Asked { agent } => self.pending = Some(*agent),
-                Event::Answered => self.pending = None,
-            }
+            Message::Tool(t) if t.name == TOOL => Some(match self.mute {
+                Some(mute) => Decision::reply(mute.refusal()),
+                None => Decision::default(),
+            }),
+            Message::Tool(_) | Message::Command(_) | Message::Child(_) => None,
         }
     }
 
@@ -161,22 +171,35 @@ impl Capability for AskUserCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::runners::message::Message;
+    use crate::sessions::runners::action::Action;
+    use crate::sessions::runners::capabilities::Capabilities;
+    use crate::sessions::runners::capabilities::runtime::RuntimeCapability;
 
-    /// The one that matters for routines: an unattended run must neither be
-    /// offered `ask_user` nor be able to reach it, because the answer that
-    /// would free the agent is never coming.
+    fn ask() -> Message {
+        tool(TOOL, serde_json::json!({"questions": []}))
+    }
+
+    fn refusal(d: &Decision) -> String {
+        assert!(
+            d.events.is_empty(),
+            "a refusal is not a fact about the session"
+        );
+        let [Action::Reply { text }] = d.actions.as_slice() else {
+            panic!("expected one reply, got {:?}", d.actions);
+        };
+        text.clone()
+    }
+
+    /// The one that matters for routines: an unattended run is offered no
+    /// `ask_user` tool, because the answer that would free the agent is never
+    /// coming.
     #[tokio::test]
-    async fn unattended_equips_nothing_and_declines_the_call() {
+    async fn unattended_equips_nothing_and_refuses_the_call() {
         let c = AskUserCapability::unattended();
         let mut spec = spec();
         c.setup(&loading(), &mut spec)
             .await
             .expect("nothing to acquire");
-        assert!(
-            c.handle(caller(), &tool(TOOL, serde_json::json!({"questions": []})))
-                .is_none()
-        );
         // Told why, rather than left to discover a tool it was told about is
         // missing.
         assert_eq!(
@@ -184,6 +207,48 @@ mod tests {
             vec!["unattended"]
         );
         assert!(spec.toolbox().is_none());
+
+        // And a call that arrives anyway is refused in words rather than
+        // declined — see the test below for what declining would cost.
+        let said = refusal(&c.handle(caller(), &ask()).expect("mine even when muted"));
+        assert!(said.contains("routine"), "{said}");
+    }
+
+    /// **A muted agent that asks anyway must be told no.** Declining the call
+    /// hands it to the next capability, and the last one is the open-namespace
+    /// runtime that claims every name — so the model would be answered by the
+    /// sandbox and never learn why its question went nowhere.
+    #[test]
+    fn a_muted_ask_is_claimed_rather_than_left_to_the_sandbox() {
+        for c in [
+            AskUserCapability::unattended(),
+            AskUserCapability::not_interactive(),
+        ] {
+            let caps = Capabilities::new(vec![Box::new(c), Box::new(RuntimeCapability::default())]);
+            let taker = caps
+                .iter()
+                .find_map(|c| c.handle(caller(), &ask()).map(|d| (c.name(), d)));
+            let Some(("ask_user", d)) = taker else {
+                panic!("the sandbox layer swallowed the question: {taker:?}");
+            };
+            assert!(!refusal(&d).is_empty());
+        }
+    }
+
+    /// An agent that *may* ask has its call claimed and nothing recorded:
+    /// parking is the agent's own doing, and an arriving answer names the agent
+    /// it is for rather than being routed to a pending entry here.
+    ///
+    /// In practice this call never arrives — `AskUserToolbox` stops the run
+    /// instead of sending a command, which is exactly why the pending entry
+    /// this capability used to hold could never be written.
+    #[test]
+    fn an_attended_ask_is_claimed_and_journals_nothing() {
+        let d = AskUserCapability::new()
+            .handle(caller(), &ask())
+            .expect("mine");
+        assert!(d.events.is_empty());
+        assert!(d.actions.is_empty());
     }
 
     /// A step that did not declare itself interactive is muted for a different
@@ -207,51 +272,14 @@ mod tests {
             !said.contains("routine") && !said.contains("nobody is reading"),
             "a muted step was told nobody is watching: {said}"
         );
-        // Still equips nothing and still declines, exactly as unattended does —
-        // the reason differs, the refusal does not.
+        // Still equips nothing, exactly as unattended does — and the refusal
+        // says the other reason, not this one.
         assert!(spec.toolbox().is_none());
+        let said = refusal(&c.handle(caller(), &ask()).expect("mine even when muted"));
         assert!(
-            c.handle(caller(), &tool(TOOL, serde_json::json!({"questions": []})))
-                .is_none()
+            said.contains("step") && !said.contains("routine"),
+            "a muted step was refused as though it were a routine: {said}"
         );
-    }
-
-    /// An answer nobody asked for falls through instead of being taken. If this
-    /// regresses, a stray answer is silently absorbed by whichever capability
-    /// happens to sit first, and the misroute stops being visible.
-    #[test]
-    fn an_answer_with_nothing_pending_is_not_mine() {
-        let c = AskUserCapability::new();
-        assert!(
-            c.handle(
-                caller(),
-                &Message::Ask(AskMsg::Answered { answers: vec![] })
-            )
-            .is_none()
-        );
-    }
-
-    /// Asking records the addressee and answering clears it. Without the clear,
-    /// the capability claims every later answer for an agent that has moved on.
-    #[test]
-    fn asking_then_answering_round_trips_the_addressee() {
-        let mut c = AskUserCapability::new();
-        let who = caller();
-        let d = c
-            .handle(who, &tool(TOOL, serde_json::json!({"questions": []})))
-            .expect("mine");
-        assert!(
-            d.actions.is_empty(),
-            "parking is the agent's own doing, so there is nothing to ask the session for"
-        );
-        c.apply(&d.events[0]);
-        assert_eq!(c.pending, Some(who.agent));
-
-        let d = c
-            .handle(who, &Message::Ask(AskMsg::Answered { answers: vec![] }))
-            .expect("mine, now that one is pending");
-        c.apply(&d.events[0]);
-        assert_eq!(c.pending, None);
     }
 
     /// An attended session does equip the tool — the counterpart that stops

@@ -218,7 +218,7 @@ impl Capability for WorkflowCapability {
         match msg {
             Message::Tool(t) => self.on_tool(caller, t),
             Message::Child(m) => self.on_child(m),
-            Message::Command(_) | Message::Ask(_) => None,
+            Message::Command(_) => None,
         }
     }
 
@@ -244,7 +244,6 @@ impl Capability for WorkflowCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::runners::message::AskMsg;
 
     fn invocation() -> serde_json::Value {
         serde_json::json!({"workflow": "release", "input": "cut 1.2.0"})
@@ -502,7 +501,10 @@ mod tests {
         assert!(
             c.handle(
                 caller(),
-                &Message::Ask(AskMsg::Answered { answers: vec![] })
+                &Message::Command(crate::sessions::runners::message::Command {
+                    name: "fork".into(),
+                    args: String::new(),
+                })
             )
             .is_none()
         );

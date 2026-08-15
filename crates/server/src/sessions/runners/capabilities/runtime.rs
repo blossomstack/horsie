@@ -485,7 +485,7 @@ impl Capability for RuntimeCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::runners::message::{AskMsg, Message};
+    use crate::sessions::runners::message::{ChildMsg, Command, Message};
 
     /// It claims any tool, which is why it sorts last.
     #[test]
@@ -501,13 +501,21 @@ mod tests {
         );
     }
 
-    /// But only tools. A child's outcome or an answer is addressed to its
-    /// owner, and a fallback that swallowed those would break the addressing.
+    /// But only tools. A child's outcome is addressed to its owner and a
+    /// built-in belongs to whichever capability declared it, so a fallback that
+    /// swallowed either would break the addressing.
     #[test]
     fn it_claims_nothing_that_is_not_a_tool_call() {
         let c = RuntimeCapability::default();
-        let ask = Message::Ask(AskMsg::Answered { answers: vec![] });
-        assert!(c.handle(caller(), &ask).is_none());
+        let child = Message::Child(ChildMsg::Ready {
+            child: crate::sessions::runners::ids::RunnerId::new_v4(),
+        });
+        assert!(c.handle(caller(), &child).is_none());
+        let command = Message::Command(Command {
+            name: "fork".into(),
+            args: String::new(),
+        });
+        assert!(c.handle(caller(), &command).is_none());
     }
 
     /// A sandbox that cannot be acquired stops the turn. Every other capability

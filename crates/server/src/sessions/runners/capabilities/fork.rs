@@ -161,7 +161,7 @@ impl Capability for ForkCapability {
         match msg {
             Message::Command(c) => self.on_command(caller, c),
             Message::Child(m) => self.on_child(m),
-            Message::Tool(_) | Message::Ask(_) => None,
+            Message::Tool(_) => None,
         }
     }
 
