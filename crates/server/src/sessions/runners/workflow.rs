@@ -39,8 +39,11 @@ use super::capabilities::ask_user::AskUserCapability;
 use super::capabilities::step_result::StepResultCapability;
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
+use super::projection::{AgentDescription, Description, RunDescription};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
+use crate::sessions::session_actor::AgentStatus;
+use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::{
     DEFAULT_MAX_STEPS, OUTCOME_FIELD, StepRun, StepStatus, WorkflowRunSpec, WorkflowRunStatus,
     compose_step_input, next_transition, output_as_input,
@@ -480,6 +483,88 @@ impl Runner for State {
 
     fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         Some(&mut self.capabilities)
+    }
+
+    /// One agent per *execution*, not one per step: a step reached twice — by a
+    /// loop or by a retry — is two agents with two transcripts, and collapsing
+    /// them would lose one.
+    fn describe(&self) -> Description<'_> {
+        Description {
+            // At most one step runs at a time and the definition chose it, so
+            // there is nothing else an unaddressed request on a run could
+            // mean. `None` between steps, which is when there is nothing to
+            // address.
+            primary: self
+                .current()
+                .and_then(|i| self.steps.get(i as usize))
+                .map(|run| AgentId(run.agent)),
+            standing: Some(match self.status {
+                WorkflowRunStatus::Pending => SessionStatus::Idle,
+                WorkflowRunStatus::Running => SessionStatus::Running,
+                WorkflowRunStatus::AwaitingInput => SessionStatus::AwaitingInput,
+                // A person decides between retrying and abandoning, so the run
+                // rests. Not a failure: nothing broke, and a retry moves it.
+                WorkflowRunStatus::Suspended => SessionStatus::Idle,
+                // Not `Idle`: a run that ran to completion and one that stopped
+                // part-way both rest, and telling them apart is the whole
+                // reason to look at a list of past runs.
+                WorkflowRunStatus::Finished => SessionStatus::Finished,
+                WorkflowRunStatus::Failed => SessionStatus::Failed {
+                    reason: self
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "the run failed".to_string()),
+                },
+            }),
+            listed: None,
+            // A step is chosen by the definition rather than spawned, so it
+            // roots its own tree at 0.
+            depth_base: 0,
+            agents: self
+                .steps
+                .iter()
+                .map(|run| AgentDescription {
+                    agent: AgentId(run.agent),
+                    label: Some(&run.step),
+                    agent_type: None,
+                    status: match run.status {
+                        StepStatus::Running => AgentStatus::Running,
+                        StepStatus::Concluded => AgentStatus::Completed,
+                        StepStatus::Failed => AgentStatus::Failed,
+                        StepStatus::Cancelled => AgentStatus::Cancelled,
+                    },
+                    error: run.error.as_deref(),
+                    // The step's own preset. A graph resolves one per step at
+                    // creation, which is what lets step 1 run on a large model
+                    // and step 2 on a small one — and reading the session's
+                    // instead is what had every step's document report the
+                    // first step's model.
+                    settings: self.graph.step(&run.step).map(|step| &step.settings),
+                    // A step's brief is its definition's, not something an
+                    // agent handed it.
+                    task: None,
+                    // Rendered the way a worker's report is, because a reader
+                    // wants the same thing from both.
+                    output: run.output.as_ref().map(output_as_input),
+                    usage: self
+                        .step_usage
+                        .get(&AgentId(run.agent))
+                        .copied()
+                        .unwrap_or_default(),
+                    // The one kind whose agents come and go inside one runner's
+                    // life, so the record's stamps are the run's and not the
+                    // step's.
+                    times: Some((run.started_at_ms, run.ended_at_ms.unwrap_or(0))),
+                })
+                .collect(),
+            run: Some(RunDescription {
+                graph: &self.graph,
+                steps: &self.steps,
+                status: self.status,
+                output: self.output.as_ref(),
+                error: self.error.as_deref(),
+            }),
+        }
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

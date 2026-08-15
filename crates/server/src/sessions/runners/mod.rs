@@ -34,6 +34,7 @@ pub mod ids;
 pub mod lifecycle_routing;
 pub mod loading;
 pub mod message;
+pub mod projection;
 pub mod runtime;
 pub mod state;
 pub mod subagent;
@@ -175,6 +176,25 @@ pub trait Runner {
     fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         None
     }
+
+    /// How I describe myself to the read side.
+    ///
+    /// The one method the read projection calls, and the reason
+    /// [`projection`] contains no `match` on [`RunnerState`]: several answers a
+    /// reader wants need something only one kind of runner holds — a worker's
+    /// label, a step's name, a conversation's last error — and reaching them
+    /// with a match would grow the per-kind dispatch back, one arm at a time,
+    /// in the file every new read touches.
+    ///
+    /// What comes back is only what *I* know. Where an agent sits in the
+    /// session — its parent, its depth — is the session's own shape and the
+    /// projection fills it in, so no runner can guess at it and no two runners
+    /// can guess differently.
+    ///
+    /// Required rather than defaulted: a fifth kind of runner has to decide
+    /// what it looks like to a reader, and a silent empty answer would show up
+    /// as an agent missing from a roster rather than as a compile error.
+    fn describe(&self) -> projection::Description<'_>;
 
     /// Fold one of my own events. Pure — no clock, no ids, no randomness.
     ///
@@ -416,6 +436,10 @@ impl Runner for RunnerState {
 
     fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         dispatch!(self, capabilities_mut)
+    }
+
+    fn describe(&self) -> projection::Description<'_> {
+        dispatch!(self, describe)
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

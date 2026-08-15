@@ -19,7 +19,9 @@
 //! caller answered for itself.
 
 use super::action::Action;
+use super::projection::Description;
 use super::{Runner, RunnerEvent, SessionView};
+use crate::sessions::spec::SessionStatus;
 use serde::{Deserialize, Serialize};
 
 /// Where the sandbox is in its life.
@@ -104,6 +106,34 @@ impl Runner for State {
 
     // Both capability accessors keep the trait's `None`: capabilities equip
     // agents, and this runner starts none.
+
+    /// No agents, and the one standing that **overrides** the root's.
+    ///
+    /// Nothing can run without a sandbox, so what the sandbox is doing is the
+    /// session's status whatever its conversation last did — a person looking
+    /// at a session whose runtime is still coming up must not be told it is
+    /// idle, and one whose runtime can never be built must not be told it can
+    /// simply try again.
+    ///
+    /// `None` once it is up, which is the state that lets the root speak. A
+    /// released sandbox says nothing either: the session may still be read, and
+    /// what it last did is still the truest thing about it.
+    fn describe(&self) -> Description<'_> {
+        Description {
+            standing: match self.phase {
+                Phase::Pending | Phase::Provisioning => Some(SessionStatus::Provisioning),
+                // The vendor's own words, which is what the person is shown.
+                Phase::Failed { terminal: false } => Some(SessionStatus::ProvisioningFailed {
+                    reason: self.detail.clone().unwrap_or_default(),
+                }),
+                Phase::Failed { terminal: true } => Some(SessionStatus::Unrecoverable {
+                    reason: self.detail.clone().unwrap_or_default(),
+                }),
+                Phase::Ready | Phase::Released => None,
+            },
+            ..Description::default()
+        }
+    }
 
     /// `at_ms` is unread here on purpose. [`Event::Succeeded`] carries its own
     /// stamp, and it means something else: when the *sandbox* came up, not when

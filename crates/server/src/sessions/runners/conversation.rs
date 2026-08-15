@@ -26,11 +26,13 @@
 //! the id used to answer by being `None`, which it can no longer do.
 
 use super::action::{Branch, FirstInput};
-use super::capabilities::Capabilities;
+use super::capabilities::{CapSlice, Capabilities};
 use super::message::ChildOutcome;
+use super::projection::{AgentDescription, Description, Listing};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::sessions::spec::AgentSettings;
+use crate::sessions::session_actor::AgentStatus;
+use crate::sessions::spec::{AgentSettings, SessionStatus};
 use serde::{Deserialize, Serialize};
 
 /// Where this conversation's turn is. The runner's own word for it, so the
@@ -149,6 +151,28 @@ pub enum Event {
     TurnInterrupted,
 }
 
+impl State {
+    /// What this conversation is called: the name it gave itself with
+    /// `set_session_title`, or the one it was created with until it does.
+    ///
+    /// The self-given name lives in the title capability's own slice, because
+    /// the capability owns the tool that sets it — folding it into a second
+    /// field here would make two writers of one fact, and they would disagree
+    /// the first time a rename took one path and not the other.
+    ///
+    /// Read through [`super::capabilities::Capability::save`] because a
+    /// capability is a `dyn` value: a runner composes its list at runtime, so
+    /// there is no enum to match on and nothing to downcast to.
+    fn name(&self) -> Option<String> {
+        for cap in self.capabilities.iter() {
+            if let CapSlice::Title(title) = cap.save() {
+                return title.title.or_else(|| self.title.clone());
+            }
+        }
+        self.title.clone()
+    }
+}
+
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
         if self.started {
@@ -207,6 +231,62 @@ impl Runner for State {
 
     fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         Some(&mut self.capabilities)
+    }
+
+    /// One agent, and the session's own status when this is the root.
+    fn describe(&self) -> Description<'_> {
+        // A fork is listed and addressable from the moment it is created, and
+        // becomes runnable only when its branch point lands — so it waits
+        // rather than rests. Unless the seed itself failed, which is a failure
+        // and not a wait: reported as `Provisioning` it would spin in the
+        // session list for ever.
+        let seeding = self.seed.is_some() && !self.seeded;
+        let status = match self.turn {
+            TurnStatus::Failed => AgentStatus::Failed,
+            TurnStatus::Idle if seeding => AgentStatus::Provisioning,
+            TurnStatus::Idle => AgentStatus::Idle,
+            TurnStatus::Running => AgentStatus::Running,
+            TurnStatus::AwaitingInput => AgentStatus::AwaitingInput,
+        };
+        Description {
+            primary: Some(self.agent),
+            // The session's status is a read of this, which is why `turn` is
+            // the runner's own word for where it is rather than a second
+            // variable beside the session's.
+            standing: Some(match self.turn {
+                TurnStatus::Idle => SessionStatus::Idle,
+                TurnStatus::Running => SessionStatus::Running,
+                TurnStatus::AwaitingInput => SessionStatus::AwaitingInput,
+                TurnStatus::Failed => SessionStatus::Failed {
+                    reason: self.last_error.clone().unwrap_or_default(),
+                },
+            }),
+            // A fork is a conversation a person opens in its own right; the
+            // session's own is the session, and is already listed as one.
+            listed: self.seed.is_some().then(|| Listing {
+                title: self.name(),
+                last_activity_ms: self.last_activity_ms,
+            }),
+            // A fork tree begins at 0: its root is the session's own
+            // conversation, which is a fork's peer in the same numbering.
+            depth_base: 0,
+            agents: vec![AgentDescription {
+                agent: self.agent,
+                // Not one of several, so nothing to tell it apart by.
+                label: None,
+                agent_type: None,
+                status,
+                error: self.last_error.as_deref(),
+                settings: Some(&self.settings),
+                // A conversation is asked things one turn at a time, and what
+                // it said is its transcript rather than a result.
+                task: None,
+                output: None,
+                usage: self.usage,
+                times: None,
+            }],
+            run: None,
+        }
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

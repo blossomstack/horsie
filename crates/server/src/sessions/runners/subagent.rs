@@ -24,8 +24,10 @@
 use super::action::FirstInput;
 use super::capabilities::Capabilities;
 use super::message::{ChildOutcome, SubAgentOutcome};
+use super::projection::{AgentDescription, Description};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
+use crate::sessions::session_actor::AgentStatus;
 use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
 
@@ -164,6 +166,44 @@ impl Runner for State {
 
     fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         Some(&mut self.capabilities)
+    }
+
+    /// One worker, described by the one field that also says whether a report
+    /// is owed — so it cannot read `completed` to a person while its asker is
+    /// still waiting.
+    fn describe(&self) -> Description<'_> {
+        let (status, error, output) = match &self.result {
+            None => (AgentStatus::Running, None, None),
+            Some(Outcome::Completed { report }) => {
+                (AgentStatus::Completed, None, Some(report.clone()))
+            }
+            Some(Outcome::Failed { error }) => (AgentStatus::Failed, Some(error.as_str()), None),
+        };
+        Description {
+            primary: Some(self.agent),
+            // Nothing creates a session that *is* one piece of delegated work:
+            // a root is a conversation or a run. A worker therefore makes no
+            // session status, rather than inventing one nothing would read.
+            standing: None,
+            listed: None,
+            // A worker tree begins at 1: its root is the agent that asked, and
+            // that agent is not a worker.
+            depth_base: 1,
+            agents: vec![AgentDescription {
+                agent: self.agent,
+                // The asker addresses its workers by label, not by id.
+                label: Some(&self.label),
+                agent_type: self.agent_type.as_deref(),
+                status,
+                error,
+                settings: Some(&self.settings),
+                task: Some(&self.task),
+                output,
+                usage: self.usage,
+                times: None,
+            }],
+            run: None,
+        }
     }
 
     fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
