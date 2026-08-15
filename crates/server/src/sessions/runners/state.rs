@@ -141,7 +141,7 @@ impl SessionState {
                 kind,
                 parent,
                 status,
-                state: RunnerState::for_kind(kind),
+                state: RunnerState::empty_for(kind),
                 created_at_ms: 0,
                 ended_at_ms: 0,
             },
