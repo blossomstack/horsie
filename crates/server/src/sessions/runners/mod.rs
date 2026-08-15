@@ -70,12 +70,6 @@ impl Emit {
             actions: Vec::new(),
         }
     }
-
-    #[must_use]
-    pub fn then(mut self, action: Action) -> Self {
-        self.actions.push(action);
-        self
-    }
 }
 
 /// How a turn ended, narrowed to the ways that mean something to a runner.

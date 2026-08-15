@@ -358,20 +358,6 @@ impl<'de> Deserialize<'de> for Capabilities {
     }
 }
 
-impl FromIterator<Box<dyn Capability>> for Capabilities {
-    fn from_iter<I: IntoIterator<Item = Box<dyn Capability>>>(iter: I) -> Self {
-        Self(iter.into_iter().collect())
-    }
-}
-
-impl<'a> IntoIterator for &'a Capabilities {
-    type Item = &'a Box<dyn Capability>;
-    type IntoIter = std::slice::Iter<'a, Box<dyn Capability>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
 /// One capability's event, tagged with which capability owns it.
 ///
 /// Typed rather than an opaque blob: the journal stays readable, and a shape
