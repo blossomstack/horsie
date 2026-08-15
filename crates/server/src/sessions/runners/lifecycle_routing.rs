@@ -67,6 +67,15 @@ pub fn route(event: &SessionEvent, state: &SessionState) -> Vec<Entry> {
         // `SubAgent(Concluded)`, `Workflow(Finished)` — has already been routed.
         // Routing this too would render the same ending twice.
         SessionEvent::RunnerEnded { .. } => Vec::new(),
+        // A conversation a person removed. There is no log left to record it
+        // in — the runner and its agents are gone from the state by the time
+        // this is routed — and the reader who asked for it is watching the
+        // session list, where the row simply stops being there.
+        SessionEvent::RunnerDeleted { .. } => Vec::new(),
+        // A name is read off the session document, not out of a transcript.
+        // The same reason `SpecRecorded` routes nowhere: it is what the session
+        // *is*, and an entry would only repeat it.
+        SessionEvent::Renamed { .. } => Vec::new(),
         // Recorded by the agent itself, in its own log: the agent journals its
         // own `TurnBegan`. Routing it from here as well would say it twice.
         SessionEvent::AgentStarted { .. } => Vec::new(),
@@ -641,6 +650,10 @@ mod tests {
                 status: RunnerStatus::Done,
                 at_ms: 1,
             },
+            SessionEvent::RunnerDeleted { id: world.fork },
+            SessionEvent::Renamed {
+                name: "the flake".into(),
+            },
             SessionEvent::AgentStarted {
                 runner: world.root,
                 agent: world.main,
@@ -811,6 +824,8 @@ mod tests {
         match event {
             SessionEvent::SpecRecorded { .. }
             | SessionEvent::RunnerEnded { .. }
+            | SessionEvent::RunnerDeleted { .. }
+            | SessionEvent::Renamed { .. }
             | SessionEvent::AgentStarted { .. }
             | SessionEvent::UsageBanked { .. } => true,
             SessionEvent::RunnerCreated { parent, state, .. } => match state.as_ref() {

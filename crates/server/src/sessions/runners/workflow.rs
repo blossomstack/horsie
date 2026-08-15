@@ -498,16 +498,15 @@ impl State {
         let action = self
             .start_action(&start)
             .ok_or_else(|| format!("step '{}' is no longer in this workflow", target.step))?;
-        emit.events
-            .push(RunnerEvent::Workflow(Event::StepStarted {
-                index: start.index,
-                step: start.step,
-                agent: start.agent,
-                attempt: start.attempt,
-                from: start.from,
-                via: start.via,
-                input: start.input,
-            }));
+        emit.events.push(RunnerEvent::Workflow(Event::StepStarted {
+            index: start.index,
+            step: start.step,
+            agent: start.agent,
+            attempt: start.attempt,
+            from: start.from,
+            via: start.via,
+            input: start.input,
+        }));
         emit.actions.push(action);
         Ok(emit)
     }

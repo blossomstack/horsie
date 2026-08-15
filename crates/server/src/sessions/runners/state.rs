@@ -152,6 +152,25 @@ pub enum SessionEvent {
         status: RunnerStatus,
         at_ms: u64,
     },
+    /// A runner left the session, because a person deleted it.
+    ///
+    /// A deletion, not a `RunnerEnded { Cancelled }` beside a `deleted` flag: a
+    /// deleted fork is *gone*, and a flag every projection has to remember to
+    /// filter is the kind of thing one of them forgets — the roster would keep
+    /// listing it, or the session list would, and only one of the two would be
+    /// fixed. The record goes, and with it every `agents` entry pointing at it,
+    /// so an id that named it resolves to nothing rather than to a runner
+    /// nothing can start.
+    RunnerDeleted { id: RunnerId },
+    /// A person named this session, from the list or from the API.
+    ///
+    /// Distinct from `set_session_title`, which is an agent naming the
+    /// conversation it is in and belongs to
+    /// [`super::capabilities::title::TitleCapability`]. This one needs no
+    /// capability, because nobody's agent asked for it — which is also why a
+    /// workflow-root session, whose steps get no title layer, can still be
+    /// renamed.
+    Renamed { name: String },
     /// A runner started an agent, so the session can route to it. The one
     /// place `agents` grows.
     AgentStarted { runner: RunnerId, agent: AgentId },
@@ -211,6 +230,22 @@ impl SessionState {
                 if let Some(rec) = self.runners.get_mut(id) {
                     rec.status = *status;
                     rec.ended_at_ms = *at_ms;
+                }
+            }
+            SessionEvent::RunnerDeleted { id } => {
+                self.runners.remove(id);
+                // Every agent it owned goes with it. Left behind, an id would
+                // still resolve to a runner the state no longer holds — which
+                // reads to every lookup as "no such agent" in one place and as a
+                // live agent in another.
+                self.agents.retain(|_, runner| runner != id);
+            }
+            // Only the name moves. A rename must not resurrect a spec that was
+            // never recorded, or a session would start believing in a default it
+            // was never created with.
+            SessionEvent::Renamed { name } => {
+                if let Some(spec) = self.spec.as_mut() {
+                    spec.name = Some(name.clone());
                 }
             }
             SessionEvent::AgentStarted { runner, agent } => {
@@ -487,6 +522,71 @@ mod tests {
             panic!("the run is a workflow");
         };
         assert_eq!(w.steps[0].started_at_ms, 1_700_000_000_000);
+    }
+
+    /// **A deleted runner is gone, and so is every id that named it.** Left as
+    /// a status plus a flag, every projection would have to remember to filter
+    /// it — and the one that forgot would keep the fork in a roster while the
+    /// session list had already dropped it. Removing the `agents` entries is the
+    /// half that is easy to miss: an agent still mapped to a runner nobody holds
+    /// resolves to a runner `record()` cannot find.
+    #[test]
+    fn deleting_a_runner_takes_its_agents_with_it() {
+        let mut s = SessionState::default();
+        let root = RunnerId::new_v4();
+        let main = AgentId::new_v4();
+        let fork = RunnerId::new_v4();
+        let fork_agent = AgentId::new_v4();
+        s.apply(&created(root, RunnerKind::Conversation, None));
+        s.apply(&SessionEvent::AgentStarted {
+            runner: root,
+            agent: main,
+        });
+        s.apply(&created(fork, RunnerKind::Conversation, Some(main)));
+        s.apply(&SessionEvent::AgentStarted {
+            runner: fork,
+            agent: fork_agent,
+        });
+
+        s.apply(&SessionEvent::RunnerDeleted { id: fork });
+        assert!(s.record(fork).is_none());
+        assert_eq!(s.runner_of(fork_agent), None, "the id still resolves");
+        assert_eq!(
+            s.runner_of(main),
+            Some(root),
+            "deleting one runner unmapped another's agent"
+        );
+        // And a delete for a runner this state never saw is ignored, like every
+        // other event addressed to one.
+        s.apply(&SessionEvent::RunnerDeleted {
+            id: RunnerId::new_v4(),
+        });
+        assert_eq!(s.runners.len(), 1);
+    }
+
+    /// A person renaming from the session list. Only the name moves — and it
+    /// must not resurrect a spec that was never recorded, or a session would
+    /// start believing in a default it was never created with.
+    #[test]
+    fn renaming_writes_the_name_and_nothing_else() {
+        let mut s = SessionState::default();
+        s.apply(&SessionEvent::Renamed {
+            name: "before the spec".into(),
+        });
+        assert!(s.spec.is_none(), "a rename invented a spec");
+
+        s.apply(&SessionEvent::SpecRecorded {
+            spec: Box::new(crate::sessions::spec::SessionSpec::for_vendor("local")),
+        });
+        s.apply(&SessionEvent::Renamed {
+            name: "the flake".into(),
+        });
+        let spec = s.spec.as_ref().expect("recorded");
+        assert_eq!(spec.name.as_deref(), Some("the flake"));
+        assert_eq!(
+            spec.vendor, "local",
+            "a rename rewrote the rest of the spec"
+        );
     }
 
     /// The state is snapshotted, so a row missing a field must still load.
