@@ -1,29 +1,165 @@
-//! Placeholder: filled in by its own task.
+//! The session's conversation, and its forks. One struct for both, because a
+//! fork *is* a conversation — one that carries a branch point.
+//!
+//! That is what collapses the five fork-shaped events the previous shape
+//! needed — created, seeded, titled, status-changed, turn-ended — into the
+//! vocabulary below. They existed only because a fork moved a roster entry
+//! while the main agent moved the session's status; once every runner carries
+//! its own status there is nothing left to tell apart, and a fork of a fork
+//! stops being a case at all.
+//!
+//! [`Runner::outcome`] is always `None`, in every state including the terminal
+//! ones. A conversation owes nobody a result, root or fork, which is what lets
+//! a `parent` mean provenance rather than debt — and it makes "a fork reports
+//! nothing" a property of this function rather than a check somewhere else that
+//! a reader has to go and find.
+//!
+//! A fork does not run until its seed lands. The branch point is a copy or a
+//! summary of the source's log, and an agent started before it exists would
+//! answer from an empty transcript — so [`State::seeded`] gates
+//! [`Runner::actions`], and a seed that failed leaves it false for good.
 
-use super::capabilities::Capability;
+use super::action::{Branch, FirstInput};
+use super::capabilities::{Capability, equip};
 use super::message::ChildOutcome;
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
+use crate::agent_loop::UsageTotal;
+use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct State {
-    pub capabilities: Vec<Capability>,
+/// Where this conversation's turn is. The runner's own word for it, so the
+/// session's status is a read of the root runner rather than a second variable
+/// that can disagree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TurnStatus {
+    /// Between turns: waiting for a person, and nothing in flight.
+    #[default]
+    Idle,
+    Running,
+    /// The agent asked, and the turn is parked on the answer.
+    AwaitingInput,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {}
+pub struct State {
+    /// The conversation's agent, once started. `None` is what
+    /// [`Runner::actions`] reads as "start it".
+    pub agent: Option<AgentId>,
+    /// `None` is the session's own conversation; `Some` is a fork, and names
+    /// where it branched from.
+    pub seed: Option<Branch>,
+    /// Whether that branch point has landed. Separate from `seed` because a
+    /// fork exists — and is listed, and is titled — from the moment it is
+    /// created, and only becomes runnable later.
+    pub seeded: bool,
+    pub turn: TurnStatus,
+    /// The name this conversation was created with. What an agent names itself
+    /// with `set_session_title` is the title capability's own slice, folded
+    /// through [`RunnerEvent::Capability`] and never through here.
+    pub title: Option<String>,
+    /// What a fork was told to do, and the first thing its agent is handed.
+    /// `None` for the session's own conversation, which waits for a person.
+    pub first_message: Option<String>,
+    /// What this conversation runs under, fixed when it was created.
+    pub settings: AgentSettings,
+    /// This conversation's own tokens; the session's aggregate is by model.
+    pub usage: UsageTotal,
+    pub capabilities: Vec<Capability>,
+}
+
+/// Not derived: [`AgentSettings`] has no `Default`. A live conversation's
+/// settings arrive with its args; this is the empty slice, and nothing else
+/// builds one.
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            agent: None,
+            seed: None,
+            seeded: false,
+            turn: TurnStatus::default(),
+            title: None,
+            first_message: None,
+            settings: AgentSettings {
+                model: String::new(),
+                allowed_tools: None,
+                use_plugins: None,
+                max_iterations: None,
+                max_retries: 0,
+                mcp_servers: Vec::new(),
+                memory_spaces: Vec::new(),
+                thinking_effort: None,
+                max_concurrent_subagents: None,
+                instructions: None,
+                plugins: Vec::new(),
+                auto_compact: None,
+                control_plane: None,
+            },
+            usage: UsageTotal::default(),
+            capabilities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Event {
+    Started {
+        agent: AgentId,
+    },
+    /// The branch point landed; a fork is now runnable like any other
+    /// conversation.
+    Seeded,
+    SeedFailed {
+        error: String,
+    },
+    TurnBegan,
+    /// The agent asked and is parked on the answer.
+    Asked,
+    TurnEnded,
+    TurnFailed {
+        error: String,
+    },
+    /// A person stopped the turn.
+    TurnStopped,
+    /// The process died inside the turn, and the agent said so at recovery.
+    TurnInterrupted,
+}
 
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        Vec::new()
+        if self.agent.is_some() {
+            return Vec::new();
+        }
+        // A fork whose branch point has not landed is a conversation with no
+        // transcript. Starting it here would have the model answer from
+        // nothing, and the copy would then land underneath it.
+        if self.seed.is_some() && !self.seeded {
+            return Vec::new();
+        }
+        vec![Action::StartAgent {
+            // Minted here rather than in the fold: a decision may be
+            // non-deterministic, a fold may not. The session journals the
+            // `Started` carrying this id when it performs the action.
+            agent: AgentId::new_v4(),
+            spec: Box::new(equip(&self.capabilities, self.settings.clone())),
+            first: match &self.first_message {
+                Some(text) => FirstInput::Text(text.clone()),
+                None => FirstInput::None,
+            },
+        }]
     }
 
+    /// Always `None`, in every state including the terminal ones.
+    ///
+    /// A conversation owes nobody a result. Its `parent` records which agent
+    /// branched it and nothing more, so a fork that failed is that fork's own
+    /// status rather than a report the source is still waiting for.
     fn outcome(&self) -> Option<ChildOutcome> {
         None
     }
 
     fn busy(&self) -> bool {
-        false
+        matches!(self.turn, TurnStatus::Running)
     }
 
     fn capabilities(&self) -> &[Capability] {
@@ -34,19 +170,374 @@ impl Runner for State {
         &mut self.capabilities
     }
 
-    fn apply(&mut self, _event: &RunnerEvent) {}
+    fn apply(&mut self, event: &RunnerEvent) {
+        // Every other arm belongs to another runner, or is a capability's own
+        // event that `RunnerState::apply` has already routed.
+        let RunnerEvent::Conversation(event) = event else {
+            return;
+        };
+        match event {
+            Event::Started { agent } => self.agent = Some(*agent),
+            Event::Seeded => self.seeded = true,
+            // `seeded` stays false, so this fork never starts an agent: a
+            // conversation with no transcript has nothing to continue.
+            Event::SeedFailed { .. } => self.turn = TurnStatus::Failed,
+            Event::TurnBegan => self.turn = TurnStatus::Running,
+            Event::Asked => self.turn = TurnStatus::AwaitingInput,
+            Event::TurnEnded | Event::TurnStopped | Event::TurnInterrupted => {
+                self.turn = TurnStatus::Idle;
+            }
+            Event::TurnFailed { .. } => self.turn = TurnStatus::Failed,
+        }
+    }
 }
 
 impl AgentLifecycle for State {
     fn on_agent_started(&self, _agent: AgentId) -> Emit {
-        (Vec::new(), Vec::new())
+        (
+            vec![RunnerEvent::Conversation(Event::TurnBegan)],
+            Vec::new(),
+        )
     }
 
-    fn on_agent_ended(&self, _agent: AgentId, _end: &TurnEnd) -> Emit {
-        (Vec::new(), Vec::new())
+    fn on_agent_ended(&self, _agent: AgentId, end: &TurnEnd) -> Emit {
+        let event = match end {
+            // The output is the agent's own transcript, which the session
+            // never copies: what ended is the turn, and that is all this
+            // records.
+            TurnEnd::Concluded { .. } => Event::TurnEnded,
+            TurnEnd::Asked => Event::Asked,
+            // `terminal` is not read here either: a conversation that failed
+            // is failed, and whether the sandbox can come back is the runtime
+            // runner's fact to hold.
+            TurnEnd::Failed { error, .. } => Event::TurnFailed {
+                error: error.clone(),
+            },
+            TurnEnd::Parked => Event::TurnFailed {
+                error: "timers are not supported in sessions".to_string(),
+            },
+            // Only while a turn is actually running. A report about a turn
+            // that already ended is history that has been written once
+            // already, and rewriting it would move an idle conversation
+            // backwards at every recovery.
+            TurnEnd::Interrupted => {
+                if self.turn != TurnStatus::Running {
+                    return (Vec::new(), Vec::new());
+                }
+                Event::TurnInterrupted
+            }
+        };
+        (vec![RunnerEvent::Conversation(event)], Vec::new())
     }
 
-    fn on_agent_halted(&self, _agent: AgentId, _reason: &str) -> Emit {
-        (Vec::new(), Vec::new())
+    fn on_agent_halted(&self, _agent: AgentId, reason: &str) -> Emit {
+        (
+            vec![RunnerEvent::Conversation(Event::TurnFailed {
+                error: reason.to_string(),
+            })],
+            Vec::new(),
+        )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::sessions::forks::ForkMode;
+    use crate::sessions::runners::action::ToolLayer;
+    use crate::sessions::runners::capabilities::title::TitleCapability;
+
+    fn view() -> SessionView {
+        SessionView {
+            runtime_ready: true,
+            depth: 0,
+            active_agents: 0,
+        }
+    }
+
+    fn fork() -> State {
+        State {
+            seed: Some(Branch {
+                source: AgentId::new_v4(),
+                source_seq: 0,
+                mode: ForkMode::Copy,
+            }),
+            first_message: Some("carry on elsewhere".into()),
+            ..State::default()
+        }
+    }
+
+    fn ended(state: &State, end: &TurnEnd) -> Vec<RunnerEvent> {
+        state.on_agent_ended(AgentId::new_v4(), end).0
+    }
+
+    fn only_event(events: Vec<RunnerEvent>) -> Event {
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        let RunnerEvent::Conversation(event) = &events[0] else {
+            panic!("expected a conversation event, got {:?}", events[0]);
+        };
+        event.clone()
+    }
+
+    fn started() -> RunnerEvent {
+        RunnerEvent::Conversation(Event::Started {
+            agent: AgentId::new_v4(),
+        })
+    }
+
+    /// A conversation with no agent starts one, and one with an agent starts
+    /// nothing — the same pure read that lets creation and recovery share a
+    /// path. Its first input is `None`: the session's own conversation waits
+    /// for a person rather than being handed something to answer.
+    #[test]
+    fn a_conversation_with_no_agent_starts_one_and_waits_for_a_person() {
+        let mut state = State::default();
+        let actions = state.actions(&view());
+        let Action::StartAgent { first, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        assert!(matches!(first, FirstInput::None));
+        assert_eq!(actions.len(), 1);
+
+        state.apply(&started());
+        assert!(state.actions(&view()).is_empty());
+    }
+
+    /// **A fork must not run before its branch point is durable.** Started
+    /// early, its agent answers from an empty transcript and the copy of the
+    /// source's log then lands underneath it — the conversation the person
+    /// asked to continue is gone, and nothing reports an error.
+    #[test]
+    fn a_fork_does_not_start_until_its_seed_lands() {
+        let mut state = fork();
+        assert!(state.actions(&view()).is_empty());
+
+        state.apply(&RunnerEvent::Conversation(Event::Seeded));
+        let actions = state.actions(&view());
+        assert_eq!(actions.len(), 1);
+        let Action::StartAgent { first, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        let FirstInput::Text(text) = first else {
+            panic!("expected the fork's message, got {first:?}");
+        };
+        assert_eq!(text, "carry on elsewhere");
+    }
+
+    /// A seed that failed leaves the fork unrunnable for good. If `SeedFailed`
+    /// only recorded a status, the next boundary would start the agent anyway
+    /// against the empty transcript the failure was about.
+    #[test]
+    fn a_fork_whose_seed_failed_never_starts() {
+        let mut state = fork();
+        state.apply(&RunnerEvent::Conversation(Event::SeedFailed {
+            error: "the copy failed".into(),
+        }));
+        assert_eq!(state.turn, TurnStatus::Failed);
+        assert!(state.actions(&view()).is_empty());
+    }
+
+    /// Equipment comes from folding this conversation's capabilities, which is
+    /// what replaces the per-kind toolbox match: a fork is equipped by holding
+    /// different capabilities, not by being a different kind of agent.
+    #[test]
+    fn the_agent_is_equipped_by_folding_the_capabilities() {
+        let state = State {
+            capabilities: vec![Capability::Title(TitleCapability::default())],
+            ..State::default()
+        };
+        let actions = state.actions(&view());
+        let Action::StartAgent { spec, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        assert!(spec.has(&ToolLayer::SessionTitle));
+    }
+
+    /// **A conversation never reports an outcome, in any state.** This is what
+    /// lets `parent` mean provenance rather than debt: give a fork an outcome
+    /// and the agent that typed `/fork` acquires an outstanding child it must
+    /// wait for, and a conversation that ends becomes a report somebody is owed.
+    #[test]
+    fn a_conversation_never_reports_an_outcome() {
+        let mut state = fork();
+        assert!(state.outcome().is_none());
+        for event in [
+            Event::Seeded,
+            Event::Started {
+                agent: AgentId::new_v4(),
+            },
+            Event::TurnBegan,
+            Event::Asked,
+            Event::TurnEnded,
+            Event::TurnStopped,
+            Event::TurnInterrupted,
+            Event::TurnFailed {
+                error: "it broke".into(),
+            },
+            Event::SeedFailed {
+                error: "the copy failed".into(),
+            },
+        ] {
+            state.apply(&RunnerEvent::Conversation(event));
+            assert!(
+                state.outcome().is_none(),
+                "a conversation reported an outcome from {:?}",
+                state.turn
+            );
+        }
+    }
+
+    /// Busy is "a turn is in flight". A conversation parked on a question must
+    /// not read busy — that is exactly the state a session is offloaded in, and
+    /// a person may not answer for hours.
+    #[test]
+    fn it_is_busy_only_while_a_turn_runs() {
+        let mut state = State::default();
+        assert!(!state.busy());
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        assert!(state.busy());
+        state.apply(&RunnerEvent::Conversation(Event::Asked));
+        assert!(!state.busy());
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        assert!(state.busy());
+        state.apply(&RunnerEvent::Conversation(Event::TurnEnded));
+        assert!(!state.busy());
+    }
+
+    /// Only its own events touch its slice. Folding a neighbour's event here
+    /// would let one runner's log rewrite another's state on replay.
+    #[test]
+    fn another_runners_event_is_a_no_op() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::SubAgent(
+            crate::sessions::runners::subagent::Event::Failed {
+                error: "not mine".into(),
+            },
+        ));
+        assert_eq!(state.turn, TurnStatus::Idle);
+        assert!(state.agent.is_none());
+    }
+
+    /// Starting an agent is the start of a turn. Without this the conversation
+    /// would read idle while the model was mid-answer, and the session could be
+    /// offloaded underneath it.
+    #[test]
+    fn starting_an_agent_begins_a_turn() {
+        let (events, actions) = State::default().on_agent_started(AgentId::new_v4());
+        assert!(actions.is_empty());
+        assert!(matches!(only_event(events), Event::TurnBegan));
+    }
+
+    /// A conclusion ends the turn and nothing more: what the agent said lives
+    /// in the agent's own journal, and copying it here would be a second copy
+    /// to keep in step.
+    #[test]
+    fn a_concluded_turn_ends_the_turn() {
+        let event = only_event(ended(
+            &State::default(),
+            &TurnEnd::Concluded {
+                output: serde_json::json!("done"),
+            },
+        ));
+        assert!(matches!(event, Event::TurnEnded));
+    }
+
+    /// An ask parks the turn rather than ending it. Read as an ending, the
+    /// conversation would go idle while an unanswered question sat in front of
+    /// the person, and nothing would show it as waiting.
+    #[test]
+    fn an_ask_parks_the_turn() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        let event = only_event(ended(&state, &TurnEnd::Asked));
+        assert!(matches!(event, Event::Asked));
+        state.apply(&RunnerEvent::Conversation(event));
+        assert_eq!(state.turn, TurnStatus::AwaitingInput);
+    }
+
+    /// A failing turn carries its error through verbatim, terminal or not: it
+    /// is the only thing a person will be shown about why the turn stopped.
+    #[test]
+    fn a_failing_turn_fails_the_turn_with_its_error() {
+        for terminal in [true, false] {
+            let event = only_event(ended(
+                &State::default(),
+                &TurnEnd::Failed {
+                    error: "the model refused".into(),
+                    terminal,
+                },
+            ));
+            let Event::TurnFailed { error } = event else {
+                panic!("expected a failed turn, got {event:?}");
+            };
+            assert_eq!(error, "the model refused");
+        }
+    }
+
+    /// A conversation has no timer tools, so a park is a turn stopped for
+    /// something that will never arrive. Failing it in words is what stops the
+    /// person waiting on a conversation that reads as running.
+    #[test]
+    fn a_park_fails_the_turn_because_sessions_have_no_timers() {
+        let event = only_event(ended(&State::default(), &TurnEnd::Parked));
+        let Event::TurnFailed { error } = event else {
+            panic!("expected a failed turn, got {event:?}");
+        };
+        assert!(error.contains("timers"));
+    }
+
+    /// An interruption counts only against a turn that was running. A report
+    /// arriving about a turn that already ended is history already written, and
+    /// acting on it would move an idle conversation backwards at every
+    /// recovery.
+    #[test]
+    fn an_interruption_counts_only_during_a_running_turn() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        let event = only_event(ended(&state, &TurnEnd::Interrupted));
+        assert!(matches!(event, Event::TurnInterrupted));
+        state.apply(&RunnerEvent::Conversation(event));
+        assert_eq!(state.turn, TurnStatus::Idle);
+
+        // Idle, awaiting input and failed all mean the turn's ending was
+        // recorded already.
+        for turn in [
+            TurnStatus::Idle,
+            TurnStatus::AwaitingInput,
+            TurnStatus::Failed,
+        ] {
+            let settled = State {
+                turn,
+                ..State::default()
+            };
+            let (events, actions) =
+                settled.on_agent_ended(AgentId::new_v4(), &TurnEnd::Interrupted);
+            assert!(events.is_empty(), "{turn:?} emitted {events:?}");
+            assert!(actions.is_empty());
+        }
+    }
+
+    /// A halted turn is a failed turn carrying the halting reason. Without it,
+    /// a conversation stopped by a hook would read as running for ever.
+    #[test]
+    fn a_halt_fails_the_turn_with_its_reason() {
+        let (events, actions) =
+            State::default().on_agent_halted(AgentId::new_v4(), "blocked by a hook");
+        assert!(actions.is_empty());
+        let Event::TurnFailed { error } = only_event(events) else {
+            panic!("expected a failed turn");
+        };
+        assert_eq!(error, "blocked by a hook");
+    }
+
+    /// A stop is a turn that ended, not one that failed: the person asked for
+    /// it, and the next thing they do is type again.
+    #[test]
+    fn a_stopped_turn_goes_back_to_idle() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        state.apply(&RunnerEvent::Conversation(Event::TurnStopped));
+        assert_eq!(state.turn, TurnStatus::Idle);
     }
 }
