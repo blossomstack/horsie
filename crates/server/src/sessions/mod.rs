@@ -20,6 +20,7 @@ pub mod lifecycle_routing;
 pub mod orchestrator;
 pub mod runners;
 pub mod session_actor;
+pub mod session_toolbox;
 pub mod spawn_tool;
 pub mod spec;
 pub mod subagents;
