@@ -34,7 +34,8 @@
 //! would ever deliver.
 
 use super::action::{Action, FirstInput};
-use super::capabilities::{Capability, equip};
+use super::capabilities::step_result::StepResultCapability;
+use super::capabilities::{Capability, Handler, equip};
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
@@ -378,9 +379,24 @@ impl Runner for State {
         let Some(step) = self.graph.step(&next.step) else {
             return Vec::new();
         };
+        let mut spec = equip(&self.capabilities, step.settings.clone());
+        // The one capability whose instance is per *agent* rather than per
+        // runner: what a step promises to return, and whether it may ask, are
+        // declared by that step, so step 1 can be interactive and step 2 not.
+        // It is built here rather than held in `capabilities` because it has
+        // no state to carry between steps — its `apply` records nothing, since
+        // a submitted result is this runner's own `StepConcluded` to fold.
+        Handler::setup(
+            &StepResultCapability::new(
+                step.outcomes.clone(),
+                step.fields.clone(),
+                step.interactive,
+            ),
+            &mut spec,
+        );
         vec![Action::StartAgent {
             agent: next.agent,
-            spec: Box::new(equip(&self.capabilities, step.settings.clone())),
+            spec: Box::new(spec),
             first: FirstInput::Text(next.input),
         }]
     }

@@ -150,6 +150,83 @@ pub trait AgentLifecycle {
     fn on_agent_halted(&self, agent: AgentId, reason: &str) -> Emit;
 }
 
+/// What a runner of this kind holds, in the order tool calls are offered
+/// around them.
+///
+/// The order is the conflict resolution for a tool call, so it is written down
+/// here rather than left to whoever constructs a runner: the fixed-name
+/// capabilities come first and the open-namespace ones last, because
+/// [`capabilities::runtime::RuntimeCapability`] answers for a namespace nobody
+/// can enumerate — the sandbox toolbox plus whatever the plugin scan found.
+/// Put it first and it silently shadows every named tool behind it.
+#[must_use]
+pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Vec<Capability> {
+    use capabilities::{
+        ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
+        mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
+        sub_agent::SubAgentCapability, title::TitleCapability, workflow::WorkflowCapability,
+    };
+    let s = opts.settings;
+    let mut caps: Vec<Capability> = Vec::new();
+
+    // A runner that owns no agents equips nothing, and has nothing to offer a
+    // message to.
+    if matches!(kind, RunnerKind::Runtime) {
+        return caps;
+    }
+
+    // Delegation: every runner that owns an agent can delegate, which is what
+    // makes nesting uniform rather than a privilege of the main agent.
+    caps.push(Capability::SubAgent(SubAgentCapability::new(s.clone())));
+    caps.push(Capability::Workflow(WorkflowCapability::default()));
+
+    match kind {
+        // A conversation can ask, name itself, and branch.
+        RunnerKind::Conversation => {
+            caps.push(Capability::AskUser(match opts.unattended {
+                true => AskUserCapability::unattended(),
+                false => AskUserCapability::default(),
+            }));
+            caps.push(Capability::Title(match opts.fork {
+                Some(fork) => TitleCapability::for_fork(fork),
+                None => TitleCapability::default(),
+            }));
+            caps.push(Capability::Fork(ForkCapability::new(s.clone())));
+        }
+        // A step's `submit_result` and its `ask_user` are declared per step, so
+        // they are equipped when the step agent starts rather than held here.
+        RunnerKind::Workflow => {}
+        // A worker owes a report and cannot ask, name the session or branch.
+        RunnerKind::SubAgent => {}
+        RunnerKind::Runtime => {}
+    }
+
+    if s.control_plane == Some(true) && matches!(kind, RunnerKind::Conversation) {
+        caps.push(Capability::ControlPlane(ControlPlaneCapability));
+    }
+    if !s.memory_spaces.is_empty() {
+        caps.push(Capability::Memory(MemoryCapability::new(
+            s.memory_spaces.clone(),
+        )));
+    }
+    // Last, and last on purpose.
+    if !s.mcp_servers.is_empty() {
+        caps.push(Capability::Mcp(McpCapability::new(s.mcp_servers.clone())));
+    }
+    caps.push(Capability::Runtime(RuntimeCapability));
+    caps
+}
+
+/// What `assemble` needs beyond the kind.
+pub struct Assembly<'a> {
+    pub settings: &'a crate::sessions::spec::AgentSettings,
+    /// Nobody is watching, so no `ask_user`: a question would park for ever.
+    pub unattended: bool,
+    /// Set when this conversation is a fork, so it names itself rather than
+    /// the session it branched from.
+    pub fork: Option<RunnerId>,
+}
+
 /// An `AgentSettings` with nothing set.
 ///
 /// Test-only, and deliberately not a `Default` on `AgentSettings` itself: a
@@ -278,5 +355,125 @@ impl RunnerState {
             Self::Workflow(s) => Some(s.as_ref()),
             Self::Runtime(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use capabilities::Handler;
+    use message::{Caller, Message, ToolCall};
+
+    fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
+        Assembly {
+            settings,
+            unattended: false,
+            fork: None,
+        }
+    }
+
+    fn call(name: &str) -> Message {
+        Message::Tool(ToolCall {
+            id: "t".into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+        })
+    }
+
+    /// The runtime capability answers for a namespace nobody can enumerate, so
+    /// it must sort last. First, it silently shadows every named tool behind
+    /// it — which is exactly the failure the written order exists to prevent.
+    #[test]
+    fn the_open_namespace_capability_sorts_last() {
+        let s = empty_settings();
+        for kind in [
+            RunnerKind::Conversation,
+            RunnerKind::SubAgent,
+            RunnerKind::Workflow,
+        ] {
+            let caps = assemble(kind, &opts(&s));
+            let last = caps.last().expect("every agent-owning runner equips one");
+            assert!(
+                matches!(last, Capability::Runtime(_)),
+                "{kind:?} put something after the runtime capability"
+            );
+        }
+    }
+
+    /// A runner that owns no agents equips nothing — there is no agent to
+    /// equip, and nothing that could send it a tool call.
+    #[test]
+    fn the_runtime_runner_assembles_nothing() {
+        let s = empty_settings();
+        assert!(assemble(RunnerKind::Runtime, &opts(&s)).is_empty());
+    }
+
+    /// Every runner that owns an agent can delegate. That uniformity is the
+    /// whole point: a subagent spawning a subagent, and a step invoking a
+    /// workflow, are the same capability in a different holder.
+    #[test]
+    fn every_agent_owning_runner_can_delegate() {
+        let s = empty_settings();
+        let caller = Caller {
+            agent: AgentId::new_v4(),
+            depth: 0,
+            active_agents: 0,
+        };
+        for kind in [
+            RunnerKind::Conversation,
+            RunnerKind::SubAgent,
+            RunnerKind::Workflow,
+        ] {
+            let caps = assemble(kind, &opts(&s));
+            assert!(
+                caps.iter().any(|c| matches!(c, Capability::SubAgent(_))),
+                "{kind:?} cannot spawn"
+            );
+            assert!(
+                caps.iter().any(|c| matches!(c, Capability::Workflow(_))),
+                "{kind:?} cannot invoke a workflow"
+            );
+            // And the runtime does not swallow the named tool on the way past.
+            let taken = caps
+                .iter()
+                .find_map(|c| c.handle(caller, &call("spawn_agent")).map(|d| (c, d)));
+            let Some((owner, _)) = taken else {
+                panic!("{kind:?} left spawn_agent unclaimed");
+            };
+            assert!(matches!(owner, Capability::SubAgent(_)));
+        }
+    }
+
+    /// A worker owes a report; it cannot ask the user, name the session or
+    /// branch a conversation. Equipping it with those would advertise tools
+    /// whose answers nothing could route.
+    #[test]
+    fn a_worker_gets_none_of_a_conversations_arms() {
+        let s = empty_settings();
+        let caps = assemble(RunnerKind::SubAgent, &opts(&s));
+        assert!(!caps.iter().any(|c| matches!(c, Capability::AskUser(_))));
+        assert!(!caps.iter().any(|c| matches!(c, Capability::Title(_))));
+        assert!(!caps.iter().any(|c| matches!(c, Capability::Fork(_))));
+    }
+
+    /// Nobody is watching a routine's run, so its conversation gets no
+    /// `ask_user` layer: a question it asked would park the run for ever.
+    #[test]
+    fn an_unattended_conversation_equips_no_ask_layer() {
+        let s = empty_settings();
+        let caps = assemble(
+            RunnerKind::Conversation,
+            &Assembly {
+                settings: &s,
+                unattended: true,
+                fork: None,
+            },
+        );
+        let mut spec = action::AgentSpec::default();
+        for c in &caps {
+            c.setup(&mut spec);
+        }
+        assert!(!spec.has(&action::ToolLayer::AskUser));
     }
 }

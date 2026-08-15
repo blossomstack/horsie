@@ -62,7 +62,10 @@ impl Handler for TitleCapability {
         if t.name != TOOL {
             return None;
         }
-        let req: Request = serde_json::from_value(t.input.clone()).ok()?;
+        let req: Request = match super::parse(&t.name, &t.input) {
+            Ok(req) => req,
+            Err(refusal) => return Some(refusal),
+        };
         Some((
             vec![CapEvent::Title(Event::Set {
                 name: req.title.clone(),

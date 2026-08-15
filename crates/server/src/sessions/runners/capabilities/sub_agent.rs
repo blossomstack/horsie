@@ -71,7 +71,10 @@ impl SubAgentCapability {
     fn on_tool(&self, caller: Caller, t: &ToolCall) -> Option<Decision> {
         match t.name.as_str() {
             SPAWN_TOOL => {
-                let req: Request = serde_json::from_value(t.input.clone()).ok()?;
+                let req: Request = match super::parse(&t.name, &t.input) {
+                    Ok(req) => req,
+                    Err(refusal) => return Some(refusal),
+                };
                 // The child's id is minted here rather than in `apply`: a
                 // decision may be non-deterministic, a fold may not. Replay
                 // must land the id the log recorded, so the event and the

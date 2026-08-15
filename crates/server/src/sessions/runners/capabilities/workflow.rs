@@ -66,7 +66,10 @@ impl WorkflowCapability {
     fn on_tool(&self, caller: Caller, t: &ToolCall) -> Option<Decision> {
         match t.name.as_str() {
             INVOKE_TOOL => {
-                let req: Request = serde_json::from_value(t.input.clone()).ok()?;
+                let req: Request = match super::parse(&t.name, &t.input) {
+                    Ok(req) => req,
+                    Err(refusal) => return Some(refusal),
+                };
                 // Minted here, not in `apply`: a decision may be
                 // non-deterministic, a fold may not. The event and the action
                 // then name the same run, and replay lands the id the log has.
@@ -292,18 +295,26 @@ mod tests {
         assert_eq!(input, "cut 1.2.0");
     }
 
-    /// Arguments that do not deserialise are not this capability's call to
-    /// answer: `None` lets the offer fall through rather than journaling a
-    /// `Started` for a run that was never asked for coherently.
+    /// Arguments this capability cannot read are still *its* call to answer.
+    /// Falling through would hand a mistyped `invoke_workflow` to the
+    /// open-namespace runtime capability, which claims anything — so the
+    /// model's mistake would be silently absorbed instead of corrected.
     #[test]
-    fn a_malformed_invocation_is_not_mine() {
+    fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
         let c = WorkflowCapability::default();
-        assert!(
-            c.handle(
+        let (events, actions) = c
+            .handle(
                 caller(),
                 &tool(INVOKE_TOOL, serde_json::json!({"workflow": "nope"})),
             )
-            .is_none()
+            .expect("the name is mine, so the mistake is mine to answer");
+        assert!(events.is_empty());
+        let [Action::Reply { text }] = actions.as_slice() else {
+            panic!("expected one reply, got {actions:?}");
+        };
+        assert!(
+            text.contains(INVOKE_TOOL),
+            "the reply names the tool: {text}"
         );
     }
 

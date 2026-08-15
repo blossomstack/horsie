@@ -135,6 +135,27 @@ impl Handler for Capability {
     }
 }
 
+/// Parse a tool call's arguments, or answer the model with what was wrong.
+///
+/// A capability that owns a tool name owns every call to it, including the
+/// malformed ones. Returning `None` on a parse failure would let the call fall
+/// through to the next capability — and the last one is the open-namespace
+/// runtime, which claims anything — so a mistyped `spawn_agent` would be
+/// quietly absorbed by the sandbox layer instead of being corrected.
+pub(crate) fn parse<T: serde::de::DeserializeOwned>(
+    tool: &str,
+    input: &serde_json::Value,
+) -> Result<T, Decision> {
+    serde_json::from_value(input.clone()).map_err(|e| {
+        (
+            Vec::new(),
+            vec![Action::Reply {
+                text: format!("`{tool}` was called with arguments it cannot read: {e}"),
+            }],
+        )
+    })
+}
+
 /// Equip an agent by folding every capability over a fresh spec.
 ///
 /// This replaces the four-arm match that used to decide an agent's toolbox
