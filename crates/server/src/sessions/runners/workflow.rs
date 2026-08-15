@@ -39,14 +39,13 @@ use super::capabilities::ask_user::AskUserCapability;
 use super::capabilities::step_result::StepResultCapability;
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
-use super::projection::{AgentDescription, Description, RunDescription};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::sessions::session_actor::AgentStatus;
-use crate::sessions::spec::SessionStatus;
+use crate::sessions::session_actor::{AgentEntry, AgentStatus};
+use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::workflow::{
-    DEFAULT_MAX_STEPS, OUTCOME_FIELD, StepRun, StepStatus, WorkflowRunSpec, WorkflowRunStatus,
-    compose_step_input, next_transition, output_as_input,
+    DEFAULT_MAX_STEPS, OUTCOME_FIELD, StepRun, StepStatus, WorkflowRunSpec, WorkflowRunState,
+    WorkflowRunStatus, compose_step_input, next_transition, output_as_input,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -89,7 +88,7 @@ pub struct State {
     pub graph: Arc<WorkflowRunSpec>,
     /// The append-only execution log. A step reached twice — by a loop or by a
     /// retry — has two entries, which is what keeps the fold pure and the graph
-    /// projection lossless.
+    /// endpoint's read of it lossless.
     pub steps: Vec<StepRun>,
     pub status: WorkflowRunStatus,
     /// The terminal output, once the run has ended.
@@ -246,6 +245,14 @@ impl State {
             .iter()
             .position(|s| s.status == StepStatus::Running)
             .map(|i| i as u32)
+    }
+
+    /// The execution one of this run's agents is. A step reached twice is two
+    /// executions with two agents, so the agent — not the step's name — is what
+    /// picks one out.
+    #[must_use]
+    fn execution(&self, agent: AgentId) -> Option<&StepRun> {
+        self.steps.iter().find(|run| run.agent == agent.as_uuid())
     }
 
     /// The last execution, which is the one a routing decision is made from.
@@ -575,83 +582,115 @@ impl Runner for State {
     /// One agent per *execution*, not one per step: a step reached twice — by a
     /// loop or by a retry — is two agents with two transcripts, and collapsing
     /// them would lose one.
-    fn describe(&self) -> Description<'_> {
-        Description {
-            // At most one step runs at a time and the definition chose it, so
-            // there is nothing else an unaddressed request on a run could
-            // mean. `None` between steps, which is when there is nothing to
-            // address.
-            primary: self
-                .current()
-                .and_then(|i| self.steps.get(i as usize))
-                .map(|run| AgentId(run.agent)),
-            standing: Some(match self.status {
-                WorkflowRunStatus::Pending => SessionStatus::Idle,
-                WorkflowRunStatus::Running => SessionStatus::Running,
-                WorkflowRunStatus::AwaitingInput => SessionStatus::AwaitingInput,
-                // A person decides between retrying and abandoning, so the run
-                // rests. Not a failure: nothing broke, and a retry moves it.
-                WorkflowRunStatus::Suspended => SessionStatus::Idle,
-                // Not `Idle`: a run that ran to completion and one that stopped
-                // part-way both rest, and telling them apart is the whole
-                // reason to look at a list of past runs.
-                WorkflowRunStatus::Finished => SessionStatus::Finished,
-                WorkflowRunStatus::Failed => SessionStatus::Failed {
-                    reason: self
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "the run failed".to_string()),
+    ///
+    /// The one kind that stamps its own agents. A step comes and goes inside
+    /// one runner's life, so the record's stamps are the run's and not the
+    /// step's, and a step that left them to the read side would report the
+    /// moment the run began.
+    fn rows(&self) -> Vec<AgentEntry> {
+        self.steps
+            .iter()
+            .map(|run| AgentEntry {
+                id: AgentId(run.agent).to_string(),
+                // Where a step sits is the session's fact about it, not the
+                // run's.
+                parent: None,
+                depth: 0,
+                label: Some(run.step.clone()),
+                agent_type: None,
+                status: match run.status {
+                    StepStatus::Running => AgentStatus::Running,
+                    StepStatus::Concluded => AgentStatus::Completed,
+                    StepStatus::Failed => AgentStatus::Failed,
+                    StepStatus::Cancelled => AgentStatus::Cancelled,
                 },
-            }),
-            listed: None,
-            // A step is chosen by the definition rather than spawned, so it
-            // roots its own tree at 0.
-            depth_base: 0,
-            agents: self
-                .steps
-                .iter()
-                .map(|run| AgentDescription {
-                    agent: AgentId(run.agent),
-                    label: Some(&run.step),
-                    agent_type: None,
-                    status: match run.status {
-                        StepStatus::Running => AgentStatus::Running,
-                        StepStatus::Concluded => AgentStatus::Completed,
-                        StepStatus::Failed => AgentStatus::Failed,
-                        StepStatus::Cancelled => AgentStatus::Cancelled,
-                    },
-                    error: run.error.as_deref(),
-                    // The step's own preset. A graph resolves one per step at
-                    // creation, which is what lets step 1 run on a large model
-                    // and step 2 on a small one — and reading the session's
-                    // instead is what had every step's document report the
-                    // first step's model.
-                    settings: self.graph.step(&run.step).map(|step| &step.settings),
-                    // A step's brief is its definition's, not something an
-                    // agent handed it.
-                    task: None,
-                    // Rendered the way a worker's report is, because a reader
-                    // wants the same thing from both.
-                    output: run.output.as_ref().map(output_as_input),
-                    usage: self
-                        .step_usage
-                        .get(&AgentId(run.agent))
-                        .copied()
-                        .unwrap_or_default(),
-                    // The one kind whose agents come and go inside one runner's
-                    // life, so the record's stamps are the run's and not the
-                    // step's.
-                    times: Some((run.started_at_ms, run.ended_at_ms.unwrap_or(0))),
-                })
-                .collect(),
-            run: Some(RunDescription {
-                graph: &self.graph,
-                steps: &self.steps,
-                status: self.status,
-                output: self.output.as_ref(),
-                error: self.error.as_deref(),
-            }),
-        }
+                error: run.error.clone(),
+                started_at_ms: run.started_at_ms,
+                ended_at_ms: run.ended_at_ms.unwrap_or(0),
+            })
+            .collect()
+    }
+
+    fn standing(&self) -> Option<SessionStatus> {
+        Some(match self.status {
+            WorkflowRunStatus::Pending => SessionStatus::Idle,
+            WorkflowRunStatus::Running => SessionStatus::Running,
+            WorkflowRunStatus::AwaitingInput => SessionStatus::AwaitingInput,
+            // A person decides between retrying and abandoning, so the run
+            // rests. Not a failure: nothing broke, and a retry moves it.
+            WorkflowRunStatus::Suspended => SessionStatus::Idle,
+            // Not `Idle`: a run that ran to completion and one that stopped
+            // part-way both rest, and telling them apart is the whole reason to
+            // look at a list of past runs.
+            WorkflowRunStatus::Finished => SessionStatus::Finished,
+            WorkflowRunStatus::Failed => SessionStatus::Failed {
+                reason: self
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "the run failed".to_string()),
+            },
+        })
+    }
+
+    /// At most one step runs at a time and the definition chose it, so there is
+    /// nothing else an unaddressed request on a run could mean. `None` between
+    /// steps, which is when there is nothing to address.
+    fn primary_agent(&self) -> Option<AgentId> {
+        self.current()
+            .and_then(|i| self.steps.get(i as usize))
+            .map(|run| AgentId(run.agent))
+    }
+
+    fn run_log(&self) -> Option<WorkflowRunState> {
+        Some(WorkflowRunState {
+            status: self.status,
+            steps: self.steps.clone(),
+            output: self.output.clone(),
+            error: self.error.clone(),
+        })
+    }
+
+    fn run_graph(&self) -> Option<Arc<WorkflowRunSpec>> {
+        Some(Arc::clone(&self.graph))
+    }
+
+    /// The step's own preset. A graph resolves one per step at creation, which
+    /// is what lets step 1 run on a large model and step 2 on a small one — and
+    /// reading the session's instead is what had every step's document report
+    /// the first step's model.
+    ///
+    /// `None` only when a step's definition has gone from the graph it was
+    /// snapshotted into, which nothing can produce.
+    fn settings(&self, agent: AgentId) -> Option<&AgentSettings> {
+        let run = self.execution(agent)?;
+        self.graph.step(&run.step).map(|step| &step.settings)
+    }
+
+    /// A step's brief is its definition's, not something an agent handed it, so
+    /// only the output half answers — rendered the way a worker's report is,
+    /// because a reader wants the same thing from both.
+    fn task_and_output(&self, agent: AgentId) -> (Option<String>, Option<String>) {
+        let output = self
+            .execution(agent)
+            .and_then(|run| run.output.as_ref())
+            .map(output_as_input);
+        (None, output)
+    }
+
+    /// One total per step agent, which is what the graph endpoint renders. A
+    /// step that has spent nothing is still listed: it is an agent of this run,
+    /// and leaving it out would read as an agent the session does not have.
+    fn usage(&self) -> Vec<(AgentId, UsageTotal)> {
+        self.steps
+            .iter()
+            .map(|run| {
+                let agent = AgentId(run.agent);
+                (
+                    agent,
+                    self.step_usage.get(&agent).copied().unwrap_or_default(),
+                )
+            })
+            .collect()
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

@@ -34,7 +34,7 @@ pub mod ids;
 pub mod lifecycle_routing;
 pub mod loading;
 pub mod message;
-pub mod projection;
+pub mod reads;
 pub mod runtime;
 pub mod state;
 pub mod subagent;
@@ -43,10 +43,15 @@ pub mod workflow;
 pub use ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
 pub use state::{RunnerRecord, SessionState};
 
+use crate::sessions::session_actor::AgentEntry;
+use crate::sessions::spec::{AgentSettings, SessionStatus};
+use crate::sessions::supervisor::ForkRow;
+use crate::sessions::workflow::{WorkflowRunSpec, WorkflowRunState};
 use action::Action;
 use capabilities::Capabilities;
 use message::ChildOutcome;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// What a runner decided: events for its own slice, actions for the session.
 ///
@@ -177,24 +182,117 @@ pub trait Runner {
         None
     }
 
-    /// How I describe myself to the read side.
+    /// My agents, as the read side lists them.
     ///
-    /// The one method the read projection calls, and the reason
-    /// [`projection`] contains no `match` on [`RunnerState`]: several answers a
-    /// reader wants need something only one kind of runner holds — a worker's
-    /// label, a step's name, a conversation's last error — and reaching them
-    /// with a match would grow the per-kind dispatch back, one arm at a time,
-    /// in the file every new read touches.
+    /// This method and the six below it are why [`reads`] contains no `match`
+    /// on [`RunnerState`]: several answers a reader wants need something only
+    /// one kind of runner holds — a worker's label, a step's name, a
+    /// conversation's last error — and reaching them with a match would grow
+    /// the per-kind dispatch back, one arm at a time, in the file every new
+    /// read touches.
     ///
-    /// What comes back is only what *I* know. Where an agent sits in the
-    /// session — its parent, its depth — is the session's own shape and the
-    /// projection fills it in, so no runner can guess at it and no two runners
-    /// can guess differently.
+    /// **A runner fills in what only it knows, and the read side fills in what
+    /// only the session knows.** A worker says it is called "read the flake"
+    /// and that it failed; the session says which agent parented it and how
+    /// deep it sits, because those are facts about the shape of the session and
+    /// not about the worker. So two fields here are left alone by every runner
+    /// and written by [`reads`]:
     ///
-    /// Required rather than defaulted: a fifth kind of runner has to decide
-    /// what it looks like to a reader, and a silent empty answer would show up
-    /// as an agent missing from a roster rather than as a compile error.
-    fn describe(&self) -> projection::Description<'_>;
+    /// - `parent` — always `None` from a runner; no runner can see the tree.
+    /// - `depth` — always `0` from a runner; the read side walks the tree.
+    ///
+    /// And one pair is left alone by all but a run: `started_at_ms` and
+    /// `ended_at_ms` stay zero when my agents live exactly as long as I do,
+    /// which lets the read side stamp them from my record. A run's step agents
+    /// come and go inside one runner's life, so a run is the one kind that
+    /// answers with times of its own.
+    ///
+    /// Defaulted to nothing, like [`Runner::capabilities`] and
+    /// [`Runner::finished`]: the runtime runner owns no agents, so "it lists
+    /// none" is a fact about the type rather than an empty vector somebody has
+    /// to keep empty.
+    fn rows(&self) -> Vec<AgentEntry> {
+        Vec::new()
+    }
+
+    /// What I would make the session, were I the root.
+    ///
+    /// The session's status is a *read* of one runner rather than a second
+    /// variable beside it, which is what stops the two disagreeing — the defect
+    /// the shape this replaces had, where thirteen `report(LITERAL)` calls each
+    /// restated the status the next line was about to fold.
+    ///
+    /// `None` from a runner that cannot be a root and keeps no such word.
+    fn standing(&self) -> Option<SessionStatus> {
+        None
+    }
+
+    /// The agent an unaddressed read of me means.
+    ///
+    /// A conversation's is its own agent, always. A run's is the step in
+    /// flight, so it is `None` between steps and once the run is over — which
+    /// is exactly when there is nothing an unaddressed request could mean.
+    fn primary_agent(&self) -> Option<AgentId> {
+        None
+    }
+
+    /// My run's log, if I am a run. The one thing a reader wants whole rather
+    /// than agent by agent — the graph endpoint renders the log, not a roster.
+    fn run_log(&self) -> Option<WorkflowRunState> {
+        None
+    }
+
+    /// The graph my run was started from, if I am a run.
+    ///
+    /// Snapshotted at creation and read from me rather than from the session's
+    /// spec, which is what makes an ad-hoc run — a graph with no definition row
+    /// and no name — expressible at all.
+    fn run_graph(&self) -> Option<Arc<WorkflowRunSpec>> {
+        None
+    }
+
+    /// My row in the session list, if a person can open me as a conversation in
+    /// my own right.
+    ///
+    /// Only a fork answers. The session's own conversation *is* the session and
+    /// is listed as one; nothing else a session hosts is a conversation.
+    ///
+    /// `parent` and `created_at_ms` are the two fields I leave alone, for the
+    /// same reason [`Runner::rows`] leaves `parent` and `depth`: where I sit and
+    /// when I was created are the session's facts about me, not mine.
+    fn listing(&self) -> Option<ForkRow> {
+        None
+    }
+
+    /// What one of my agents runs under: a step's own preset, a worker's
+    /// settings as its caller fixed them, a conversation's own.
+    ///
+    /// Never the session's, which is the defect this shape closes: the
+    /// session's `AgentSettings` is the *first* step's, and the wrong answer for
+    /// every other agent in a run.
+    ///
+    /// `agent` is always one of mine — the read side resolves the runner from
+    /// the agent before asking — and it is a parameter because a run owns
+    /// several.
+    fn settings(&self, _agent: AgentId) -> Option<&AgentSettings> {
+        None
+    }
+
+    /// What one of my agents was asked to do, and what it produced.
+    ///
+    /// A conversation has neither: it is asked things one turn at a time, and
+    /// what it said is its transcript rather than a result.
+    fn task_and_output(&self, _agent: AgentId) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+
+    /// What each of my agents has banked.
+    ///
+    /// Per agent rather than one total, because a run's per-step split is what
+    /// the graph endpoint renders and a sum cannot be taken apart again.
+    fn usage(&self) -> Vec<(AgentId, crate::agent_loop::UsageTotal)> {
+        Vec::new()
+    }
 
     /// Fold one of my own events. Pure — no clock, no ids, no randomness.
     ///
@@ -438,8 +536,40 @@ impl Runner for RunnerState {
         dispatch!(self, capabilities_mut)
     }
 
-    fn describe(&self) -> projection::Description<'_> {
-        dispatch!(self, describe)
+    fn rows(&self) -> Vec<AgentEntry> {
+        dispatch!(self, rows)
+    }
+
+    fn standing(&self) -> Option<SessionStatus> {
+        dispatch!(self, standing)
+    }
+
+    fn primary_agent(&self) -> Option<AgentId> {
+        dispatch!(self, primary_agent)
+    }
+
+    fn run_log(&self) -> Option<WorkflowRunState> {
+        dispatch!(self, run_log)
+    }
+
+    fn run_graph(&self) -> Option<Arc<WorkflowRunSpec>> {
+        dispatch!(self, run_graph)
+    }
+
+    fn listing(&self) -> Option<ForkRow> {
+        dispatch!(self, listing)
+    }
+
+    fn settings(&self, agent: AgentId) -> Option<&AgentSettings> {
+        dispatch!(self, settings, agent)
+    }
+
+    fn task_and_output(&self, agent: AgentId) -> (Option<String>, Option<String>) {
+        dispatch!(self, task_and_output, agent)
+    }
+
+    fn usage(&self) -> Vec<(AgentId, crate::agent_loop::UsageTotal)> {
+        dispatch!(self, usage)
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

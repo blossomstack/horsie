@@ -28,11 +28,11 @@
 use super::action::{Branch, FirstInput};
 use super::capabilities::{CapSlice, Capabilities};
 use super::message::ChildOutcome;
-use super::projection::{AgentDescription, Description, Listing};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::sessions::session_actor::AgentStatus;
+use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::{AgentSettings, SessionStatus};
+use crate::sessions::supervisor::ForkRow;
 use serde::{Deserialize, Serialize};
 
 /// Where this conversation's turn is. The runner's own word for it, so the
@@ -171,6 +171,27 @@ impl State {
         }
         self.title.clone()
     }
+
+    /// Where this conversation's agent is, as a reader sees it.
+    ///
+    /// A fork is listed and addressable from the moment it is created, and
+    /// becomes runnable only when its branch point lands — so it waits rather
+    /// than rests. Unless the seed itself failed, which is a failure and not a
+    /// wait: reported as `Provisioning` it would spin in the session list for
+    /// ever.
+    ///
+    /// One source for both the roster entry and the fork's row in the session
+    /// list, so the same conversation cannot be badged two ways.
+    fn agent_status(&self) -> AgentStatus {
+        let seeding = self.seed.is_some() && !self.seeded;
+        match self.turn {
+            TurnStatus::Failed => AgentStatus::Failed,
+            TurnStatus::Idle if seeding => AgentStatus::Provisioning,
+            TurnStatus::Idle => AgentStatus::Idle,
+            TurnStatus::Running => AgentStatus::Running,
+            TurnStatus::AwaitingInput => AgentStatus::AwaitingInput,
+        }
+    }
 }
 
 impl Runner for State {
@@ -233,60 +254,71 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    /// One agent, and the session's own status when this is the root.
-    fn describe(&self) -> Description<'_> {
-        // A fork is listed and addressable from the moment it is created, and
-        // becomes runnable only when its branch point lands — so it waits
-        // rather than rests. Unless the seed itself failed, which is a failure
-        // and not a wait: reported as `Provisioning` it would spin in the
-        // session list for ever.
-        let seeding = self.seed.is_some() && !self.seeded;
-        let status = match self.turn {
-            TurnStatus::Failed => AgentStatus::Failed,
-            TurnStatus::Idle if seeding => AgentStatus::Provisioning,
-            TurnStatus::Idle => AgentStatus::Idle,
-            TurnStatus::Running => AgentStatus::Running,
-            TurnStatus::AwaitingInput => AgentStatus::AwaitingInput,
-        };
-        Description {
-            primary: Some(self.agent),
-            // The session's status is a read of this, which is why `turn` is
-            // the runner's own word for where it is rather than a second
-            // variable beside the session's.
-            standing: Some(match self.turn {
-                TurnStatus::Idle => SessionStatus::Idle,
-                TurnStatus::Running => SessionStatus::Running,
-                TurnStatus::AwaitingInput => SessionStatus::AwaitingInput,
-                TurnStatus::Failed => SessionStatus::Failed {
-                    reason: self.last_error.clone().unwrap_or_default(),
-                },
-            }),
-            // A fork is a conversation a person opens in its own right; the
-            // session's own is the session, and is already listed as one.
-            listed: self.seed.is_some().then(|| Listing {
-                title: self.name(),
-                last_activity_ms: self.last_activity_ms,
-            }),
-            // A fork tree begins at 0: its root is the session's own
-            // conversation, which is a fork's peer in the same numbering.
-            depth_base: 0,
-            agents: vec![AgentDescription {
-                agent: self.agent,
-                // Not one of several, so nothing to tell it apart by.
-                label: None,
-                agent_type: None,
-                status,
-                error: self.last_error.as_deref(),
-                settings: Some(&self.settings),
-                // A conversation is asked things one turn at a time, and what
-                // it said is its transcript rather than a result.
-                task: None,
-                output: None,
-                usage: self.usage,
-                times: None,
-            }],
-            run: None,
-        }
+    /// One agent, which the read side badges with the session's own status
+    /// when this conversation is the root.
+    fn rows(&self) -> Vec<AgentEntry> {
+        vec![AgentEntry {
+            id: self.agent.to_string(),
+            // Where I sit is the session's fact about me, not mine.
+            parent: None,
+            depth: 0,
+            // Not one of several, so nothing to tell it apart by.
+            label: None,
+            agent_type: None,
+            status: self.agent_status(),
+            error: self.last_error.clone(),
+            // My agent is as old as I am, so the read side stamps it from my
+            // record rather than from a second copy kept here.
+            started_at_ms: 0,
+            ended_at_ms: 0,
+        }]
+    }
+
+    /// The session's status is a read of this, which is why `turn` is the
+    /// runner's own word for where it is rather than a second variable beside
+    /// the session's.
+    fn standing(&self) -> Option<SessionStatus> {
+        Some(match self.turn {
+            TurnStatus::Idle => SessionStatus::Idle,
+            TurnStatus::Running => SessionStatus::Running,
+            TurnStatus::AwaitingInput => SessionStatus::AwaitingInput,
+            TurnStatus::Failed => SessionStatus::Failed {
+                reason: self.last_error.clone().unwrap_or_default(),
+            },
+        })
+    }
+
+    fn primary_agent(&self) -> Option<AgentId> {
+        Some(self.agent)
+    }
+
+    /// A fork is a conversation a person opens in its own right; the session's
+    /// own is the session, and is already listed as one.
+    fn listing(&self) -> Option<ForkRow> {
+        // No branch point, no row: this conversation is the session.
+        self.seed.as_ref()?;
+        Some(ForkRow {
+            id: self.agent.as_uuid(),
+            // The read side's two: where I sit, and when I was created.
+            parent: None,
+            created_at_ms: 0,
+            title: self.name(),
+            status: self.agent_status(),
+            last_activity_ms: self.last_activity_ms,
+        })
+    }
+
+    fn settings(&self, _agent: AgentId) -> Option<&AgentSettings> {
+        Some(&self.settings)
+    }
+
+    // `task_and_output` keeps the trait's `(None, None)`: a conversation is
+    // asked things one turn at a time, and what it said is its transcript
+    // rather than a result.
+
+    /// One total: a conversation owns one agent.
+    fn usage(&self) -> Vec<(AgentId, UsageTotal)> {
+        vec![(self.agent, self.usage)]
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {

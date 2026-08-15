@@ -24,10 +24,9 @@
 use super::action::FirstInput;
 use super::capabilities::Capabilities;
 use super::message::{ChildOutcome, SubAgentOutcome};
-use super::projection::{AgentDescription, Description};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::sessions::session_actor::AgentStatus;
+use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
 
@@ -168,42 +167,56 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    /// One worker, described by the one field that also says whether a report
-    /// is owed — so it cannot read `completed` to a person while its asker is
+    /// One worker, statused by the one field that also says whether a report is
+    /// owed — so it cannot read `completed` to a person while its asker is
     /// still waiting.
-    fn describe(&self) -> Description<'_> {
-        let (status, error, output) = match &self.result {
-            None => (AgentStatus::Running, None, None),
-            Some(Outcome::Completed { report }) => {
-                (AgentStatus::Completed, None, Some(report.clone()))
-            }
-            Some(Outcome::Failed { error }) => (AgentStatus::Failed, Some(error.as_str()), None),
+    ///
+    /// `standing` and `listing` keep the trait's `None`. Nothing creates a
+    /// session that *is* one piece of delegated work — a root is a conversation
+    /// or a run — so a worker makes no session status and is no row in the
+    /// session list, rather than inventing either for nothing to read.
+    fn rows(&self) -> Vec<AgentEntry> {
+        let (status, error) = match &self.result {
+            None => (AgentStatus::Running, None),
+            Some(Outcome::Completed { .. }) => (AgentStatus::Completed, None),
+            Some(Outcome::Failed { error }) => (AgentStatus::Failed, Some(error.clone())),
         };
-        Description {
-            primary: Some(self.agent),
-            // Nothing creates a session that *is* one piece of delegated work:
-            // a root is a conversation or a run. A worker therefore makes no
-            // session status, rather than inventing one nothing would read.
-            standing: None,
-            listed: None,
-            // A worker tree begins at 1: its root is the agent that asked, and
-            // that agent is not a worker.
-            depth_base: 1,
-            agents: vec![AgentDescription {
-                agent: self.agent,
-                // The asker addresses its workers by label, not by id.
-                label: Some(&self.label),
-                agent_type: self.agent_type.as_deref(),
-                status,
-                error,
-                settings: Some(&self.settings),
-                task: Some(&self.task),
-                output,
-                usage: self.usage,
-                times: None,
-            }],
-            run: None,
-        }
+        vec![AgentEntry {
+            id: self.agent.to_string(),
+            // Where I sit is the session's fact about me, not mine.
+            parent: None,
+            depth: 0,
+            // The asker addresses its workers by label, not by id.
+            label: Some(self.label.clone()),
+            agent_type: self.agent_type.clone(),
+            status,
+            error,
+            // My agent is as old as I am, so the read side stamps it from my
+            // record rather than from a second copy kept here.
+            started_at_ms: 0,
+            ended_at_ms: 0,
+        }]
+    }
+
+    fn primary_agent(&self) -> Option<AgentId> {
+        Some(self.agent)
+    }
+
+    fn settings(&self, _agent: AgentId) -> Option<&AgentSettings> {
+        Some(&self.settings)
+    }
+
+    fn task_and_output(&self, _agent: AgentId) -> (Option<String>, Option<String>) {
+        let report = match &self.result {
+            Some(Outcome::Completed { report }) => Some(report.clone()),
+            None | Some(Outcome::Failed { .. }) => None,
+        };
+        (Some(self.task.clone()), report)
+    }
+
+    /// One total: a worker owns one agent.
+    fn usage(&self) -> Vec<(AgentId, UsageTotal)> {
+        vec![(self.agent, self.usage)]
     }
 
     fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {

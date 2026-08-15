@@ -6,7 +6,7 @@
 //! journal — which is the whole reason this lands before the actor is swapped
 //! over to it.
 //!
-//! # One method, not a match per fact
+//! # A method per fact, not a match per fact
 //!
 //! Several of these answers need something only one kind of runner holds: a
 //! worker's label, a step's name, a conversation's last error. None of it is
@@ -15,12 +15,12 @@
 //! would simply grow back — one arm at a time, in the file every new read
 //! touches.
 //!
-//! Instead every runner answers [`Runner::describe`], and this module projects
-//! what comes back. The split is worth stating: **a runner fills in what only it
-//! knows, and the projection fills in what only the session knows.** A worker
-//! says it is called "read the flake" and that it failed; the session says which
-//! agent parented it and how deep it sits, because those are facts about the
-//! shape of the session and not about the worker.
+//! Instead each fact is a method on [`Runner`] that the runner holding it
+//! answers and the rest leave defaulted. The split is worth stating: **a runner
+//! answers what only it knows, and this module fills in what only the session
+//! knows.** A worker says it is called "read the flake" and that it failed; the
+//! session says which agent parented it and how deep it sits, because those are
+//! facts about the shape of the session and not about the worker.
 //!
 //! # Where this deliberately differs from the shape it replaces
 //!
@@ -42,113 +42,9 @@ use crate::sessions::session_actor::{
 };
 use crate::sessions::spec::{AgentSettings, SessionSpec, SessionStatus, status_reason};
 use crate::sessions::supervisor::ForkRow;
-use crate::sessions::workflow::{StepRun, WorkflowRunSpec, WorkflowRunState, WorkflowRunStatus};
-use serde_json::Value;
+use crate::sessions::workflow::{WorkflowRunSpec, WorkflowRunState};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-// -- what a runner says about itself ---------------------------------------
-
-/// What a runner says about itself to the read side.
-///
-/// One value returned by one method, rather than a handful of accessors the
-/// projection would have to call in the right combination per kind. Everything
-/// on it is a fact the runner owns; nothing on it can be derived from the
-/// session's structure, because the projection derives those itself.
-#[derive(Debug, Default)]
-pub struct Description<'a> {
-    /// The agent an unaddressed read of this runner means.
-    ///
-    /// A conversation's is its own agent, always. A run's is the step in
-    /// flight, so it is `None` between steps and once the run is over — which
-    /// is exactly when there is nothing an unaddressed request could mean.
-    pub primary: Option<AgentId>,
-    /// What this runner would make the session, were it the root.
-    ///
-    /// The session's status is a *read* of one runner rather than a second
-    /// variable beside it, which is what stops the two disagreeing — the defect
-    /// the shape this replaces had, where thirteen `report(LITERAL)` calls each
-    /// restated the status the next line was about to fold.
-    ///
-    /// `None` from a runner that cannot be a root and keeps no such word.
-    pub standing: Option<SessionStatus>,
-    /// This runner's row in the session list, when a person can open it as a
-    /// conversation in its own right.
-    ///
-    /// Only a fork has one. The session's own conversation *is* the session and
-    /// is listed as one; nothing else a session hosts is a conversation.
-    pub listed: Option<Listing>,
-    /// What the first agent of my kind is numbered inside its own tree.
-    ///
-    /// One number rather than a `match` on the kind in [`depth_of`], because
-    /// the convention belongs to the kind that has it. A subagent tree starts
-    /// at 1 — its root is the agent that spawned it, which is not a subagent —
-    /// while a fork tree starts at 0, because its root is the session's own
-    /// conversation, which is a fork's peer in the same numbering.
-    pub depth_base: u32,
-    /// The agents this runner owns, in the order a reader should see them.
-    pub agents: Vec<AgentDescription<'a>>,
-    /// The run this runner is, if it is one. The one thing a reader wants
-    /// whole rather than agent by agent — the graph endpoint renders the log,
-    /// not a roster.
-    pub run: Option<RunDescription<'a>>,
-}
-
-/// A fork's row in the session list.
-#[derive(Debug, Default)]
-pub struct Listing {
-    /// The name this conversation gave itself, or `None` until it does — a
-    /// client then shows what it was branched from instead.
-    pub title: Option<String>,
-    /// When it last did anything, from the entry that recorded it. The session
-    /// list is ordered by it.
-    pub last_activity_ms: u64,
-}
-
-/// One agent, as the runner that owns it describes it.
-///
-/// [`AgentEntry`] minus `id`, `parent` and `depth`: those three are facts about
-/// where the agent sits in the session, which a runner cannot see and must not
-/// guess at.
-#[derive(Debug)]
-pub struct AgentDescription<'a> {
-    pub agent: AgentId,
-    /// A worker's label, or the name of the step this is one execution of.
-    /// `None` for a conversation, which is not one of several.
-    pub label: Option<&'a str>,
-    /// The plugin-declared agent type a typed worker runs as.
-    pub agent_type: Option<&'a str>,
-    pub status: AgentStatus,
-    pub error: Option<&'a str>,
-    /// What this agent runs under — a step's own preset, a worker's inherited
-    /// settings, a conversation's own. `None` only when a step's definition has
-    /// gone from the graph it was snapshotted into, which nothing can produce.
-    pub settings: Option<&'a AgentSettings>,
-    /// What it was asked to do, when something asked it in one piece. A
-    /// conversation is asked things one turn at a time.
-    pub task: Option<&'a str>,
-    /// Its terminal result, rendered as the text a reader wants.
-    pub output: Option<String>,
-    /// Its banked tokens.
-    pub usage: UsageTotal,
-    /// When this agent started and ended, when the runner is the only thing
-    /// that knows.
-    ///
-    /// `None` means the runner started and ended with it, so the projection
-    /// reads the record's own stamps — true for every kind but a run, whose
-    /// step agents come and go inside one runner's life.
-    pub times: Option<(u64, u64)>,
-}
-
-/// A run's log and the graph it was started from.
-#[derive(Debug)]
-pub struct RunDescription<'a> {
-    pub graph: &'a Arc<WorkflowRunSpec>,
-    pub steps: &'a [StepRun],
-    pub status: WorkflowRunStatus,
-    pub output: Option<&'a Value>,
-    pub error: Option<&'a str>,
-}
 
 // -- the session's status ---------------------------------------------------
 
@@ -166,10 +62,7 @@ pub struct RunDescription<'a> {
 #[must_use]
 pub fn session_status(s: &SessionState) -> SessionStatus {
     sandbox_standing(s)
-        .or_else(|| {
-            s.record(s.root)
-                .and_then(|rec| rec.state.describe().standing)
-        })
+        .or_else(|| s.record(s.root).and_then(|rec| rec.state.standing()))
         .unwrap_or_default()
 }
 
@@ -180,7 +73,7 @@ fn sandbox_standing(s: &SessionState) -> Option<SessionStatus> {
     s.runners
         .values()
         .find(|rec| rec.kind == RunnerKind::Runtime)
-        .and_then(|rec| rec.state.describe().standing)
+        .and_then(|rec| rec.state.standing())
 }
 
 /// A session's status as the status of the agent that *is* that session.
@@ -230,20 +123,13 @@ pub fn agent_roster(s: &SessionState) -> Vec<AgentEntry> {
         let Some(rec) = s.record(runner) else {
             continue;
         };
-        let described = rec.state.describe();
-        if described.listed.is_some() {
+        // A runner with a row in the session list is a conversation of its own,
+        // and is read there rather than here.
+        if rec.state.listing().is_some() {
             continue;
         }
-        for agent in &described.agents {
-            agents.push(entry(
-                s,
-                runner,
-                rec,
-                agent,
-                described.depth_base,
-                main,
-                &status,
-            ));
+        for row in rec.state.rows() {
+            agents.push(entry(s, runner, rec, row, main, &status));
         }
     }
     agents
@@ -251,35 +137,33 @@ pub fn agent_roster(s: &SessionState) -> Vec<AgentEntry> {
 
 /// One agent's roster entry. `None` when this session hosts no such agent.
 ///
-/// The same projection [`agent_roster`] uses, so an agent's own document and
-/// its row in the session's cannot disagree — they used to, and a concluded
-/// step reported `running` for ever as a result.
+/// The same read [`agent_roster`] performs, so an agent's own document and its
+/// row in the session's cannot disagree — they used to, and a concluded step
+/// reported `running` for ever as a result.
 #[must_use]
 pub fn agent_entry(s: &SessionState, agent: AgentId) -> Option<AgentEntry> {
     let runner = s.runner_of(agent)?;
     let rec = s.record(runner)?;
-    let described = rec.state.describe();
-    let found = described.agents.iter().find(|a| a.agent == agent)?;
+    let id = agent.to_string();
+    let row = rec.state.rows().into_iter().find(|row| row.id == id)?;
     Some(entry(
         s,
         runner,
         rec,
-        found,
-        described.depth_base,
+        row,
         resolve(s, None),
         &session_status(s),
     ))
 }
 
-/// What the runner said about this agent, plus what only the session knows:
-/// where it sits, and — for the one agent that *is* the session — the session's
-/// own status.
+/// The runner's row, filled in with what only the session knows: where the
+/// agent sits, when its runner lived, and — for the one agent that *is* the
+/// session — the session's own status.
 fn entry(
     s: &SessionState,
     runner: RunnerId,
     rec: &RunnerRecord,
-    described: &AgentDescription<'_>,
-    base: u32,
+    mut row: AgentEntry,
     main: Option<AgentId>,
     status: &SessionStatus,
 ) -> AgentEntry {
@@ -287,28 +171,22 @@ fn entry(
     // session, so it reports the session's status rather than its runner's.
     // That is also what carries the sandbox down onto it — an agent whose
     // runtime is still being built reads `provisioning`, not `idle`.
-    let is_main = runner == s.root && main == Some(described.agent);
-    let (agent_status, error) = match is_main {
-        true => (main_status(status), status_reason(status)),
-        false => (described.status, described.error.map(str::to_string)),
-    };
-    let (started_at_ms, ended_at_ms) = described.times.unwrap_or(match runner == s.root {
-        // The root is as old as the session, whose `created_at` is on the same
-        // document, so it reports no start of its own.
-        true => (0, 0),
-        false => (rec.created_at_ms, rec.ended_at_ms),
-    });
-    AgentEntry {
-        id: described.agent.to_string(),
-        parent: parent_of(s, runner),
-        label: described.label.map(str::to_string),
-        depth: depth_of(s, runner, rec.kind, base),
-        agent_type: described.agent_type.map(str::to_string),
-        status: agent_status,
-        error,
-        started_at_ms,
-        ended_at_ms,
+    let is_main = runner == s.root && main.is_some_and(|agent| agent.to_string() == row.id);
+    if is_main {
+        row.status = main_status(status);
+        row.error = status_reason(status);
     }
+    // Zero at both ends is a runner saying it keeps no stamps of its own,
+    // because its agent lived exactly as long as it did. Only a run answers
+    // otherwise, and only the root is left at zero: the root is as old as the
+    // session, whose `created_at` is on the same document.
+    if row.started_at_ms == 0 && row.ended_at_ms == 0 && runner != s.root {
+        row.started_at_ms = rec.created_at_ms;
+        row.ended_at_ms = rec.ended_at_ms;
+    }
+    row.parent = parent_of(s, runner);
+    row.depth = depth_of(s, runner, rec.kind);
+    row
 }
 
 /// The agent that parented this runner, as a reader addresses it.
@@ -336,11 +214,25 @@ fn parent_of(s: &SessionState, runner: RunnerId) -> Option<uuid::Uuid> {
 /// stops, which is what makes a fork of the session's conversation depth 0 while
 /// a worker spawned by that same conversation is depth 1.
 ///
+/// **The two conventions, and why they differ.** A subagent tree numbers from
+/// 1: its root is the agent that spawned the worker, and that agent is not a
+/// worker. A fork tree numbers from 0: its root is the session's own
+/// conversation, which is a fork's peer in the same numbering — and a step is
+/// chosen by its definition rather than spawned, so it roots its own tree at 0
+/// for the same reason. The kind is the whole of what decides it, so it is
+/// settled here rather than asked of each runner: a number a runner could
+/// answer with is a number a runner could answer wrongly, and nothing about a
+/// tree's numbering is a fact about the work in it.
+///
 /// Bounded by the number of runners rather than trusted to terminate: `parent`
 /// is written once at creation so a cycle is impossible, but this walks data
 /// recovered from a journal and the bound costs one comparison.
-fn depth_of(s: &SessionState, runner: RunnerId, kind: RunnerKind, base: u32) -> u32 {
-    let mut depth = base;
+fn depth_of(s: &SessionState, runner: RunnerId, kind: RunnerKind) -> u32 {
+    let mut depth = match kind {
+        RunnerKind::SubAgent => 1,
+        // The runtime owns no agents, so nothing asks it how deep they sit.
+        RunnerKind::Conversation | RunnerKind::Workflow | RunnerKind::Runtime => 0,
+    };
     let mut at = runner;
     for _ in 0..s.runners.len() {
         if at == s.root {
@@ -371,7 +263,7 @@ fn depth_of(s: &SessionState, runner: RunnerId, kind: RunnerKind, base: u32) -> 
 /// agent in a run.
 #[must_use]
 pub fn settings_of(s: &SessionState, agent: AgentId) -> Option<&AgentSettings> {
-    about(s, agent)?.settings
+    s.record(s.runner_of(agent)?)?.state.settings(agent)
 }
 
 /// What this agent was asked to do, and what it produced.
@@ -380,20 +272,10 @@ pub fn settings_of(s: &SessionState, agent: AgentId) -> Option<&AgentSettings> {
 /// it said is its transcript rather than a result.
 #[must_use]
 pub fn task_and_output(s: &SessionState, agent: AgentId) -> (Option<String>, Option<String>) {
-    match about(s, agent) {
-        Some(described) => (described.task.map(str::to_string), described.output),
+    match s.runner_of(agent).and_then(|runner| s.record(runner)) {
+        Some(rec) => rec.state.task_and_output(agent),
         None => (None, None),
     }
-}
-
-/// One agent as the runner that owns it describes it.
-fn about(s: &SessionState, agent: AgentId) -> Option<AgentDescription<'_>> {
-    let rec = s.record(s.runner_of(agent)?)?;
-    rec.state
-        .describe()
-        .agents
-        .into_iter()
-        .find(|a| a.agent == agent)
 }
 
 // -- the run ----------------------------------------------------------------
@@ -405,14 +287,7 @@ fn about(s: &SessionState, agent: AgentId) -> Option<AgentDescription<'_>> {
 /// about the session.
 #[must_use]
 pub fn run_state(s: &SessionState) -> Option<WorkflowRunState> {
-    let described = s.record(s.root)?.state.describe();
-    let run = described.run?;
-    Some(WorkflowRunState {
-        status: run.status,
-        steps: run.steps.to_vec(),
-        output: run.output.cloned(),
-        error: run.error.map(str::to_string),
-    })
+    s.record(s.root)?.state.run_log()
 }
 
 /// The graph this session's run was started from, snapshotted at creation.
@@ -421,8 +296,7 @@ pub fn run_state(s: &SessionState) -> Option<WorkflowRunState> {
 /// ad-hoc run — a graph with no definition row and no name — expressible at all.
 #[must_use]
 pub fn run_graph(s: &SessionState) -> Option<Arc<WorkflowRunSpec>> {
-    let described = s.record(s.root)?.state.describe();
-    described.run.map(|run| Arc::clone(run.graph))
+    s.record(s.root)?.state.run_graph()
 }
 
 // -- usage ------------------------------------------------------------------
@@ -447,8 +321,8 @@ pub fn run_graph(s: &SessionState) -> Option<Arc<WorkflowRunSpec>> {
 pub fn usage_stats(s: &SessionState) -> SessionUsageStats {
     let mut agents: HashMap<String, UsageTotal> = HashMap::new();
     for rec in s.runners.values() {
-        for described in rec.state.describe().agents {
-            agents.insert(described.agent.to_string(), described.usage);
+        for (agent, spent) in rec.state.usage() {
+            agents.insert(agent.to_string(), spent);
         }
     }
     let main = resolve(s, None).and_then(|agent| agents.get(&agent.to_string()).copied());
@@ -478,27 +352,19 @@ pub fn usage_stats(s: &SessionState) -> SessionUsageStats {
 
 /// The forks this session holds, as the session list nests them.
 ///
-/// Whole every time, so a projection built from the current value cannot drift
-/// the way one built from deltas can.
+/// Whole every time, so a copy built from the current value cannot drift the
+/// way one built from deltas can.
 #[must_use]
 pub fn fork_rows(s: &SessionState) -> Vec<ForkRow> {
-    let status = session_status(s);
-    let main = resolve(s, None);
     s.runners
         .iter()
         .filter_map(|(id, rec)| {
-            let described = rec.state.describe();
-            let listed = described.listed?;
-            let agent = described.primary?;
-            let found = described.agents.iter().find(|a| a.agent == agent)?;
-            Some(ForkRow {
-                id: agent.as_uuid(),
-                parent: parent_of(s, *id),
-                title: listed.title,
-                status: entry(s, *id, rec, found, described.depth_base, main, &status).status,
-                created_at_ms: rec.created_at_ms,
-                last_activity_ms: listed.last_activity_ms,
-            })
+            let mut row = rec.state.listing()?;
+            // The two the fork cannot see: where it sits, and when the session
+            // created it.
+            row.parent = parent_of(s, *id);
+            row.created_at_ms = rec.created_at_ms;
+            Some(row)
         })
         .collect()
 }
@@ -523,7 +389,7 @@ pub fn fork_rows(s: &SessionState) -> Vec<ForkRow> {
 #[must_use]
 pub fn resolve(s: &SessionState, agent_id: Option<&str>) -> Option<AgentId> {
     match agent_id {
-        None | Some(MAIN_AGENT_ID) => s.record(s.root)?.state.describe().primary,
+        None | Some(MAIN_AGENT_ID) => s.record(s.root)?.state.primary_agent(),
         Some(raw) => {
             let id = AgentId(uuid::Uuid::parse_str(raw).ok()?);
             s.runner_of(id).map(|_| id)
@@ -540,7 +406,8 @@ mod tests {
     use crate::sessions::runners::{empty_settings, workflow};
     use crate::sessions::spec::{AgentSettings, SessionKind, SessionSpec};
     use crate::sessions::workflow::{
-        StepStatus, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec, default_outcomes,
+        StepStatus, TransitionSpec, WorkflowRunSpec, WorkflowRunStatus, WorkflowStepSpec,
+        default_outcomes,
     };
 
     // -- fixtures -----------------------------------------------------------
@@ -553,8 +420,8 @@ mod tests {
     }
 
     /// Insert a runner with the slice a test built, and register its agents.
-    /// The fold is the only writer in production; a projection test wants the
-    /// state it projects, so it writes the record directly.
+    /// The fold is the only writer in production; a test of the read side wants
+    /// the state it reads, so it writes the record directly.
     fn put(
         s: &mut SessionState,
         kind: RunnerKind,
@@ -982,7 +849,7 @@ mod tests {
                 .expect("a concluded step reports what it concluded")
                 .contains("found it")
         );
-        // And the roster agrees, because it is the same projection.
+        // And the roster agrees, because it is the same read.
         assert_eq!(agent_roster(&s)[0].status, AgentStatus::Completed);
     }
 
@@ -1027,7 +894,7 @@ mod tests {
             "a step reads its own preset, not the run's first"
         );
         // And a worker spawned by that step runs under what its caller fixed,
-        // which the projection reads off the worker rather than re-deriving.
+        // which this reads off the worker rather than re-deriving.
         let helper = AgentId::new_v4();
         put(
             &mut s,
