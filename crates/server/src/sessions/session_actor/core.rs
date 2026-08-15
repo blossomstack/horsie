@@ -42,7 +42,7 @@ impl SessionCore {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
-            CoreCommand::SetTitle { title, reply } => {
+            CoreCommand::SetTitle { title, reply, .. } => {
                 let result = match normalize_session_title(&title) {
                     Ok(title) => actor.rename_session(title).await,
                     Err(error) => Err(error.to_string()),

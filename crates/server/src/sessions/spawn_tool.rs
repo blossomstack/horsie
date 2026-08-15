@@ -9,6 +9,7 @@
 
 use crate::agent_loop::AgentCatalog;
 use crate::sessions::addressing::SessionRef;
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::session_actor::SubAgentCommand;
 use crate::sessions::subagents::SubAgentParent;
@@ -112,6 +113,10 @@ pub struct SubAgentToolbox {
     session: SessionRef,
     /// Which agent this toolbox belongs to — the parent spawns attribute to.
     caller: SubAgentParent,
+    /// The same agent in the runners' flat id space. Carried beside `caller`
+    /// because [`SubAgentParent`] cannot tell a main agent, a step and a fork
+    /// apart, so a runner handed only `caller` could not find who called.
+    agent: AgentId,
     /// The plugin-declared agents this session can spawn. Held here because
     /// this toolbox is built in `provide()`, where the library scan is; the
     /// session actor never learns what an agent type is, it journals a string.
@@ -123,12 +128,14 @@ impl SubAgentToolbox {
         inner: Arc<dyn Toolbox>,
         session: SessionRef,
         caller: SubAgentParent,
+        agent: AgentId,
         catalog: Arc<AgentCatalog>,
     ) -> Self {
         Self {
             inner,
             session,
             caller,
+            agent,
             catalog,
         }
     }
@@ -191,6 +198,7 @@ impl Toolbox for SubAgentToolbox {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Spawn {
                         caller: self.caller,
+                        agent: self.agent,
                         label: label.to_string(),
                         task: task.to_string(),
                         agent_type,
@@ -219,6 +227,7 @@ impl Toolbox for SubAgentToolbox {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Status {
                         caller: self.caller,
+                        agent: self.agent,
                         id,
                         reply,
                     })
@@ -255,6 +264,8 @@ mod tests {
     /// is tested without a session actor.
     struct StubSession {
         spawn_result: Result<Uuid, String>,
+        /// Which agent each command named, in arrival order.
+        seen: Arc<std::sync::Mutex<Vec<AgentId>>>,
     }
 
     #[async_trait::async_trait]
@@ -279,10 +290,14 @@ mod tests {
             _ctx: &mut ActorContext<SessionInbox>,
         ) -> CommandEffect<()> {
             match cmd.cmd {
-                SessionCommand::SubAgent(SubAgentCommand::Spawn { reply, .. }) => {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn { agent, reply, .. }) => {
+                    self.seen.lock().unwrap().push(agent);
                     let _ = reply.send(self.spawn_result.clone());
                 }
-                SessionCommand::SubAgent(SubAgentCommand::Status { id, reply, .. }) => {
+                SessionCommand::SubAgent(SubAgentCommand::Status {
+                    agent, id, reply, ..
+                }) => {
+                    self.seen.lock().unwrap().push(agent);
                     let _ = reply.send(Ok(match id {
                         Some(id) => format!("subagent \"w\" ({id}) — completed, depth 1"),
                         None => "- \"w\" [running]\n".to_string(),
@@ -299,20 +314,42 @@ mod tests {
     }
 
     fn with_catalog(spawn_result: Result<Uuid, String>, catalog: AgentCatalog) -> SubAgentToolbox {
+        built(spawn_result, catalog).0
+    }
+
+    /// The toolbox, the agent it was built for, and what the session was told.
+    fn built(
+        spawn_result: Result<Uuid, String>,
+        catalog: AgentCatalog,
+    ) -> (
+        SubAgentToolbox,
+        AgentId,
+        Arc<std::sync::Mutex<Vec<AgentId>>>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let session = SessionRef::new(
             crate::testing::spawn_detached(
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-                StubSession { spawn_result },
+                StubSession {
+                    spawn_result,
+                    seen: Arc::clone(&seen),
+                },
             ),
             crate::auth::UserId::bootstrap(),
             Uuid::new_v4(),
             None,
         );
-        SubAgentToolbox::new(
-            Arc::new(EmptyToolbox),
-            session,
-            SubAgentParent::Main,
-            Arc::new(catalog),
+        let agent = AgentId::new_v4();
+        (
+            SubAgentToolbox::new(
+                Arc::new(EmptyToolbox),
+                session,
+                SubAgentParent::Main,
+                agent,
+                Arc::new(catalog),
+            ),
+            agent,
+            seen,
         )
     }
 
@@ -497,6 +534,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
+    }
+
+    /// Both commands name the agent that called the tool. `caller` cannot say
+    /// it: a main agent, a workflow step and a fork all collapse into
+    /// `SubAgentParent::Main`, so without this field the session has no way to
+    /// tell which of them spawned.
+    #[tokio::test]
+    async fn both_commands_carry_the_calling_agent() {
+        let (tb, agent, seen) = built(Ok(Uuid::new_v4()), AgentCatalog::default());
+        tb.execute(SPAWN_AGENT_TOOL, json!({"label": "x", "task": "y"}), "tc1")
+            .await
+            .unwrap();
+        tb.execute(SUBAGENT_STATUS_TOOL, json!({}), "tc2")
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![agent, agent]);
     }
 
     #[tokio::test]

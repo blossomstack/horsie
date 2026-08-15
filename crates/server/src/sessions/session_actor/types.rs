@@ -18,6 +18,7 @@ pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
     forks::{ForkMode, ForkParent, ForkRoster},
+    runners::ids::AgentId,
     spec::{AgentSettings, SessionSpec, SessionStatus},
     subagents::{SubAgentForest, SubAgentParent, TreeOwner},
     workflow::WorkflowRunState,
@@ -150,6 +151,14 @@ pub enum SubAgentCommand {
     /// The `spawn_agent` tool: start a subagent under `caller`.
     Spawn {
         caller: SubAgentParent,
+        /// The agent that called the tool, in the runners' flat id space.
+        ///
+        /// Beside `caller` rather than replacing it because
+        /// [`SubAgentParent`] collapses `Main`, a step and a fork into one
+        /// variant — a distinction the runners keep and the old tree cannot
+        /// express. The old handler still reads `caller`; the runner reads
+        /// this.
+        agent: AgentId,
         label: String,
         task: String,
         /// A plugin-declared agent type, already checked against the catalogue
@@ -173,6 +182,8 @@ pub enum SubAgentCommand {
     /// The `subagent_status` tool: one node, or the caller's whole subtree.
     Status {
         caller: SubAgentParent,
+        /// The agent that called the tool, in the runners' flat id space.
+        agent: AgentId,
         id: Option<Uuid>,
         reply: ReplyTo<Result<String, String>>,
     },
@@ -250,6 +261,8 @@ pub enum ForkCommand {
     /// it is in to name it.
     SetTitle {
         id: Uuid,
+        /// The agent that called the tool, in the runners' flat id space.
+        agent: AgentId,
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },
@@ -325,6 +338,10 @@ pub enum HookCommand {
 pub enum CoreCommand {
     /// Set the session title from the built-in title tool.
     SetTitle {
+        /// The agent that called the tool, in the runners' flat id space.
+        /// The old handler renames the session regardless of who asked; the
+        /// runner routes on it.
+        agent: AgentId,
         title: String,
         reply: ReplyTo<Result<String, String>>,
     },

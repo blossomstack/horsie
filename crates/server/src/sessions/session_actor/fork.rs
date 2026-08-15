@@ -156,7 +156,9 @@ impl ForkedAgents {
                     status: AgentStatus::Failed,
                 }])
             }
-            ForkCommand::SetTitle { id, title, reply } => {
+            ForkCommand::SetTitle {
+                id, title, reply, ..
+            } => {
                 let normalized = match crate::sessions::title_tool::normalize_session_title(&title)
                 {
                     Ok(t) => t,

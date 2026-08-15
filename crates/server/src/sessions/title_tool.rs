@@ -4,6 +4,7 @@
 //! on by the session server and routed through the owning SessionActor.
 
 use crate::sessions::addressing::SessionRef;
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::session_actor::CoreCommand;
 use crate::sessions::session_actor::SessionCommand;
 use async_trait::async_trait;
@@ -92,23 +93,34 @@ enum TitleTarget {
 pub struct SessionTitleToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
+    /// The agent that holds this toolbox, in the runners' flat id space. The
+    /// target says *what* is renamed; this says *who* asked, which is the only
+    /// thing a runner can route on.
+    agent: AgentId,
     target: TitleTarget,
 }
 
 impl SessionTitleToolbox {
-    pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef) -> Self {
+    pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef, agent: AgentId) -> Self {
         Self {
             inner,
             session,
+            agent,
             target: TitleTarget::Session,
         }
     }
 
     /// The same tool, renaming one fork instead of the session it lives in.
-    pub fn for_fork(inner: Arc<dyn Toolbox>, session: SessionRef, id: uuid::Uuid) -> Self {
+    pub fn for_fork(
+        inner: Arc<dyn Toolbox>,
+        session: SessionRef,
+        agent: AgentId,
+        id: uuid::Uuid,
+    ) -> Self {
         Self {
             inner,
             session,
+            agent,
             target: TitleTarget::Fork(id),
         }
     }
@@ -139,12 +151,14 @@ impl Toolbox for SessionTitleToolbox {
             .session
             .ask(|reply| match self.target {
                 TitleTarget::Session => SessionCommand::Core(CoreCommand::SetTitle {
+                    agent: self.agent,
                     title: title.to_string(),
                     reply,
                 }),
                 TitleTarget::Fork(id) => {
                     SessionCommand::Fork(crate::sessions::session_actor::ForkCommand::SetTitle {
                         id,
+                        agent: self.agent,
                         title: title.to_string(),
                         reply,
                     })
@@ -204,18 +218,36 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn tool_spec_documents_rename_any_time_and_latest_wins() {
+    /// The toolbox, the agent it was built for, and which agent the session
+    /// was told about.
+    fn built() -> (
+        SessionTitleToolbox,
+        AgentId,
+        Arc<std::sync::Mutex<Vec<AgentId>>>,
+    ) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let session = SessionRef::new(
             crate::testing::spawn_detached(
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-                TitleActor,
+                TitleActor {
+                    seen: Arc::clone(&seen),
+                },
             ),
             crate::auth::UserId::bootstrap(),
             uuid::Uuid::new_v4(),
             None,
         );
-        let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
+        let agent = AgentId::new_v4();
+        (
+            SessionTitleToolbox::new(Arc::new(EmptyToolbox), session, agent),
+            agent,
+            seen,
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_spec_documents_rename_any_time_and_latest_wins() {
+        let toolbox = built().0;
         let spec = toolbox
             .specs()
             .into_iter()
@@ -233,18 +265,22 @@ mod tests {
         );
     }
 
+    /// The rename command names the agent that called the tool. Nothing else
+    /// on it can: a session's title command is addressed to the session, so
+    /// only this field says which of its conversations asked.
+    #[tokio::test]
+    async fn the_command_carries_the_calling_agent() {
+        let (toolbox, agent, seen) = built();
+        toolbox
+            .execute(SET_SESSION_TITLE_TOOL, json!({"title": "a name"}), "tc1")
+            .await
+            .unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![agent]);
+    }
+
     #[tokio::test]
     async fn execute_returns_the_normalized_title() {
-        let session = SessionRef::new(
-            crate::testing::spawn_detached(
-                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-                TitleActor,
-            ),
-            crate::auth::UserId::bootstrap(),
-            uuid::Uuid::new_v4(),
-            None,
-        );
-        let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
+        let toolbox = built().0;
         let result = toolbox
             .execute(
                 SET_SESSION_TITLE_TOOL,
@@ -261,16 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_delegates_other_tools() {
-        let session = SessionRef::new(
-            crate::testing::spawn_detached(
-                &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
-                TitleActor,
-            ),
-            crate::auth::UserId::bootstrap(),
-            uuid::Uuid::new_v4(),
-            None,
-        );
-        let toolbox = SessionTitleToolbox::new(Arc::new(EmptyToolbox), session);
+        let toolbox = built().0;
         let err = toolbox.execute("bash", json!({}), "tc1").await.unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
     }
@@ -278,7 +305,10 @@ mod tests {
     #[derive(Serialize, Deserialize, Default)]
     struct Empty;
 
-    struct TitleActor;
+    struct TitleActor {
+        /// Which agent each rename named, in arrival order.
+        seen: Arc<std::sync::Mutex<Vec<AgentId>>>,
+    }
 
     #[async_trait::async_trait]
     impl EventSourcedActor for TitleActor {
@@ -305,7 +335,13 @@ mod tests {
             _ctx: &mut ActorContext<SessionInbox>,
         ) -> CommandEffect<()> {
             let cmd = cmd.cmd;
-            if let SessionCommand::Core(CoreCommand::SetTitle { title, reply }) = cmd {
+            if let SessionCommand::Core(CoreCommand::SetTitle {
+                agent,
+                title,
+                reply,
+            }) = cmd
+            {
+                self.seen.lock().unwrap().push(agent);
                 let _ =
                     reply.send(normalize_session_title(&title).map_err(|error| error.to_string()));
             }

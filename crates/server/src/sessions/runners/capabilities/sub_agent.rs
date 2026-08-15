@@ -230,6 +230,10 @@ impl Capability for SubAgentCapability {
             return Ok(());
         }
         let session = loading.session.clone();
+        // Who is being equipped, in the runners' own id space. `parent` below
+        // cannot say it — `SubAgentParent` collapses a main agent, a step and
+        // a fork into one variant — so the tool carries both.
+        let agent = loading.agent;
         // Where this agent's children hang. A step and a fork each root their
         // own tree, for the same reason: nothing is waiting on them for a
         // report, so their spawns are that tree's `Main`.
@@ -242,6 +246,7 @@ impl Capability for SubAgentCapability {
                 or_empty(inner),
                 session,
                 parent,
+                agent,
                 facts
                     .shared
                     .as_ref()

@@ -8,7 +8,7 @@ use super::{CapEvent, CapSlice, Capability, Decision, SetupError, or_empty};
 use crate::sessions::runners::ids::RunnerId;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{Caller, Message};
-use crate::sessions::title_tool::SessionTitleToolbox;
+use crate::sessions::title_tool::{SessionTitleToolbox, normalize_session_title};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -69,12 +69,16 @@ impl Capability for TitleCapability {
     /// names the session — the model never has to know which it is in.
     async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         let session = _loading.session.clone();
+        // The target says what is renamed; this says who asked, which is the
+        // only thing the session can route a reply on.
+        let agent = _loading.agent;
         match self.fork {
             Some(fork) => {
                 spec.wrap(move |inner, _| {
                     Arc::new(SessionTitleToolbox::for_fork(
                         or_empty(inner),
                         session,
+                        agent,
                         fork.as_uuid(),
                     ))
                 });
@@ -86,7 +90,7 @@ impl Capability for TitleCapability {
             }
             None => {
                 spec.wrap(move |inner, _| {
-                    Arc::new(SessionTitleToolbox::new(or_empty(inner), session))
+                    Arc::new(SessionTitleToolbox::new(or_empty(inner), session, agent))
                 });
                 spec.say(
                     "title",
@@ -98,6 +102,14 @@ impl Capability for TitleCapability {
         Ok(())
     }
 
+    /// Validation lives here, with the capability that owns the tool, rather
+    /// than in the command handler that used to receive it: a name the session
+    /// would refuse must not reach the log as one it accepted.
+    ///
+    /// The reply is the *normalized* title and nothing else.
+    /// [`SessionTitleToolbox`] wraps whatever comes back in
+    /// `Session title set to "…"`, so a sentence here would reach the model
+    /// doubled.
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
         let Message::Tool(t) = msg else { return None };
         if t.name != TOOL {
@@ -107,13 +119,14 @@ impl Capability for TitleCapability {
             Ok(req) => req,
             Err(refusal) => return Some(refusal),
         };
+        let name = match normalize_session_title(&req.title) {
+            Ok(name) => name,
+            // A refusal journals nothing: the session was never renamed.
+            Err(error) => return Some(Decision::reply(error.to_string())),
+        };
         Some(Decision {
-            events: vec![CapEvent::Title(Event::Set {
-                name: req.title.clone(),
-            })],
-            actions: vec![crate::sessions::runners::action::Action::Reply {
-                text: format!("titled: {}", req.title),
-            }],
+            events: vec![CapEvent::Title(Event::Set { name: name.clone() })],
+            actions: vec![crate::sessions::runners::action::Action::Reply { text: name }],
         })
     }
 
@@ -145,6 +158,44 @@ mod tests {
             .expect("mine");
         c.apply(&d.events[0]);
         assert_eq!(c.title.as_deref(), Some("the flake"));
+    }
+
+    /// The reply is the bare title, not a sentence about it: the toolbox
+    /// renders `Session title set to "…"` around whatever comes back, so prose
+    /// here reaches the model doubled. Normalization happens here too, so what
+    /// is journaled and what is answered are the same string.
+    #[test]
+    fn the_reply_is_the_normalized_title_alone() {
+        let d = TitleCapability::default()
+            .handle(
+                caller(),
+                &tool(TOOL, serde_json::json!({"title": "  Fix café login ☕  "})),
+            )
+            .expect("mine");
+        let CapEvent::Title(Event::Set { name }) = &d.events[0] else {
+            panic!("expected a set, got {:?}", d.events[0]);
+        };
+        assert_eq!(name, "Fix café login ☕");
+        let crate::sessions::runners::action::Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
+        };
+        assert_eq!(text, "Fix café login ☕");
+    }
+
+    /// A title the session would refuse is refused here, and journals nothing:
+    /// a name that never took must not replay as one that did.
+    #[test]
+    fn an_invalid_title_is_refused_and_records_nothing() {
+        for bad in ["   ", "one\ntwo"] {
+            let d = TitleCapability::default()
+                .handle(caller(), &tool(TOOL, serde_json::json!({ "title": bad })))
+                .expect("mine");
+            assert!(d.events.is_empty(), "{bad:?} was journaled");
+            let crate::sessions::runners::action::Action::Reply { text } = &d.actions[0] else {
+                panic!("expected a reply, got {:?}", d.actions[0]);
+            };
+            assert!(text.contains("session title must"), "{text}");
+        }
     }
 
     /// Both variants equip the one tool: the model calls `set_session_title`

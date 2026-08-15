@@ -811,6 +811,7 @@ pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> 
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
                 caller: crate::sessions::subagents::SubAgentParent::Main,
+                agent: crate::sessions::runners::ids::AgentId::new_v4(),
                 label: label.into(),
                 task: task.into(),
                 agent_type: None,
@@ -1409,6 +1410,7 @@ pub(super) async fn spawn_typed(
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
                 caller: crate::sessions::subagents::SubAgentParent::Main,
+                agent: crate::sessions::runners::ids::AgentId::new_v4(),
                 label: "review".into(),
                 task: "look at the diff".into(),
                 agent_type: agent_type.map(str::to_string),

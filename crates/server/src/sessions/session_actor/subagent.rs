@@ -45,6 +45,7 @@ impl SubAgents {
                 task,
                 agent_type,
                 reply,
+                ..
             } => {
                 let owner = state.subagents.owner_for(caller, state.root_owner());
                 let Some(parent_depth) = owner
@@ -141,7 +142,9 @@ impl SubAgents {
                 let _ = reply.send(Ok(id));
                 CommandEffect::none()
             }
-            SubAgentCommand::Status { caller, id, reply } => {
+            SubAgentCommand::Status {
+                caller, id, reply, ..
+            } => {
                 // Visibility is answered within the caller's own tree: a step
                 // and a conversation each see their own, and neither learns the
                 // other exists.
@@ -504,6 +507,7 @@ mod tests {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Spawn {
                         caller: parent,
+                        agent: crate::sessions::runners::ids::AgentId::new_v4(),
                         label: "w".into(),
                         task: "t".into(),
                         agent_type: None,
@@ -520,6 +524,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: parent,
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
                     label: "x".into(),
                     task: "y".into(),
                     agent_type: None,
@@ -543,6 +548,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: crate::sessions::subagents::SubAgentParent::Main,
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
                     label: "x".into(),
                     task: "y".into(),
                     agent_type: None,
@@ -562,6 +568,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
                     label: "x".into(),
                     task: "y".into(),
                     agent_type: None,
@@ -959,6 +966,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
                     label: "helper".into(),
                     task: "dig".into(),
                     agent_type: None,

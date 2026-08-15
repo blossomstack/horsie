@@ -599,6 +599,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: crate::sessions::subagents::SubAgentParent::Main,
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
                     label: "second".into(),
                     task: "more".into(),
                     agent_type: None,
