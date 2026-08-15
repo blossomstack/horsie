@@ -31,6 +31,7 @@ pub mod action;
 pub mod capabilities;
 pub mod conversation;
 pub mod ids;
+pub mod lifecycle_routing;
 pub mod loading;
 pub mod message;
 pub mod runtime;
