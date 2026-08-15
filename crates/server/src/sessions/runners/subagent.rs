@@ -63,6 +63,7 @@ pub struct State {
 
 /// Not derived: [`AgentSettings`] has no `Default`. A live worker's settings
 /// arrive with its args; this is the empty slice, and nothing else builds one.
+#[cfg(test)]
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -70,21 +71,7 @@ impl Default for State {
             label: String::new(),
             task: String::new(),
             agent_type: None,
-            settings: AgentSettings {
-                model: String::new(),
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: Vec::new(),
-                memory_spaces: Vec::new(),
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                instructions: None,
-                plugins: Vec::new(),
-                auto_compact: None,
-                control_plane: None,
-            },
+            settings: super::empty_settings(),
             usage: UsageTotal::default(),
             result: None,
             capabilities: Vec::new(),

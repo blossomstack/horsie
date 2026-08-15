@@ -150,6 +150,33 @@ pub trait AgentLifecycle {
     fn on_agent_halted(&self, agent: AgentId, reason: &str) -> Emit;
 }
 
+/// An `AgentSettings` with nothing set.
+///
+/// Test-only, and deliberately not a `Default` on `AgentSettings` itself: a
+/// settings with an empty `model` names no provider, so production code must
+/// not be able to build one by accident. The two runners that need a `Default`
+/// state need it only so `RunnerState::empty_for` can build one, which is
+/// itself test scaffolding.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn empty_settings() -> crate::sessions::spec::AgentSettings {
+    crate::sessions::spec::AgentSettings {
+        model: String::new(),
+        allowed_tools: None,
+        use_plugins: None,
+        max_iterations: None,
+        max_retries: 0,
+        mcp_servers: Vec::new(),
+        memory_spaces: Vec::new(),
+        thinking_effort: None,
+        max_concurrent_subagents: None,
+        instructions: None,
+        plugins: Vec::new(),
+        auto_compact: None,
+        control_plane: None,
+    }
+}
+
 /// A runner's own slice.
 ///
 /// One arm per kind, and the session never matches on it to make a decision:

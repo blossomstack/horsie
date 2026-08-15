@@ -71,6 +71,7 @@ pub struct State {
 /// Not derived: [`AgentSettings`] has no `Default`. A live conversation's
 /// settings arrive with its args; this is the empty slice, and nothing else
 /// builds one.
+#[cfg(test)]
 impl Default for State {
     fn default() -> Self {
         Self {
@@ -80,21 +81,7 @@ impl Default for State {
             turn: TurnStatus::default(),
             title: None,
             first_message: None,
-            settings: AgentSettings {
-                model: String::new(),
-                allowed_tools: None,
-                use_plugins: None,
-                max_iterations: None,
-                max_retries: 0,
-                mcp_servers: Vec::new(),
-                memory_spaces: Vec::new(),
-                thinking_effort: None,
-                max_concurrent_subagents: None,
-                instructions: None,
-                plugins: Vec::new(),
-                auto_compact: None,
-                control_plane: None,
-            },
+            settings: super::empty_settings(),
             usage: UsageTotal::default(),
             capabilities: Vec::new(),
         }

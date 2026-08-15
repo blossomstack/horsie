@@ -170,26 +170,11 @@ pub(crate) mod testing {
     use crate::sessions::runners::ids::AgentId;
     use crate::sessions::spec::AgentSettings;
 
-    /// `spec.rs`'s own helper is `pub(super)` inside its test module and
-    /// cannot be reached from here. Build one rather than widening a
-    /// production module's test surface.
+    /// The shared empty settings, re-exported so a capability test does not
+    /// have to know where it lives.
     #[must_use]
     pub(crate) fn settings() -> AgentSettings {
-        AgentSettings {
-            model: "m".into(),
-            allowed_tools: None,
-            use_plugins: None,
-            max_iterations: None,
-            max_retries: 0,
-            mcp_servers: vec![],
-            memory_spaces: vec![],
-            thinking_effort: None,
-            max_concurrent_subagents: None,
-            instructions: None,
-            plugins: vec![],
-            auto_compact: None,
-            control_plane: None,
-        }
+        crate::sessions::runners::empty_settings()
     }
 
     #[must_use]

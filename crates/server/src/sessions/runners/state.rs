@@ -7,8 +7,8 @@
 //! had to be summed from a per-agent map was a per-agent fact wearing a
 //! session-shaped name.
 
-use super::RunnerState;
 use super::ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
+use super::{RunnerEvent, RunnerState};
 use crate::agent_loop::UsageTotal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -123,6 +123,107 @@ impl SessionState {
     }
 }
 
+/// What a session records.
+///
+/// Five variants and no more: everything else a session used to journal was a
+/// fact about one runner, and lives in that runner's own slice now. The old
+/// vocabulary had thirty-odd variants because a fork's turn boundary, a step's
+/// conclusion and a subagent's report each needed their own, and each had to be
+/// routed to the one component that understood it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionEvent {
+    /// What this session is. The first thing a session journals.
+    SpecRecorded {
+        spec: Box<crate::sessions::spec::SessionSpec>,
+    },
+    /// A runner came into being. Persisted *before* its agents exist, so a
+    /// crash between the two replays as a runner with nothing started — which
+    /// `Runner::actions` restarts — rather than as an agent nothing tracks.
+    RunnerCreated {
+        id: RunnerId,
+        kind: RunnerKind,
+        parent: Option<AgentId>,
+        state: Box<RunnerState>,
+        at_ms: u64,
+    },
+    /// A runner reached its end.
+    RunnerEnded {
+        id: RunnerId,
+        status: RunnerStatus,
+        at_ms: u64,
+    },
+    /// A runner started an agent, so the session can route to it. The one
+    /// place `agents` grows.
+    AgentStarted { runner: RunnerId, agent: AgentId },
+    /// Something a runner recorded about itself, or one of its capabilities
+    /// about itself. Routed by id and never inspected.
+    Runner {
+        id: RunnerId,
+        event: Box<RunnerEvent>,
+    },
+    /// Tokens spent, banked against the model that spent them.
+    UsageBanked { model: String, spent: UsageTotal },
+}
+
+impl SessionState {
+    /// Fold one event.
+    ///
+    /// Pure, and the only writer. An event addressed to a runner this state
+    /// does not know is ignored rather than a panic: a fold has to survive a
+    /// log it does not fully understand, or one bad row takes the session with
+    /// it.
+    pub fn apply(&mut self, event: &SessionEvent) {
+        match event {
+            SessionEvent::SpecRecorded { spec } => self.spec = Some((**spec).clone()),
+            SessionEvent::RunnerCreated {
+                id,
+                kind,
+                parent,
+                state,
+                at_ms,
+            } => {
+                // The first runner is the root: a session's shape is decided
+                // when it is created, and the root is whichever runner the
+                // spec called for.
+                if self.runners.is_empty() {
+                    self.root = *id;
+                }
+                self.runners.insert(
+                    *id,
+                    RunnerRecord {
+                        kind: *kind,
+                        parent: *parent,
+                        status: RunnerStatus::Pending,
+                        state: (**state).clone(),
+                        created_at_ms: *at_ms,
+                        ended_at_ms: 0,
+                    },
+                );
+            }
+            SessionEvent::RunnerEnded { id, status, at_ms } => {
+                if let Some(rec) = self.runners.get_mut(id) {
+                    rec.status = *status;
+                    rec.ended_at_ms = *at_ms;
+                }
+            }
+            SessionEvent::AgentStarted { runner, agent } => {
+                if self.runners.contains_key(runner) {
+                    self.agents.insert(*agent, *runner);
+                    if let Some(rec) = self.runners.get_mut(runner) {
+                        rec.status = RunnerStatus::Running;
+                    }
+                }
+            }
+            SessionEvent::Runner { id, event } => {
+                if let Some(rec) = self.runners.get_mut(id) {
+                    super::Runner::apply(&mut rec.state, event);
+                }
+            }
+            SessionEvent::UsageBanked { model, spent } => self.bank(model.clone(), spent),
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 impl SessionState {
@@ -154,6 +255,16 @@ impl SessionState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    fn created(id: RunnerId, kind: RunnerKind, parent: Option<AgentId>) -> SessionEvent {
+        SessionEvent::RunnerCreated {
+            id,
+            kind,
+            parent,
+            state: Box::new(RunnerState::empty_for(kind)),
+            at_ms: 0,
+        }
+    }
 
     /// The session's status is the root runner's, not an aggregate: a
     /// background subagent must not make the session read Running.
@@ -251,6 +362,90 @@ mod tests {
         assert_eq!(s.usage.len(), 2);
         assert_eq!(s.usage["sonnet"].input_tokens, 11);
         assert_eq!(s.usage["opus"].output_tokens, 2);
+    }
+
+    /// Creation registers no agent: the runner's own first `StartAgent` does
+    /// that. A crash between the two therefore replays as a runner with
+    /// nothing started, which `actions()` restarts — the alternative, an agent
+    /// nothing tracks, is the one this ordering exists to prevent.
+    #[test]
+    fn creating_a_runner_registers_no_agent() {
+        let mut s = SessionState::default();
+        let id = RunnerId::new_v4();
+        s.apply(&created(id, RunnerKind::Conversation, None));
+        assert_eq!(s.runners[&id].status, RunnerStatus::Pending);
+        assert!(s.agents.is_empty());
+        assert_eq!(s.root, id, "the first runner is the root");
+    }
+
+    /// The one place `agents` grows, and it moves the runner to Running.
+    #[test]
+    fn a_started_agent_is_routable_and_moves_the_runner() {
+        let mut s = SessionState::default();
+        let id = RunnerId::new_v4();
+        let agent = AgentId::new_v4();
+        s.apply(&created(id, RunnerKind::SubAgent, None));
+        s.apply(&SessionEvent::AgentStarted { runner: id, agent });
+        assert_eq!(s.runner_of(agent), Some(id));
+        assert_eq!(s.runners[&id].status, RunnerStatus::Running);
+    }
+
+    /// A fold must survive a log it does not fully understand: one row naming
+    /// a runner this state never saw must not take the whole session down.
+    #[test]
+    fn an_event_for_an_unknown_runner_is_ignored() {
+        let mut s = SessionState::default();
+        s.apply(&SessionEvent::AgentStarted {
+            runner: RunnerId::new_v4(),
+            agent: AgentId::new_v4(),
+        });
+        s.apply(&SessionEvent::RunnerEnded {
+            id: RunnerId::new_v4(),
+            status: RunnerStatus::Done,
+            at_ms: 1,
+        });
+        assert!(s.agents.is_empty());
+        assert!(s.runners.is_empty());
+    }
+
+    /// The recovery contract, and the reason nothing in a fold may reach for a
+    /// clock or mint an id: replaying the same log twice has to land the same
+    /// state, byte for byte, or a recovered session and a live one diverge.
+    #[test]
+    fn folding_the_same_log_twice_lands_the_same_state() {
+        let root = RunnerId::new_v4();
+        let main = AgentId::new_v4();
+        let child = RunnerId::new_v4();
+        let log = vec![
+            created(root, RunnerKind::Conversation, None),
+            SessionEvent::AgentStarted {
+                runner: root,
+                agent: main,
+            },
+            created(child, RunnerKind::SubAgent, Some(main)),
+            SessionEvent::UsageBanked {
+                model: "sonnet".into(),
+                spent: UsageTotal {
+                    input_tokens: 7,
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+            },
+            SessionEvent::RunnerEnded {
+                id: child,
+                status: RunnerStatus::Done,
+                at_ms: 9,
+            },
+        ];
+
+        let fold = |log: &[SessionEvent]| {
+            let mut s = SessionState::default();
+            for e in log {
+                s.apply(e);
+            }
+            serde_json::to_string(&s).unwrap()
+        };
+        assert_eq!(fold(&log), fold(&log));
     }
 
     /// The state is snapshotted, so a row missing a field must still load.
