@@ -154,22 +154,29 @@ The set: `Runtime`, `Memory`, `Mcp`, `ControlPlane`, `AskUser`, `Title`, `SubAge
 
 ```rust
 trait Capability {
-    /// Tool names and agent-event kinds I own. The runner builds a routing
-    /// map from these when it assembles its capabilities; a duplicate key is
-    /// an assembly error, not a resolution by list order.
-    fn owns(&self) -> &[Selector];
-
     /// Equip the agent: toolbox layer, prompt section.
     fn setup(&self, spec: &mut AgentSpec);
 
-    /// Handle one thing addressed to me — a tool call, a child's outcome, an
-    /// answer arriving. Decides; never performs.
-    fn handle(&self, from: AgentId, msg: Message) -> (Vec<CapEvent>, Vec<Action>);
+    /// `None` means "not mine" — the runner offers it to the next capability.
+    /// `Some` means I took it, and here is what to journal and what to do.
+    ///
+    /// One method rather than a `supports` predicate beside a handler: a
+    /// capability that answered yes and then could not cope, or a pair edited
+    /// out of step, are states that cannot be written this way.
+    ///
+    /// `&Message` rather than by value, because the same message is offered
+    /// to each capability until one takes it; the taker clones what it keeps.
+    fn handle(&self, from: AgentId, msg: &Message)
+        -> Option<(Vec<CapEvent>, Vec<Action>)>;
 
     /// Fold my own slice.
     fn apply(&mut self, e: &CapEvent);
 }
 ```
+
+**Tool calls are offered around; structural messages are looked up.** A tool call goes through `capabilities.iter().find_map(|c| c.handle(from, &msg))`, which is what lets `Runtime` answer for a namespace nobody can enumerate — the sandbox toolbox plus whatever the plugin library scan discovered — while the fixed-name capabilities answer for theirs. A child's outcome and an arriving answer do **not** go through that scan: they route to the capability that created that child or recorded that ask, which is one owner by construction, recorded in that capability's own slice. Scanning there would let two capabilities plausibly claim the same `ChildOutcome`, which is the ambiguity most worth designing out.
+
+Order is therefore the conflict resolution for tool calls, and it must be a written property of assembly rather than an accident of construction: the open-namespace capabilities — `Runtime`, `Mcp` — sort last. This is the behaviour today, where `AskUserToolbox` wraps the plugin toolbox and silently shadows a plugin tool of the same name, so it is not a regression; but it is worth a debug-only assembly pass that offers a synthetic call to every capability and warns when more than one answers.
 
 A capability is a **value**, not a trait impl on the runner — a runner holds a `Vec<Capability>` where `Capability` is a closed enum with one arm per implementation, so the list serializes into the runner's slice and the trait above is implemented for the enum by delegation. There is one implementation of each; per-runner variation is expressed at construction:
 
@@ -207,7 +214,7 @@ SessionState
 
 **Instances belong to the runner; equipment is computed per agent.** A `WorkflowRunner` holds one `SubAgents` and one `AskUser`, because their state outlives any single step. Which capabilities a *given* agent is equipped with is decided at spawn, by folding a subset over its `AgentSpec`. That is how a workflow whose step 1 is interactive and step 2 is not gets exactly the right tools, with one mechanism rather than two — and it replaces the four-arm toolbox match and the four-arm prompt-suffix match in `context.rs`.
 
-An event nobody owns is an error, never a silent drop. A dynamic routing map gives up the exhaustive-match compile error the current code relies on; failing loudly at runtime is the least that replaces it.
+A message every capability declined is an error, never a silent drop — `None` from all of them, checked in the one place the scan lives. That check replaces an exhaustive-match compile error the current code relies on, so it is a real downgrade in safety; making it loud is the least that compensates.
 
 ## The agent lifecycle
 
@@ -258,7 +265,7 @@ Every message from an agent goes to the runner that owns it:
 let runner = state.agents[&agent];
 ```
 
-That single lookup replaces `on_agent_outcome`'s identity probing, `stop_target`'s three-registry walk, and the same walk in `resolve_agent` and `reach`. Within the runner, a tool call routes by the capability routing map.
+That single lookup replaces `on_agent_outcome`'s identity probing, `stop_target`'s three-registry walk, and the same walk in `resolve_agent` and `reach`. Within the runner, a tool call is offered to each capability until one takes it, and a structural message is looked up in the capability that owns it.
 
 Usage, turn-preparation progress and hook records mean the same thing for every runner; the session answers those itself rather than routing them, so no runner grows a tail of variants it ignores.
 
@@ -306,7 +313,8 @@ The only things outside the fold are live actor handles, which are connections r
 4. `actions()` is pure and idempotent.
 5. One runner owns exactly one agent role.
 6. **An agent may not conclude while it has outstanding children.** Load-bearing: it is what makes a single `SubAgents` implementation correct for all three parent kinds. Needs an enforcement point — `submit_result` refused, or the conclusion deferred, while `outstanding` is non-empty — and a test.
-7. A capability routing key is owned by exactly one capability; duplicates fail at assembly.
+7. A structural message has exactly one owning capability, found by lookup rather than by offering it around. A tool call declined by every capability is an error.
+8. Capability order within a runner is a written property of assembly — open-namespace capabilities last — not an accident of construction.
 
 ## What this deletes
 
@@ -336,7 +344,7 @@ Roughly 2,600 lines net removed, against a rewrite of the most load-bearing acto
 
 - Recovery: a journal cut mid-create replays to no child; cut between the two delivery batches replays to a re-delivered report.
 - One runner, one agent role: a workflow's step agents all end through the same path.
-- Capability assembly: duplicate routing keys fail; an unowned event errors rather than vanishing.
+- Capability dispatch: a tool call every capability declines errors rather than vanishing; a fixed-name capability wins over the open-namespace one that sorts after it.
 - Nesting: a subagent of a step agent behaves identically to a subagent of a main agent, and a workflow invoked by a subagent delivers its terminal output to that subagent.
 - Invariant 6: an agent that tries to conclude with outstanding children does not.
 
