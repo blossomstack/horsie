@@ -114,7 +114,7 @@ struct ConversationState {
     turn: TurnStatus,
     title: Option<String>,
     usage: UsageTotal,
-    capabilities: Vec<Capability>,
+    capabilities: Capabilities,
 }
 ```
 
@@ -129,7 +129,7 @@ struct SubAgentState {
     task: String,
     agent_type: Option<String>,
     usage: UsageTotal,
-    capabilities: Vec<Capability>,
+    capabilities: Capabilities,
 }
 ```
 
@@ -148,7 +148,7 @@ struct WorkflowState {
     output: Option<Value>,
     error: Option<String>,
     usage: UsageTotal,
-    capabilities: Vec<Capability>,
+    capabilities: Capabilities,
 }
 ```
 
@@ -198,9 +198,10 @@ Each file owns its capability's struct, its `Event`, and its request types. The 
 
 ```rust
 trait Capability {
-    /// How the journal names my events, and how progress names me while I set
-    /// up. A rename breaks replay, so the set of names is pinned by a test.
-    const NAME: &'static str;
+    /// How progress names me while I set up, and how a test pins the set.
+    /// A method rather than an associated const, which would make the trait
+    /// not dyn-compatible.
+    fn name(&self) -> &'static str;
 
     /// Once, when the agent is loaded. Acquire what this agent needs — a
     /// runtime client, an MCP connection — and fill in the spec.
@@ -222,8 +223,12 @@ trait Capability {
     /// each capability until one takes it; the taker clones what it keeps.
     fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision>;
 
-    /// Fold my own durable slice. Pure.
-    fn apply(&mut self, event: &CapEvent);
+    /// Fold my own durable slice. Pure. Every capability is offered every
+    /// event, so an arm that is not mine is a no-op rather than an error.
+    fn apply(&mut self, event: &CapEvent) {}
+
+    /// Me, in the form the journal stores.
+    fn save(&self) -> CapSlice;
 }
 
 /// Events to journal, actions for the session to perform.
@@ -248,7 +253,19 @@ That split names the last missing concept: a capability holds a **durable slice*
 
 A runner holds `Vec<Box<dyn Capability>>`, built when it is assembled. A runner that should not delegate simply is not given the capability, rather than holding one that refuses.
 
-The cost, stated because it is real: the durable slice cannot be a closed enum either, so the journal carries `{ capability: NAME, event: … }` and the fold routes by name. A renamed capability then breaks replay at runtime rather than at compile time. `const NAME` plus one test pinning the set is what stands in for the compiler.
+An earlier draft of this section accepted a cost that turned out not to be necessary: that the journal would have to carry `{ capability: name, event: … }` and route the fold by name, so a rename broke replay at runtime rather than at compile time. It does not. What has to be open is the *dispatch* — which capabilities a runner holds, and in what order. Persistence is a separate question, and it stays closed:
+
+```rust
+/// One capability as it is persisted. Serialising the whole capability, not a
+/// durable-state extract, so a reload does not depend on `assemble`
+/// reproducing the config it produced when the runner was created.
+enum CapSlice { Runtime(..), Mcp(..), Memory(..), /* one arm each */ }
+
+/// The list, round-tripping through `Vec<CapSlice>` with no hydration step.
+struct Capabilities(Vec<Box<dyn Capability>>);
+```
+
+So the journal stays typed, a shape change still fails to compile, and `CapEvent` stays a closed enum too. `Capabilities::clone` goes through `save()` as well, which is what makes the copy an agent equips itself from provably the same thing a reload would build. `name()` and its pinning test remain, for narration and for event routing within a capability — not as a substitute for the compiler.
 
 ### Setup, and what the user sees while it runs
 
@@ -432,9 +449,11 @@ A message every capability declined is an error, never a silent drop — `None` 
 Every runner that owns agents implements one handler; `RuntimeRunner` does not implement it at all, so "a runner with no agents cannot be handed an agent event" is a type fact rather than an unreachable arm.
 
 ```rust
-/// Every method returns the same pair every decision in this design returns:
-/// events to journal, and actions for the session to perform.
-type Emit = (Vec<RunnerEvent>, Vec<Action>);
+/// Every method returns the same shape every decision in this design returns:
+/// events to journal, and actions for the session to perform. Deliberately the
+/// same shape as a capability's `Decision`, one level up — "decide, never
+/// perform" is one idea, and two shapes for it would read as two.
+struct Emit { events: Vec<RunnerEvent>, actions: Vec<Action> }
 
 trait AgentLifecycle {
     fn on_agent_started(&self, s: &State, agent: AgentId) -> Emit;
@@ -459,7 +478,9 @@ Pure and idempotent, called at every boundary. Creation and recovery then take t
 
 ```rust
 enum Action {
-    StartAgent  { agent: AgentId, spec: AgentSpec, first: Incoming },
+    /// Carries the ingredients, not a finished `AgentSpec`: building one is
+    /// `setup`, which is async, so the agent's own task does it.
+    StartAgent  { agent: AgentId, equipment: Capabilities, settings: AgentSettings, first: Incoming },
     CreateChild { kind: RunnerKind, args: RunnerArgs, parent: AgentId },
     Deliver     { to: AgentId, from: RunnerId, part: ResultPart },
     Cancel      { agent: AgentId },
