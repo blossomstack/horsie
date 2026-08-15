@@ -27,8 +27,10 @@
 //!    silently differ from what the log says.
 #![allow(dead_code)] // Phase A: built and tested here, wired into the actor in Phase B.
 
+pub mod action;
 pub mod capabilities;
 pub mod ids;
+pub mod message;
 pub mod state;
 
 pub use ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
