@@ -384,20 +384,22 @@ impl State {
     }
 }
 
-/// A step's own capabilities, spliced into the runner's list ahead of the
-/// open-namespace one.
-///
-impl Runner for State {
-    fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        let Some(next) = self.next_step() else {
-            return Vec::new();
-        };
+impl State {
+    /// The action that starts one execution, equipped as that step declared.
+    ///
+    /// Shared by [`Runner::actions`] and [`State::retry`], because a retried
+    /// step is an ordinary execution of the same step — equipped from the same
+    /// declaration, on the same preset. Two copies of this would be two answers
+    /// to "what is a step agent equipped with", and the retry's would be the one
+    /// nobody edits.
+    ///
+    /// `None` when the step has gone from the graph, which is the same reason
+    /// the run fails rather than starting an agent with no definition.
+    fn start_action(&self, next: &StepStart) -> Option<Action> {
         // The step's own settings, not the run's: a graph resolves one preset
         // per step at creation, which is what lets step 1 run on a large model
         // and step 2 on a small one.
-        let Some(step) = self.graph.step(&next.step) else {
-            return Vec::new();
-        };
+        let step = self.graph.step(&next.step)?;
         // A fresh copy for the step agent's task to equip itself from; the
         // folded one stays here.
         //
@@ -425,12 +427,98 @@ impl Runner for State {
             true => AskUserCapability::new(),
             false => AskUserCapability::not_interactive(),
         });
-        vec![Action::StartAgent {
+        Some(Action::StartAgent {
             agent: next.agent,
             equipment,
             settings: Box::new(step.settings.clone()),
-            first: FirstInput::Text(next.input),
-        }]
+            first: FirstInput::Text(next.input.clone()),
+        })
+    }
+
+    /// Re-run one execution from the log, because a person asked.
+    ///
+    /// **Not an [`AgentLifecycle`] method, and not reachable from one.** A retry
+    /// comes from a person looking at a stalled run, never from an agent, so it
+    /// is a plain function the session calls rather than a case every runner has
+    /// to carry an arm for.
+    ///
+    /// Appends rather than truncating: earlier attempts stay readable, and the
+    /// graph renders them stacked on their node. A run still in flight has its
+    /// current step cancelled first — the run's workspace is shared, so two
+    /// steps must never be writing to it at once. The workspace itself is *not*
+    /// rolled back: a retried step re-runs against whatever the previous attempt
+    /// left on disk, which is the honest behaviour and what the guide promises.
+    ///
+    /// The new execution sits on the *original's* edge — same `from`, same
+    /// `via`, same input — so the graph draws it stacked on the node it retries
+    /// rather than inventing a transition nothing took.
+    ///
+    /// `Err` is a request that names nothing, which is a person's mistake and
+    /// belongs in the reply rather than in the log.
+    pub fn retry(&self, index: u32) -> Result<Emit, String> {
+        let target = self
+            .steps
+            .get(index as usize)
+            .ok_or_else(|| format!("no step execution at index {index}"))?
+            .clone();
+        let mut emit = Emit::nothing();
+        // Cancel whatever is in flight first, so the retry is the only writer of
+        // the shared workspace. Both halves: the agent's run has to stop, and
+        // the log entry has to say so — without the entry `current()` never
+        // clears and the run starts nothing ever again.
+        if let Some(current) = self.current() {
+            if let Some(running) = self.steps.get(current as usize) {
+                emit.actions.push(Action::Cancel {
+                    agent: AgentId(running.agent),
+                });
+            }
+            emit.events
+                .push(RunnerEvent::Workflow(Event::StepCancelled {
+                    index: current,
+                }));
+        }
+        // Folded locally one step early — the same fold the session applies when
+        // it persists — because the new execution's index and attempt are counts
+        // over the log *including* the cancel above.
+        let mut next = self.clone();
+        for event in &emit.events {
+            // Zero, and never persisted: this copy exists only to number the
+            // retry, and the time the real fold stamps is the session's.
+            next.apply(event, 0);
+        }
+        let start = StepStart {
+            index: next.steps.len() as u32,
+            step: target.step.clone(),
+            agent: step_agent_id(self.run, next.steps.len() as u32),
+            attempt: next.attempts_of(&target.step) + 1,
+            from: target.from,
+            via: target.via.clone(),
+            input: target.input.clone(),
+        };
+        let action = self
+            .start_action(&start)
+            .ok_or_else(|| format!("step '{}' is no longer in this workflow", target.step))?;
+        emit.events
+            .push(RunnerEvent::Workflow(Event::StepStarted {
+                index: start.index,
+                step: start.step,
+                agent: start.agent,
+                attempt: start.attempt,
+                from: start.from,
+                via: start.via,
+                input: start.input,
+            }));
+        emit.actions.push(action);
+        Ok(emit)
+    }
+}
+
+impl Runner for State {
+    fn actions(&self, _view: &SessionView) -> Vec<Action> {
+        let Some(next) = self.next_step() else {
+            return Vec::new();
+        };
+        self.start_action(&next).into_iter().collect()
     }
 
     /// The **run's** ending, never a step's. A step concluding is an input to
@@ -1518,5 +1606,144 @@ mod tests {
         assert_eq!(back.run, state.run);
         assert_eq!(back.steps, state.steps);
         assert_eq!(back.status, state.status);
+    }
+
+    /// Fold an `Emit`'s events, exactly as the session does when it persists.
+    fn fold(state: &mut State, emit: &Emit) {
+        for e in &emit.events {
+            state.apply(e, 0);
+        }
+    }
+
+    /// A retry appends an attempt on the *same edge*: same `from`, same `via`,
+    /// same input. Truncating instead would lose the attempt a person is
+    /// looking at, and re-routing would draw the retry on a transition nothing
+    /// ever took.
+    #[test]
+    fn a_retry_appends_an_attempt_on_the_original_edge() {
+        let mut state = run();
+        advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        // triage concluded and routed to fix; run fix to completion too, so
+        // nothing is in flight when the retry lands.
+        advance(&mut state, serde_json::json!({"description": "fixed"}));
+        assert_eq!(state.steps.len(), 2);
+
+        let emit = state.retry(1).expect("index 1 is an execution");
+        fold(&mut state, &emit);
+
+        assert_eq!(state.steps.len(), 3, "the retry is appended");
+        assert_eq!(state.steps[2].step, "fix");
+        assert_eq!(state.steps[2].attempt, 2, "the retry numbers itself");
+        assert_eq!(state.steps[2].from, state.steps[1].from);
+        assert_eq!(state.steps[2].via, state.steps[1].via);
+        assert_eq!(state.steps[2].input, state.steps[1].input);
+        assert_eq!(
+            state.steps[1].status,
+            StepStatus::Concluded,
+            "the first attempt is untouched"
+        );
+    }
+
+    /// And it asks for the agent, because nothing else will: `actions()` routes
+    /// out of the last *concluded* step, so a retry it did not start is a step
+    /// that sits in the log as `Running` with no agent behind it, for ever.
+    #[test]
+    fn a_retry_starts_the_agent_it_journals() {
+        let mut state = run();
+        advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        advance(&mut state, serde_json::json!({"description": "fixed"}));
+
+        let emit = state.retry(1).expect("index 1 is an execution");
+        let Some(Action::StartAgent { agent, first, .. }) = emit.actions.last() else {
+            panic!("expected a start, got {:?}", emit.actions);
+        };
+        let started = *agent;
+        let FirstInput::Text(input) = first else {
+            panic!("a step is started with its composed input, got {first:?}");
+        };
+        assert!(input.contains("Do fix."), "{input}");
+        fold(&mut state, &emit);
+        assert_eq!(
+            AgentId(state.steps[2].agent),
+            started,
+            "the log names an agent the session was never asked to start"
+        );
+        // And the boundary starts nothing further: the retry is in flight, so a
+        // second `actions()` would double-start it.
+        assert!(state.actions(&view()).is_empty());
+        // Nor does the agent's own start journal a second execution.
+        assert!(state.on_agent_started(started).events.is_empty());
+    }
+
+    /// A run with a step in flight has it cancelled first — both halves. The
+    /// agent's run has to stop, because the run's workspace is shared and two
+    /// steps must never write to it at once; and the log entry has to say so,
+    /// or `current()` never clears and the run starts nothing ever again.
+    #[test]
+    fn retrying_mid_step_cancels_the_one_in_flight() {
+        let mut state = run();
+        let running = advance_to_running(&mut state);
+
+        let emit = state.retry(0).expect("index 0 is an execution");
+        assert!(
+            emit.actions
+                .iter()
+                .any(|a| matches!(a, Action::Cancel { agent } if *agent == running)),
+            "the step in flight was left running: {:?}",
+            emit.actions
+        );
+        fold(&mut state, &emit);
+        assert_eq!(state.steps[0].status, StepStatus::Cancelled);
+        assert_eq!(state.steps.len(), 2);
+        assert_eq!(
+            state.steps[1].attempt, 2,
+            "the cancelled attempt still counts"
+        );
+        assert_eq!(state.current(), Some(1), "the retry is the one in flight");
+    }
+
+    /// Start the run's first step and leave it running.
+    fn advance_to_running(state: &mut State) -> AgentId {
+        let agent = started_agent(state);
+        let emit = state.on_agent_started(agent);
+        fold(state, &emit);
+        agent
+    }
+
+    /// An index that names no execution is a person's mistake, so it is
+    /// answered rather than journaled. A run that recorded it would hold a
+    /// `StepStarted` for a step nobody asked for.
+    #[test]
+    fn retrying_an_index_that_names_nothing_is_refused() {
+        let state = run();
+        let err = state.retry(0).expect_err("nothing has run yet");
+        assert!(err.contains('0'), "{err}");
+        let mut state = run();
+        advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        assert!(state.retry(7).is_err());
+    }
+
+    /// A retried step is equipped from the same declaration an ordinary
+    /// execution is — one `start_action`, so the retry cannot drift into
+    /// running with a different toolbox from the attempt it replaces.
+    #[test]
+    fn a_retry_is_equipped_like_any_other_execution() {
+        let mut state = run();
+        let first = state.actions(&view());
+        let Some(Action::StartAgent { equipment, .. }) = first.first() else {
+            panic!("expected a start, got {first:?}");
+        };
+        let ordinary: Vec<&str> = equipment.iter().map(|c| c.name()).collect();
+
+        advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        advance(&mut state, serde_json::json!({"description": "fixed"}));
+        let emit = state.retry(0).expect("index 0 is an execution");
+        let Some(Action::StartAgent { equipment, .. }) = emit.actions.last() else {
+            panic!("expected a start, got {:?}", emit.actions);
+        };
+        assert_eq!(
+            equipment.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            ordinary
+        );
     }
 }
