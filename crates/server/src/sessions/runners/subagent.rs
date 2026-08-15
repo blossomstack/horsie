@@ -167,6 +167,11 @@ impl Runner for State {
     }
 
     fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
+        // One total: a worker owns one agent.
+        if let RunnerEvent::Usage { spent, .. } = event {
+            self.usage = self.usage.combine(spent);
+            return;
+        }
         // Every other arm belongs to another runner, or is a capability's own
         // event that `RunnerState::apply` has already routed.
         let RunnerEvent::SubAgent(event) = event else {
@@ -590,6 +595,28 @@ mod tests {
             "a worker that already reported was failed a second time"
         );
         assert!(emit.actions.is_empty());
+    }
+
+    /// A worker owns one agent, so its tokens are one total — the breakdown the
+    /// session does not keep, because a session-wide map keyed by agent was a
+    /// per-agent fact wearing a session-shaped name.
+    #[test]
+    fn banked_tokens_land_on_the_workers_own_total() {
+        let mut state = worker();
+        state.apply(
+            &RunnerEvent::Usage {
+                agent: state.agent,
+                model: "sonnet".into(),
+                spent: UsageTotal {
+                    input_tokens: 12,
+                    output_tokens: 6,
+                    ..Default::default()
+                },
+            },
+            0,
+        );
+        assert_eq!(state.usage.input_tokens, 12);
+        assert_eq!(state.usage.output_tokens, 6);
     }
 
     /// The status the session records is read off the same field the report is,

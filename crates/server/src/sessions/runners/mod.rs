@@ -356,6 +356,24 @@ pub enum RunnerEvent {
     /// arm. Here rather than on each runner because every runner holds
     /// capabilities and none of them needs to know which.
     Capability(capabilities::CapEvent),
+    /// Tokens one of my agents spent, banked against me.
+    ///
+    /// One arm rather than one per runner, because banking is the same act for
+    /// every kind: the session decides it — it means the same thing whoever
+    /// spent them — and each runner only chooses where to add them up. A
+    /// conversation and a worker keep one total; a workflow keeps one per step
+    /// agent, because a run's graph is read per step and this is its only
+    /// source for the number.
+    ///
+    /// `agent` is carried even where nobody reads it. The runner that owns the
+    /// agent is the one being handed this, so the field is not routing; it is
+    /// what lets a runner that owns several agents attribute a total to one,
+    /// which is a fact about the log that a workflow-only field would hide.
+    Usage {
+        agent: AgentId,
+        model: String,
+        spent: crate::agent_loop::UsageTotal,
+    },
 }
 
 macro_rules! dispatch {

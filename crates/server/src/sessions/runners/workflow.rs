@@ -47,6 +47,7 @@ use crate::sessions::workflow::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -91,10 +92,20 @@ pub struct State {
     /// The terminal output, once the run has ended.
     pub output: Option<Value>,
     pub error: Option<String>,
-    /// This run's own total. The session aggregates by model; nothing here
-    /// writes this yet, because banking usage is an answer the session gives
-    /// for every runner alike.
+    /// This run's own total, across every step.
     pub usage: UsageTotal,
+    /// The same tokens, split by the step agent that spent them.
+    ///
+    /// The one runner that keeps a per-agent breakdown, and it is not
+    /// duplication: the graph endpoint renders a token count against each step,
+    /// and this is its only source. A run's `usage` is a sum, and a sum cannot
+    /// be taken apart again.
+    ///
+    /// Keyed on the agent rather than the step index because that is what the
+    /// event carries and what [`State::index_of_agent`] turns back into an
+    /// index — an index written here would be a second copy of a mapping the
+    /// log already holds.
+    pub step_usage: BTreeMap<AgentId, UsageTotal>,
     pub capabilities: Capabilities,
 }
 
@@ -159,6 +170,7 @@ impl Default for State {
             output: None,
             error: None,
             usage: UsageTotal::default(),
+            step_usage: BTreeMap::new(),
             capabilities: Capabilities::default(),
         }
     }
@@ -471,6 +483,16 @@ impl Runner for State {
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {
+        // Banked twice, against the run and against the step agent that spent
+        // it. The run's total is what a session-level read wants; the split is
+        // what the graph endpoint renders per step, and a sum cannot be taken
+        // apart again.
+        if let RunnerEvent::Usage { agent, spent, .. } = event {
+            self.usage = self.usage.combine(spent);
+            let entry = self.step_usage.entry(*agent).or_default();
+            *entry = entry.combine(spent);
+            return;
+        }
         let RunnerEvent::Workflow(event) = event else {
             return;
         };
@@ -1259,6 +1281,47 @@ mod tests {
             state.apply(e, 0);
         }
         assert_eq!(state.status, WorkflowRunStatus::Suspended);
+    }
+
+    /// **The graph endpoint renders a token count against each step, and this
+    /// is its only source.** The run's total is a sum, and a sum cannot be
+    /// taken apart again — so the split has to be folded as it arrives, keyed
+    /// on the agent that spent it.
+    #[test]
+    fn per_step_tokens_bank_against_the_step_that_spent_them() {
+        fn spent(input: u64) -> UsageTotal {
+            UsageTotal {
+                input_tokens: input,
+                ..Default::default()
+            }
+        }
+        let mut state = run();
+        let first = advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        let second = started_agent(&state);
+        let Emit { events, .. } = state.on_agent_started(second);
+        for e in &events {
+            state.apply(e, 0);
+        }
+
+        for (agent, tokens) in [(first, 10), (second, 3), (first, 5)] {
+            state.apply(
+                &RunnerEvent::Usage {
+                    agent,
+                    model: "sonnet".into(),
+                    spent: spent(tokens),
+                },
+                0,
+            );
+        }
+
+        assert_eq!(state.step_usage[&first].input_tokens, 15);
+        assert_eq!(state.step_usage[&second].input_tokens, 3);
+        // And the run's own total is the sum, so a session-level read does not
+        // have to add the steps up itself.
+        assert_eq!(state.usage.input_tokens, 18);
+        // Keyed on the agent, which the log already maps back to a step.
+        assert_eq!(state.index_of_agent(first), Some(0));
+        assert_eq!(state.index_of_agent(second), Some(1));
     }
 
     /// A suspended run is not a finished one: a person can still retry a step

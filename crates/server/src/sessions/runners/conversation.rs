@@ -83,6 +83,20 @@ pub struct State {
     pub settings: AgentSettings,
     /// This conversation's own tokens; the session's aggregate is by model.
     pub usage: UsageTotal,
+    /// Why the last turn failed, or `None` if the last one did not.
+    ///
+    /// The session's `Failed` status has no other source: the error used to be
+    /// carried into [`Event::TurnFailed`] and dropped on the floor by the fold,
+    /// so a person was shown a conversation that had failed and nothing at all
+    /// about why. Cleared when the next turn begins, because by then it is the
+    /// previous attempt's reason and showing it beside a running turn is worse
+    /// than showing nothing.
+    pub last_error: Option<String>,
+    /// When this conversation last did anything, from the entry that recorded
+    /// it. A fork's row in the session list is ordered and stamped by it, and
+    /// there is nowhere else to read it from — the session's own journal
+    /// position is the whole session's, not this conversation's.
+    pub last_activity_ms: u64,
     pub capabilities: Capabilities,
 }
 
@@ -102,6 +116,8 @@ impl Default for State {
             first_message: None,
             settings: super::empty_settings(),
             usage: UsageTotal::default(),
+            last_error: None,
+            last_activity_ms: 0,
             capabilities: Capabilities::default(),
         }
     }
@@ -193,24 +209,47 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
+    fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {
+        // Banking is the same act for every runner, so the session decides it
+        // and each runner only chooses where to add it up. Here that is one
+        // total: a conversation owns one agent.
+        if let RunnerEvent::Usage { spent, .. } = event {
+            self.usage = self.usage.combine(spent);
+            return;
+        }
         // Every other arm belongs to another runner, or is a capability's own
         // event that `RunnerState::apply` has already routed.
         let RunnerEvent::Conversation(event) = event else {
             return;
         };
+        // Every one of its own events counts as activity, before the match
+        // rather than in nine arms: a fork's row in the session list is
+        // ordered by this, and an arm somebody forgot would make a busy
+        // conversation read as the oldest one there.
+        self.last_activity_ms = at_ms;
         match event {
             Event::Started => self.started = true,
             Event::Seeded => self.seeded = true,
             // `seeded` stays false, so this fork never starts an agent: a
             // conversation with no transcript has nothing to continue.
-            Event::SeedFailed { .. } => self.turn = TurnStatus::Failed,
-            Event::TurnBegan => self.turn = TurnStatus::Running,
+            Event::SeedFailed { error } => {
+                self.turn = TurnStatus::Failed;
+                self.last_error = Some(error.clone());
+            }
+            Event::TurnBegan => {
+                self.turn = TurnStatus::Running;
+                // The previous attempt's reason, and this one is under way:
+                // shown beside a running turn it reads as a live failure.
+                self.last_error = None;
+            }
             Event::Asked => self.turn = TurnStatus::AwaitingInput,
             Event::TurnEnded | Event::TurnStopped | Event::TurnInterrupted => {
                 self.turn = TurnStatus::Idle;
             }
-            Event::TurnFailed { .. } => self.turn = TurnStatus::Failed,
+            Event::TurnFailed { error } => {
+                self.turn = TurnStatus::Failed;
+                self.last_error = Some(error.clone());
+            }
         }
     }
 }
@@ -640,6 +679,80 @@ mod tests {
             assert!(emit.events.is_empty(), "{turn:?} emitted {:?}", emit.events);
             assert!(emit.actions.is_empty());
         }
+    }
+
+    /// **The session's `Failed` status has no other source.** The error used to
+    /// reach `TurnFailed` and be dropped by the fold, so a person saw a
+    /// conversation that had failed and nothing at all about why. And the next
+    /// turn clears it: kept, it would sit beside a running turn reading as a
+    /// live failure.
+    #[test]
+    fn a_failed_turn_keeps_the_reason_the_session_reports() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
+        assert_eq!(state.last_error, None);
+
+        state.apply(
+            &RunnerEvent::Conversation(Event::TurnFailed {
+                error: "the model refused".into(),
+            }),
+            0,
+        );
+        assert_eq!(state.turn, TurnStatus::Failed);
+        assert_eq!(state.last_error.as_deref(), Some("the model refused"));
+
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
+        assert_eq!(
+            state.last_error, None,
+            "the previous attempt's reason was shown beside a running turn"
+        );
+    }
+
+    /// A fork's row in the session list is ordered and stamped by this, so it
+    /// moves with the fork's own turns and reads the time off the entry that
+    /// recorded them — never a clock, or a replay would restamp the whole list
+    /// with the moment of recovery.
+    #[test]
+    fn a_forks_last_activity_moves_with_its_turns() {
+        let mut state = fork();
+        assert_eq!(state.last_activity_ms, 0);
+
+        state.apply(&RunnerEvent::Conversation(Event::Seeded), 100);
+        assert_eq!(state.last_activity_ms, 100);
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 250);
+        assert_eq!(state.last_activity_ms, 250);
+        state.apply(&RunnerEvent::Conversation(Event::TurnEnded), 900);
+        assert_eq!(state.last_activity_ms, 900);
+
+        // Another runner's event is not this fork's activity.
+        state.apply(
+            &RunnerEvent::SubAgent(crate::sessions::runners::subagent::Event::Started),
+            5_000,
+        );
+        assert_eq!(state.last_activity_ms, 900);
+    }
+
+    /// A conversation owns one agent, so its tokens are one total.
+    #[test]
+    fn banked_tokens_land_on_the_conversations_own_total() {
+        let mut state = State::default();
+        let spent = UsageTotal {
+            input_tokens: 10,
+            output_tokens: 4,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            state.apply(
+                &RunnerEvent::Usage {
+                    agent: state.agent,
+                    model: "sonnet".into(),
+                    spent,
+                },
+                0,
+            );
+        }
+        assert_eq!(state.usage.input_tokens, 20);
+        assert_eq!(state.usage.output_tokens, 8);
     }
 
     /// **A conversation is never over.** A failed turn is a failed turn; the
