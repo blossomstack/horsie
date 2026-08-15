@@ -9,7 +9,7 @@
 //! call falling through to the open-namespace capability behind it, which
 //! would take it and journal nothing.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{AgentSpec, ToolLayer};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,8 @@ pub struct McpCapability {
 }
 
 /// Uninhabited: an MCP call's effect is on the far side of the server, so
-/// there is no session-level fact to record and no arm for [`Handler::apply`]
-/// to fold.
+/// there is no session-level fact to record and no arm for
+/// [`Capability::apply`] to fold.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {}
 
@@ -36,26 +36,34 @@ impl McpCapability {
     }
 }
 
-impl Handler for McpCapability {
+#[async_trait::async_trait]
+impl Capability for McpCapability {
+    fn name(&self) -> &'static str {
+        "mcp"
+    }
+
     /// No servers, no layer: a session that names none connects to none, and
     /// an empty layer would advertise a namespace nothing answers for.
-    fn setup(&self, spec: &mut AgentSpec) {
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.servers.is_empty() {
-            return;
+            return Ok(());
         }
         spec.layers.push(ToolLayer::Mcp {
             servers: self.servers.clone(),
         });
+        Ok(())
     }
 
     /// Claims the `mcp__` namespace, journaling nothing. The empty decision is
     /// what says "taken, with nothing to record".
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
         let Message::Tool(t) = msg else { return None };
-        t.name.starts_with(PREFIX).then(|| (Vec::new(), Vec::new()))
+        t.name.starts_with(PREFIX).then(Decision::default)
     }
 
-    fn apply(&mut self, _event: &CapEvent) {}
+    fn save(&self) -> CapSlice {
+        CapSlice::Mcp(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -91,19 +99,25 @@ mod tests {
 
     /// No servers named, no layer equipped. If this regresses every session
     /// gets an MCP layer wrapping nothing.
-    #[test]
-    fn no_servers_equips_no_layer() {
+    #[tokio::test]
+    async fn no_servers_equips_no_layer() {
         let mut spec = AgentSpec::default();
-        McpCapability::new(vec![]).setup(&mut spec);
+        McpCapability::new(vec![])
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.layers.is_empty());
     }
 
     /// The named servers reach the layer verbatim, because the layer is what
     /// the context provider connects.
-    #[test]
-    fn named_servers_equip_the_layer() {
+    #[tokio::test]
+    async fn named_servers_equip_the_layer() {
         let mut spec = AgentSpec::default();
-        McpCapability::new(vec!["github".into(), "docs".into()]).setup(&mut spec);
+        McpCapability::new(vec!["github".into(), "docs".into()])
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::Mcp {
             servers: vec!["github".into(), "docs".into()],
         }));

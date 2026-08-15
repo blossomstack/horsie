@@ -9,7 +9,7 @@
 //! and matching what the code names means a sixth cannot start being claimed
 //! by a prefix before anything exists to answer it.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{AgentSpec, ToolLayer};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
@@ -41,27 +41,33 @@ impl MemoryCapability {
     }
 }
 
-impl Handler for MemoryCapability {
+#[async_trait::async_trait]
+impl Capability for MemoryCapability {
+    fn name(&self) -> &'static str {
+        "memory"
+    }
+
     /// No spaces, no layer: an agent that names none has nothing to read, and
     /// the tools would only ever refuse.
-    fn setup(&self, spec: &mut AgentSpec) {
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.spaces.is_empty() {
-            return;
+            return Ok(());
         }
         spec.layers.push(ToolLayer::Memory {
             spaces: self.spaces.clone(),
         });
+        Ok(())
     }
 
     /// Claims the five memory tools, journaling nothing.
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
         let Message::Tool(t) = msg else { return None };
-        TOOLS
-            .contains(&t.name.as_str())
-            .then(|| (Vec::new(), Vec::new()))
+        TOOLS.contains(&t.name.as_str()).then(Decision::default)
     }
 
-    fn apply(&mut self, _event: &CapEvent) {}
+    fn save(&self) -> CapSlice {
+        CapSlice::Memory(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -98,19 +104,25 @@ mod tests {
 
     /// No spaces named, no layer equipped. If this regresses every session
     /// gets memory tools whose every call is refused.
-    #[test]
-    fn no_spaces_equips_no_layer() {
+    #[tokio::test]
+    async fn no_spaces_equips_no_layer() {
         let mut spec = AgentSpec::default();
-        MemoryCapability::new(vec![]).setup(&mut spec);
+        MemoryCapability::new(vec![])
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.layers.is_empty());
     }
 
     /// The named spaces reach the layer verbatim, because that list is what
     /// bounds the toolbox at run time.
-    #[test]
-    fn named_spaces_equip_the_layer() {
+    #[tokio::test]
+    async fn named_spaces_equip_the_layer() {
         let mut spec = AgentSpec::default();
-        MemoryCapability::new(vec!["default".into(), "team".into()]).setup(&mut spec);
+        MemoryCapability::new(vec!["default".into(), "team".into()])
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::Memory {
             spaces: vec!["default".into(), "team".into()],
         }));

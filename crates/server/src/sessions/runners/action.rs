@@ -8,6 +8,10 @@
 //! context provider turns the list into real toolboxes when the turn is
 //! assembled. Without that seam, testing what an agent is equipped with would
 //! need a sandbox.
+//!
+//! The spec is built by [`super::capabilities::Capabilities::equip`], which is
+//! async, so no decision here can produce one. [`Action::StartAgent`] carries
+//! the ingredients instead and the agent's own task does the equipping.
 
 use super::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::spec::AgentSettings;
@@ -22,9 +26,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub enum Action {
     /// Start an agent for this runner, and put `first` in its queue.
+    ///
+    /// Carries the capability set rather than a finished [`AgentSpec`], because
+    /// building the spec is [`super::capabilities::Capability::setup`] and that
+    /// is async: it acquires a sandbox, scans a workspace, connects MCP. The
+    /// session hands this list to the agent's own task, which equips itself.
+    /// A decision stays sync, and the slow part never touches the mailbox.
+    ///
+    /// `settings` travels with the equipment because it is the other half of
+    /// what the spec is built from, and it is not always the runner's own: a
+    /// workflow resolves one preset per step, which is what lets step 1 run on
+    /// a large model and step 2 on a small one.
     StartAgent {
         agent: AgentId,
-        spec: Box<AgentSpec>,
+        equipment: super::capabilities::Capabilities,
+        settings: Box<AgentSettings>,
         first: FirstInput,
     },
     /// Create a child runner.

@@ -8,7 +8,7 @@
 //! capability has no `horsie_*` layer and nothing to claim its calls, so there
 //! is no inherited flag left to read the wrong way.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{AgentSpec, PromptSection, ToolLayer};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
@@ -25,8 +25,13 @@ pub struct ControlPlaneCapability;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {}
 
-impl Handler for ControlPlaneCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for ControlPlaneCapability {
+    fn name(&self) -> &'static str {
+        "control_plane"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.layers.push(ToolLayer::ControlPlane);
         spec.prompt.push(PromptSection {
             key: "control_plane",
@@ -37,15 +42,18 @@ impl Handler for ControlPlaneCapability {
                    row you mean."
                 .to_string(),
         });
+        Ok(())
     }
 
     /// Claims the `horsie_` namespace, journaling nothing.
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
         let Message::Tool(t) = msg else { return None };
-        t.name.starts_with(PREFIX).then(|| (Vec::new(), Vec::new()))
+        t.name.starts_with(PREFIX).then(Decision::default)
     }
 
-    fn apply(&mut self, _event: &CapEvent) {}
+    fn save(&self) -> CapSlice {
+        CapSlice::ControlPlane(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -78,10 +86,13 @@ mod tests {
 
     /// Holding the capability is what equips the layer and the prompt that
     /// tells the agent it exists — a tool nobody was told about is not used.
-    #[test]
-    fn it_equips_the_layer_and_a_prompt_section() {
+    #[tokio::test]
+    async fn it_equips_the_layer_and_a_prompt_section() {
         let mut spec = AgentSpec::default();
-        ControlPlaneCapability.setup(&mut spec);
+        ControlPlaneCapability
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::ControlPlane));
         assert!(spec.prompt.iter().any(|p| p.key == "control_plane"));
     }

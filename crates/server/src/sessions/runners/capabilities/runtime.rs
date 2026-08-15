@@ -5,7 +5,7 @@
 //! whatever the plugin library scan discovered — so this capability claims
 //! anything nobody else did, and assembly therefore sorts it last.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{AgentSpec, ToolLayer};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
@@ -13,9 +13,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeCapability;
 
-impl Handler for RuntimeCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for RuntimeCapability {
+    fn name(&self) -> &'static str {
+        "runtime"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.layers.push(ToolLayer::Runtime);
+        Ok(())
     }
 
     /// Claims every tool call, and nothing else.
@@ -24,10 +30,12 @@ impl Handler for RuntimeCapability {
     /// agent's own transcript, so there is no session-level fact to record.
     /// The empty decision is what says "taken, with nothing to journal".
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
-        matches!(msg, Message::Tool(_)).then(|| (Vec::new(), Vec::new()))
+        matches!(msg, Message::Tool(_)).then(Decision::default)
     }
 
-    fn apply(&mut self, _event: &CapEvent) {}
+    fn save(&self) -> CapSlice {
+        CapSlice::Runtime(self.clone())
+    }
 }
 
 #[cfg(test)]

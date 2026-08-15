@@ -19,7 +19,6 @@
 //! caller answered for itself.
 
 use super::action::Action;
-use super::capabilities::Capability;
 use super::{Runner, RunnerEvent, SessionView};
 use serde::{Deserialize, Serialize};
 
@@ -98,14 +97,8 @@ impl Runner for State {
         self.phase == Phase::Provisioning
     }
 
-    fn capabilities(&self) -> &[Capability] {
-        // Capabilities equip agents, and this runner starts none.
-        &[]
-    }
-
-    fn capabilities_mut(&mut self) -> &mut [Capability] {
-        &mut []
-    }
+    // Both capability accessors keep the trait's `None`: capabilities equip
+    // agents, and this runner starts none.
 
     fn apply(&mut self, event: &RunnerEvent) {
         let RunnerEvent::Runtime(event) = event else {
@@ -180,7 +173,7 @@ mod tests {
     #[test]
     fn a_runner_with_no_agents_has_no_capabilities_and_no_lifecycle() {
         let state = State::default();
-        assert!(state.capabilities().is_empty());
+        assert!(state.capabilities().is_none());
         assert!(RunnerState::Runtime(state).lifecycle().is_none());
     }
 

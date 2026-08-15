@@ -12,14 +12,14 @@
 //! journaled output. That separation is the point: this capability cannot end a
 //! run, so an outcome cannot be acted on twice by two different owners.
 
-use super::{CapEvent, Decision, Handler};
-use crate::sessions::runners::action::{Action, AgentSpec, ToolLayer};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
+use crate::sessions::runners::action::{AgentSpec, ToolLayer};
 use crate::sessions::runners::message::{Caller, Message};
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, validate_result};
 use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepResultCapability {
     /// The values this step's `outcome` may take.
     pub outcomes: Vec<StepOutcome>,
@@ -45,8 +45,13 @@ impl StepResultCapability {
     }
 }
 
-impl Handler for StepResultCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for StepResultCapability {
+    fn name(&self) -> &'static str {
+        "step_result"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.layers.push(ToolLayer::SubmitResult {
             outcomes: self.outcomes.clone(),
             fields: self.fields.clone(),
@@ -60,6 +65,7 @@ impl Handler for StepResultCapability {
         if self.interactive {
             spec.layers.push(ToolLayer::AskUser);
         }
+        Ok(())
     }
 
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
@@ -68,28 +74,26 @@ impl Handler for StepResultCapability {
             return None;
         }
         match validate_result(&t.input, &self.outcomes, &self.fields) {
-            Ok(()) => Some((
-                vec![CapEvent::StepResult(Event::Submitted {
+            Ok(()) => Some(Decision::record(vec![CapEvent::StepResult(
+                Event::Submitted {
                     output: t.input.clone(),
-                })],
-                vec![],
-            )),
+                },
+            )])),
             // Journal nothing: an undeclared outcome in the log is one the
             // runner would try to route on. The validator's own words go back
             // so the model can correct the field it actually got wrong.
-            Err(reason) => Some((
-                vec![],
-                vec![Action::Reply {
-                    text: format!("submit_result was rejected: {reason}"),
-                }],
-            )),
+            Err(reason) => Some(Decision::reply(format!(
+                "submit_result was rejected: {reason}"
+            ))),
         }
     }
 
-    fn apply(&mut self, _event: &CapEvent) {
-        // Nothing to fold: the submitted output belongs to the step's own
-        // record, which the workflow runner keeps. Holding a copy here would
-        // be a second answer to "what did step 3 return".
+    // `apply` keeps the trait's no-op: the submitted output belongs to the
+    // step's own record, which the workflow runner keeps. Holding a copy here
+    // would be a second answer to "what did step 3 return".
+
+    fn save(&self) -> CapSlice {
+        CapSlice::StepResult(self.clone())
     }
 }
 
@@ -98,6 +102,7 @@ impl Handler for StepResultCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
+    use crate::sessions::runners::action::Action;
     use horsie_models::workflow::StepFieldType;
 
     fn outcomes() -> Vec<StepOutcome> {
@@ -136,12 +141,12 @@ mod tests {
             "description": "found the flake",
             "owner": "shawn",
         });
-        let (events, actions) = cap(false)
+        let d = cap(false)
             .handle(caller(), &tool(SUBMIT_RESULT_TOOL, submitted.clone()))
             .expect("mine");
-        assert!(actions.is_empty());
-        let [CapEvent::StepResult(Event::Submitted { output })] = events.as_slice() else {
-            panic!("expected one Submitted, got {events:?}")
+        assert!(d.actions.is_empty());
+        let [CapEvent::StepResult(Event::Submitted { output })] = d.events.as_slice() else {
+            panic!("expected one Submitted, got {:?}", d.events)
         };
         assert_eq!(output, &submitted);
     }
@@ -151,7 +156,7 @@ mod tests {
     /// the validator exists to keep out of the log.
     #[test]
     fn an_invalid_submission_replies_and_journals_nothing() {
-        let (events, actions) = cap(false)
+        let d = cap(false)
             .handle(
                 caller(),
                 &tool(
@@ -160,9 +165,9 @@ mod tests {
                 ),
             )
             .expect("mine");
-        assert!(events.is_empty(), "nothing undeclared reaches the log");
-        let [Action::Reply { text }] = actions.as_slice() else {
-            panic!("expected one Reply, got {actions:?}")
+        assert!(d.events.is_empty(), "nothing undeclared reaches the log");
+        let [Action::Reply { text }] = d.actions.as_slice() else {
+            panic!("expected one Reply, got {:?}", d.actions)
         };
         assert!(
             text.contains("p9") && text.contains("p0"),
@@ -171,19 +176,19 @@ mod tests {
     }
 
     /// An interactive step gets `ask_user` alongside its result tool.
-    #[test]
-    fn an_interactive_step_is_equipped_to_ask() {
+    #[tokio::test]
+    async fn an_interactive_step_is_equipped_to_ask() {
         let mut spec = AgentSpec::default();
-        cap(true).setup(&mut spec);
+        cap(true).setup(&mut spec).await.expect("nothing fatal");
         assert!(spec.has(&ToolLayer::AskUser));
     }
 
     /// And a non-interactive one is not — the same capability, one flag apart,
     /// which is what lets step 1 stop for a person and step 2 not.
-    #[test]
-    fn a_non_interactive_step_gets_the_result_tool_and_no_ask_user() {
+    #[tokio::test]
+    async fn a_non_interactive_step_gets_the_result_tool_and_no_ask_user() {
         let mut spec = AgentSpec::default();
-        cap(false).setup(&mut spec);
+        cap(false).setup(&mut spec).await.expect("nothing fatal");
         assert!(spec.has(&ToolLayer::SubmitResult {
             outcomes: outcomes(),
             fields: fields(),

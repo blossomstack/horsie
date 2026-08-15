@@ -17,7 +17,7 @@
 //! declined here even for a child id this capability holds: the outcome's kind
 //! and the owning capability have to agree, and `None` is how they say so.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{
     Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer, WorkflowSource,
 };
@@ -74,12 +74,12 @@ impl WorkflowCapability {
                 // non-deterministic, a fold may not. The event and the action
                 // then name the same run, and replay lands the id the log has.
                 let child = RunnerId::new_v4();
-                Some((
-                    vec![CapEvent::Workflow(Event::Started {
+                Some(Decision {
+                    events: vec![CapEvent::Workflow(Event::Started {
                         child,
                         from: caller.agent,
                     })],
-                    vec![Action::CreateChild {
+                    actions: vec![Action::CreateChild {
                         id: child,
                         kind: RunnerKind::Workflow,
                         args: RunnerArgs::Workflow {
@@ -88,14 +88,9 @@ impl WorkflowCapability {
                         },
                         parent: caller.agent,
                     }],
-                ))
+                })
             }
-            STATUS_TOOL => Some((
-                Vec::new(),
-                vec![Action::Reply {
-                    text: self.render_status(),
-                }],
-            )),
+            STATUS_TOOL => Some(Decision::reply(self.render_status())),
             _ => None,
         }
     }
@@ -133,14 +128,12 @@ impl WorkflowCapability {
     }
 
     fn deliver(&self, child: RunnerId, to: AgentId, part: SubAgentResultPart) -> Decision {
-        (
-            vec![CapEvent::Workflow(Event::Reported { child })],
-            vec![Action::Deliver {
-                to,
-                from: child,
-                part: Box::new(part),
-            }],
-        )
+        let reported = CapEvent::Workflow(Event::Reported { child });
+        Decision::record(vec![reported]).then(Action::Deliver {
+            to,
+            from: child,
+            part: Box::new(part),
+        })
     }
 
     /// Only what is still running: a run that reported has already been
@@ -200,8 +193,13 @@ fn render(output: &Value) -> String {
     serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
 }
 
-impl Handler for WorkflowCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for WorkflowCapability {
+    fn name(&self) -> &'static str {
+        "workflow"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.layers.push(ToolLayer::InvokeWorkflow);
         spec.prompt.push(PromptSection {
             key: "workflow",
@@ -213,6 +211,7 @@ impl Handler for WorkflowCapability {
                    asked for progress — never as a poll."
                 .to_string(),
         });
+        Ok(())
     }
 
     fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision> {
@@ -234,6 +233,10 @@ impl Handler for WorkflowCapability {
             }
         }
     }
+
+    fn save(&self) -> CapSlice {
+        CapSlice::Workflow(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -248,12 +251,12 @@ mod tests {
     }
 
     fn invoke(c: &mut WorkflowCapability, caller: Caller) -> RunnerId {
-        let (events, actions) = c
+        let d = c
             .handle(caller, &tool(INVOKE_TOOL, invocation()))
             .expect("mine");
-        c.apply(&events[0]);
-        let Action::CreateChild { id, .. } = &actions[0] else {
-            panic!("expected a create, got {:?}", actions[0]);
+        c.apply(&d.events[0]);
+        let Action::CreateChild { id, .. } = &d.actions[0] else {
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         *id
     }
@@ -266,11 +269,11 @@ mod tests {
     fn an_invocation_journals_and_creates_the_same_run() {
         let c = WorkflowCapability::default();
         let caller = caller();
-        let (events, actions) = c
+        let d = c
             .handle(caller, &tool(INVOKE_TOOL, invocation()))
             .expect("mine");
-        let CapEvent::Workflow(Event::Started { child, from }) = &events[0] else {
-            panic!("expected a start, got {:?}", events[0]);
+        let CapEvent::Workflow(Event::Started { child, from }) = &d.events[0] else {
+            panic!("expected a start, got {:?}", d.events[0]);
         };
         assert_eq!(*from, caller.agent);
         let Action::CreateChild {
@@ -278,9 +281,9 @@ mod tests {
             kind,
             args,
             parent,
-        } = &actions[0]
+        } = &d.actions[0]
         else {
-            panic!("expected a create, got {:?}", actions[0]);
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         assert_eq!(id, child);
         assert_eq!(*kind, RunnerKind::Workflow);
@@ -302,15 +305,15 @@ mod tests {
     #[test]
     fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
         let c = WorkflowCapability::default();
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &tool(INVOKE_TOOL, serde_json::json!({"workflow": "nope"})),
             )
             .expect("the name is mine, so the mistake is mine to answer");
-        assert!(events.is_empty());
-        let [Action::Reply { text }] = actions.as_slice() else {
-            panic!("expected one reply, got {actions:?}");
+        assert!(d.events.is_empty());
+        let [Action::Reply { text }] = d.actions.as_slice() else {
+            panic!("expected one reply, got {:?}", d.actions);
         };
         assert!(
             text.contains(INVOKE_TOOL),
@@ -337,7 +340,7 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let asker = caller();
         let child = invoke(&mut c, asker);
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Outcome {
@@ -349,11 +352,11 @@ mod tests {
             )
             .expect("mine");
         assert!(matches!(
-            events[0],
+            d.events[0],
             CapEvent::Workflow(Event::Reported { .. })
         ));
-        let Action::Deliver { to, from, part } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { to, from, part } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(*to, asker.agent);
         assert_eq!(*from, child);
@@ -367,7 +370,7 @@ mod tests {
     fn a_failed_run_is_delivered_as_a_failed_part() {
         let mut c = WorkflowCapability::default();
         let child = invoke(&mut c, caller());
-        let (_, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Outcome {
@@ -378,8 +381,8 @@ mod tests {
                 }),
             )
             .expect("mine");
-        let Action::Deliver { part, .. } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { part, .. } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(part.status, "failed");
         assert_eq!(part.text, "step 2 failed");
@@ -391,7 +394,7 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let asker = caller();
         let child = invoke(&mut c, asker);
-        let (_, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Failed {
@@ -400,8 +403,8 @@ mod tests {
                 }),
             )
             .expect("mine");
-        let Action::Deliver { to, part, .. } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { to, part, .. } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(*to, asker.agent);
         assert_eq!(part.status, "failed");
@@ -455,29 +458,32 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let caller = caller();
         let child = invoke(&mut c, caller);
-        let (events, actions) = c
+        let d = c
             .handle(caller, &tool(STATUS_TOOL, serde_json::json!({})))
             .expect("mine");
-        assert!(events.is_empty());
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
+        assert!(d.events.is_empty());
+        let Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
         };
         assert!(text.contains(&child.to_string()));
 
         c.apply(&CapEvent::Workflow(Event::Reported { child }));
-        let (_, actions) = c
+        let d = c
             .handle(caller, &tool(STATUS_TOOL, serde_json::json!({})))
             .expect("mine");
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
+        let Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
         };
         assert!(!text.contains(&child.to_string()));
     }
 
-    #[test]
-    fn setup_equips_the_invoke_layer() {
+    #[tokio::test]
+    async fn setup_equips_the_invoke_layer() {
         let mut spec = AgentSpec::default();
-        WorkflowCapability::default().setup(&mut spec);
+        WorkflowCapability::default()
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::InvokeWorkflow));
     }
 

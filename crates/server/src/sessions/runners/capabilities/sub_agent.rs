@@ -15,7 +15,7 @@
 //! before the acknowledgement persists, so a crash in that window replays as a
 //! report still outstanding and it is delivered again.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::message::{
@@ -80,12 +80,12 @@ impl SubAgentCapability {
                 // must land the id the log recorded, so the event and the
                 // action name the same child and neither invents one.
                 let child = RunnerId::new_v4();
-                Some((
-                    vec![CapEvent::SubAgent(Event::Started {
+                Some(Decision {
+                    events: vec![CapEvent::SubAgent(Event::Started {
                         child,
                         from: caller.agent,
                     })],
-                    vec![Action::CreateChild {
+                    actions: vec![Action::CreateChild {
                         id: child,
                         kind: RunnerKind::SubAgent,
                         args: RunnerArgs::SubAgent {
@@ -96,14 +96,9 @@ impl SubAgentCapability {
                         },
                         parent: caller.agent,
                     }],
-                ))
+                })
             }
-            STATUS_TOOL => Some((
-                Vec::new(),
-                vec![Action::Reply {
-                    text: self.render_status(),
-                }],
-            )),
+            STATUS_TOOL => Some(Decision::reply(self.render_status())),
             _ => None,
         }
     }
@@ -144,14 +139,12 @@ impl SubAgentCapability {
     }
 
     fn deliver(&self, child: RunnerId, to: AgentId, part: SubAgentResultPart) -> Decision {
-        (
-            vec![CapEvent::SubAgent(Event::Reported { child })],
-            vec![Action::Deliver {
-                to,
-                from: child,
-                part: Box::new(part),
-            }],
-        )
+        let reported = CapEvent::SubAgent(Event::Reported { child });
+        Decision::record(vec![reported]).then(Action::Deliver {
+            to,
+            from: child,
+            part: Box::new(part),
+        })
     }
 
     /// Only what is still running: a child that reported has been delivered
@@ -201,14 +194,19 @@ fn failed_part(child: RunnerId, label: String, error: String) -> SubAgentResultP
     }
 }
 
-impl Handler for SubAgentCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for SubAgentCapability {
+    fn name(&self) -> &'static str {
+        "sub_agent"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         let max = self.child_settings.max_subagents();
         // A zero cap advertises nothing. A tool the model can only ever be
         // refused by is worse than no tool: it spends prompt on a capability
         // that does not exist and invites a retry loop against a fixed number.
         if max == 0 {
-            return;
+            return Ok(());
         }
         spec.layers.push(ToolLayer::SpawnAgent { max });
         spec.prompt.push(PromptSection {
@@ -222,6 +220,7 @@ impl Handler for SubAgentCapability {
                    result seems lost — never as a poll."
                 .to_string(),
         });
+        Ok(())
     }
 
     fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision> {
@@ -243,6 +242,10 @@ impl Handler for SubAgentCapability {
             }
         }
     }
+
+    fn save(&self) -> CapSlice {
+        CapSlice::SubAgent(self.clone())
+    }
 }
 
 #[cfg(test)]
@@ -257,15 +260,15 @@ mod tests {
     }
 
     fn spawn(c: &mut SubAgentCapability, caller: Caller) -> RunnerId {
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller,
                 &tool(SPAWN_TOOL, serde_json::json!({"label": "l", "task": "t"})),
             )
             .expect("mine");
-        c.apply(&events[0]);
-        let Action::CreateChild { id, .. } = &actions[0] else {
-            panic!("expected a create, got {:?}", actions[0]);
+        c.apply(&d.events[0]);
+        let Action::CreateChild { id, .. } = &d.actions[0] else {
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         *id
     }
@@ -276,7 +279,7 @@ mod tests {
     fn a_spawn_journals_and_creates_the_same_child() {
         let c = cap();
         let caller = caller();
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller,
                 &tool(
@@ -285,8 +288,8 @@ mod tests {
                 ),
             )
             .expect("mine");
-        let CapEvent::SubAgent(Event::Started { child, from }) = &events[0] else {
-            panic!("expected a start, got {:?}", events[0]);
+        let CapEvent::SubAgent(Event::Started { child, from }) = &d.events[0] else {
+            panic!("expected a start, got {:?}", d.events[0]);
         };
         assert_eq!(*from, caller.agent);
         let Action::CreateChild {
@@ -294,9 +297,9 @@ mod tests {
             kind,
             args,
             parent,
-        } = &actions[0]
+        } = &d.actions[0]
         else {
-            panic!("expected a create, got {:?}", actions[0]);
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         assert_eq!(id, child);
         assert_eq!(*kind, RunnerKind::SubAgent);
@@ -331,7 +334,7 @@ mod tests {
 
         // Delivered during some other agent's turn on purpose: the address
         // comes from what the log recorded, never from who is speaking now.
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Outcome {
@@ -344,11 +347,11 @@ mod tests {
             )
             .expect("mine");
         assert!(matches!(
-            events[0],
+            d.events[0],
             CapEvent::SubAgent(Event::Reported { .. })
         ));
-        let Action::Deliver { to, from, part } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { to, from, part } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(*to, asker.agent);
         assert_eq!(*from, child);
@@ -364,7 +367,7 @@ mod tests {
     fn a_failed_outcome_is_delivered_as_a_failed_part() {
         let mut c = cap();
         let child = spawn(&mut c, caller());
-        let (_, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Outcome {
@@ -376,8 +379,8 @@ mod tests {
                 }),
             )
             .expect("mine");
-        let Action::Deliver { part, .. } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { part, .. } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(part.status, "failed");
         assert_eq!(part.text, "it broke");
@@ -390,7 +393,7 @@ mod tests {
         let mut c = cap();
         let caller = caller();
         let child = spawn(&mut c, caller);
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller,
                 &Message::Child(ChildMsg::Failed {
@@ -400,11 +403,11 @@ mod tests {
             )
             .expect("mine");
         assert!(matches!(
-            events[0],
+            d.events[0],
             CapEvent::SubAgent(Event::Reported { .. })
         ));
-        let Action::Deliver { to, part, .. } = &actions[0] else {
-            panic!("expected a delivery, got {:?}", actions[0]);
+        let Action::Deliver { to, part, .. } = &d.actions[0] else {
+            panic!("expected a delivery, got {:?}", d.actions[0]);
         };
         assert_eq!(*to, caller.agent);
         assert_eq!(part.status, "failed");
@@ -439,31 +442,31 @@ mod tests {
         let mut c = cap();
         let caller = caller();
         let child = spawn(&mut c, caller);
-        let (events, actions) = c
+        let d = c
             .handle(caller, &tool(STATUS_TOOL, serde_json::json!({})))
             .expect("mine");
-        assert!(events.is_empty());
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
+        assert!(d.events.is_empty());
+        let Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
         };
         assert!(text.contains(&child.to_string()));
 
         c.apply(&CapEvent::SubAgent(Event::Reported { child }));
-        let (_, actions) = c
+        let d = c
             .handle(caller, &tool(STATUS_TOOL, serde_json::json!({})))
             .expect("mine");
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
+        let Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
         };
         assert!(!text.contains(&child.to_string()));
     }
 
     /// The layer carries the cap, so equipment and the limit are one fact
     /// rather than two that can disagree.
-    #[test]
-    fn setup_equips_the_spawn_layer_with_the_cap() {
+    #[tokio::test]
+    async fn setup_equips_the_spawn_layer_with_the_cap() {
         let mut spec = AgentSpec::default();
-        cap().setup(&mut spec);
+        cap().setup(&mut spec).await.expect("nothing fatal");
         assert!(spec.has(&ToolLayer::SpawnAgent {
             max: settings().max_subagents()
         }));
@@ -471,12 +474,15 @@ mod tests {
 
     /// A zero cap advertises no tool at all, so the model never meets one that
     /// can only refuse.
-    #[test]
-    fn a_zero_cap_advertises_nothing() {
+    #[tokio::test]
+    async fn a_zero_cap_advertises_nothing() {
         let mut s = settings();
         s.max_concurrent_subagents = Some(0);
         let mut spec = AgentSpec::default();
-        SubAgentCapability::new(s).setup(&mut spec);
+        SubAgentCapability::new(s)
+            .setup(&mut spec)
+            .await
+            .expect("nothing fatal");
         assert!(spec.layers.is_empty());
         assert!(spec.prompt.is_empty());
     }

@@ -18,7 +18,7 @@
 //! therefore only ever a seed in flight — the copy or the summary that has to
 //! land before the new conversation can run — and empties when it lands.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
 use crate::sessions::forks::ForkMode;
 use crate::sessions::runners::action::{Action, AgentSpec, Branch, RunnerArgs};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
@@ -69,23 +69,18 @@ impl ForkCapability {
         // it would branch a whole conversation and then sit idle, and the
         // person would have to notice that themselves.
         if message.is_empty() {
-            return Some((
-                Vec::new(),
-                vec![Action::Reply {
-                    text: format!(
-                        "/{} needs a message saying what the new conversation should do",
-                        c.name
-                    ),
-                }],
-            ));
+            return Some(Decision::reply(format!(
+                "/{} needs a message saying what the new conversation should do",
+                c.name
+            )));
         }
         let fork = RunnerId::new_v4();
-        Some((
-            vec![CapEvent::Fork(Event::Created {
+        Some(Decision {
+            events: vec![CapEvent::Fork(Event::Created {
                 fork,
                 from: caller.agent,
             })],
-            vec![Action::CreateChild {
+            actions: vec![Action::CreateChild {
                 id: fork,
                 kind: RunnerKind::Conversation,
                 args: RunnerArgs::Conversation {
@@ -103,7 +98,7 @@ impl ForkCapability {
                 },
                 parent: caller.agent,
             }],
-        ))
+        })
     }
 
     fn on_child(&self, m: &ChildMsg) -> Option<Decision> {
@@ -112,36 +107,39 @@ impl ForkCapability {
             // its own runner starts its agent.
             ChildMsg::Ready { child } => {
                 self.pending.get(child)?;
-                Some((
-                    vec![CapEvent::Fork(Event::Seeded { fork: *child })],
-                    Vec::new(),
-                ))
+                Some(Decision::record(vec![CapEvent::Fork(Event::Seeded {
+                    fork: *child,
+                })]))
             }
             // No delivery: a fork owes nobody a result, so a failed one is
             // recorded and shown as that fork's own status rather than sent
             // back to the conversation it branched from.
             ChildMsg::Failed { child, error } => {
                 self.pending.get(child)?;
-                Some((
-                    vec![CapEvent::Fork(Event::SeedFailed {
-                        fork: *child,
-                        error: error.clone(),
-                    })],
-                    Vec::new(),
-                ))
+                Some(Decision::record(vec![CapEvent::Fork(Event::SeedFailed {
+                    fork: *child,
+                    error: error.clone(),
+                })]))
             }
             ChildMsg::Outcome { .. } => None,
         }
     }
 }
 
-impl Handler for ForkCapability {
+#[async_trait::async_trait]
+impl Capability for ForkCapability {
+    fn name(&self) -> &'static str {
+        "fork"
+    }
+
     /// Equips nothing.
     ///
     /// No tool layer, because `/fork` is typed rather than called, and no
     /// prompt section either: a paragraph about a command the model cannot use
     /// spends context to tell it about something it will never do.
-    fn setup(&self, _spec: &mut AgentSpec) {}
+    async fn setup(&self, _spec: &mut AgentSpec) -> Result<(), SetupError> {
+        Ok(())
+    }
 
     fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision> {
         match msg {
@@ -163,6 +161,10 @@ impl Handler for ForkCapability {
                 self.pending.remove(fork);
             }
         }
+    }
+
+    fn save(&self) -> CapSlice {
+        CapSlice::Fork(self.clone())
     }
 }
 
@@ -186,12 +188,12 @@ mod tests {
     }
 
     fn fork_via(c: &mut ForkCapability, caller: Caller, name: &str) -> RunnerId {
-        let (events, actions) = c
+        let d = c
             .handle(caller, &command(name, "look into it"))
             .expect("mine");
-        c.apply(&events[0]);
-        let Action::CreateChild { id, .. } = &actions[0] else {
-            panic!("expected a create, got {:?}", actions[0]);
+        c.apply(&d.events[0]);
+        let Action::CreateChild { id, .. } = &d.actions[0] else {
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         *id
     }
@@ -203,11 +205,11 @@ mod tests {
     fn forking_creates_a_conversation_branched_from_the_caller() {
         let c = cap();
         let caller = caller();
-        let (events, actions) = c
+        let d = c
             .handle(caller, &command(FORK_COMMAND, "  look into the flake  "))
             .expect("mine");
-        let CapEvent::Fork(Event::Created { fork, from }) = &events[0] else {
-            panic!("expected a create, got {:?}", events[0]);
+        let CapEvent::Fork(Event::Created { fork, from }) = &d.events[0] else {
+            panic!("expected a create, got {:?}", d.events[0]);
         };
         assert_eq!(*from, caller.agent);
         let Action::CreateChild {
@@ -215,9 +217,9 @@ mod tests {
             kind,
             args,
             parent,
-        } = &actions[0]
+        } = &d.actions[0]
         else {
-            panic!("expected a create, got {:?}", actions[0]);
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         assert_eq!(id, fork);
         assert_eq!(*kind, RunnerKind::Conversation);
@@ -236,11 +238,11 @@ mod tests {
     #[test]
     fn summary_n_fork_seeds_with_a_summary() {
         let c = cap();
-        let (_, actions) = c
+        let d = c
             .handle(caller(), &command(SUMMARY_COMMAND, "carry on elsewhere"))
             .expect("mine");
-        let Action::CreateChild { args, .. } = &actions[0] else {
-            panic!("expected a create, got {:?}", actions[0]);
+        let Action::CreateChild { args, .. } = &d.actions[0] else {
+            panic!("expected a create, got {:?}", d.actions[0]);
         };
         let RunnerArgs::Conversation { seed, .. } = args else {
             panic!("expected conversation args, got {args:?}");
@@ -253,12 +255,12 @@ mod tests {
     #[test]
     fn an_empty_message_is_refused_and_journals_nothing() {
         let c = cap();
-        let (events, actions) = c
+        let d = c
             .handle(caller(), &command(FORK_COMMAND, "   "))
             .expect("mine");
-        assert!(events.is_empty());
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
+        assert!(d.events.is_empty());
+        let Action::Reply { text } = &d.actions[0] else {
+            panic!("expected a reply, got {:?}", d.actions[0]);
         };
         assert!(text.contains("/fork"));
     }
@@ -272,11 +274,11 @@ mod tests {
         let fork = fork_via(&mut c, caller(), FORK_COMMAND);
         assert!(c.pending.contains_key(&fork));
 
-        let (events, actions) = c
+        let d = c
             .handle(caller(), &Message::Child(ChildMsg::Ready { child: fork }))
             .expect("mine");
-        assert!(actions.is_empty());
-        c.apply(&events[0]);
+        assert!(d.actions.is_empty());
+        c.apply(&d.events[0]);
         assert!(c.pending.is_empty());
     }
 
@@ -286,7 +288,7 @@ mod tests {
     fn a_seed_that_fails_is_recorded_and_delivers_nothing() {
         let mut c = cap();
         let fork = fork_via(&mut c, caller(), FORK_COMMAND);
-        let (events, actions) = c
+        let d = c
             .handle(
                 caller(),
                 &Message::Child(ChildMsg::Failed {
@@ -295,12 +297,12 @@ mod tests {
                 }),
             )
             .expect("mine");
-        assert!(actions.is_empty());
-        let CapEvent::Fork(Event::SeedFailed { error, .. }) = &events[0] else {
-            panic!("expected a seed failure, got {:?}", events[0]);
+        assert!(d.actions.is_empty());
+        let CapEvent::Fork(Event::SeedFailed { error, .. }) = &d.events[0] else {
+            panic!("expected a seed failure, got {:?}", d.events[0]);
         };
         assert_eq!(error, "the copy failed");
-        c.apply(&events[0]);
+        c.apply(&d.events[0]);
         assert!(c.pending.is_empty());
     }
 
@@ -343,10 +345,10 @@ mod tests {
 
     /// It equips nothing at all: `/fork` is typed, and a tool for it would let
     /// a model branch the conversation it is having.
-    #[test]
-    fn it_equips_no_tool() {
+    #[tokio::test]
+    async fn it_equips_no_tool() {
         let mut spec = AgentSpec::default();
-        cap().setup(&mut spec);
+        cap().setup(&mut spec).await.expect("nothing to acquire");
         assert!(spec.layers.is_empty());
         assert!(spec.prompt.is_empty());
         assert!(!spec.has(&ToolLayer::Runtime));

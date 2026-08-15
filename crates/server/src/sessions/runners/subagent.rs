@@ -17,7 +17,7 @@
 //! recovery, and the suppression that implies is what double-starts a worker.
 
 use super::action::FirstInput;
-use super::capabilities::{Capability, equip};
+use super::capabilities::Capabilities;
 use super::message::{ChildOutcome, SubAgentOutcome};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
@@ -58,7 +58,7 @@ pub struct State {
     /// `Some` once it has ended, whichever way. The one field that says both
     /// "stop starting agents" and "there is a report to hand over".
     pub result: Option<Outcome>,
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Capabilities,
 }
 
 /// Not derived: [`AgentSettings`] has no `Default`. A live worker's settings
@@ -74,7 +74,7 @@ impl Default for State {
             settings: super::empty_settings(),
             usage: UsageTotal::default(),
             result: None,
-            capabilities: Vec::new(),
+            capabilities: Capabilities::default(),
         }
     }
 }
@@ -96,7 +96,11 @@ impl Runner for State {
             // non-deterministic, a fold may not. The session journals the
             // `Started` that carries this id when it performs the action.
             agent: AgentId::new_v4(),
-            spec: Box::new(equip(&self.capabilities, self.settings.clone())),
+            // A fresh copy for the agent's task to equip itself from; the
+            // folded one stays here. The clone goes through the persisted
+            // form, so the two cannot diverge from what a reload would build.
+            equipment: self.capabilities.clone(),
+            settings: Box::new(self.settings.clone()),
             first: FirstInput::Text(self.task.clone()),
         }]
     }
@@ -119,12 +123,12 @@ impl Runner for State {
         self.agent.is_some() && self.result.is_none()
     }
 
-    fn capabilities(&self) -> &[Capability] {
-        &self.capabilities
+    fn capabilities(&self) -> Option<&Capabilities> {
+        Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> &mut [Capability] {
-        &mut self.capabilities
+    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
+        Some(&mut self.capabilities)
     }
 
     fn apply(&mut self, event: &RunnerEvent) {
@@ -154,7 +158,7 @@ impl AgentLifecycle for State {
     /// already recorded the only fact there is. An event here would say it
     /// twice, and two writers of one field is how they come to disagree.
     fn on_agent_started(&self, _agent: AgentId) -> Emit {
-        (Vec::new(), Vec::new())
+        Emit::nothing()
     }
 
     fn on_agent_ended(&self, _agent: AgentId, end: &TurnEnd) -> Emit {
@@ -181,18 +185,15 @@ impl AgentLifecycle for State {
             // Deliberately nothing. The session reconciles a child that was
             // interrupted when it loads, so failing it here would fail the same
             // worker twice — once from the report, once from the reconcile.
-            TurnEnd::Interrupted => return (Vec::new(), Vec::new()),
+            TurnEnd::Interrupted => return Emit::nothing(),
         };
-        (vec![RunnerEvent::SubAgent(event)], Vec::new())
+        Emit::record(vec![RunnerEvent::SubAgent(event)])
     }
 
     fn on_agent_halted(&self, _agent: AgentId, reason: &str) -> Emit {
-        (
-            vec![RunnerEvent::SubAgent(Event::Failed {
-                error: reason.to_string(),
-            })],
-            Vec::new(),
-        )
+        Emit::record(vec![RunnerEvent::SubAgent(Event::Failed {
+            error: reason.to_string(),
+        })])
     }
 }
 
@@ -234,7 +235,7 @@ mod tests {
     }
 
     fn ended(state: &State, end: &TurnEnd) -> Vec<RunnerEvent> {
-        state.on_agent_ended(AgentId::new_v4(), end).0
+        state.on_agent_ended(AgentId::new_v4(), end).events
     }
 
     fn only_event(events: Vec<RunnerEvent>) -> Event {
@@ -299,16 +300,20 @@ mod tests {
     /// Equipment comes from folding this runner's capabilities, so what a
     /// worker can do is decided in one place rather than by a match on what
     /// kind of agent it is.
-    #[test]
-    fn the_agent_is_equipped_by_folding_the_capabilities() {
+    #[tokio::test]
+    async fn the_agent_is_equipped_by_folding_the_capabilities() {
         let state = State {
-            capabilities: vec![Capability::Title(TitleCapability::default())],
+            capabilities: Capabilities::new(vec![Box::new(TitleCapability::default())]),
             ..worker()
         };
         let actions = state.actions(&view());
-        let Action::StartAgent { spec, .. } = &actions[0] else {
+        let Action::StartAgent { equipment, .. } = &actions[0] else {
             panic!("expected a start, got {:?}", actions[0]);
         };
+        let (spec, _) = equipment
+            .equip(state.settings.clone())
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::SessionTitle));
         assert_eq!(
             spec.settings.as_ref().map(|s| s.model.clone()),
@@ -469,9 +474,9 @@ mod tests {
     /// same worker a second time and deliver two reports for one task.
     #[test]
     fn an_interruption_emits_nothing() {
-        let (events, actions) = worker().on_agent_ended(AgentId::new_v4(), &TurnEnd::Interrupted);
-        assert!(events.is_empty());
-        assert!(actions.is_empty());
+        let emit = worker().on_agent_ended(AgentId::new_v4(), &TurnEnd::Interrupted);
+        assert!(emit.events.is_empty());
+        assert!(emit.actions.is_empty());
     }
 
     /// Starting journals nothing here: the session's own `Started` already
@@ -479,9 +484,9 @@ mod tests {
     /// the state come to disagree.
     #[test]
     fn starting_an_agent_records_nothing_further() {
-        let (events, actions) = worker().on_agent_started(AgentId::new_v4());
-        assert!(events.is_empty());
-        assert!(actions.is_empty());
+        let emit = worker().on_agent_started(AgentId::new_v4());
+        assert!(emit.events.is_empty());
+        assert!(emit.actions.is_empty());
     }
 
     /// A halt is a failure with the halting reason as the report. Without it, a
@@ -489,9 +494,9 @@ mod tests {
     /// no turn will ever produce.
     #[test]
     fn a_halt_fails_the_worker_with_its_reason() {
-        let (events, actions) = worker().on_agent_halted(AgentId::new_v4(), "blocked by a hook");
-        assert!(actions.is_empty());
-        let Event::Failed { error } = only_event(events) else {
+        let emit = worker().on_agent_halted(AgentId::new_v4(), "blocked by a hook");
+        assert!(emit.actions.is_empty());
+        let Event::Failed { error } = only_event(emit.events) else {
             panic!("expected a failure");
         };
         assert_eq!(error, "blocked by a hook");

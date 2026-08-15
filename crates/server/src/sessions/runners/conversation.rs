@@ -20,7 +20,7 @@
 //! [`Runner::actions`], and a seed that failed leaves it false for good.
 
 use super::action::{Branch, FirstInput};
-use super::capabilities::{Capability, equip};
+use super::capabilities::Capabilities;
 use super::message::ChildOutcome;
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
@@ -65,7 +65,7 @@ pub struct State {
     pub settings: AgentSettings,
     /// This conversation's own tokens; the session's aggregate is by model.
     pub usage: UsageTotal,
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Capabilities,
 }
 
 /// Not derived: [`AgentSettings`] has no `Default`. A live conversation's
@@ -83,7 +83,7 @@ impl Default for State {
             first_message: None,
             settings: super::empty_settings(),
             usage: UsageTotal::default(),
-            capabilities: Vec::new(),
+            capabilities: Capabilities::default(),
         }
     }
 }
@@ -128,7 +128,11 @@ impl Runner for State {
             // non-deterministic, a fold may not. The session journals the
             // `Started` carrying this id when it performs the action.
             agent: AgentId::new_v4(),
-            spec: Box::new(equip(&self.capabilities, self.settings.clone())),
+            // A fresh copy for the agent's task to equip itself from; the
+            // folded one stays here. The clone goes through the persisted
+            // form, so the two cannot diverge from what a reload would build.
+            equipment: self.capabilities.clone(),
+            settings: Box::new(self.settings.clone()),
             first: match &self.first_message {
                 Some(text) => FirstInput::Text(text.clone()),
                 None => FirstInput::None,
@@ -149,12 +153,12 @@ impl Runner for State {
         matches!(self.turn, TurnStatus::Running)
     }
 
-    fn capabilities(&self) -> &[Capability] {
-        &self.capabilities
+    fn capabilities(&self) -> Option<&Capabilities> {
+        Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> &mut [Capability] {
-        &mut self.capabilities
+    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
+        Some(&mut self.capabilities)
     }
 
     fn apply(&mut self, event: &RunnerEvent) {
@@ -181,10 +185,7 @@ impl Runner for State {
 
 impl AgentLifecycle for State {
     fn on_agent_started(&self, _agent: AgentId) -> Emit {
-        (
-            vec![RunnerEvent::Conversation(Event::TurnBegan)],
-            Vec::new(),
-        )
+        Emit::record(vec![RunnerEvent::Conversation(Event::TurnBegan)])
     }
 
     fn on_agent_ended(&self, _agent: AgentId, end: &TurnEnd) -> Emit {
@@ -209,21 +210,18 @@ impl AgentLifecycle for State {
             // backwards at every recovery.
             TurnEnd::Interrupted => {
                 if self.turn != TurnStatus::Running {
-                    return (Vec::new(), Vec::new());
+                    return Emit::nothing();
                 }
                 Event::TurnInterrupted
             }
         };
-        (vec![RunnerEvent::Conversation(event)], Vec::new())
+        Emit::record(vec![RunnerEvent::Conversation(event)])
     }
 
     fn on_agent_halted(&self, _agent: AgentId, reason: &str) -> Emit {
-        (
-            vec![RunnerEvent::Conversation(Event::TurnFailed {
-                error: reason.to_string(),
-            })],
-            Vec::new(),
-        )
+        Emit::record(vec![RunnerEvent::Conversation(Event::TurnFailed {
+            error: reason.to_string(),
+        })])
     }
 }
 
@@ -256,7 +254,7 @@ mod tests {
     }
 
     fn ended(state: &State, end: &TurnEnd) -> Vec<RunnerEvent> {
-        state.on_agent_ended(AgentId::new_v4(), end).0
+        state.on_agent_ended(AgentId::new_v4(), end).events
     }
 
     fn only_event(events: Vec<RunnerEvent>) -> Event {
@@ -328,16 +326,20 @@ mod tests {
     /// Equipment comes from folding this conversation's capabilities, which is
     /// what replaces the per-kind toolbox match: a fork is equipped by holding
     /// different capabilities, not by being a different kind of agent.
-    #[test]
-    fn the_agent_is_equipped_by_folding_the_capabilities() {
+    #[tokio::test]
+    async fn the_agent_is_equipped_by_folding_the_capabilities() {
         let state = State {
-            capabilities: vec![Capability::Title(TitleCapability::default())],
+            capabilities: Capabilities::new(vec![Box::new(TitleCapability::default())]),
             ..State::default()
         };
         let actions = state.actions(&view());
-        let Action::StartAgent { spec, .. } = &actions[0] else {
+        let Action::StartAgent { equipment, .. } = &actions[0] else {
             panic!("expected a start, got {:?}", actions[0]);
         };
+        let (spec, _) = equipment
+            .equip(state.settings.clone())
+            .await
+            .expect("nothing fatal");
         assert!(spec.has(&ToolLayer::SessionTitle));
     }
 
@@ -411,9 +413,9 @@ mod tests {
     /// offloaded underneath it.
     #[test]
     fn starting_an_agent_begins_a_turn() {
-        let (events, actions) = State::default().on_agent_started(AgentId::new_v4());
-        assert!(actions.is_empty());
-        assert!(matches!(only_event(events), Event::TurnBegan));
+        let emit = State::default().on_agent_started(AgentId::new_v4());
+        assert!(emit.actions.is_empty());
+        assert!(matches!(only_event(emit.events), Event::TurnBegan));
     }
 
     /// A conclusion ends the turn and nothing more: what the agent said lives
@@ -498,10 +500,9 @@ mod tests {
                 turn,
                 ..State::default()
             };
-            let (events, actions) =
-                settled.on_agent_ended(AgentId::new_v4(), &TurnEnd::Interrupted);
-            assert!(events.is_empty(), "{turn:?} emitted {events:?}");
-            assert!(actions.is_empty());
+            let emit = settled.on_agent_ended(AgentId::new_v4(), &TurnEnd::Interrupted);
+            assert!(emit.events.is_empty(), "{turn:?} emitted {:?}", emit.events);
+            assert!(emit.actions.is_empty());
         }
     }
 
@@ -509,10 +510,9 @@ mod tests {
     /// a conversation stopped by a hook would read as running for ever.
     #[test]
     fn a_halt_fails_the_turn_with_its_reason() {
-        let (events, actions) =
-            State::default().on_agent_halted(AgentId::new_v4(), "blocked by a hook");
-        assert!(actions.is_empty());
-        let Event::TurnFailed { error } = only_event(events) else {
+        let emit = State::default().on_agent_halted(AgentId::new_v4(), "blocked by a hook");
+        assert!(emit.actions.is_empty());
+        let Event::TurnFailed { error } = only_event(emit.events) else {
             panic!("expected a failed turn");
         };
         assert_eq!(error, "blocked by a hook");

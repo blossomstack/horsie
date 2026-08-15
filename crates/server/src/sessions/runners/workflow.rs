@@ -34,8 +34,8 @@
 //! would ever deliver.
 
 use super::action::{Action, FirstInput};
+use super::capabilities::Capabilities;
 use super::capabilities::step_result::StepResultCapability;
-use super::capabilities::{Capability, Handler, equip};
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
@@ -94,7 +94,7 @@ pub struct State {
     /// writes this yet, because banking usage is an answer the session gives
     /// for every runner alike.
     pub usage: UsageTotal,
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Capabilities,
 }
 
 /// `Arc<T>` only implements `Serialize`/`Deserialize` under serde's `rc`
@@ -158,7 +158,7 @@ impl Default for State {
             output: None,
             error: None,
             usage: UsageTotal::default(),
-            capabilities: Vec::new(),
+            capabilities: Capabilities::default(),
         }
     }
 }
@@ -379,24 +379,24 @@ impl Runner for State {
         let Some(step) = self.graph.step(&next.step) else {
             return Vec::new();
         };
-        let mut spec = equip(&self.capabilities, step.settings.clone());
+        // A fresh copy for the step agent's task to equip itself from; the
+        // folded one stays here.
+        let mut equipment = self.capabilities.clone();
         // The one capability whose instance is per *agent* rather than per
         // runner: what a step promises to return, and whether it may ask, are
         // declared by that step, so step 1 can be interactive and step 2 not.
-        // It is built here rather than held in `capabilities` because it has
-        // no state to carry between steps — its `apply` records nothing, since
-        // a submitted result is this runner's own `StepConcluded` to fold.
-        Handler::setup(
-            &StepResultCapability::new(
-                step.outcomes.clone(),
-                step.fields.clone(),
-                step.interactive,
-            ),
-            &mut spec,
-        );
+        // It joins the copy rather than `capabilities` because it has no state
+        // to carry between steps — its `apply` records nothing, since a
+        // submitted result is this runner's own `StepConcluded` to fold.
+        equipment.push(StepResultCapability::new(
+            step.outcomes.clone(),
+            step.fields.clone(),
+            step.interactive,
+        ));
         vec![Action::StartAgent {
             agent: next.agent,
-            spec: Box::new(spec),
+            equipment,
+            settings: Box::new(step.settings.clone()),
             first: FirstInput::Text(next.input),
         }]
     }
@@ -427,12 +427,12 @@ impl Runner for State {
         self.current().is_some()
     }
 
-    fn capabilities(&self) -> &[Capability] {
-        &self.capabilities
+    fn capabilities(&self) -> Option<&Capabilities> {
+        Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> &mut [Capability] {
-        &mut self.capabilities
+    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
+        Some(&mut self.capabilities)
     }
 
     fn apply(&mut self, event: &RunnerEvent) {
@@ -515,30 +515,27 @@ impl AgentLifecycle for State {
     /// cannot be written at all.
     fn on_agent_started(&self, agent: AgentId) -> Emit {
         let Some(next) = self.next_step() else {
-            return (Vec::new(), Vec::new());
+            return Emit::nothing();
         };
         if next.agent != agent {
-            return (Vec::new(), Vec::new());
+            return Emit::nothing();
         }
-        (
-            vec![RunnerEvent::Workflow(Event::StepStarted {
-                index: next.index,
-                step: next.step,
-                agent: next.agent,
-                attempt: next.attempt,
-                from: next.from,
-                via: next.via,
-                input: next.input,
-            })],
-            Vec::new(),
-        )
+        Emit::record(vec![RunnerEvent::Workflow(Event::StepStarted {
+            index: next.index,
+            step: next.step,
+            agent: next.agent,
+            attempt: next.attempt,
+            from: next.from,
+            via: next.via,
+            input: next.input,
+        })])
     }
 
     /// A turn ending is a *step* ending, and only for the endings that are one.
     fn on_agent_ended(&self, agent: AgentId, end: &TurnEnd) -> Emit {
         // An agent this run never started belongs to somebody else.
         let Some(index) = self.index_of_agent(agent) else {
-            return (Vec::new(), Vec::new());
+            return Emit::nothing();
         };
         let events = match end {
             TurnEnd::Concluded { output } => {
@@ -580,7 +577,7 @@ impl AgentLifecycle for State {
             // here as well would append a second entry for one execution.
             | TurnEnd::Interrupted => Vec::new(),
         };
-        (events, Vec::new())
+        Emit::record(events)
     }
 
     /// A halted step is cancelled, which suspends the run: what it did to the
@@ -588,12 +585,9 @@ impl AgentLifecycle for State {
     /// between retrying and abandoning.
     fn on_agent_halted(&self, agent: AgentId, _reason: &str) -> Emit {
         let Some(index) = self.index_of_agent(agent) else {
-            return (Vec::new(), Vec::new());
+            return Emit::nothing();
         };
-        (
-            vec![RunnerEvent::Workflow(Event::StepCancelled { index })],
-            Vec::new(),
-        )
+        Emit::record(vec![RunnerEvent::Workflow(Event::StepCancelled { index })])
     }
 }
 
@@ -680,11 +674,11 @@ mod tests {
     /// exactly as the session does.
     fn advance(state: &mut State, output: Value) -> AgentId {
         let agent = started_agent(state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
-        let (events, _) = state.on_agent_ended(agent, &TurnEnd::Concluded { output });
+        let Emit { events, .. } = state.on_agent_ended(agent, &TurnEnd::Concluded { output });
         for e in &events {
             state.apply(e);
         }
@@ -752,7 +746,7 @@ mod tests {
     fn nothing_starts_while_a_step_is_in_flight() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
@@ -822,7 +816,7 @@ mod tests {
             "{input}"
         );
 
-        let (events, _) = state.on_agent_started(*agent);
+        let Emit { events, .. } = state.on_agent_started(*agent);
         for e in &events {
             state.apply(e);
         }
@@ -876,12 +870,12 @@ mod tests {
         let mut state = run();
         assert!(!state.busy());
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
         assert!(state.busy());
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             agent,
             &TurnEnd::Concluded {
                 output: serde_json::json!({}),
@@ -899,7 +893,7 @@ mod tests {
     fn starting_the_agent_journals_the_step_it_was_started_for() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, actions) = state.on_agent_started(agent);
+        let Emit { events, actions } = state.on_agent_started(agent);
         assert!(actions.is_empty(), "recording a start asks for nothing");
         let [
             RunnerEvent::Workflow(Event::StepStarted {
@@ -938,11 +932,11 @@ mod tests {
         let mut state = run();
         advance(&mut state, serde_json::json!({"outcome": "p0"}));
         let second = started_agent(&state);
-        let (events, _) = state.on_agent_started(second);
+        let Emit { events, .. } = state.on_agent_started(second);
         for e in &events {
             state.apply(e);
         }
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             second,
             &TurnEnd::Concluded {
                 output: serde_json::json!({"outcome": "done"}),
@@ -971,11 +965,11 @@ mod tests {
         let mut state = run();
         advance(&mut state, serde_json::json!({"outcome": "p0"}));
         let second = started_agent(&state);
-        let (events, _) = state.on_agent_started(second);
+        let Emit { events, .. } = state.on_agent_started(second);
         for e in &events {
             state.apply(e);
         }
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             second,
             &TurnEnd::Concluded {
                 output: serde_json::json!({"outcome": "done"}),
@@ -1004,11 +998,11 @@ mod tests {
             ..(*state.graph).clone()
         });
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             agent,
             &TurnEnd::Concluded {
                 output: serde_json::json!({"outcome": "p0"}),
@@ -1035,11 +1029,11 @@ mod tests {
     fn a_failed_turn_fails_the_step_and_stops_the_run_advancing() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             agent,
             &TurnEnd::Failed {
                 error: "provider 500".into(),
@@ -1065,12 +1059,12 @@ mod tests {
     fn an_ask_a_park_and_an_interrupt_end_no_step() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
         for end in [TurnEnd::Asked, TurnEnd::Parked, TurnEnd::Interrupted] {
-            let (events, actions) = state.on_agent_ended(agent, &end);
+            let Emit { events, actions } = state.on_agent_ended(agent, &end);
             assert!(events.is_empty(), "{end:?} must record no step event");
             assert!(actions.is_empty(), "{end:?} must ask for nothing");
         }
@@ -1083,19 +1077,19 @@ mod tests {
     fn an_agent_this_run_never_started_yields_no_events() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
         let stranger = AgentId::new_v4();
-        let (events, _) = state.on_agent_ended(
+        let Emit { events, .. } = state.on_agent_ended(
             stranger,
             &TurnEnd::Concluded {
                 output: serde_json::json!({}),
             },
         );
         assert!(events.is_empty());
-        let (events, _) = state.on_agent_halted(stranger, "stopped");
+        let Emit { events, .. } = state.on_agent_halted(stranger, "stopped");
         assert!(events.is_empty());
     }
 
@@ -1106,11 +1100,11 @@ mod tests {
     fn halting_a_step_cancels_it_and_suspends_the_run() {
         let mut state = run();
         let agent = started_agent(&state);
-        let (events, _) = state.on_agent_started(agent);
+        let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e);
         }
-        let (events, actions) = state.on_agent_halted(agent, "the person stopped it");
+        let Emit { events, actions } = state.on_agent_halted(agent, "the person stopped it");
         assert!(actions.is_empty());
         let [RunnerEvent::Workflow(Event::StepCancelled { index })] = events.as_slice() else {
             panic!("expected one StepCancelled, got {events:?}");

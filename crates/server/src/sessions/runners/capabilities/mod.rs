@@ -13,6 +13,23 @@
 //! single step — while *equipment* is computed per agent, by folding a subset
 //! over its [`AgentSpec`].
 //!
+//! # Two sides
+//!
+//! A capability is driven from two places, and which one drives which method is
+//! the single fact worth holding on to:
+//!
+//! - The **agent's own task** walks [`Capability::setup`] in order when the
+//!   agent is loaded, and [`Capability::teardown`] when it is unloaded. Both
+//!   are async, because acquiring a sandbox or connecting an MCP server is slow
+//!   and must not block the session mailbox.
+//! - The **session actor** offers [`Capability::handle`] every message the
+//!   agent produces, and folds what comes back through [`Capability::apply`].
+//!   Both are sync and pure — they decide, and the session performs.
+//!
+//! So the list a `setup` runs against is built fresh for the agent being
+//! started, and the folded copy stays with the session. They are the same set,
+//! built by the same [`super::assemble`] call, doing two different jobs.
+//!
 //! # Dispatch
 //!
 //! [`Capability::handle`] returns `Option`: `None` means "not mine". One
@@ -20,7 +37,7 @@
 //! capability that answered yes and then could not cope, and a pair edited out
 //! of step, are states that cannot be written this way.
 //!
-//! Tool calls and commands are offered around by [`offer`]; a child's outcome
+//! Tool calls and commands are offered around by [`Capabilities::offer`]; a child's outcome
 //! and an arriving answer are addressed to their owner instead, because
 //! exactly one capability created that child or recorded that ask. Offering
 //! those around would let two capabilities plausibly claim the same outcome,
@@ -47,17 +64,100 @@ use super::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
 
 /// What a capability decided: events for its own slice, actions for the
-/// session. The pair every decision in this module returns.
-pub type Decision = (Vec<CapEvent>, Vec<Action>);
+/// session.
+///
+/// A struct rather than a tuple because both halves are lists and a tuple of
+/// two `Vec`s reads the same in either order — the one shape where getting it
+/// backwards compiles.
+#[derive(Debug, Default)]
+pub struct Decision {
+    pub events: Vec<CapEvent>,
+    pub actions: Vec<Action>,
+}
 
-/// One capability's behaviour.
-pub trait Handler {
-    /// Equip the agent: toolbox layer, prompt section.
+impl Decision {
+    /// Journal these, do nothing.
+    #[must_use]
+    pub fn record(events: Vec<CapEvent>) -> Self {
+        Self {
+            events,
+            actions: Vec::new(),
+        }
+    }
+
+    /// Answer the model, journal nothing. A refusal is not a fact about the
+    /// session, so it must not reach the log.
+    #[must_use]
+    pub fn reply(text: impl Into<String>) -> Self {
+        Self {
+            events: Vec::new(),
+            actions: vec![Action::Reply { text: text.into() }],
+        }
+    }
+
+    #[must_use]
+    pub fn then(mut self, action: Action) -> Self {
+        self.actions.push(action);
+        self
+    }
+}
+
+/// Why a capability could not equip the agent.
+///
+/// `fatal` is the capability's own call, and it is the whole answer to "does a
+/// failed setup stop the turn?": the runtime says yes, because an agent with no
+/// sandbox can do nothing; MCP says no, because a server that will not connect
+/// costs the agent some tools and not its turn. Neither the session nor the
+/// runner has to know which is which.
+#[derive(Debug)]
+pub struct SetupError {
+    pub capability: &'static str,
+    pub reason: String,
+    pub fatal: bool,
+}
+
+impl std::fmt::Display for SetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} could not equip the agent: {}",
+            self.capability, self.reason
+        )
+    }
+}
+
+/// One thing an agent can do.
+///
+/// `dyn` rather than an enum because a runner composes its list at runtime —
+/// a workflow's step capabilities are built per step, from what that step
+/// declared — so the set is not knowable at the point a match arm would have to
+/// be written. [`CapSlice`] carries persistence instead, which keeps the
+/// journal typed without putting the enum back in the dispatch path.
+#[async_trait::async_trait]
+pub trait Capability: std::fmt::Debug + Send + Sync {
+    /// Stable, and the key its events are routed by. An associated const would
+    /// be nicer to read but makes the trait not dyn-compatible.
+    fn name(&self) -> &'static str;
+
+    /// Equip the agent: acquire what this capability needs, then fill in the
+    /// part of the spec it answers for.
+    ///
+    /// Async, and run on the agent's own task rather than the session mailbox —
+    /// acquiring a sandbox, scanning a workspace and connecting an MCP server
+    /// are all slow, and a session that cannot answer a `List` while one agent
+    /// starts is the shape this design exists to avoid.
     ///
     /// Called per agent, so a capability may equip one of its runner's agents
     /// and not another — a workflow step that declares itself interactive gets
     /// `ask_user`, and the next step does not.
-    fn setup(&self, spec: &mut AgentSpec);
+    ///
+    /// Reads config only, never the folded slice: the list this runs against is
+    /// built fresh for the agent being started, while the folded copy stays
+    /// with the session.
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError>;
+
+    /// Release what `setup` acquired. Runs when the agent is unloaded.
+    async fn teardown(&self) {}
 
     /// `None` means "not mine".
     ///
@@ -68,16 +168,25 @@ pub trait Handler {
     /// Fold one of my own events. Pure: no clock, no randomness, no id
     /// generation — those belong in `handle`, which is a decision rather than
     /// a replay.
-    fn apply(&mut self, event: &CapEvent);
+    ///
+    /// Every capability is offered every event, so an arm that is not mine is
+    /// a no-op rather than an error.
+    fn apply(&mut self, event: &CapEvent) {
+        let _ = event;
+    }
+
+    /// Me, in the form the journal stores.
+    fn save(&self) -> CapSlice;
 }
 
-/// The capabilities a runner can hold.
+/// One capability as it is persisted.
 ///
-/// A closed enum rather than `Box<dyn Handler>` so the list serialises into
-/// the runner's slice, and so a new capability is a compile error in the two
-/// places that must know about it rather than a silent gap.
+/// The whole capability rather than a durable-state extract, so a reload does
+/// not depend on [`super::assemble`] reproducing the same config it produced
+/// when the runner was created. A capability's config is a fact about the
+/// runner, and facts about the runner belong in its slice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Capability {
+pub enum CapSlice {
     Runtime(runtime::RuntimeCapability),
     Mcp(mcp::McpCapability),
     Memory(memory::MemoryCapability),
@@ -88,6 +197,159 @@ pub enum Capability {
     Workflow(workflow::WorkflowCapability),
     Fork(fork::ForkCapability),
     StepResult(step_result::StepResultCapability),
+}
+
+impl From<CapSlice> for Box<dyn Capability> {
+    fn from(slice: CapSlice) -> Self {
+        match slice {
+            CapSlice::Runtime(c) => Box::new(c),
+            CapSlice::Mcp(c) => Box::new(c),
+            CapSlice::Memory(c) => Box::new(c),
+            CapSlice::ControlPlane(c) => Box::new(c),
+            CapSlice::AskUser(c) => Box::new(c),
+            CapSlice::Title(c) => Box::new(c),
+            CapSlice::SubAgent(c) => Box::new(c),
+            CapSlice::Workflow(c) => Box::new(c),
+            CapSlice::Fork(c) => Box::new(c),
+            CapSlice::StepResult(c) => Box::new(c),
+        }
+    }
+}
+
+/// What an agent is equipped with, in the order tool calls are offered around.
+///
+/// A newtype so the list round-trips through the journal as `Vec<CapSlice>`
+/// with no hydration step: what comes back is what went in, including config.
+#[derive(Debug, Default)]
+pub struct Capabilities(Vec<Box<dyn Capability>>);
+
+impl Capabilities {
+    #[must_use]
+    pub fn new(caps: Vec<Box<dyn Capability>>) -> Self {
+        Self(caps)
+    }
+
+    pub fn push(&mut self, cap: impl Capability + 'static) {
+        self.0.push(Box::new(cap));
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Capability>> {
+        self.0.iter()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn last(&self) -> Option<&dyn Capability> {
+        self.0.last().map(AsRef::as_ref)
+    }
+
+    /// Whether a capability of this name is equipped. The read a test makes,
+    /// and the read `assemble`'s order tests make.
+    #[must_use]
+    pub fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|c| c.name() == name)
+    }
+
+    /// Offer a message to each capability until one takes it.
+    ///
+    /// `None` from all of them is an error at the one place this is called,
+    /// never a silent drop.
+    #[must_use]
+    pub fn offer(&self, caller: Caller, msg: &Message) -> Option<Decision> {
+        self.0.iter().find_map(|c| c.handle(caller, msg))
+    }
+
+    /// Fold a capability's event into the capability that owns it.
+    pub fn apply(&mut self, event: &CapEvent) {
+        for cap in &mut self.0 {
+            cap.apply(event);
+        }
+    }
+
+    /// Equip an agent by folding every capability over a fresh spec.
+    ///
+    /// One fold, one source, and no way to advertise a tool whose result
+    /// nothing can process. Non-fatal failures are returned alongside the spec
+    /// rather than swallowed: the agent starts, and the caller reports what it
+    /// starts without.
+    pub async fn equip(
+        &self,
+        settings: crate::sessions::spec::AgentSettings,
+    ) -> Result<(AgentSpec, Vec<SetupError>), SetupError> {
+        let mut spec = AgentSpec {
+            settings: Some(settings),
+            ..AgentSpec::default()
+        };
+        let mut degraded = Vec::new();
+        for cap in &self.0 {
+            if let Err(e) = cap.setup(&mut spec).await {
+                if e.fatal {
+                    return Err(e);
+                }
+                degraded.push(e);
+            }
+        }
+        Ok((spec, degraded))
+    }
+
+    /// Release everything `equip` acquired.
+    pub async fn teardown(&self) {
+        for cap in &self.0 {
+            cap.teardown().await;
+        }
+    }
+}
+
+impl Clone for Capabilities {
+    /// Through the persisted form, so a clone cannot diverge from what a reload
+    /// would produce.
+    fn clone(&self) -> Self {
+        Self(self.0.iter().map(|c| c.save().into()).collect())
+    }
+}
+
+impl Serialize for Capabilities {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0
+            .iter()
+            .map(|c| c.save())
+            .collect::<Vec<_>>()
+            .serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Capabilities {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(Self(
+            Vec::<CapSlice>::deserialize(d)?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        ))
+    }
+}
+
+impl FromIterator<Box<dyn Capability>> for Capabilities {
+    fn from_iter<I: IntoIterator<Item = Box<dyn Capability>>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'a> IntoIterator for &'a Capabilities {
+    type Item = &'a Box<dyn Capability>;
+    type IntoIter = std::slice::Iter<'a, Box<dyn Capability>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
 }
 
 /// One capability's event, tagged with which capability owns it.
@@ -104,37 +366,6 @@ pub enum CapEvent {
     StepResult(step_result::Event),
 }
 
-macro_rules! dispatch {
-    ($self:ident, $method:ident $(, $arg:expr)*) => {
-        match $self {
-            Capability::Runtime(c) => c.$method($($arg),*),
-            Capability::Mcp(c) => c.$method($($arg),*),
-            Capability::Memory(c) => c.$method($($arg),*),
-            Capability::ControlPlane(c) => c.$method($($arg),*),
-            Capability::AskUser(c) => c.$method($($arg),*),
-            Capability::Title(c) => c.$method($($arg),*),
-            Capability::SubAgent(c) => c.$method($($arg),*),
-            Capability::Workflow(c) => c.$method($($arg),*),
-            Capability::Fork(c) => c.$method($($arg),*),
-            Capability::StepResult(c) => c.$method($($arg),*),
-        }
-    };
-}
-
-impl Handler for Capability {
-    fn setup(&self, spec: &mut AgentSpec) {
-        dispatch!(self, setup, spec);
-    }
-
-    fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision> {
-        dispatch!(self, handle, caller, msg)
-    }
-
-    fn apply(&mut self, event: &CapEvent) {
-        dispatch!(self, apply, event);
-    }
-}
-
 /// Parse a tool call's arguments, or answer the model with what was wrong.
 ///
 /// A capability that owns a tool name owns every call to it, including the
@@ -147,41 +378,10 @@ pub(crate) fn parse<T: serde::de::DeserializeOwned>(
     input: &serde_json::Value,
 ) -> Result<T, Decision> {
     serde_json::from_value(input.clone()).map_err(|e| {
-        (
-            Vec::new(),
-            vec![Action::Reply {
-                text: format!("`{tool}` was called with arguments it cannot read: {e}"),
-            }],
-        )
+        Decision::reply(format!(
+            "`{tool}` was called with arguments it cannot read: {e}"
+        ))
     })
-}
-
-/// Equip an agent by folding every capability over a fresh spec.
-///
-/// This replaces the four-arm match that used to decide an agent's toolbox
-/// layers from its kind, and the second four-arm match that decided its prompt
-/// suffix. One fold, one source, and no way to advertise a tool whose result
-/// nothing can process.
-#[must_use]
-pub fn equip(caps: &[Capability], settings: crate::sessions::spec::AgentSettings) -> AgentSpec {
-    let mut spec = AgentSpec {
-        settings: Some(settings),
-        ..AgentSpec::default()
-    };
-    for cap in caps {
-        cap.setup(&mut spec);
-    }
-    spec
-}
-
-/// Offer a message to each capability until one takes it.
-///
-/// `None` from all of them is an error at the one place this is called, never
-/// a silent drop: it replaces an exhaustive-match compile error, which is a
-/// real downgrade in safety, so what is left has to be loud.
-#[must_use]
-pub fn offer(caps: &[Capability], caller: Caller, msg: &Message) -> Option<Decision> {
-    caps.iter().find_map(|c| c.handle(caller, msg))
 }
 
 #[cfg(test)]
@@ -223,40 +423,44 @@ mod tests {
     use super::testing::*;
     use super::*;
 
+    fn caps(list: Vec<Box<dyn Capability>>) -> Capabilities {
+        Capabilities::new(list)
+    }
+
     /// A fixed-name capability wins over the open-namespace one behind it.
     /// Order is the conflict resolution for tool calls, so it is a property of
     /// assembly and gets a test rather than a comment.
     #[test]
     fn a_fixed_name_capability_beats_the_fallback_behind_it() {
-        let caps = vec![
-            Capability::Title(title::TitleCapability::default()),
-            Capability::Runtime(runtime::RuntimeCapability),
-        ];
-        let (events, _) = offer(
-            &caps,
-            caller(),
-            &tool("set_session_title", serde_json::json!({"title": "x"})),
-        )
-        .expect("someone takes it");
-        assert!(matches!(events.first(), Some(CapEvent::Title(_))));
+        let caps = caps(vec![
+            Box::new(title::TitleCapability::default()),
+            Box::new(runtime::RuntimeCapability),
+        ]);
+        let d = caps
+            .offer(
+                caller(),
+                &tool("set_session_title", serde_json::json!({"title": "x"})),
+            )
+            .expect("someone takes it");
+        assert!(matches!(d.events.first(), Some(CapEvent::Title(_))));
     }
 
     /// And the same set in the wrong order routes it to the fallback, which is
     /// exactly the silent shadowing the written order exists to prevent.
     #[test]
     fn the_wrong_order_lets_the_fallback_shadow_a_named_tool() {
-        let caps = vec![
-            Capability::Runtime(runtime::RuntimeCapability),
-            Capability::Title(title::TitleCapability::default()),
-        ];
-        let (events, _) = offer(
-            &caps,
-            caller(),
-            &tool("set_session_title", serde_json::json!({"title": "x"})),
-        )
-        .expect("the fallback takes it");
+        let caps = caps(vec![
+            Box::new(runtime::RuntimeCapability),
+            Box::new(title::TitleCapability::default()),
+        ]);
+        let d = caps
+            .offer(
+                caller(),
+                &tool("set_session_title", serde_json::json!({"title": "x"})),
+            )
+            .expect("the fallback takes it");
         assert!(
-            events.is_empty(),
+            d.events.is_empty(),
             "the runtime capability journals nothing, so the title was lost"
         );
     }
@@ -264,20 +468,69 @@ mod tests {
     /// A call nobody claims is `None` at the one place the scan lives.
     #[test]
     fn a_call_nobody_claims_is_none() {
-        let caps = vec![Capability::Title(title::TitleCapability::default())];
-        assert!(offer(&caps, caller(), &tool("nope", serde_json::json!({}))).is_none());
+        let caps = caps(vec![Box::new(title::TitleCapability::default())]);
+        assert!(
+            caps.offer(caller(), &tool("nope", serde_json::json!({})))
+                .is_none()
+        );
     }
 
     /// Equipping folds every capability over one spec, so what an agent can do
     /// is the sum of its runner's capabilities and nothing else.
-    #[test]
-    fn equipping_folds_every_capability() {
-        let caps = vec![
-            Capability::Title(title::TitleCapability::default()),
-            Capability::Runtime(runtime::RuntimeCapability),
-        ];
-        let spec = equip(&caps, settings());
+    #[tokio::test]
+    async fn equipping_folds_every_capability() {
+        let caps = caps(vec![
+            Box::new(title::TitleCapability::default()),
+            Box::new(runtime::RuntimeCapability),
+        ]);
+        let (spec, degraded) = caps.equip(settings()).await.expect("nothing fatal");
+        assert!(degraded.is_empty());
         assert!(spec.has(&crate::sessions::runners::action::ToolLayer::SessionTitle));
         assert!(spec.has(&crate::sessions::runners::action::ToolLayer::Runtime));
+    }
+
+    /// A capability's name is what its events are routed by and what a test
+    /// asserts on, so the set is pinned here: renaming one is a deliberate act
+    /// with a journal migration behind it, not a rename-symbol away.
+    #[test]
+    fn the_capability_names_are_pinned() {
+        let all: Vec<Box<dyn Capability>> = vec![
+            Box::new(runtime::RuntimeCapability),
+            Box::new(mcp::McpCapability::new(vec!["s".into()])),
+            Box::new(memory::MemoryCapability::new(vec!["m".into()])),
+            Box::new(control_plane::ControlPlaneCapability),
+            Box::new(ask_user::AskUserCapability::default()),
+            Box::new(title::TitleCapability::default()),
+            Box::new(sub_agent::SubAgentCapability::new(settings())),
+            Box::new(workflow::WorkflowCapability::default()),
+            Box::new(fork::ForkCapability::new(settings())),
+            Box::new(step_result::StepResultCapability::default()),
+        ];
+        let names: Vec<&str> = all.iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "runtime",
+                "mcp",
+                "memory",
+                "control_plane",
+                "ask_user",
+                "title",
+                "sub_agent",
+                "workflow",
+                "fork",
+                "step_result",
+            ]
+        );
+        // And every one of them round-trips through the persisted form, which
+        // is the only thing keeping a reload from losing a capability.
+        let round: Capabilities =
+            serde_json::from_str(&serde_json::to_string(&Capabilities::new(all)).expect("write"))
+                .expect("read");
+        assert_eq!(
+            round.iter().map(|c| c.name()).collect::<Vec<_>>(),
+            names,
+            "a capability was dropped or reordered by the journal"
+        );
     }
 }

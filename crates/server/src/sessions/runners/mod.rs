@@ -41,13 +41,42 @@ pub use ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
 pub use state::{RunnerRecord, SessionState};
 
 use action::Action;
-use capabilities::Capability;
+use capabilities::Capabilities;
 use message::ChildOutcome;
 use serde::{Deserialize, Serialize};
 
 /// What a runner decided: events for its own slice, actions for the session.
-/// The same pair a capability returns, one level up.
-pub type Emit = (Vec<RunnerEvent>, Vec<Action>);
+///
+/// The same shape a capability's [`capabilities::Decision`] has, one level up —
+/// deliberately, because "decide, never perform" is one idea and two shapes for
+/// it would read as two.
+#[derive(Debug, Default)]
+pub struct Emit {
+    pub events: Vec<RunnerEvent>,
+    pub actions: Vec<Action>,
+}
+
+impl Emit {
+    /// Nothing to journal, nothing to do. The common answer.
+    #[must_use]
+    pub fn nothing() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn record(events: Vec<RunnerEvent>) -> Self {
+        Self {
+            events,
+            actions: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn then(mut self, action: Action) -> Self {
+        self.actions.push(action);
+        self
+    }
+}
 
 /// How a turn ended, narrowed to the ways that mean something to a runner.
 ///
@@ -118,12 +147,21 @@ pub trait Runner {
     /// Whether I have work in flight, so the session must not unload.
     fn busy(&self) -> bool;
 
-    /// What my agents are equipped with.
-    fn capabilities(&self) -> &[Capability];
+    /// What my agents are equipped with, or `None` when I own no agents.
+    ///
+    /// `Option` for the same reason [`RunnerState::lifecycle`] is one, and
+    /// defaulted to the same answer: the runtime runner owns nothing that could
+    /// hold a capability, so "it equips nothing" is a fact about the type
+    /// rather than an empty field somebody has to keep empty.
+    fn capabilities(&self) -> Option<&Capabilities> {
+        None
+    }
 
     /// The same, for folding a capability's own event into it. Separate from
     /// [`Runner::capabilities`] so the read-only path stays read-only.
-    fn capabilities_mut(&mut self) -> &mut [Capability];
+    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
+        None
+    }
 
     /// Fold one of my own events. Pure — no clock, no ids, no randomness.
     fn apply(&mut self, event: &RunnerEvent);
@@ -160,14 +198,14 @@ pub trait AgentLifecycle {
 /// can enumerate — the sandbox toolbox plus whatever the plugin scan found.
 /// Put it first and it silently shadows every named tool behind it.
 #[must_use]
-pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Vec<Capability> {
+pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use capabilities::{
         ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
         mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
         sub_agent::SubAgentCapability, title::TitleCapability, workflow::WorkflowCapability,
     };
     let s = opts.settings;
-    let mut caps: Vec<Capability> = Vec::new();
+    let mut caps = Capabilities::default();
 
     // A runner that owns no agents equips nothing, and has nothing to offer a
     // message to.
@@ -177,21 +215,21 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Vec<Capability> {
 
     // Delegation: every runner that owns an agent can delegate, which is what
     // makes nesting uniform rather than a privilege of the main agent.
-    caps.push(Capability::SubAgent(SubAgentCapability::new(s.clone())));
-    caps.push(Capability::Workflow(WorkflowCapability::default()));
+    caps.push(SubAgentCapability::new(s.clone()));
+    caps.push(WorkflowCapability::default());
 
     match kind {
         // A conversation can ask, name itself, and branch.
         RunnerKind::Conversation => {
-            caps.push(Capability::AskUser(match opts.unattended {
+            caps.push(match opts.unattended {
                 true => AskUserCapability::unattended(),
                 false => AskUserCapability::default(),
-            }));
-            caps.push(Capability::Title(match opts.fork {
+            });
+            caps.push(match opts.fork {
                 Some(fork) => TitleCapability::for_fork(fork),
                 None => TitleCapability::default(),
-            }));
-            caps.push(Capability::Fork(ForkCapability::new(s.clone())));
+            });
+            caps.push(ForkCapability::new(s.clone()));
         }
         // A step's `submit_result` and its `ask_user` are declared per step, so
         // they are equipped when the step agent starts rather than held here.
@@ -202,18 +240,16 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Vec<Capability> {
     }
 
     if s.control_plane == Some(true) && matches!(kind, RunnerKind::Conversation) {
-        caps.push(Capability::ControlPlane(ControlPlaneCapability));
+        caps.push(ControlPlaneCapability);
     }
     if !s.memory_spaces.is_empty() {
-        caps.push(Capability::Memory(MemoryCapability::new(
-            s.memory_spaces.clone(),
-        )));
+        caps.push(MemoryCapability::new(s.memory_spaces.clone()));
     }
     // Last, and last on purpose.
     if !s.mcp_servers.is_empty() {
-        caps.push(Capability::Mcp(McpCapability::new(s.mcp_servers.clone())));
+        caps.push(McpCapability::new(s.mcp_servers.clone()));
     }
-    caps.push(Capability::Runtime(RuntimeCapability));
+    caps.push(RuntimeCapability);
     caps
 }
 
@@ -310,11 +346,11 @@ impl Runner for RunnerState {
         dispatch!(self, busy)
     }
 
-    fn capabilities(&self) -> &[Capability] {
+    fn capabilities(&self) -> Option<&Capabilities> {
         dispatch!(self, capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> &mut [Capability] {
+    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         dispatch!(self, capabilities_mut)
     }
 
@@ -322,8 +358,8 @@ impl Runner for RunnerState {
         // A capability's event is folded into the capability that owns it,
         // whichever runner is holding it.
         if let RunnerEvent::Capability(e) = event {
-            for cap in dispatch!(self, capabilities_mut) {
-                capabilities::Handler::apply(cap, e);
+            if let Some(caps) = dispatch!(self, capabilities_mut) {
+                caps.apply(e);
             }
             return;
         }
@@ -362,7 +398,6 @@ impl RunnerState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use capabilities::Handler;
     use message::{Caller, Message, ToolCall};
 
     fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
@@ -394,8 +429,9 @@ mod tests {
         ] {
             let caps = assemble(kind, &opts(&s));
             let last = caps.last().expect("every agent-owning runner equips one");
-            assert!(
-                matches!(last, Capability::Runtime(_)),
+            assert_eq!(
+                last.name(),
+                "runtime",
                 "{kind:?} put something after the runtime capability"
             );
         }
@@ -426,22 +462,17 @@ mod tests {
             RunnerKind::Workflow,
         ] {
             let caps = assemble(kind, &opts(&s));
-            assert!(
-                caps.iter().any(|c| matches!(c, Capability::SubAgent(_))),
-                "{kind:?} cannot spawn"
-            );
-            assert!(
-                caps.iter().any(|c| matches!(c, Capability::Workflow(_))),
-                "{kind:?} cannot invoke a workflow"
-            );
+            assert!(caps.has("sub_agent"), "{kind:?} cannot spawn");
+            assert!(caps.has("workflow"), "{kind:?} cannot invoke a workflow");
             // And the runtime does not swallow the named tool on the way past.
             let taken = caps
                 .iter()
-                .find_map(|c| c.handle(caller, &call("spawn_agent")).map(|d| (c, d)));
-            let Some((owner, _)) = taken else {
-                panic!("{kind:?} left spawn_agent unclaimed");
-            };
-            assert!(matches!(owner, Capability::SubAgent(_)));
+                .find_map(|c| c.handle(caller, &call("spawn_agent")).map(|_| c.name()));
+            assert_eq!(
+                taken,
+                Some("sub_agent"),
+                "{kind:?} left spawn_agent unclaimed or misrouted"
+            );
         }
     }
 
@@ -452,15 +483,19 @@ mod tests {
     fn a_worker_gets_none_of_a_conversations_arms() {
         let s = empty_settings();
         let caps = assemble(RunnerKind::SubAgent, &opts(&s));
-        assert!(!caps.iter().any(|c| matches!(c, Capability::AskUser(_))));
-        assert!(!caps.iter().any(|c| matches!(c, Capability::Title(_))));
-        assert!(!caps.iter().any(|c| matches!(c, Capability::Fork(_))));
+        assert!(!caps.has("ask_user"));
+        assert!(!caps.has("title"));
+        assert!(!caps.has("fork"));
     }
 
     /// Nobody is watching a routine's run, so its conversation gets no
     /// `ask_user` layer: a question it asked would park the run for ever.
-    #[test]
-    fn an_unattended_conversation_equips_no_ask_layer() {
+    ///
+    /// Note it still *holds* the capability — an unattended `AskUserCapability`
+    /// equips nothing but still answers for the tool name, so a model that asks
+    /// anyway is told no rather than falling through to the sandbox.
+    #[tokio::test]
+    async fn an_unattended_conversation_equips_no_ask_layer() {
         let s = empty_settings();
         let caps = assemble(
             RunnerKind::Conversation,
@@ -470,10 +505,7 @@ mod tests {
                 fork: None,
             },
         );
-        let mut spec = action::AgentSpec::default();
-        for c in &caps {
-            c.setup(&mut spec);
-        }
+        let (spec, _) = caps.equip(s.clone()).await.expect("nothing fatal");
         assert!(!spec.has(&action::ToolLayer::AskUser));
     }
 }

@@ -4,7 +4,7 @@
 //! not the session it lives in — the model should not have to know which kind
 //! of conversation it is in to name it.
 
-use super::{CapEvent, Decision, Handler};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
 use crate::sessions::runners::action::{AgentSpec, PromptSection, ToolLayer};
 use crate::sessions::runners::ids::RunnerId;
 use crate::sessions::runners::message::{Caller, Message};
@@ -43,8 +43,13 @@ impl TitleCapability {
     }
 }
 
-impl Handler for TitleCapability {
-    fn setup(&self, spec: &mut AgentSpec) {
+#[async_trait::async_trait]
+impl Capability for TitleCapability {
+    fn name(&self) -> &'static str {
+        "title"
+    }
+
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.layers.push(match self.fork {
             Some(fork) => ToolLayer::ForkTitle { fork },
             None => ToolLayer::SessionTitle,
@@ -55,6 +60,7 @@ impl Handler for TitleCapability {
                    know what it is about."
                 .to_string(),
         });
+        Ok(())
     }
 
     fn handle(&self, _caller: Caller, msg: &Message) -> Option<Decision> {
@@ -66,20 +72,24 @@ impl Handler for TitleCapability {
             Ok(req) => req,
             Err(refusal) => return Some(refusal),
         };
-        Some((
-            vec![CapEvent::Title(Event::Set {
+        Some(Decision {
+            events: vec![CapEvent::Title(Event::Set {
                 name: req.title.clone(),
             })],
-            vec![crate::sessions::runners::action::Action::Reply {
+            actions: vec![crate::sessions::runners::action::Action::Reply {
                 text: format!("titled: {}", req.title),
             }],
-        ))
+        })
     }
 
     fn apply(&mut self, event: &CapEvent) {
         if let CapEvent::Title(Event::Set { name }) = event {
             self.title = Some(name.clone());
         }
+    }
+
+    fn save(&self) -> CapSlice {
+        CapSlice::Title(self.clone())
     }
 }
 
@@ -92,23 +102,26 @@ mod tests {
     #[test]
     fn setting_a_title_records_it() {
         let mut c = TitleCapability::default();
-        let (events, _) = c
+        let d = c
             .handle(
                 caller(),
                 &tool(TOOL, serde_json::json!({"title": "the flake"})),
             )
             .expect("mine");
-        c.apply(&events[0]);
+        c.apply(&d.events[0]);
         assert_eq!(c.title.as_deref(), Some("the flake"));
     }
 
     /// A fork names itself. Same capability, different layer — which is what
     /// stops a fork renaming the session it branched from.
-    #[test]
-    fn a_forks_capability_equips_the_fork_layer() {
+    #[tokio::test]
+    async fn a_forks_capability_equips_the_fork_layer() {
         let fork = RunnerId::new_v4();
         let mut spec = AgentSpec::default();
-        TitleCapability::for_fork(fork).setup(&mut spec);
+        TitleCapability::for_fork(fork)
+            .setup(&mut spec)
+            .await
+            .expect("nothing to acquire");
         assert!(spec.has(&ToolLayer::ForkTitle { fork }));
         assert!(!spec.has(&ToolLayer::SessionTitle));
     }
