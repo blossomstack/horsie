@@ -69,9 +69,8 @@ pub enum RunnerArgs {
         settings: Box<AgentSettings>,
     },
     Workflow {
-        /// The graph, resolved before the create. On the args rather than
-        /// looked up later, which is what makes an ad-hoc graph expressible.
-        graph: std::sync::Arc<crate::sessions::workflow::WorkflowRunSpec>,
+        /// Where the graph comes from.
+        source: WorkflowSource,
         input: String,
     },
     Conversation {
@@ -80,6 +79,23 @@ pub enum RunnerArgs {
         message: String,
         settings: Box<AgentSettings>,
     },
+}
+
+/// Where a workflow run's graph comes from.
+///
+/// Two arms because the capability that asks for a run cannot always hand over
+/// a graph: turning a name into a definition is a database read, and a
+/// database read may not happen on the session mailbox. So the capability says
+/// *what it wants* and the session resolves it while performing the create —
+/// which is the same "decide, never perform" split every other action makes,
+/// rather than a special case for one of them.
+///
+/// [`Self::Graph`] is what makes an ad-hoc workflow expressible: a graph built
+/// at runtime needs no name and no lookup, and nothing else has to change.
+#[derive(Debug, Clone)]
+pub enum WorkflowSource {
+    Named(String),
+    Graph(std::sync::Arc<crate::sessions::workflow::WorkflowRunSpec>),
 }
 
 /// A fork's branch point.

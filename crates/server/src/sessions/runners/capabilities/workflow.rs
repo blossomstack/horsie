@@ -18,17 +18,17 @@
 //! and the owning capability have to agree, and `None` is how they say so.
 
 use super::{CapEvent, Decision, Handler};
-use crate::sessions::runners::action::{Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer};
+use crate::sessions::runners::action::{
+    Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer, WorkflowSource,
+};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::message::{
     Caller, ChildMsg, ChildOutcome, Message, ToolCall, WorkflowOutcome,
 };
-use crate::sessions::workflow::WorkflowRunSpec;
 use horsie_models::agent::SubAgentResultPart;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// The tool that starts a run.
 pub const INVOKE_TOOL: &str = "invoke_workflow";
@@ -47,22 +47,19 @@ pub enum Event {
     Reported { child: RunnerId },
 }
 
-/// The tool's arguments.
+/// The tool's arguments: exactly what the model writes, and nothing else.
 ///
 /// The model names a workflow; it never writes a graph. Turning that name into
 /// a definition is a database read, and a database read may not happen on the
-/// session mailbox — so the layer that owns this tool resolves it off-mailbox
-/// and attaches the result to the call it forwards. That is why `graph` is
-/// here and optional while the model's schema has only the two fields above
-/// it: the name is what was asked for, and the resolved graph reaches
-/// [`RunnerArgs::Workflow`] one hop later. A call that arrives without one is a
-/// name that resolved to nothing, and is refused rather than run.
+/// session mailbox — so this capability asks for [`WorkflowSource::Named`] and
+/// the session resolves it while performing the create. That keeps the split
+/// every other action makes rather than smuggling a resolved graph through the
+/// tool's own arguments, where it would sit in a field the model must never
+/// fill.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     pub workflow: String,
     pub input: String,
-    #[serde(default)]
-    pub graph: Option<Arc<WorkflowRunSpec>>,
 }
 
 impl WorkflowCapability {
@@ -70,14 +67,6 @@ impl WorkflowCapability {
         match t.name.as_str() {
             INVOKE_TOOL => {
                 let req: Request = serde_json::from_value(t.input.clone()).ok()?;
-                let Some(graph) = req.graph else {
-                    return Some((
-                        Vec::new(),
-                        vec![Action::Reply {
-                            text: format!("no workflow named `{}`", req.workflow),
-                        }],
-                    ));
-                };
                 // Minted here, not in `apply`: a decision may be
                 // non-deterministic, a fold may not. The event and the action
                 // then name the same run, and replay lands the id the log has.
@@ -91,7 +80,7 @@ impl WorkflowCapability {
                         id: child,
                         kind: RunnerKind::Workflow,
                         args: RunnerArgs::Workflow {
-                            graph,
+                            source: WorkflowSource::Named(req.workflow),
                             input: req.input,
                         },
                         parent: caller.agent,
@@ -251,22 +240,8 @@ mod tests {
     use super::*;
     use crate::sessions::runners::message::AskMsg;
 
-    fn graph() -> Arc<WorkflowRunSpec> {
-        Arc::new(WorkflowRunSpec {
-            workflow: "release".into(),
-            start: "first".into(),
-            steps: vec![],
-            input: String::new(),
-            max_steps: 8,
-        })
-    }
-
     fn invocation() -> serde_json::Value {
-        serde_json::json!({
-            "workflow": "release",
-            "input": "cut 1.2.0",
-            "graph": serde_json::to_value(&*graph()).unwrap(),
-        })
+        serde_json::json!({"workflow": "release", "input": "cut 1.2.0"})
     }
 
     fn invoke(c: &mut WorkflowCapability, caller: Caller) -> RunnerId {
@@ -281,8 +256,9 @@ mod tests {
     }
 
     /// The event and the action must name the same run, or the log records a
-    /// run nothing created and the agent waits for ever. The graph rides on
-    /// the args, which is what makes an ad-hoc one expressible later.
+    /// run nothing created and the agent waits for ever. The args carry the
+    /// name the model wrote; the session resolves it while performing the
+    /// create, because a database read may not happen on the mailbox.
     #[test]
     fn an_invocation_journals_and_creates_the_same_run() {
         let c = WorkflowCapability::default();
@@ -306,33 +282,29 @@ mod tests {
         assert_eq!(id, child);
         assert_eq!(*kind, RunnerKind::Workflow);
         assert_eq!(*parent, caller.agent);
-        let RunnerArgs::Workflow { graph, input } = args else {
+        let RunnerArgs::Workflow { source, input } = args else {
             panic!("expected workflow args, got {args:?}");
         };
-        assert_eq!(graph.workflow, "release");
+        let WorkflowSource::Named(name) = source else {
+            panic!("a tool call names a workflow; it never writes a graph");
+        };
+        assert_eq!(name, "release");
         assert_eq!(input, "cut 1.2.0");
     }
 
-    /// A name that resolved to nothing is refused in words, not journaled: a
-    /// `Started` for a run that cannot be created would leave the agent owed a
-    /// report nothing will ever send.
+    /// Arguments that do not deserialise are not this capability's call to
+    /// answer: `None` lets the offer fall through rather than journaling a
+    /// `Started` for a run that was never asked for coherently.
     #[test]
-    fn an_unresolved_name_is_refused_and_journals_nothing() {
+    fn a_malformed_invocation_is_not_mine() {
         let c = WorkflowCapability::default();
-        let (events, actions) = c
-            .handle(
+        assert!(
+            c.handle(
                 caller(),
-                &tool(
-                    INVOKE_TOOL,
-                    serde_json::json!({"workflow": "nope", "input": "x"}),
-                ),
+                &tool(INVOKE_TOOL, serde_json::json!({"workflow": "nope"})),
             )
-            .expect("mine");
-        assert!(events.is_empty());
-        let Action::Reply { text } = &actions[0] else {
-            panic!("expected a reply, got {:?}", actions[0]);
-        };
-        assert!(text.contains("nope"));
+            .is_none()
+        );
     }
 
     /// `outstanding` says both "an output is owed" and "to whom".
