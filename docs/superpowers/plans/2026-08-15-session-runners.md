@@ -1007,41 +1007,71 @@ The session command vocabulary never escapes `crates/server/src/sessions/`. Noth
 
 **Keep the re-export.** `session_actor/types.rs` re-exports `AskAnswer` and `AnswerError` from `crate::agent_loop`, and both `supervisor.rs` and `http/handlers.rs` import them *through* session_actor. Dropping the re-export breaks two call sites for types that did not change.
 
-### Task B1: the context provider consumes `AgentSpec`
+### What reading the real toolboxes changed
 
-Replace `context.rs`'s two four-arm matches — toolbox layers at `provide()` and prompt suffix below it — with a fold over `AgentSpec::layers` and `AgentSpec::prompt`. `SessionAgentKind` is deleted here. `build_memory_layer` and `build_control_layer` become `ToolLayer::Memory` and `ToolLayer::ControlPlane` arms of the same fold.
+Phase A modelled an agent's equipment as `ToolLayer` — a *name* for a toolbox to wrap. Reading the six bespoke wrappers shows that name only fits half of them, and the split matters enough to fix before the actor depends on it.
 
-Test: a spec carrying `[Runtime, SpawnAgent { max: 4 }, AskUser]` builds a toolbox advertising `spawn_agent` and `ask_user`; the same spec without `AskUser` advertises neither `ask_user` nor a stub that refuses.
+`SubAgentToolbox`, `AskUserToolbox`, `SessionTitleToolbox` and `StepResultToolbox` all do the same three things: advertise a `ToolSpec`, match one tool name, and send a typed `SessionCommand` awaiting a reply. Under capabilities that dispatch is uniform — the session routes a tool call to the owning runner and offers it around — so all four collapse into **one** `SessionToolbox { specs, session, agent }` that forwards `(agent, name, input)` and renders the `Action::Reply` back. Four files become one, and a new session-routed tool becomes a `ToolSpec` on a capability rather than a new wrapper.
 
-### Task B2: `SessionActor` dispatches to runners
+`RuntimeCapability`, `McpCapability`, `MemoryCapability` and `ControlPlaneCapability` are different in kind: they execute against real services, never through the mailbox. `ToolLayer` names those correctly and they keep it.
 
-`handle_command` resolves `agents[id] -> runner` and routes; `apply_event` folds through `SessionState::apply`; `on_events_persisted` reports `state.status()`. The `Component` trait and `session_actor/{turns,run,subagent,fork,lifecycle,core}.rs` are deleted; `reads.rs` and `hooks.rs` are rewritten against the new state.
+So `AgentSpec` carries both — `layers: Vec<ToolLayer>` for the service-backed wrappers, and `tools: Vec<ToolSpec>` for everything the session routes — and a capability's `setup` pushes whichever it owns. This also puts a tool's schema next to the handler that answers it, which is the last place the two could drift.
 
-Test: the existing `session_actor` integration tests, ported. They are the acceptance criteria for this task — a green port is what says the rewrite preserved behaviour.
+### Task B1: `AgentSpec` carries real tool specs
 
-### Task B3: delete the old vocabulary
+**Files:** `runners/action.rs` (add `tools: Vec<ToolSpec>`), the six session-routed capabilities (`setup` pushes its real `ToolSpec`, moved from the wrapper that owns it today), `sessions/spawn_tool.rs`/`ask_tool.rs`/`title_tool.rs`/`workflow/toolbox.rs` (the spec builders become `pub` so the capability can call them; the wrappers stay until B3).
 
-Remove `subagents.rs`'s forest (`SubAgentForest`, `SubAgentTree`, `TreeOwner`, `owner_for`, `root_owner`), `forks.rs`, `AgentKey`, `effective_settings`, `effective_settings_for_parent`. Update the HTTP and control handlers the exploration pass identified.
+**Test:** a conversation runner's assembled capabilities produce a spec whose `tools` name `spawn_agent`, `subagent_status`, `invoke_workflow`, `workflow_status`, `ask_user`, `set_session_title` — and a subagent runner's name only the first four. Green on its own; nothing is wired yet.
 
-Test: `cargo clippy --all-targets -- -D warnings` is the test — a dead type is a warning, and the deletion is complete when nothing references the old names.
+### Task B2: `SessionToolbox`, the one forwarding wrapper
 
-### Task B4: enforce invariant 6
+**Files:** create `sessions/session_toolbox.rs`.
 
-An agent may not conclude while it has outstanding children. Enforcement point: `StepResultCapability::handle` returns a refusal when the runner's `SubAgentCapability`/`WorkflowCapability` still hold outstanding children, and `ConversationRunner::on_agent_ended` defers the boundary.
+`Toolbox::specs` returns the inner toolbox's plus `self.specs`; `execute` forwards any name in `self.specs` to the session as `SessionCommand::AgentTool { agent, call, reply }` and passes everything else inward.
 
-Test: a step that calls `submit_result` with a subagent still running does not conclude; when the subagent reports, the step concludes on its next turn. Write this test first and watch it fail against Task B2's code — it is the invariant that licenses a single `SubAgentCapability` implementation, so it must fail before it passes.
+**Test:** a call to a forwarded name reaches a recording fake session with the agent id attached; an unforwarded name reaches the inner toolbox. This is the seam the whole rewrite rests on, so it is tested before anything depends on it.
 
-Also here: the concurrency cap moves to the session. The count is global (how many agents may run at once on one sandbox) and is checked before a delegation is dispatched, beside "does this agent have this tool". `AgentSettings::max_concurrent_subagents` stops being the enforced number and remains only as what a capability advertises when equipping an agent.
+### Task B3: the equipment builder
 
-Test: with the session cap reached, a `spawn_agent` from any runner is refused with a message naming the cap, and no `RunnerCreated` is journaled.
+**Files:** create `sessions/equipment.rs`.
 
-### Task B5: the cancel cascade
+One function turning an `AgentSpec` into `(Arc<dyn Toolbox>, Option<String>)`: fold `layers` over the base toolbox in order (`Runtime` → `Memory` → `ControlPlane` → `Mcp`), then wrap once in `SessionToolbox` carrying `tools`, then join the `PromptSection`s onto the composed system prompt. It needs the runtime client, the session ref, the agent id and the account's services — take them in a struct rather than as eight arguments.
 
-Cancelling a runner cancels the runners parented on its agents, recursively, using `SessionState::children_of` and `depth_of`.
+**Test:** a spec with `[Runtime, Memory{spaces}]` plus `tools: [ask_user]` advertises the sandbox tools, the five memory tools and `ask_user`; the same spec without the memory layer advertises neither the memory tools nor a stub that refuses. This replaces `context.rs`'s two four-arm matches, so assert against tool *names* rather than against layer identity.
 
-Test: cancelling a workflow step with a subagent in flight leaves no runner in `Running`.
+### Task B4: `SessionActor` dispatches to runners
 
----
+The big one, and the only task in this phase that cannot be green on its own.
+
+- `handle_command` resolves `agents[id] -> runner` and routes; `SessionCommand` shrinks to `AgentTool`, `UserMessage`, `Stop`, `Answer`, `Read`, `Lifecycle`, `Core`, and `AgentOutcome`.
+- `apply_event` folds through `SessionState::apply`; `on_events_persisted` reports `state.status()`.
+- The boundary performs `Action`s and re-drives: persist, fold, then for every `Done` runner with a parent, offer its `outcome()` to the parent's capabilities; then collect `actions()` from every runner.
+- `Action` gains the two arms Phase A named as missing: one for the runtime declaring itself provisioned, one for a runner ending itself.
+- `Component` and `session_actor/{turns,run,subagent,fork,lifecycle,core}.rs` are deleted; `reads.rs` and `hooks.rs` are rewritten against the new state.
+- `lifecycle_routing.rs` — the heaviest consumer, with deliberately exhaustive tests — is rewritten to fan out from `SessionEvent` instead of `SessionDomainEvent`.
+
+**Test:** the existing `session_actor` integration tests, ported. A green port is the acceptance criterion — it is what says the rewrite preserved behaviour rather than merely compiling.
+
+### Task B5: delete the old vocabulary
+
+`subagents.rs`'s forest (`SubAgentForest`, `SubAgentTree`, `TreeOwner`, `owner_for`, `root_owner`), `forks.rs`, `orchestrator.rs`, `AgentKey`, `SessionAgentKind`, `effective_settings`, `effective_settings_for_parent`, and the four bespoke tool wrappers B2 replaced. Update `http/handlers.rs`'s `AgentEntry`/`SessionSnapshot`/`to_wire_agent` and `supervisor.rs`'s reply types.
+
+**Keep the re-export**: `session_actor/types.rs` re-exports `AskAnswer` and `AnswerError` from `crate::agent_loop`, and `supervisor.rs` and `http/handlers.rs` import them *through* it. Dropping it breaks two call sites for types that did not change.
+
+**Test:** `cargo clippy --all-targets -- -D warnings` is the test — a dead type is a warning, and the deletion is complete when nothing names the old vocabulary.
+
+### Task B6: enforce invariant 6
+
+An agent may not conclude while it has outstanding children. `StepResultCapability::handle` refuses `submit_result`, and `ConversationRunner::on_agent_ended` defers the boundary, while the runner's `SubAgentCapability`/`WorkflowCapability` still hold outstanding children.
+
+**Test:** a step that submits with a subagent still running does not conclude; when the child reports, it concludes on its next turn. **Write it first and watch it fail against B4's code** — it is the invariant that licenses a single `SubAgentCapability` implementation for all three parent kinds, so a test that passes immediately has proved nothing.
+
+### Task B7: the cancel cascade, and the session-wide cap
+
+Cancelling a runner cancels the runners parented on its agents, recursively, over `SessionState::children_of`. And the concurrency cap moves to the session: the count is global — how many agents may run at once on one sandbox — and is checked before a delegation is dispatched, beside "does this agent have this tool". `AgentSettings::max_concurrent_subagents` stops being the enforced number and remains only what a capability advertises.
+
+**Tests:** cancelling a workflow step with a subagent in flight leaves no runner `Running`; with the session cap reached, `spawn_agent` from any runner is refused with a message naming the cap and journals no `RunnerCreated`.
+
 
 ## Phase C — invoke_workflow (PR 3)
 
