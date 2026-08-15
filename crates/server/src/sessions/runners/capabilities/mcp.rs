@@ -10,7 +10,7 @@
 //! would take it and journal nothing.
 
 use super::{CapSlice, Capability, Decision, SetupError};
-use crate::sessions::runners::action::{AgentSpec, ToolLayer};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
 
@@ -42,15 +42,44 @@ impl Capability for McpCapability {
         "mcp"
     }
 
-    /// No servers, no layer: a session that names none connects to none, and
-    /// an empty layer would advertise a namespace nothing answers for.
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    /// Connect the named servers and leave them for the runtime to build into
+    /// the base toolbox.
+    ///
+    /// The one capability that hands another an ingredient rather than a layer,
+    /// and the reason setup runs front-to-back: an MCP tool is gated by the
+    /// session's `allowed_tools` exactly like a runtime tool, and that gate is
+    /// applied inside [`crate::agent_loop::DefaultToolboxFactory::for_agent`] —
+    /// so the connections have to reach it before it builds, rather than
+    /// wrapping it afterwards.
+    ///
+    /// No servers, no connections: a session that names none connects to none.
+    ///
+    /// Never fatal. A server that will not connect costs the agent some tools,
+    /// not its turn — and the ones that failed are carried in `unavailable`, so
+    /// a call for one is answered with why rather than "no such tool".
+    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.servers.is_empty() {
             return Ok(());
         }
-        spec.layers.push(ToolLayer::Mcp {
-            servers: self.servers.clone(),
-        });
+        let Some(service) = loading.mcp.as_ref() else {
+            return Err(SetupError {
+                capability: self.name(),
+                reason: format!(
+                    "this agent names MCP servers ({}) but no MCP service is configured",
+                    self.servers.join(", ")
+                ),
+                fatal: false,
+            });
+        };
+        loading.progress("connecting_tools", None).await;
+        spec.mcp = service
+            .toolboxes_for(&self.servers)
+            .await
+            .map_err(|e| SetupError {
+                capability: self.name(),
+                reason: format!("build MCP toolboxes: {e}"),
+                fatal: false,
+            })?;
         Ok(())
     }
 
@@ -97,29 +126,39 @@ mod tests {
         );
     }
 
-    /// No servers named, no layer equipped. If this regresses every session
-    /// gets an MCP layer wrapping nothing.
+    /// No servers named, nothing connected and nothing asked of the service.
+    /// If this regresses every session pays for a connection round it never
+    /// wanted.
     #[tokio::test]
-    async fn no_servers_equips_no_layer() {
-        let mut spec = AgentSpec::default();
+    async fn no_servers_connects_nothing() {
+        let mut spec = spec();
         McpCapability::new(vec![])
-            .setup(&mut spec)
+            .setup(&loading(), &mut spec)
             .await
             .expect("nothing fatal");
-        assert!(spec.layers.is_empty());
+        assert!(spec.mcp.is_empty());
     }
 
-    /// The named servers reach the layer verbatim, because the layer is what
-    /// the context provider connects.
+    /// A session that names servers with no service behind them loses its MCP
+    /// tools and keeps its turn. The whole point of a non-fatal setup error:
+    /// the agent still starts, and the caller reports what it started without.
+    ///
+    /// The counterpart — that the named servers reach the service verbatim —
+    /// needs a live MCP service, and lives in `mcp::service`'s own tests where
+    /// one is stood up. What is testable here is which way the failure goes.
     #[tokio::test]
-    async fn named_servers_equip_the_layer() {
-        let mut spec = AgentSpec::default();
-        McpCapability::new(vec!["github".into(), "docs".into()])
-            .setup(&mut spec)
+    async fn no_service_is_degraded_rather_than_fatal() {
+        let mut spec = spec();
+        let e = McpCapability::new(vec!["github".into(), "docs".into()])
+            .setup(&loading(), &mut spec)
             .await
-            .expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::Mcp {
-            servers: vec!["github".into(), "docs".into()],
-        }));
+            .expect_err("no service is wired");
+        assert_eq!(e.capability, "mcp");
+        assert!(
+            !e.fatal,
+            "a server that will not connect costs tools, not the turn"
+        );
+        assert!(e.reason.contains("github") && e.reason.contains("docs"));
+        assert!(spec.mcp.is_empty());
     }
 }

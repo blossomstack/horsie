@@ -12,22 +12,58 @@
 //! routine run ends up parked for ever against nobody, and a layer that is not
 //! pushed cannot be called.
 
-use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
-use crate::sessions::runners::action::{AgentSpec, ToolLayer};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError, or_empty};
+use crate::sessions::ask_tool::AskUserToolbox;
 use crate::sessions::runners::ids::AgentId;
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{AskMsg, Caller, Message};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+/// Appended to an unattended run's system prompt (a routine). It has no
+/// `ask_user` tool, so the prompt says why rather than leaving the model to
+/// discover that a tool it was told about is missing.
+const UNATTENDED_PROMPT_SUFFIX: &str = "# Unattended run\n\
+This session was started by a routine, not by a person, and nobody is reading it while \
+it runs. There is no ask_user tool: a question would park the run with nobody to answer \
+it. Work from the instructions you were given — where they leave a choice open, make the \
+reasonable one, say which you made and why, and carry on. Your final message is the \
+report; make it self-contained.";
+
+/// Appended for a step that did not declare itself interactive. Deliberately
+/// says nothing about whether anyone is watching, because somebody usually is:
+/// this step simply is not the one that asks.
+const NOT_INTERACTIVE_PROMPT_SUFFIX: &str = "# No questions in this step\n\
+This step has no ask_user tool. Work from the input you were given — where it leaves a \
+choice open, make the reasonable one, say which you made and why, and carry on. Your \
+result is what the rest of the run sees; make it self-contained.";
 
 /// The tool this capability answers for.
 pub const TOOL: &str = "ask_user";
+
+/// Why this agent may not ask, when it may not.
+///
+/// Two reasons, not one flag, because they are different facts and the model is
+/// told which. Collapsing them once put "this session was started by a routine"
+/// in front of a step running in a session somebody was sitting and watching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Mute {
+    /// A routine's run. Nobody is reading it, so a question parks it against
+    /// nobody.
+    Unattended,
+    /// A workflow step that did not declare itself interactive. Says nothing
+    /// about whether anyone is watching — usually somebody is.
+    NotInteractive,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AskUserCapability {
     /// The agent waiting on an answer, if one is. Also the addressee an
     /// arriving answer is routed to.
     pub pending: Option<AgentId>,
-    /// Nobody is there to answer: no `ask_user` layer, and no route to it.
-    pub unattended: bool,
+    /// `Some` when this agent may not ask, and why. `None` is the ordinary
+    /// conversation that can.
+    pub mute: Option<Mute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,13 +78,21 @@ impl AskUserCapability {
         Self::default()
     }
 
-    /// For a run with no person attached — a routine, a workflow step that did
-    /// not declare itself interactive.
+    /// A routine's run: nobody is reading it.
     #[must_use]
     pub fn unattended() -> Self {
         Self {
             pending: None,
-            unattended: true,
+            mute: Some(Mute::Unattended),
+        }
+    }
+
+    /// A workflow step that did not declare itself interactive.
+    #[must_use]
+    pub fn not_interactive() -> Self {
+        Self {
+            pending: None,
+            mute: Some(Mute::NotInteractive),
         }
     }
 }
@@ -59,12 +103,18 @@ impl Capability for AskUserCapability {
         "ask_user"
     }
 
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         // Skip the layer entirely when unattended: a tool that is never
         // equipped cannot be called, whereas a tool that is equipped and
-        // refused still costs the model a turn to discover that.
-        if !self.unattended {
-            spec.layers.push(ToolLayer::AskUser);
+        // refused still costs the model a turn to discover that. The paragraph
+        // goes in its place — a model that was told the tool exists and finds
+        // it missing spends a turn working out why.
+        match self.mute {
+            Some(Mute::Unattended) => spec.say("unattended", UNATTENDED_PROMPT_SUFFIX),
+            Some(Mute::NotInteractive) => {
+                spec.say("not_interactive", NOT_INTERACTIVE_PROMPT_SUFFIX);
+            }
+            None => spec.wrap(|inner, _| Arc::new(AskUserToolbox::new(or_empty(inner)))),
         }
         Ok(())
     }
@@ -73,7 +123,7 @@ impl Capability for AskUserCapability {
         // Unattended declines by both routes, not just by not equipping the
         // layer: a plugin or a resumed transcript could still put the call in
         // front of us, and taking it would park an agent nobody can free.
-        if self.unattended {
+        if self.mute.is_some() {
             return None;
         }
         match msg {
@@ -119,9 +169,47 @@ mod tests {
     #[tokio::test]
     async fn unattended_equips_nothing_and_declines_the_call() {
         let c = AskUserCapability::unattended();
-        let mut spec = AgentSpec::default();
-        c.setup(&mut spec).await.expect("nothing to acquire");
-        assert!(!spec.has(&ToolLayer::AskUser));
+        let mut spec = spec();
+        c.setup(&loading(), &mut spec)
+            .await
+            .expect("nothing to acquire");
+        assert!(
+            c.handle(caller(), &tool(TOOL, serde_json::json!({"questions": []})))
+                .is_none()
+        );
+        // Told why, rather than left to discover a tool it was told about is
+        // missing.
+        assert_eq!(
+            spec.prompt.iter().map(|s| s.key).collect::<Vec<_>>(),
+            vec!["unattended"]
+        );
+        assert!(spec.toolbox().is_none());
+    }
+
+    /// A step that did not declare itself interactive is muted for a different
+    /// reason than a routine is, and the model is told which. One flag for both
+    /// told a step in a session somebody was watching that "this session was
+    /// started by a routine, and nobody is reading it" — plainly false.
+    #[tokio::test]
+    async fn a_non_interactive_step_is_not_told_it_is_unattended() {
+        let c = AskUserCapability::not_interactive();
+        let mut spec = spec();
+        c.setup(&loading(), &mut spec)
+            .await
+            .expect("nothing to acquire");
+
+        assert_eq!(
+            spec.prompt.iter().map(|s| s.key).collect::<Vec<_>>(),
+            vec!["not_interactive"]
+        );
+        let said = &spec.prompt[0].body;
+        assert!(
+            !said.contains("routine") && !said.contains("nobody is reading"),
+            "a muted step was told nobody is watching: {said}"
+        );
+        // Still equips nothing and still declines, exactly as unattended does —
+        // the reason differs, the refusal does not.
+        assert!(spec.toolbox().is_none());
         assert!(
             c.handle(caller(), &tool(TOOL, serde_json::json!({"questions": []})))
                 .is_none()
@@ -166,15 +254,15 @@ mod tests {
         assert_eq!(c.pending, None);
     }
 
-    /// An attended session does equip the layer — the counterpart that stops
+    /// An attended session does equip the tool — the counterpart that stops
     /// the unattended test passing for the wrong reason.
     #[tokio::test]
-    async fn an_attended_session_equips_the_layer() {
-        let mut spec = AgentSpec::default();
+    async fn an_attended_session_equips_the_tool() {
+        let mut spec = spec();
         AskUserCapability::new()
-            .setup(&mut spec)
+            .setup(&loading(), &mut spec)
             .await
             .expect("nothing to acquire");
-        assert!(spec.has(&ToolLayer::AskUser));
+        assert_eq!(equipped(spec), vec![TOOL]);
     }
 }

@@ -24,7 +24,7 @@ use crate::sessions::spec::SessionSpec;
 use crate::sessions::supervisor::SupervisorConfig;
 use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
-use std::sync::PoisonError;
+use std::sync::{Mutex, PoisonError};
 
 pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
     events
@@ -1258,33 +1258,52 @@ pub(super) async fn catalog_harness_with(
     (f, session, id)
 }
 
+/// The session half of a load, for a provider a test builds by hand.
+///
+/// One helper rather than a literal per test: the three fields a kind decides —
+/// the key, the id, the narration — go through the same `loading_for` the actor
+/// itself uses, so a test provider cannot disagree with a real one about who it
+/// is.
+pub(super) fn test_loading(
+    f: &ActorFixture,
+    session: &SessionRef,
+    id: Uuid,
+    kind: SessionAgentKind,
+) -> crate::sessions::runners::loading::Loading {
+    super::context::loading_for(
+        kind,
+        session.clone(),
+        id,
+        super::context::LoadingDeps {
+            runtimes: f.deps.runtimes.provider(
+                id.to_string(),
+                "i1".to_string(),
+                false,
+                "mock".to_string(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            ),
+            registry: f.deps.provider_registry.clone(),
+            mcp: None,
+            memory: None,
+            services: None,
+            plugin_library: f.deps.plugins.clone(),
+        },
+    )
+}
+
 pub(super) fn catalog_provider(
     f: &ActorFixture,
     session: &SessionRef,
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(
-            id.to_string(),
-            "i1".to_string(),
-            false,
-            "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock"),
-        ),
-        registry: f.deps.provider_registry.clone(),
-        mcp: None,
-        memory: None,
-        services: None,
+        loading: test_loading(f, session, id, SessionAgentKind::Main),
         settings: agent_settings_fixture(),
         step_result: Default::default(),
-        session_id: id,
         kind: SessionAgentKind::Main,
         agent_type: None,
         unattended: false,
-        session: session.clone(),
         plugins: Vec::new(),
-        plugin_library: f.deps.plugins.clone(),
-        last_client: Mutex::new(None),
     }
 }
 
@@ -1367,28 +1386,15 @@ pub(super) fn typed_provider(
 ) -> SessionContextProvider {
     let mut settings = agent_settings_fixture();
     settings.allowed_tools = allowed_tools;
+    let kind = SessionAgentKind::Sub(sub);
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(
-            id.to_string(),
-            "i1".to_string(),
-            false,
-            "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock"),
-        ),
-        registry: f.deps.provider_registry.clone(),
-        mcp: None,
-        memory: None,
-        services: None,
+        loading: test_loading(f, session, id, kind),
         settings,
         step_result: Default::default(),
-        session_id: id,
-        kind: SessionAgentKind::Sub(sub),
+        kind,
         agent_type: Some("code-reviewer".to_string()),
         unattended: false,
-        session: session.clone(),
         plugins: Vec::new(),
-        plugin_library: None,
-        last_client: Mutex::new(None),
     }
 }
 

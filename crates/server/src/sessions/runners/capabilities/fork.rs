@@ -20,8 +20,9 @@
 
 use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
 use crate::sessions::forks::ForkMode;
-use crate::sessions::runners::action::{Action, AgentSpec, Branch, RunnerArgs};
+use crate::sessions::runners::action::{Action, Branch, RunnerArgs};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{Caller, ChildMsg, Command, Message};
 use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
@@ -137,7 +138,14 @@ impl Capability for ForkCapability {
     /// No tool layer, because `/fork` is typed rather than called, and no
     /// prompt section either: a paragraph about a command the model cannot use
     /// spends context to tell it about something it will never do.
-    async fn setup(&self, _spec: &mut AgentSpec) -> Result<(), SetupError> {
+    ///
+    /// In particular not the "you are a fork" paragraph. This capability is
+    /// held by a conversation that *can* branch, which is every conversation;
+    /// the paragraph is for one that *is* a branch, and that is
+    /// [`super::title::TitleCapability::for_fork`] — the only capability whose
+    /// presence means "this agent is a fork", and the one that owns the tool
+    /// the paragraph tells it to call.
+    async fn setup(&self, _loading: &Loading, _spec: &mut AgentSpec) -> Result<(), SetupError> {
         Ok(())
     }
 
@@ -173,7 +181,6 @@ impl Capability for ForkCapability {
 mod tests {
     use super::super::testing::*;
     use super::*;
-    use crate::sessions::runners::action::ToolLayer;
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome};
 
     fn cap() -> ForkCapability {
@@ -347,11 +354,16 @@ mod tests {
     /// a model branch the conversation it is having.
     #[tokio::test]
     async fn it_equips_no_tool() {
-        let mut spec = AgentSpec::default();
-        cap().setup(&mut spec).await.expect("nothing to acquire");
-        assert!(spec.layers.is_empty());
+        let mut spec = spec();
+        cap()
+            .setup(&loading(), &mut spec)
+            .await
+            .expect("nothing to acquire");
         assert!(spec.prompt.is_empty());
-        assert!(!spec.has(&ToolLayer::Runtime));
+        assert!(
+            spec.toolbox().is_none(),
+            "a capability that pushes no layer leaves the spec with no toolbox"
+        );
     }
 
     /// Another built-in — `/compact` — belongs to a different capability, so

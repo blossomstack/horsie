@@ -34,8 +34,9 @@
 //! would ever deliver.
 
 use super::action::{Action, FirstInput};
-use super::capabilities::Capabilities;
+use super::capabilities::ask_user::AskUserCapability;
 use super::capabilities::step_result::StepResultCapability;
+use super::capabilities::{Capabilities, Capability};
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
@@ -368,6 +369,27 @@ impl State {
     }
 }
 
+/// A step's own capabilities, spliced into the runner's list ahead of the
+/// open-namespace one.
+///
+/// Ahead, not appended, and both orders say why. A tool call is offered to the
+/// first capability that claims it, and the runtime claims everything — so
+/// `submit_result` appended after it would never be reached. The toolbox is
+/// built from the same list, innermost last, and the runtime's layer is the
+/// sandbox *base*: it wraps nothing, so a layer pushed after it would be built
+/// and then dropped on the floor. Same rule, both ends.
+fn insert_before_runtime(caps: &Capabilities, per_step: Vec<Box<dyn Capability>>) -> Capabilities {
+    let mut list: Vec<Box<dyn Capability>> = caps.iter().map(|c| c.save().into()).collect();
+    let at = list
+        .iter()
+        .position(|c| c.name() == "runtime")
+        .unwrap_or(list.len());
+    for (offset, cap) in per_step.into_iter().enumerate() {
+        list.insert(at + offset, cap);
+    }
+    Capabilities::new(list)
+}
+
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
         let Some(next) = self.next_step() else {
@@ -381,22 +403,28 @@ impl Runner for State {
         };
         // A fresh copy for the step agent's task to equip itself from; the
         // folded one stays here.
-        let mut equipment = self.capabilities.clone();
-        // The one capability whose instance is per *agent* rather than per
-        // runner: what a step promises to return, and whether it may ask, are
-        // declared by that step, so step 1 can be interactive and step 2 not.
-        // It joins the copy rather than `capabilities` because it has no state
-        // to carry between steps — its `apply` records nothing, since a
-        // submitted result is this runner's own `StepConcluded` to fold.
         //
-        // At the front, not the back: the list ends with the capability that
-        // claims every tool call offered to it, so a `submit_result` appended
-        // after it would be swallowed by the sandbox layer.
-        equipment.push_front(StepResultCapability::new(
-            step.outcomes.clone(),
-            step.fields.clone(),
-            step.interactive,
-        ));
+        // The per-*agent* capabilities join the copy rather than
+        // `capabilities`: what a step promises to return, and whether it may
+        // ask, are declared by that step, so step 1 can be interactive and step
+        // 2 not. Neither carries state between steps — a submitted result is
+        // this runner's own `StepConcluded` to fold.
+        let per_step: Vec<Box<dyn Capability>> = vec![
+            // Equipped either way, and the flag is the whole difference: a step
+            // that may not ask still needs somebody to answer for `ask_user`,
+            // or the call falls through to the sandbox and the model is never
+            // told no.
+            Box::new(match step.interactive {
+                true => AskUserCapability::new(),
+                false => AskUserCapability::not_interactive(),
+            }),
+            Box::new(StepResultCapability::new(
+                step.outcomes.clone(),
+                step.fields.clone(),
+                step.interactive,
+            )),
+        ];
+        let equipment = insert_before_runtime(&self.capabilities, per_step);
         vec![Action::StartAgent {
             agent: next.agent,
             equipment,
@@ -1120,6 +1148,79 @@ mod tests {
         assert_eq!(state.status, WorkflowRunStatus::Suspended);
         assert!(!state.busy());
         assert!(state.actions(&view()).is_empty());
+    }
+
+    /// A step's own capabilities are spliced in *ahead* of the runtime's, and
+    /// both orders say why: the runtime claims every tool name, so
+    /// `submit_result` behind it is never offered — and the runtime's layer is
+    /// the sandbox base, which wraps nothing, so a layer behind it is built and
+    /// dropped. Appended, an interactive step would silently have neither tool.
+    #[test]
+    fn a_steps_own_capabilities_sort_ahead_of_the_runtime() {
+        let s = settings();
+        let mut graph = graph();
+        graph.steps[0].interactive = true;
+        let mut state = run_of(graph);
+        state.capabilities = crate::sessions::runners::assemble(
+            crate::sessions::runners::RunnerKind::Workflow,
+            &crate::sessions::runners::Assembly {
+                settings: &s,
+                unattended: false,
+                fork: None,
+                agent_type: None,
+            },
+        );
+        let actions = state.actions(&view());
+        let Action::StartAgent { equipment, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        let names: Vec<&str> = equipment.iter().map(|c| c.name()).collect();
+        assert_eq!(
+            names.last(),
+            Some(&"runtime"),
+            "a step's tools ended up behind the open-namespace capability: {names:?}"
+        );
+        assert!(names.contains(&"step_result"));
+        assert!(
+            names.contains(&"ask_user"),
+            "an interactive step cannot ask: {names:?}"
+        );
+    }
+
+    /// And a step that did not declare itself interactive is not equipped to
+    /// ask — the same runner, one flag apart, which is what lets step 1 stop
+    /// for a person and step 2 not.
+    ///
+    /// It still *holds* the capability: something has to answer for `ask_user`,
+    /// or a step that asks anyway falls through to the sandbox and is never
+    /// told no.
+    #[tokio::test]
+    async fn a_non_interactive_step_holds_ask_user_but_equips_no_tool() {
+        let state = run();
+        let actions = state.actions(&view());
+        let Action::StartAgent { equipment, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        let names: Vec<&str> = equipment.iter().map(|c| c.name()).collect();
+        assert!(names.contains(&"step_result"));
+        assert!(names.contains(&"ask_user"), "{names:?}");
+
+        let asks: Capabilities = equipment
+            .iter()
+            .filter(|c| c.name() == "ask_user")
+            .map(|c| c.save().into())
+            .collect();
+        let (spec, _) = asks
+            .equip(
+                &crate::sessions::runners::capabilities::testing::loading(),
+                settings(),
+            )
+            .await
+            .expect("nothing fatal");
+        assert!(
+            spec.toolbox().is_none(),
+            "a step that may not ask must be equipped with no ask tool"
+        );
     }
 
     /// The slice is snapshotted, and the graph is the part with a hand-written

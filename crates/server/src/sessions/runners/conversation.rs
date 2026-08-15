@@ -230,7 +230,6 @@ impl AgentLifecycle for State {
 mod tests {
     use super::*;
     use crate::sessions::forks::ForkMode;
-    use crate::sessions::runners::action::ToolLayer;
     use crate::sessions::runners::capabilities::title::TitleCapability;
 
     fn view() -> SessionView {
@@ -337,10 +336,17 @@ mod tests {
             panic!("expected a start, got {:?}", actions[0]);
         };
         let (spec, _) = equipment
-            .equip(state.settings.clone())
+            .equip(
+                &crate::sessions::runners::capabilities::testing::loading(),
+                state.settings.clone(),
+            )
             .await
             .expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::SessionTitle));
+        assert_eq!(
+            crate::sessions::runners::capabilities::testing::equipped(spec),
+            vec![crate::sessions::runners::capabilities::title::TOOL],
+            "the capability it holds is what its agent runs with"
+        );
     }
 
     /// **A conversation never reports an outcome, in any state.** This is what

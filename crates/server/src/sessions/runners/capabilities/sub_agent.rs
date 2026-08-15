@@ -15,16 +15,21 @@
 //! before the acknowledgement persists, so a crash in that window replays as a
 //! report still outstanding and it is delivered again.
 
-use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
-use crate::sessions::runners::action::{Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer};
+use super::{CapEvent, CapSlice, Capability, Decision, SetupError, or_empty};
+use crate::sessions::runners::action::{Action, RunnerArgs};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{
     Caller, ChildMsg, ChildOutcome, Message, SubAgentOutcome, ToolCall,
 };
+use crate::sessions::session_actor::AgentKey;
+use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::AgentSettings;
+use crate::sessions::subagents::SubAgentParent;
 use horsie_models::agent::SubAgentResultPart;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// The tool that delegates.
 pub const SPAWN_TOOL: &str = "spawn_agent";
@@ -200,26 +205,51 @@ impl Capability for SubAgentCapability {
         "sub_agent"
     }
 
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
-        let max = self.child_settings.max_subagents();
+    /// Equips `spawn_agent`, with the catalogue read at compose time.
+    ///
+    /// The catalogue only exists after the runtime's workspace scan, and this
+    /// capability sorts *before* the runtime — it has to, or the
+    /// open-namespace sandbox layer would swallow the `spawn_agent` name. So
+    /// the layer reads [`crate::sessions::runners::loading::AgentFacts`] when
+    /// it is composed, which is after every `setup` has run, rather than
+    /// capturing a catalogue that does not exist yet.
+    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         // A zero cap advertises nothing. A tool the model can only ever be
         // refused by is worse than no tool: it spends prompt on a capability
         // that does not exist and invites a retry loop against a fixed number.
-        if max == 0 {
+        if self.child_settings.max_subagents() == 0 {
             return Ok(());
         }
-        spec.layers.push(ToolLayer::SpawnAgent { max });
-        spec.prompt.push(PromptSection {
-            key: "sub_agent",
-            body: "Delegate independent work with `spawn_agent`. A subagent \
-                   does not see this conversation, so its task must be \
-                   self-contained; its final message is its report, and that \
-                   report is delivered to you automatically when it finishes. \
-                   Carry on with other work meanwhile, and use \
-                   `subagent_status` only when asked for progress or when a \
-                   result seems lost — never as a poll."
-                .to_string(),
+        let session = loading.session.clone();
+        // Where this agent's children hang. A step and a fork each root their
+        // own tree, for the same reason: nothing is waiting on them for a
+        // report, so their spawns are that tree's `Main`.
+        let parent = match loading.key {
+            AgentKey::Sub(id) => SubAgentParent::SubAgent(id),
+            AgentKey::Main | AgentKey::Step(_) | AgentKey::Fork(_) => SubAgentParent::Main,
+        };
+        spec.wrap(move |inner, facts| {
+            Arc::new(SubAgentToolbox::new(
+                or_empty(inner),
+                session,
+                parent,
+                facts
+                    .shared
+                    .as_ref()
+                    .map(|s| Arc::clone(&s.agents))
+                    .unwrap_or_default(),
+            ))
         });
+        spec.say(
+            "sub_agent",
+            "Delegate independent work with `spawn_agent`. A subagent \
+             does not see this conversation, so its task must be \
+             self-contained; its final message is its report, and that \
+             report is delivered to you automatically when it finishes. \
+             Carry on with other work meanwhile, and use \
+             `subagent_status` only when asked for progress or when a \
+             result seems lost — never as a poll.",
+        );
         Ok(())
     }
 
@@ -461,15 +491,63 @@ mod tests {
         assert!(!text.contains(&child.to_string()));
     }
 
-    /// The layer carries the cap, so equipment and the limit are one fact
-    /// rather than two that can disagree.
+    /// Both tools, and the paragraph that says how to use them.
     #[tokio::test]
-    async fn setup_equips_the_spawn_layer_with_the_cap() {
-        let mut spec = AgentSpec::default();
-        cap().setup(&mut spec).await.expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::SpawnAgent {
-            max: settings().max_subagents()
+    async fn setup_equips_the_spawn_tools() {
+        let mut spec = spec();
+        cap()
+            .setup(&loading(), &mut spec)
+            .await
+            .expect("nothing fatal");
+        assert!(spec.prompt.iter().any(|s| s.key == "sub_agent"));
+        let names = equipped(spec);
+        assert!(names.contains(&SPAWN_TOOL.to_string()));
+        assert!(names.contains(&STATUS_TOOL.to_string()));
+    }
+
+    /// The catalogue this capability offers is the one the runtime's scan
+    /// found — read when the layer is composed, not when it is pushed, because
+    /// `spawn_agent` has to be claimed before the runtime and the scan has not
+    /// happened by then. If this regresses, every typed agent silently
+    /// disappears from `spawn_agent`'s description.
+    #[tokio::test]
+    async fn the_catalogue_is_read_after_the_runtimes_scan() {
+        let mut spec = spec();
+        cap()
+            .setup(&loading(), &mut spec)
+            .await
+            .expect("nothing fatal");
+        // Written after the layer was pushed, exactly as the runtime does.
+        let reviewer = crate::agent_loop::CatalogAgent {
+            plugin: "b".into(),
+            def: horsie_support::plugin::agents::PluginAgentDef {
+                name: "reviewer".into(),
+                description: "reads a diff".into(),
+                model: None,
+                tools: vec![],
+                prompt: "you review".into(),
+            },
+        };
+        spec.facts.shared = Some(Arc::new(crate::agent_loop::SharedContext {
+            skills: Arc::default(),
+            agents: Arc::new([reviewer].into_iter().collect()),
+            root: None,
         }));
+        let spawn = spec
+            .toolbox()
+            .expect("a layer was pushed")
+            .specs()
+            .into_iter()
+            .find(|s| s.name == SPAWN_TOOL)
+            .expect("spawn_agent is advertised");
+        // The catalogue is rendered into the description — a bare list of names
+        // says nothing about when to pick one — so that is where it is read
+        // back from.
+        assert!(
+            spawn.description.contains("reviewer") && spawn.description.contains("reads a diff"),
+            "the catalogue the scan found did not reach the tool: {}",
+            spawn.description
+        );
     }
 
     /// A zero cap advertises no tool at all, so the model never meets one that
@@ -478,13 +556,13 @@ mod tests {
     async fn a_zero_cap_advertises_nothing() {
         let mut s = settings();
         s.max_concurrent_subagents = Some(0);
-        let mut spec = AgentSpec::default();
+        let mut spec = spec();
         SubAgentCapability::new(s)
-            .setup(&mut spec)
+            .setup(&loading(), &mut spec)
             .await
             .expect("nothing fatal");
-        assert!(spec.layers.is_empty());
         assert!(spec.prompt.is_empty());
+        assert!(spec.toolbox().is_none());
     }
 
     /// Everything else falls through, so the offer reaches the capability that

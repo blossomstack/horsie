@@ -60,7 +60,7 @@ impl AgentOutcomeSink for SessionParent {
 ///
 /// A `tell`, not an `ask`: nothing waits on a record, and a hook's audit trail
 /// must never be able to slow the tool call it describes.
-pub(super) struct SessionHookSink {
+pub(crate) struct SessionHookSink {
     target: SessionRef,
     /// Which agent's transcript these records belong in. A subagent's hooks are
     /// its own; without this they would all pile into one log with no way to
@@ -69,7 +69,7 @@ pub(super) struct SessionHookSink {
 }
 
 impl SessionHookSink {
-    pub(super) fn new(target: SessionRef, key: AgentKey) -> Self {
+    pub(crate) fn new(target: SessionRef, key: AgentKey) -> Self {
         Self { target, key }
     }
 }

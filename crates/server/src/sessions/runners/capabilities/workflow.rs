@@ -18,10 +18,9 @@
 //! and the owning capability have to agree, and `None` is how they say so.
 
 use super::{CapEvent, CapSlice, Capability, Decision, SetupError};
-use crate::sessions::runners::action::{
-    Action, AgentSpec, PromptSection, RunnerArgs, ToolLayer, WorkflowSource,
-};
+use crate::sessions::runners::action::{Action, RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{
     Caller, ChildMsg, ChildOutcome, Message, ToolCall, WorkflowOutcome,
 };
@@ -199,18 +198,19 @@ impl Capability for WorkflowCapability {
         "workflow"
     }
 
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
-        spec.layers.push(ToolLayer::InvokeWorkflow);
-        spec.prompt.push(PromptSection {
-            key: "workflow",
-            body: "Run a defined workflow with `invoke_workflow` when the job \
-                   is one you already have a definition for. The run happens \
-                   in this session and shares its workspace; its terminal \
-                   output is delivered to you automatically when it finishes, \
-                   so carry on meanwhile and use `workflow_status` only when \
-                   asked for progress — never as a poll."
-                .to_string(),
-        });
+    /// Equips nothing yet.
+    ///
+    /// `invoke_workflow` has no toolbox behind it: today a run is started
+    /// through the API, and the tool that lets an agent start one is the last
+    /// phase of this redesign. The dispatch half below is already real — a call
+    /// arriving from anywhere is routed and journaled — so what is missing is
+    /// only the layer that would advertise it, and advertising a tool before
+    /// there is one to execute is how a model learns to call something that
+    /// answers "no such tool".
+    ///
+    /// No prompt section either, for the same reason: a paragraph about a tool
+    /// the model cannot see is context spent on nothing.
+    async fn setup(&self, _loading: &Loading, _spec: &mut AgentSpec) -> Result<(), SetupError> {
         Ok(())
     }
 
@@ -477,14 +477,18 @@ mod tests {
         assert!(!text.contains(&child.to_string()));
     }
 
+    /// It equips nothing while `invoke_workflow` has no toolbox behind it. The
+    /// dispatch half is real and tested above; this pins that the tool is not
+    /// advertised before something can execute it.
     #[tokio::test]
-    async fn setup_equips_the_invoke_layer() {
-        let mut spec = AgentSpec::default();
+    async fn setup_equips_nothing_until_the_tool_exists() {
+        let mut spec = spec();
         WorkflowCapability::default()
-            .setup(&mut spec)
+            .setup(&loading(), &mut spec)
             .await
             .expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::InvokeWorkflow));
+        assert!(spec.prompt.is_empty());
+        assert!(spec.toolbox().is_none());
     }
 
     /// Everything else falls through, so the offer reaches whoever does own it.

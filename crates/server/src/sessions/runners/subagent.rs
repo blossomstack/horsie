@@ -215,7 +215,6 @@ fn render(output: &serde_json::Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::runners::action::ToolLayer;
     use crate::sessions::runners::capabilities::title::TitleCapability;
 
     fn worker() -> State {
@@ -311,13 +310,20 @@ mod tests {
             panic!("expected a start, got {:?}", actions[0]);
         };
         let (spec, _) = equipment
-            .equip(state.settings.clone())
+            .equip(
+                &crate::sessions::runners::capabilities::testing::loading(),
+                state.settings.clone(),
+            )
             .await
             .expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::SessionTitle));
+        // The settings it was started with travel on the spec: a worker runs
+        // under what its parent decided, not under whatever the session's are
+        // by the time it wakes.
+        assert_eq!(spec.settings.model, state.settings.model);
         assert_eq!(
-            spec.settings.as_ref().map(|s| s.model.clone()),
-            Some(String::new())
+            crate::sessions::runners::capabilities::testing::equipped(spec),
+            vec![crate::sessions::runners::capabilities::title::TOOL],
+            "the capability it holds is what its agent runs with"
         );
     }
 

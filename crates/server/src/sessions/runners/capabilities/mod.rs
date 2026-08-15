@@ -66,7 +66,8 @@ pub mod sub_agent;
 pub mod title;
 pub mod workflow;
 
-use super::action::{Action, AgentSpec};
+use super::action::Action;
+use super::loading::{AgentSpec, Loading};
 use super::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
 
@@ -161,7 +162,7 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
     /// Reads config only, never the folded slice: the list this runs against is
     /// built fresh for the agent being started, while the folded copy stays
     /// with the session.
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError>;
+    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError>;
 
     /// Release what `setup` acquired. Runs when the agent is unloaded.
     async fn teardown(&self) {}
@@ -246,13 +247,14 @@ impl Capabilities {
         self.0.push(Box::new(cap));
     }
 
-    /// Add a capability at the fixed-name end, ahead of everything already
-    /// here.
+    /// Equip a capability ahead of everything already here.
     ///
-    /// What a per-agent capability needs. A workflow step's `submit_result` is
-    /// added to a copy of its runner's list when the step agent starts, and
-    /// `push` would put it behind the runtime capability — which claims every
-    /// tool call it is offered, and would swallow the step's own result.
+    /// For the per-agent ones a runner adds to a copy of its list when it
+    /// starts an agent — a step's `submit_result` above all. Front rather than
+    /// back because both orders demand it: the open-namespace runtime sorts
+    /// last and would otherwise claim the call, and it is also the innermost
+    /// toolbox, which wraps nothing — so a layer pushed behind it would be
+    /// built and then dropped.
     pub fn push_front(&mut self, cap: impl Capability + 'static) {
         self.0.insert(0, Box::new(cap));
     }
@@ -303,15 +305,13 @@ impl Capabilities {
     /// starts without.
     pub async fn equip(
         &self,
+        loading: &Loading,
         settings: crate::sessions::spec::AgentSettings,
     ) -> Result<(AgentSpec, Vec<SetupError>), SetupError> {
-        let mut spec = AgentSpec {
-            settings: Some(settings),
-            ..AgentSpec::default()
-        };
+        let mut spec = AgentSpec::new(settings);
         let mut degraded = Vec::new();
         for cap in &self.0 {
-            if let Err(e) = cap.setup(&mut spec).await {
+            if let Err(e) = cap.setup(loading, &mut spec).await {
                 if e.fatal {
                     return Err(e);
                 }
@@ -372,6 +372,22 @@ pub enum CapEvent {
     StepResult(step_result::Event),
 }
 
+/// The layer a decorator wraps, or an empty one when it is the innermost.
+///
+/// Every server-owned toolbox here decorates: it answers for its own tool and
+/// delegates the rest inward. `None` reaches whichever one ended up innermost,
+/// which happens whenever a capability set has no runtime — a prompt-only
+/// agent, or a test. Wrapping [`horsie_agentcore::EmptyToolbox`] then is the
+/// honest answer: the decorator still advertises its own tool, and a call for
+/// anything else is refused by the same code path that refuses an unknown tool
+/// today.
+#[must_use]
+pub(crate) fn or_empty(
+    inner: Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>>,
+) -> std::sync::Arc<dyn horsie_agentcore::Toolbox> {
+    inner.unwrap_or_else(|| std::sync::Arc::new(horsie_agentcore::EmptyToolbox))
+}
+
 /// Parse a tool call's arguments, or answer the model with what was wrong.
 ///
 /// A capability that owns a tool name owns every call to it, including the
@@ -394,14 +410,130 @@ pub(crate) fn parse<T: serde::de::DeserializeOwned>(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub(crate) mod testing {
     use super::*;
+    use crate::sessions::addressing::{SessionInbox, SessionRef};
     use crate::sessions::runners::ids::AgentId;
+    use crate::sessions::runners::loading::{AgentSpec, Loading};
+    use crate::sessions::session_actor::AgentKey;
     use crate::sessions::spec::AgentSettings;
+    use horsie_actor::{
+        ActorContext, ActorSystem, CommandEffect, EventSourcedActor, InMemoryJournal, PersistenceId,
+    };
+    use std::sync::{Arc, Mutex, RwLock};
 
     /// The shared empty settings, re-exported so a capability test does not
     /// have to know where it lives.
     #[must_use]
     pub(crate) fn settings() -> AgentSettings {
         crate::sessions::runners::empty_settings()
+    }
+
+    /// A fresh spec over those settings — what `equip` starts every agent from.
+    #[must_use]
+    pub(crate) fn spec() -> AgentSpec {
+        AgentSpec::new(settings())
+    }
+
+    /// What a capability loads from, with nothing behind it.
+    ///
+    /// A session mailbox that answers nothing, a runtime provider that knows no
+    /// vendor, and no MCP, memory, services or plugin library. Enough for every
+    /// capability that composes a toolbox out of what it already holds; the two
+    /// that reach outward — `mcp` and `runtime` — are what the `None`s are for,
+    /// and their tests assert on how they degrade rather than pretending a
+    /// sandbox is there.
+    #[must_use]
+    pub(crate) fn loading() -> Loading {
+        let session_id = uuid::Uuid::new_v4();
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                Inert,
+            ),
+            crate::auth::UserId::bootstrap(),
+            session_id,
+            None,
+        );
+        let vendors: crate::sessions::spec::RuntimeVendorMap =
+            Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let runtimes = crate::runtime_manager::test_runtime_manager(&vendors).provider(
+            session_id.to_string(),
+            "incarnation".to_string(),
+            false,
+            "none".to_string(),
+            session_spec(),
+        );
+        Loading {
+            session,
+            session_id,
+            key: AgentKey::Main,
+            agent: AgentId::new_v4(),
+            narrate: false,
+            runtimes,
+            registry: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            mcp: None,
+            memory: None,
+            services: None,
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        }
+    }
+
+    fn session_spec() -> crate::sessions::spec::SessionSpec {
+        crate::sessions::spec::SessionSpec {
+            name: Some("test".into()),
+            kind: crate::sessions::spec::SessionKind::Agent {
+                settings: settings(),
+            },
+            workspaces: vec![crate::sessions::spec::WorkspaceDef {
+                name: "main".into(),
+            }],
+            provision: vec![],
+            vendor: "none".into(),
+            plugins: vec![],
+            origin: crate::sessions::spec::SessionOrigin::User,
+            environment: None,
+            env_vars: vec![],
+        }
+    }
+
+    /// A session mailbox that takes every command and does nothing with it.
+    /// A capability's `setup` only ever needs the address, never an answer.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl EventSourcedActor for Inert {
+        type Command = SessionInbox;
+        type Event = ();
+        type State = ();
+
+        fn persistence_id(&self) -> PersistenceId {
+            PersistenceId::new("capability-test", "inert")
+        }
+
+        fn initial_state() {}
+
+        fn apply_event((): (), (): ()) {}
+
+        async fn handle_command(
+            &mut self,
+            (): &(),
+            _cmd: SessionInbox,
+            _ctx: &mut ActorContext<SessionInbox>,
+        ) -> CommandEffect<()> {
+            CommandEffect::none()
+        }
+    }
+
+    /// The names the composed toolbox advertises, innermost first.
+    ///
+    /// What a `setup` test asserts on now that a spec holds real toolboxes
+    /// rather than a list of layer names: the question "is this tool equipped?"
+    /// is answered by asking the thing the agent will actually run with.
+    #[must_use]
+    pub(crate) fn equipped(spec: AgentSpec) -> Vec<String> {
+        spec.toolbox().map_or_else(Vec::new, |t| {
+            t.specs().into_iter().map(|s| s.name).collect()
+        })
     }
 
     #[must_use]
@@ -440,7 +572,7 @@ mod tests {
     fn a_fixed_name_capability_beats_the_fallback_behind_it() {
         let caps = caps(vec![
             Box::new(title::TitleCapability::default()),
-            Box::new(runtime::RuntimeCapability),
+            Box::new(runtime::RuntimeCapability::default()),
         ]);
         let d = caps
             .offer(
@@ -456,7 +588,7 @@ mod tests {
     #[test]
     fn the_wrong_order_lets_the_fallback_shadow_a_named_tool() {
         let caps = caps(vec![
-            Box::new(runtime::RuntimeCapability),
+            Box::new(runtime::RuntimeCapability::default()),
             Box::new(title::TitleCapability::default()),
         ]);
         let d = caps
@@ -483,16 +615,33 @@ mod tests {
 
     /// Equipping folds every capability over one spec, so what an agent can do
     /// is the sum of its runner's capabilities and nothing else.
+    ///
+    /// The runtime is fatal here — this `Loading` knows no vendor, so there is
+    /// no sandbox to acquire — which is itself the fold working: one
+    /// capability's refusal ends the equip, and the ones before it are what the
+    /// error is measured against.
     #[tokio::test]
     async fn equipping_folds_every_capability() {
-        let caps = caps(vec![
+        let with_runtime = caps(vec![
             Box::new(title::TitleCapability::default()),
-            Box::new(runtime::RuntimeCapability),
+            Box::new(runtime::RuntimeCapability::default()),
         ]);
-        let (spec, degraded) = caps.equip(settings()).await.expect("nothing fatal");
+        let failed = with_runtime
+            .equip(&loading(), settings())
+            .await
+            .expect_err("no vendor, so no sandbox");
+        assert_eq!(failed.capability, "runtime");
+        assert!(failed.fatal, "an agent with no sandbox can do nothing");
+
+        // And without the one that cannot be satisfied, the fold produces a
+        // toolbox holding exactly what the capabilities before it equipped.
+        let title_only = caps(vec![Box::new(title::TitleCapability::default())]);
+        let (spec, degraded) = title_only
+            .equip(&loading(), settings())
+            .await
+            .expect("nothing fatal");
         assert!(degraded.is_empty());
-        assert!(spec.has(&crate::sessions::runners::action::ToolLayer::SessionTitle));
-        assert!(spec.has(&crate::sessions::runners::action::ToolLayer::Runtime));
+        assert_eq!(equipped(spec), vec!["set_session_title"]);
     }
 
     /// A capability's name is what its events are routed by and what a test
@@ -501,7 +650,7 @@ mod tests {
     #[test]
     fn the_capability_names_are_pinned() {
         let all: Vec<Box<dyn Capability>> = vec![
-            Box::new(runtime::RuntimeCapability),
+            Box::new(runtime::RuntimeCapability::default()),
             Box::new(mcp::McpCapability::new(vec!["s".into()])),
             Box::new(memory::MemoryCapability::new(vec!["m".into()])),
             Box::new(control_plane::ControlPlaneCapability),

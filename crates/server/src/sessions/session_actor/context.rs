@@ -7,36 +7,42 @@
 //! hibernate and resume without knowing either happened.
 //!
 //! One type serves all three kinds of agent a session hosts — main, subagent
-//! and workflow step — because they differ only in which layers they get.
-//! [`SessionAgentKind`] is what decides: the session-metadata tools are
-//! main-only, `submit_result` is step-only, and preparation progress is broadcast
-//! for everything except a subagent, which is quiet by design.
+//! and workflow step — because they differ only in what they are equipped with.
+//! What that is, this file no longer decides: [`SessionContextProvider::provide`]
+//! hands a [`Loading`] to the agent's [`Capabilities`] and returns what they
+//! filled in. [`SessionAgentKind`] survives only as the bridge to
+//! [`assemble`]'s vocabulary, and the next change deletes it.
 
-use super::CoreCommand;
-use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
-use crate::agent_loop::{
-    AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
-    StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
-};
-use crate::sessions::addressing::SessionRef;
+use super::{AgentKey, CoreCommand, SessionCommand};
 use crate::{
-    runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
+    agent_loop::{
+        ContextError, ContextProvider, Contexts, StartTurn, TurnPreparation, compose_system_prompt,
+    },
+    runtime_manager::{NARRATION_BUFFER, RuntimeError},
     sessions::{
-        ask_tool::AskUserToolbox, spawn_tool::SubAgentToolbox, spec::AgentSettings,
-        subagents::SubAgentParent, title_tool::SessionTitleToolbox,
+        addressing::SessionRef,
+        runners::{
+            Assembly, RunnerId, RunnerKind, assemble,
+            capabilities::{
+                Capabilities, SetupError, ask_user::AskUserCapability, runtime::GONE_PREFIX,
+                step_result::StepResultCapability,
+            },
+            loading::{AgentSpec, Loading},
+        },
+        spec::AgentSettings,
     },
 };
 use async_trait::async_trait;
-use horsie_agentcore::{LlmProvider, Toolbox};
+use horsie_agentcore::LlmProvider;
 use horsie_models::{
     hooks::HookRecord,
     runtime::{
-        McpServerFailure, ServerHookEvent, SessionStartInput, SubagentStartInput,
-        UserPromptExpansionInput, UserPromptSubmitInput,
+        ServerHookEvent, SessionStartInput, SubagentStartInput, UserPromptExpansionInput,
+        UserPromptSubmitInput,
     },
 };
 use horsie_runtime_host::RuntimeClient;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Report turn-preparation progress into an agent's log.
@@ -49,7 +55,12 @@ use uuid::Uuid;
 /// Routed through the session's mailbox rather than straight at the agent, so
 /// a caller needs only the session handle it already holds and the entry is
 /// ordered against whatever else the session is doing.
-async fn emit_progress(session: &SessionRef, key: AgentKey, stage: &str, detail: Option<String>) {
+pub(crate) async fn emit_progress(
+    session: &SessionRef,
+    key: AgentKey,
+    stage: &str,
+    detail: Option<String>,
+) {
     let _ = session
         .tell(SessionCommand::Core(CoreCommand::Progress {
             key,
@@ -88,40 +99,6 @@ fn narration_pump(
 /// The baseline system prompt given to every session agent.
 const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
 
-/// The interactive session's `AgentRunDef`.
-pub(super) fn session_run_def(settings: &AgentSettings) -> AgentRunDef {
-    AgentRunDef {
-        system_prompt: None,
-        max_iterations: settings.max_iterations,
-        max_retries: Some(settings.max_retries),
-        allowed_tools: settings.allowed_tools.clone(),
-    }
-}
-
-/// Wrap `base` with the memory tools and render the memory index.
-async fn build_memory_layer(
-    base: Arc<dyn Toolbox>,
-    memory: Option<Arc<crate::memory::MemoryService>>,
-    settings: &AgentSettings,
-) -> Result<(Arc<dyn Toolbox>, String), String> {
-    let spaces = &settings.memory_spaces;
-    if spaces.is_empty() {
-        return Ok((base, String::new()));
-    }
-    let Some(service) = memory else {
-        tracing::warn!("session names memory spaces but no memory service is configured; ignoring");
-        return Ok((base, String::new()));
-    };
-    let rows = service.memories_in(spaces).await?;
-    let index = crate::memory::render_index(&rows, spaces);
-    let toolbox: Arc<dyn Toolbox> = Arc::new(crate::memory::MemoryToolbox::new(
-        base,
-        service,
-        spaces.clone(),
-    ));
-    Ok((toolbox, index))
-}
-
 /// What a workflow step promises to return, carried to the toolbox that builds
 /// its `submit_result` tool. Default (empty outcomes, no fields, not
 /// interactive) for every agent that is not a step; those never get the layer.
@@ -132,45 +109,14 @@ pub(crate) struct StepResultDef {
     pub(crate) interactive: bool,
 }
 
-/// Wrap `base` with the control-plane tools, and render the command index for
-/// the system prompt.
+/// Which of a session's agents a [`SessionContextProvider`] serves.
 ///
-/// Main-agent only. A subagent, a workflow step and a fork all inherit the
-/// session's settings, but authority over the server is not a setting they
-/// should carry — the same rule that keeps session-metadata tools off them.
-fn build_control_layer(
-    base: Arc<dyn Toolbox>,
-    services: Option<&Arc<crate::users::UserServices>>,
-    settings: &AgentSettings,
-    kind: SessionAgentKind,
-) -> (Arc<dyn Toolbox>, String) {
-    if !matches!(kind, SessionAgentKind::Main) || settings.control_plane != Some(true) {
-        return (base, String::new());
-    }
-    let Some(services) = services else {
-        tracing::warn!("session asks for the control plane but no services are wired; ignoring");
-        return (base, String::new());
-    };
-    let toolbox = crate::control::toolbox::ControlToolbox::new(
-        base,
-        services.clone(),
-        crate::control::operations(),
-    );
-    let index = format!(
-        "## Managing this horsie server\n\n\
-         You can manage this server through the `horsie_*` tools: {}\n\n\
-         Call a resource's tool with an `action`. Changes take effect \
-         immediately and are not confirmed with the user first, so read before \
-         you write when you are unsure which row you mean.",
-        toolbox.command_index()
-    );
-    (Arc::new(toolbox), index)
-}
-
-/// Which of a session's agents a [`SessionContextProvider`] serves. The kind
-/// decides the toolbox layers (session-metadata tools are main-only) and
-/// whether preparation progress is broadcast (main-only — subagents are
-/// quiet).
+/// It no longer decides what the agent is equipped with — the capability list
+/// does — so what is left is addressing: the key the session registers this
+/// agent under, the id it journals under, and whether it narrates its own
+/// setup. Temporary, and deliberately so: it duplicates
+/// [`RunnerKind`](crate::sessions::runners::RunnerKind) plus an id, and the
+/// change that gives the session real runners deletes it.
 #[derive(Clone, Copy)]
 pub(super) enum SessionAgentKind {
     Main,
@@ -199,6 +145,59 @@ impl SessionAgentKind {
     fn broadcasts(&self) -> bool {
         matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
     }
+
+    /// The same agent in the runners' vocabulary.
+    ///
+    /// The main agent journals under the session's own id — its transcript
+    /// *is* the session's — so that is the id it is known by here too.
+    fn agent_id(&self, session_id: Uuid) -> crate::sessions::runners::AgentId {
+        crate::sessions::runners::AgentId(match self {
+            Self::Main => session_id,
+            Self::Sub(id) | Self::Step(id) | Self::Fork(id) => *id,
+        })
+    }
+}
+
+/// The session's half of a load, for one of its agents.
+///
+/// Here rather than at each construction site because every field but the kind
+/// is the session's own, and the three the kind decides — the key, the id, and
+/// whether it narrates — must not be able to disagree with the provider's.
+pub(super) fn loading_for(
+    kind: SessionAgentKind,
+    session: SessionRef,
+    session_id: Uuid,
+    deps: LoadingDeps,
+) -> Loading {
+    Loading {
+        session,
+        session_id,
+        key: kind.agent_key(),
+        agent: kind.agent_id(session_id),
+        narrate: kind.broadcasts(),
+        runtimes: deps.runtimes,
+        registry: deps.registry,
+        mcp: deps.mcp,
+        memory: deps.memory,
+        services: deps.services,
+        plugin_library: deps.plugin_library,
+        last_client: std::sync::Mutex::new(None),
+    }
+}
+
+/// What [`loading_for`] needs that the kind does not decide: the session's
+/// services, exactly as the session holds them.
+pub(super) struct LoadingDeps {
+    pub(super) runtimes: crate::runtime_manager::RuntimeClientProvider,
+    pub(super) registry: crate::sessions::spec::SharedProviderRegistry,
+    pub(super) mcp: Option<Arc<crate::mcp::McpService>>,
+    pub(super) memory: Option<Arc<crate::memory::MemoryService>>,
+    /// The account's whole service bundle, for the control-plane tools — which
+    /// reach agents, routines and environments alike, so unlike `memory` there
+    /// is no single service to hold. `None` wherever the control plane is not
+    /// wired, which is every test that does not exercise it.
+    pub(super) services: Option<Arc<crate::users::UserServices>>,
+    pub(super) plugin_library: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
 }
 
 /// The runtime client an agent runs with. Subagents share the session's
@@ -216,80 +215,37 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
     }
 }
 
-/// Appended to a subagent's system prompt: its place in the tree and how its
-/// result travels. Deliberately short — the tools carry their own docs.
-const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
-You are a subagent, spawned to work on one task. Your final message is your report: \
-it is automatically delivered to the agent that spawned you — make it self-contained. You \
-may spawn your own subagents with spawn_agent. Continue with independent work, or wait if \
-none remains; do not poll subagent_status or call it repeatedly. Use subagent_status only \
-when the user requests a progress update or to diagnose a suspected runtime or \
-result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
-report that instead.";
-
-/// Appended to a workflow step's system prompt: what a step is, how it ends,
-/// and that its result is what decides where the run goes next. Deliberately
-/// short — `submit_result` carries its own schema.
-///
-/// The paragraph about ending a turn earns its length. A step ends when it
-/// calls `submit_result`, but a turn may legitimately end without one — parked
-/// on a question, on a timer, or waiting for subagents — and a model that does
-/// not know the difference either submits early to be safe or stops with
-/// nothing to wake it.
-const STEP_PROMPT_SUFFIX: &str = "\n\n# Workflow step\n\
-You are one step of a workflow, not a conversation. Your instruction and the previous \
-step's result are in the message above. You share one workspace with every other step: \
-what you change on disk is what the next step sees. You may spawn subagents with \
-spawn_agent. You cannot rename the session.\n\n\
-Finish by calling `submit_result`. What you submit is this step's result *and* what the \
-workflow reads to decide which step runs next, so make it accurate and self-contained. \
-Ending a turn without it is only safe while something will wake you — a question you \
-asked, a timer you armed, or a subagent still running. If nothing will, and the work is \
-done, submit.";
-
-/// Appended to a fork's system prompt.
-///
-/// A fork is a conversation, so almost nothing a subagent is told applies: it
-/// can ask the user, and it owes nobody a report. What it does need is to know
-/// it is one of several under one session sharing one workspace, and that its
-/// title is how a person tells them apart.
-const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked conversation\n\
-You are a fork: a conversation branched from another one in this session, carrying its \
-history up to the branch point. You share one workspace with it — what you change on disk \
-is what it sees. Name yourself with set_session_title as soon as the new direction is \
-clear; that title is how a person tells this conversation from the one it came from.";
-
-/// Appended to an unattended session's system prompt (a routine run). It has
-/// no `ask_user` tool, so the prompt says why rather than leaving the model to
-/// discover a tool it was told about is missing.
-const UNATTENDED_PROMPT_SUFFIX: &str = "\n\n# Unattended run\n\
-This session was started by a routine, not by a person, and nobody is reading it while \
-it runs. There is no ask_user tool: a question would park the run with nobody to answer \
-it. Work from the instructions you were given — where they leave a choice open, make the \
-reasonable one, say which you made and why, and carry on. Your final message is the \
-report; make it self-contained.";
+// The four role suffixes are gone from this file. Each one now belongs to the
+// capability that grants the arms the role has — `ask_user` says why there is
+// no `ask_user`, `title` says what a fork's own name is for — so a tool and the
+// paragraph explaining it are one edit in one place. `STEP_PROMPT_SUFFIX` goes
+// to `step_result`, `SUBAGENT_PROMPT_SUFFIX` to `runtime`, which is the only
+// capability that sees the plugin agent definition its typed variant composes
+// with.
 
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
-/// It asks the [`RuntimeClientProvider`] for a client each run rather than
-/// holding one: that is what lets the agent be resident across a hibernate and
-/// resume without knowing either happened.
+/// It asks the [`RuntimeClientProvider`](crate::runtime_manager::RuntimeClientProvider)
+/// for a client each run rather than holding one: that is what lets the agent
+/// be resident across a hibernate and resume without knowing either happened.
+///
+/// Two halves, and the split is [`Loading`]'s: everything the *session* brings
+/// to a load lives in `loading`, and what is left here is this one agent's
+/// config. The capability list reads the first; the second is only what still
+/// has to be translated into a capability list at all.
 pub(super) struct SessionContextProvider {
-    pub(super) runtimes: RuntimeClientProvider,
-    pub(super) registry: crate::sessions::spec::SharedProviderRegistry,
-    pub(super) mcp: Option<Arc<crate::mcp::McpService>>,
-    pub(super) memory: Option<Arc<crate::memory::MemoryService>>,
-    /// The account's whole service bundle, for the control-plane tools — which
-    /// reach agents, routines and environments alike, so unlike `memory` there
-    /// is no single service to hold. `None` wherever the control plane is not
-    /// wired, which is every test that does not exercise it.
-    pub(super) services: Option<Arc<crate::users::UserServices>>,
+    /// The session's services, its address, and the client cache.
+    ///
+    /// Built once when the agent is spawned rather than per `provide()`,
+    /// because the cache has to outlive a single turn: `Stop` hooks and
+    /// [`SessionActor::cancel_agent`](super::SessionActor) both read the handle
+    /// the last load acquired.
+    pub(super) loading: Loading,
     pub(super) settings: AgentSettings,
     /// What a workflow step promises to return, and whether it may ask. Empty
     /// and false for every other kind of agent, which never gets the
-    /// `submit_result` layer at all.
+    /// `submit_result` capability at all.
     pub(super) step_result: StepResultDef,
-    pub(super) session_id: Uuid,
     pub(super) kind: SessionAgentKind,
     /// The plugin-declared agent type this agent runs as, for a subagent that
     /// was spawned with one. The *name* only — the definition is resolved from
@@ -299,36 +255,22 @@ pub(super) struct SessionContextProvider {
     /// Whether nobody is watching this session (a routine run). Decides one
     /// thing: the main agent gets no `ask_user`, and is told why.
     pub(super) unattended: bool,
-    /// The owning session's mailbox — routes the server-owned tools.
-    pub(super) session: SessionRef,
-    /// The plugin bundles this session selected, and the library that can say
-    /// what they offer. Together they answer "is `/commit` a command?" from the
-    /// database, with no runtime involved — which is what lets a prompt merely
-    /// *starting* with a slash cost nothing.
+    /// The plugin bundles this session selected. With the library in
+    /// [`Loading`] they answer "is `/commit` a command?" from the database,
+    /// with no runtime involved — which is what lets a prompt merely *starting*
+    /// with a slash cost nothing.
     pub(super) plugins: Vec<String>,
-    pub(super) plugin_library: Option<Arc<dyn crate::plugins::PluginProvisioner>>,
-    /// The client the most recent `provide()` resolved. Cheap to keep — cloning
-    /// shares the same in-flight-call tracking — and it is what lets
-    /// [`SessionActor::cancel_run`](super::SessionActor) cancel without a fresh vendor round-trip.
-    pub(super) last_client: Mutex<Option<RuntimeClient>>,
 }
 
 impl SessionContextProvider {
-    /// The provider for one named model, or `None` when horsie has none.
+    /// The session's own model's provider.
     ///
-    /// Separate from [`Self::llm_provider`] because a missing model means two
-    /// different things: the session's own model is a failure, while a
-    /// plugin agent's is a declaration horsie cannot honour and inherits past.
-    fn provider_for(&self, model: &str) -> Option<Arc<dyn LlmProvider>> {
-        self.registry
-            .read()
-            .ok()?
-            .get(model)
-            .map(|e| e.provider.clone())
-    }
-
+    /// The fallback, not the answer: a capability may have picked one — a
+    /// plugin agent definition can declare a model — and this is what the agent
+    /// runs on when none did.
     fn llm_provider(&self) -> Result<Arc<dyn LlmProvider>, String> {
         let reg = self
+            .loading
             .registry
             .read()
             .map_err(|_| "provider registry lock poisoned".to_string())?;
@@ -337,25 +279,9 @@ impl SessionContextProvider {
             .ok_or_else(|| format!("no provider registered for model '{}'", self.settings.model))
     }
 
-    /// This session's model's context window, when its card declares one.
-    ///
-    /// Absent for a model horsie has no provider for at all, which is a failure
-    /// `llm_provider` reports first — so a `None` here always means "the card
-    /// says nothing", never "the model is missing".
-    fn context_window(&self) -> Option<u32> {
-        self.registry
-            .read()
-            .ok()?
-            .get(&self.settings.model)?
-            .context_window
-    }
-
     /// The client the run currently in flight already acquired, if any.
     pub(super) fn cached_client(&self) -> Option<RuntimeClient> {
-        self.last_client
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.loading.cached_client()
     }
 
     /// Whether this agent loads the shared plugin library — and so whether any
@@ -389,11 +315,11 @@ impl SessionContextProvider {
         if names.is_empty() {
             // Nothing selected falls back to the account's default-enabled set,
             // exactly as session-wide provisioning did.
-            if let Some(library) = &self.plugin_library {
+            if let Some(library) = &self.loading.plugin_library {
                 names = library.default_names().await;
             }
         }
-        let bundles = match &self.plugin_library {
+        let bundles = match &self.loading.plugin_library {
             Some(library) if !names.is_empty() => library
                 .resolve(&names)
                 .await
@@ -424,11 +350,11 @@ impl SessionContextProvider {
         // then on its sink — so those words are carried into this agent's log
         // as they arrive rather than summarised once it is over.
         let (narrate, task) = self
-            .kind
-            .broadcasts()
-            .then(|| narration_pump(&self.session, self.kind.agent_key()))
+            .loading
+            .narrate
+            .then(|| narration_pump(&self.loading.session, self.loading.key))
             .unzip();
-        let acquired = self.runtimes.get(narrate).await;
+        let acquired = self.loading.runtimes.get(narrate).await;
         // Joined rather than detached. The acquisition dropped the sender on
         // its way out, so this ends immediately — and waiting for it is what
         // keeps every line of narration ordered before whatever stage the
@@ -472,7 +398,7 @@ impl SessionContextProvider {
         if !self.use_plugins() {
             return (None, Vec::new());
         }
-        let Some(library) = &self.plugin_library else {
+        let Some(library) = &self.loading.plugin_library else {
             return (None, Vec::new());
         };
         // Cheapest test first: neither sigil, nothing to look up.
@@ -549,6 +475,112 @@ impl SessionContextProvider {
         self.agent_type
             .clone()
             .unwrap_or_else(|| "subagent".to_string())
+    }
+
+    /// What this agent is equipped with.
+    ///
+    /// The bridge from the session's vocabulary to the runners', and nothing
+    /// else — deliberately temporary. Once a session hosts real runners, the
+    /// runner that owns this agent holds its capability list and hands it over,
+    /// [`SessionAgentKind`] is gone, and so is this method. Until then it is
+    /// the one place a kind still decides anything, and it decides it by
+    /// calling [`assemble`] rather than by listing tools.
+    fn equipment(&self) -> Capabilities {
+        let opts = Assembly {
+            settings: &self.settings,
+            unattended: self.unattended,
+            fork: match self.kind {
+                SessionAgentKind::Fork(id) => Some(RunnerId(id)),
+                SessionAgentKind::Main | SessionAgentKind::Sub(_) | SessionAgentKind::Step(_) => {
+                    None
+                }
+            },
+            agent_type: self.agent_type.clone(),
+        };
+        match self.kind {
+            // A fork is a conversation. Its own runner, not its own kind of
+            // equipment: `Assembly::fork` is the whole difference, and it names
+            // which conversation `set_session_title` renames.
+            SessionAgentKind::Main | SessionAgentKind::Fork(_) => {
+                assemble(RunnerKind::Conversation, &opts)
+            }
+            SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
+            // A step's result schema and whether it may ask are declared per
+            // step, so the workflow runner cannot hold either — the run
+            // outlives every step and could only describe one of them. They
+            // are equipped when the step agent starts, which is here.
+            SessionAgentKind::Step(_) => {
+                let mut caps = assemble(RunnerKind::Workflow, &opts);
+                // Front, not back: the list ends with the capability that
+                // claims every call offered to it, so an appended
+                // `submit_result` would be swallowed by the sandbox.
+                caps.push_front(StepResultCapability::new(
+                    self.step_result.outcomes.clone(),
+                    self.step_result.fields.clone(),
+                    self.step_result.interactive,
+                ));
+                // Equipped either way: a step that may not ask still needs
+                // somebody to answer for `ask_user`, or the call falls through
+                // to the sandbox and the model is never told no.
+                //
+                // Which mute matters, because the model is told which. A step
+                // that did not declare itself interactive is not the same fact
+                // as nobody being there — usually somebody is — and telling an
+                // attended run it was started by a routine is simply false.
+                caps.push_front(match (self.step_result.interactive, self.unattended) {
+                    (true, false) => AskUserCapability::new(),
+                    // Interactive, but a routine started the run: a question
+                    // here would park it on an answer nobody will read.
+                    (true, true) => AskUserCapability::unattended(),
+                    (false, _) => AskUserCapability::not_interactive(),
+                });
+                caps
+            }
+        }
+    }
+
+    /// Why the turn cannot be prepared.
+    ///
+    /// Retryable unless the runtime is *gone*, which is the one failure a
+    /// session can never retry: the vendor is alive and says the sandbox does
+    /// not exist. A vendor that is merely offline says nothing about that, so
+    /// it is a wait rather than an ending.
+    ///
+    /// The test is on the reason's text, because [`SetupError`] has one axis —
+    /// `fatal` — and it does not separate "wait" from "this session is over".
+    /// [`GONE_PREFIX`] is the second axis, written once by the capability that
+    /// knows and read once here.
+    fn fatal(e: SetupError) -> ContextError {
+        match e.reason.strip_prefix(GONE_PREFIX) {
+            Some(what) => ContextError::terminal(what),
+            None => ContextError::retryable(e.to_string()),
+        }
+    }
+
+    /// The agent's system prompt: the base, then what each capability said.
+    ///
+    /// The sections arrive in setup order, which is the order tool calls are
+    /// offered in — so the paragraph about a tool and the tool itself cannot
+    /// end up in different places.
+    fn compose_prompt(&self, spec: &AgentSpec) -> Option<String> {
+        let base = compose_system_prompt(
+            Some(SESSION_AGENT_PROMPT),
+            &spec.facts.workspace,
+            spec.facts.shared.as_deref(),
+            self.settings.instructions.as_deref(),
+        );
+        let sections: Vec<&str> = spec
+            .prompt
+            .iter()
+            .map(|s| s.body.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        match (base, sections.is_empty()) {
+            (Some(base), true) => Some(base),
+            (Some(base), false) => Some(format!("{base}\n\n{}", sections.join("\n\n"))),
+            (None, false) => Some(sections.join("\n\n")),
+            (None, true) => None,
+        }
     }
 }
 
@@ -643,342 +675,57 @@ impl ContextProvider for SessionContextProvider {
         Ok(TurnPreparation { records, message })
     }
 
+    /// Everything the run needs, from the agent's capability list.
+    ///
+    /// There is no match on the kind here, and that absence is the point. This
+    /// method used to carry two tables — one choosing toolbox layers, one
+    /// choosing a prompt suffix — that had to be edited together and were
+    /// nowhere near each other. A capability now contributes both, so a tool
+    /// and the paragraph that explains it are one edit in one file.
     async fn provide(&self) -> Result<Contexts, ContextError> {
-        let settings = &self.settings;
-        let mut def = session_run_def(settings);
-        let use_plugins = settings.use_plugins.unwrap_or(true);
-        // Preparation progress is main-only: subagents are quiet by design.
-        let broadcast = self.kind.broadcasts();
-
-        if broadcast {
-            emit_progress(
-                &self.session,
-                self.kind.agent_key(),
-                "acquiring_runtime",
-                None,
-            )
-            .await;
+        let (spec, degraded) = self
+            .equipment()
+            .equip(&self.loading, self.settings.clone())
+            .await
+            .map_err(Self::fatal)?;
+        // Not fatal, by the failing capability's own judgement: an MCP server
+        // that will not connect costs the agent some tools and not its turn.
+        // Logged rather than swallowed, because "the agent started without
+        // them" is exactly the thing nobody notices otherwise.
+        for e in degraded {
+            tracing::warn!(
+                session = %self.loading.session_id,
+                capability = e.capability,
+                reason = %e.reason,
+                "the agent starts without this capability's tools"
+            );
         }
-        let runtime_client = self.runtime_client().await?;
-        // Hooks run runtime-side and report what they did on the tool response.
-        // Routing those records here is what makes a plugin's interventions
-        // visible to the user rather than silent.
-        let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink::new(
-            self.session.clone(),
-            self.kind.agent_key(),
-        )));
-        // Cached *after* the sink is attached, not before: `Stop` runs its hooks
-        // through this handle once the turn is over, and a sink-less clone would
-        // run them and drop every record on the floor. Cancellation is
-        // unaffected — in-flight tracking is shared across clones.
-        *self
-            .last_client
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
-
-        // Before anything reads this agent's plugins — the hooks its bundles
-        // declare, the skills the scan finds, the MCP servers discovery starts.
-        // Sent on every load rather than once: the runtime is the only party
-        // that knows what is already on its disk, and it absorbs the repeat.
-        self.provision_agent(&runtime_client).await?;
-
-        if broadcast {
-            emit_progress(
-                &self.session,
-                self.kind.agent_key(),
-                "scanning_workspace",
-                None,
-            )
-            .await;
-        }
-        let (ws, shared_scan) = scan_workspace(&runtime_client, None).await;
-        // No `SessionStart` here any more. It used to fire on this line, once
-        // per *run* — `provide` is per-run — so every turn re-ran every start
-        // hook, always reporting `source: "startup"`. It now fires once per
-        // agent load at `start_hooks`, early enough for its context to reach the
-        // turn that triggered it.
-        let shared = use_plugins.then(|| SharedContext {
-            skills: Arc::new(shared_scan.skills),
-            agents: Arc::new(shared_scan.agents),
-            root: shared_scan.root,
-        });
-        // Resolved here rather than carried from the spawn: the definition is a
-        // property of the library as it is *now*, so an agent whose plugin was
-        // uninstalled between spawn and wake fails loudly.
-        let plugin_agent = match (&self.agent_type, shared.as_ref()) {
-            (None, _) => None,
-            (Some(name), Some(shared)) => Some(shared.agents.get(name).cloned().ok_or_else(|| {
-                ContextError::retryable(format!(
-                    "this subagent runs as agent type '{name}', which no installed plugin declares"
-                ))
-            })?),
-            (Some(name), None) => {
-                return Err(ContextError::retryable(format!(
-                    "this subagent runs as agent type '{name}', but the session loads no plugins"
-                )));
-            }
-        };
-        if let Some(agent) = &plugin_agent
-            && !agent.def.tools.is_empty()
-        {
-            // The declared allowlist is in Claude's vocabulary; horsie's filter
-            // is in horsie's. Same table the hook matchers use, read backwards.
-            let allowed: Vec<String> = agent
-                .def
-                .tools
-                .iter()
-                .flat_map(|t| horsie_support::plugin::hooks::horsie_tools_for(t))
-                .map(str::to_string)
-                .collect();
-            if allowed.is_empty() {
-                tracing::warn!(
-                    agent = %agent.def.name,
-                    declared = ?agent.def.tools,
-                    "agent's tool allowlist names no tool horsie has; it will run with none"
-                );
-            }
-            // Intersected with the session's own allowlist, never substituted
-            // for it. An agent definition is a file inside a plugin: it may say
-            // which of the tools this session already grants it wants, and must
-            // not be able to grant itself one the session withheld.
-            def.allowed_tools = Some(match &def.allowed_tools {
-                None => allowed,
-                Some(session) => allowed
-                    .into_iter()
-                    .filter(|t| session.contains(t))
-                    .collect(),
-            });
-        }
-        // A declared `model` is honoured only when horsie actually has it.
-        // Every model declared in the wild is an alias (`inherit`, `sonnet`,
-        // `opus`), and mapping those onto whatever the catalogue holds would let
-        // a plugin author switch a kimi session to Anthropic by writing a word
-        // in a file.
-        let provider = match plugin_agent.as_ref().and_then(|a| a.def.model.as_deref()) {
-            Some(model) => match self.provider_for(model) {
-                Some(provider) => provider,
-                None => {
-                    tracing::info!(
-                        model,
-                        "agent declares a model horsie has no provider for; inheriting the session's"
-                    );
-                    self.llm_provider()?
-                }
-            },
+        // The session's own model unless a capability picked one — only a
+        // plugin agent definition can, and only when horsie has it.
+        let provider = match &spec.provider {
+            Some(provider) => provider.clone(),
             None => self.llm_provider()?,
         };
-        // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
-        // same pass as the workspace scan and only when this agent loads the
-        // library at all — a session with no plugins asks for nothing.
-        let mut mcp: crate::agent_loop::McpToolboxes = if settings.mcp_servers.is_empty() {
-            crate::agent_loop::McpToolboxes::default()
-        } else if let Some(mcp_svc) = self.mcp.as_ref() {
-            if broadcast {
-                emit_progress(
-                    &self.session,
-                    self.kind.agent_key(),
-                    "connecting_tools",
-                    None,
-                )
-                .await;
-            }
-            mcp_svc
-                .toolboxes_for(&settings.mcp_servers)
-                .await
-                .map_err(|e| format!("build MCP toolboxes: {e}"))?
-        } else {
-            tracing::warn!(
-                session = %self.session_id,
-                "session names MCP servers but no MCP service is configured; ignoring"
-            );
-            crate::agent_loop::McpToolboxes::default()
-        };
-        // Plugin-declared MCP servers, hosted by the runtime. Discovered on the
-        // same pass as the workspace scan and only when this agent loads the
-        // library at all — a session with no plugins asks for nothing.
-        //
-        // Appended *after* the admin boxes: `CompositeToolbox` routes to the
-        // first box advertising a name, and a plugin declaring a server the
-        // user already configured must not capture those calls, arguments and
-        // all.
-        if use_plugins {
-            match runtime_client.mcp_discover().await {
-                Ok(discovery) => {
-                    for failure in &discovery.failures {
-                        match failure {
-                            McpServerFailure::Unreachable(f) => {
-                                tracing::warn!(
-                                    session = %self.session_id,
-                                    server = %f.server,
-                                    reason = %f.reason,
-                                    "a plugin MCP server is unavailable; its tools are absent"
-                                );
-                                mcp.unavailable.push(
-                                    crate::agent_loop::McpUnavailable::Unreachable {
-                                        server: f.server.clone(),
-                                        reason: f.reason.clone(),
-                                    },
-                                );
-                            }
-                            McpServerFailure::NeedsAuth(f) => {
-                                tracing::info!(
-                                    session = %self.session_id,
-                                    server = %f.server,
-                                    "a plugin MCP server needs authorisation; its tools are absent"
-                                );
-                                mcp.unavailable.push(
-                                    crate::agent_loop::McpUnavailable::NeedsAuth {
-                                        server: f.server.clone(),
-                                    },
-                                );
-                            }
-                        }
-                    }
-                    if !discovery.tools.is_empty() {
-                        mcp.boxes
-                            .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
-                                runtime_client.clone(),
-                                discovery.tools,
-                            )));
-                    }
-                }
-                // Never fatal: a plugin bringing a broken server must not stop a
-                // session that merely happens to load it.
-                Err(e) => tracing::warn!(
-                    session = %self.session_id,
-                    error = %e,
-                    "plugin MCP discovery failed; continuing without those tools"
-                ),
-            }
-        }
-        let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
-            &def,
-            runtime_client.clone(),
-            ws.names(),
-            use_plugins,
-            mcp,
-        );
-        let (with_memory, memory_index) =
-            build_memory_layer(base, self.memory.clone(), settings).await?;
-        let (with_memory, control_index) =
-            build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
-        let caller = match self.kind {
-            // A step roots its own tree, so its spawns are that tree's `Main`.
-            // A fork roots its own tree too, for the same reason a step does.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                SubAgentParent::Main
-            }
-            SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
-        };
-        // A zero cap disables subagents outright: no tools advertised, so the
-        // model never meets a tool that only ever rejects.
-        let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
-            with_memory
-        } else {
-            Arc::new(SubAgentToolbox::new(
-                with_memory,
-                self.session.clone(),
-                caller,
-                shared
-                    .as_ref()
-                    .map(|s| Arc::clone(&s.agents))
-                    .unwrap_or_default(),
-            ))
-        };
-        let toolbox: Arc<dyn Toolbox> = match self.kind {
-            // An unattended session skips the ask layer entirely rather than
-            // offering a tool whose answer would never come.
-            SessionAgentKind::Main if self.unattended => {
-                Arc::new(SessionTitleToolbox::new(with_spawn, self.session.clone()))
-            }
-            SessionAgentKind::Main => {
-                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
-            }
-            // A step gets `submit_result` instead of the title layer — its
-            // title belongs to the run rather than to one step — and `ask_user`
-            // only when the definition says it is interactive and somebody is
-            // there to answer.
-            SessionAgentKind::Step(_) => {
-                let result = crate::sessions::workflow::StepResultToolbox::wrap(
-                    with_spawn,
-                    self.step_result.outcomes.clone(),
-                    self.step_result.fields.clone(),
-                );
-                if self.step_result.interactive && !self.unattended {
-                    Arc::new(AskUserToolbox::new(result))
-                } else {
-                    result
-                }
-            }
-            // A fork takes the main agent's arms: it is a conversation, so
-            // it can ask the user — and it names *itself*, not the session.
-            SessionAgentKind::Fork(id) => {
-                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::for_fork(
-                    inner,
-                    self.session.clone(),
-                    id,
-                ))
-            }
-            SessionAgentKind::Sub(_) => with_spawn,
-        };
-        let system_prompt = compose_system_prompt(
-            Some(SESSION_AGENT_PROMPT),
-            &ws,
-            shared.as_ref(),
-            settings.instructions.as_deref(),
-        );
-        // A typed subagent's own section follows the generic one, it does not
-        // replace it: `SUBAGENT_PROMPT_SUFFIX` is the only place an agent is
-        // told its final message is its report and that it cannot ask the user,
-        // and no definition in the wild says either — they open "you are an
-        // expert code reviewer" and stop. The workspace and skill sections
-        // around both are untouched: a named agent still works in the same
-        // workspace, with the same skills.
-        let subagent_role = plugin_agent.as_ref().map(|a| {
-            format!(
-                "{SUBAGENT_PROMPT_SUFFIX}\n\n# Agent type: {}\n\n{}\n",
-                a.def.name, a.def.prompt
+        // Taken as the capability left it, never re-derived: `auto_compact:
+        // false` is expressed as `None`, so a fallback here would hand the
+        // window back to a session that turned compaction off.
+        let context_window = spec.context_window;
+        let system_prompt = self.compose_prompt(&spec);
+        // Last, because it consumes the spec: the layers each capability pushed
+        // are folded here, innermost last.
+        let toolbox = spec.toolbox().ok_or_else(|| {
+            ContextError::retryable(
+                "this agent was equipped with no tools at all, not even the sandbox",
             )
-        });
-        let suffix: Option<&str> = match &self.kind {
-            SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
-            SessionAgentKind::Main => None,
-            SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
-            SessionAgentKind::Fork(_) => Some(FORK_PROMPT_SUFFIX),
-            SessionAgentKind::Sub(_) => {
-                Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
-            }
-        };
-        let system_prompt = match suffix {
-            None => system_prompt,
-            Some(suffix) => Some(match system_prompt {
-                Some(p) => format!("{p}{suffix}"),
-                None => suffix.trim_start().to_string(),
-            }),
-        };
-        let sections: Vec<String> = [memory_index, control_index]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect();
-        let system_prompt = match (system_prompt, sections.is_empty()) {
-            (Some(p), false) => Some(format!("{p}\n\n{}", sections.join("\n\n"))),
-            (Some(p), true) => Some(p),
-            (None, false) => Some(sections.join("\n\n")),
-            (None, true) => None,
-        };
-        if broadcast {
-            emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
-        }
+        })?;
+        // The only stage this method still reports itself. The three before it
+        // belong to the capabilities that do the waiting.
+        self.loading.progress("ready", None).await;
         Ok(Contexts {
             provider,
             toolbox,
             system_prompt,
-            context_window: crate::agent_loop::compaction_window(
-                self.settings.auto_compact,
-                self.context_window(),
-            ),
+            context_window,
         })
     }
 }
@@ -1000,70 +747,56 @@ mod tests {
 
     use crate::agent_loop::{ContextProvider, Contexts, StartTurn};
     use horsie_models::hooks::HookAction;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, PoisonError};
     use uuid::Uuid;
 
-    /// The gate, at the layer that applies it: off unless the preset says so,
-    /// and never for an agent that is not the session's main one.
+    /// The gate, at the layer that now applies it: a worker inherits the
+    /// session's settings but not its authority over the server.
+    ///
+    /// It used to be a `matches!(kind, Main)` inside a toolbox builder here.
+    /// It is `assemble`'s now — the capability is simply not in the list — so
+    /// what this asserts is that the kind still reaches that decision intact.
+    /// The one difference is deliberate and `assemble`'s: a fork is a
+    /// conversation of this session, so it is trusted with what the session is.
     #[tokio::test]
-    async fn control_tools_reach_only_a_main_agent_that_asked_for_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::testing::state(dir.path()).build().await;
-        let services = state.services().await;
-        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
-
-        let mut settings = AgentSettings {
-            model: "m".into(),
-            allowed_tools: None,
-            use_plugins: None,
-            max_iterations: None,
-            max_retries: 0,
-            mcp_servers: Vec::new(),
-            memory_spaces: Vec::new(),
-            thinking_effort: None,
-            max_concurrent_subagents: None,
-            instructions: None,
-            auto_compact: None,
-            control_plane: None,
-            plugins: Vec::new(),
+    async fn control_tools_reach_only_a_conversation_that_asked_for_them() {
+        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let build = |kind: SessionAgentKind, control_plane: Option<bool>| {
+            let mut settings = agent_settings_fixture();
+            settings.control_plane = control_plane;
+            SessionContextProvider {
+                loading: test_loading(&f, &session, id, kind),
+                settings,
+                step_result: StepResultDef::default(),
+                kind,
+                agent_type: None,
+                unattended: false,
+                plugins: Vec::new(),
+            }
         };
-        let (toolbox, index) = build_control_layer(
-            base.clone(),
-            Some(&services),
-            &settings,
-            SessionAgentKind::Main,
-        );
+
         assert!(
-            !toolbox
-                .specs()
-                .iter()
-                .any(|s| s.name.starts_with("horsie_")),
+            !build(SessionAgentKind::Main, None)
+                .equipment()
+                .has("control_plane"),
             "a preset that never asked must not get them"
         );
-        assert!(index.is_empty());
-
-        settings.control_plane = Some(true);
-        let (toolbox, index) = build_control_layer(
-            base.clone(),
-            Some(&services),
-            &settings,
+        for kind in [
             SessionAgentKind::Main,
-        );
-        assert!(toolbox.specs().iter().any(|s| s.name == "horsie_agents"));
-        assert!(index.contains("agents {"), "{index}");
-
+            SessionAgentKind::Fork(Uuid::new_v4()),
+        ] {
+            assert!(
+                build(kind, Some(true)).equipment().has("control_plane"),
+                "a conversation that asked for them must have them"
+            );
+        }
         for kind in [
             SessionAgentKind::Sub(Uuid::new_v4()),
             SessionAgentKind::Step(Uuid::new_v4()),
-            SessionAgentKind::Fork(Uuid::new_v4()),
         ] {
-            let (toolbox, _) = build_control_layer(base.clone(), Some(&services), &settings, kind);
             assert!(
-                !toolbox
-                    .specs()
-                    .iter()
-                    .any(|s| s.name.starts_with("horsie_")),
-                "a non-main agent inherits the setting but must not inherit the authority"
+                !build(kind, Some(true)).equipment().has("control_plane"),
+                "a worker inherits the setting but must not inherit the authority"
             );
         }
     }
@@ -1073,27 +806,13 @@ mod tests {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
-            agent_type: None,
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
+            loading: test_loading(&f, &session, id, kind),
             settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
-            session_id: id,
             kind,
+            agent_type: None,
             unattended: false,
-            session: session.clone(),
             plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
         };
 
         let main = build(SessionAgentKind::Main).provide().await.unwrap();
@@ -1138,27 +857,13 @@ mod tests {
         let mut settings = agent_settings_fixture();
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
+            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
             settings,
             step_result: StepResultDef::default(),
-            session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
             unattended: false,
-            session: session.clone(),
             plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
         };
         let tools: Vec<String> = provider
             .provide()
@@ -1183,27 +888,13 @@ mod tests {
         // too -- the base prompt tells the model the tool exists.
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
+            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
             settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
-            session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
             unattended,
-            session: session.clone(),
             plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
         };
         let names = |c: &Contexts| -> Vec<String> {
             c.toolbox.specs().into_iter().map(|s| s.name).collect()
@@ -1507,28 +1198,15 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
         let (f, session, id) = agent_harness().await;
+        let kind = SessionAgentKind::Sub(Uuid::new_v4());
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".to_string(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
+            loading: test_loading(&f, &session, id, kind),
             settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
-            session_id: id,
-            kind: SessionAgentKind::Sub(Uuid::new_v4()),
+            kind,
             agent_type: Some("uninstalled-agent".to_string()),
             unattended: false,
-            session: session.clone(),
             plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
         };
         let Err(err) = provider.provide().await else {
             panic!("a subagent whose agent type is gone must not run generic");
@@ -1709,28 +1387,33 @@ mod tests {
             id,
             None,
         );
+        let loading = loading_for(
+            kind,
+            session,
+            id,
+            LoadingDeps {
+                runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".into(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock"),
+                ),
+                registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+                mcp: None,
+                memory: None,
+                services: None,
+                plugin_library: None,
+            },
+        );
         SessionContextProvider {
-            agent_type: None,
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            mcp: None,
-            memory: None,
-            services: None,
+            loading,
             settings: agent_settings_fixture(),
             step_result: StepResultDef::default(),
-            session_id: id,
             kind,
+            agent_type: None,
             unattended: false,
-            session,
             plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
         }
     }
 

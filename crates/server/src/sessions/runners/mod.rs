@@ -31,6 +31,7 @@ pub mod action;
 pub mod capabilities;
 pub mod conversation;
 pub mod ids;
+pub mod loading;
 pub mod message;
 pub mod runtime;
 pub mod state;
@@ -243,7 +244,7 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     if !s.mcp_servers.is_empty() {
         caps.push(McpCapability::new(s.mcp_servers.clone()));
     }
-    caps.push(RuntimeCapability);
+    caps.push(RuntimeCapability::new(opts.agent_type.clone()));
     caps
 }
 
@@ -255,6 +256,13 @@ pub struct Assembly<'a> {
     /// Set when this conversation is a fork, so it names itself rather than
     /// the session it branched from.
     pub fork: Option<RunnerId>,
+    /// The plugin-declared agent type a worker was spawned as, if it was.
+    ///
+    /// The *name* only. It travels to the runtime capability, which resolves
+    /// the definition against the library on every load — so a worker whose
+    /// plugin was uninstalled between spawn and wake fails rather than running
+    /// a prompt nobody can point at.
+    pub agent_type: Option<String>,
 }
 
 /// An `AgentSettings` with nothing set.
@@ -399,6 +407,7 @@ mod tests {
             settings,
             unattended: false,
             fork: None,
+            agent_type: None,
         }
     }
 
@@ -493,9 +502,24 @@ mod tests {
                 settings: &s,
                 unattended: true,
                 fork: None,
+                agent_type: None,
             },
         );
-        let (spec, _) = caps.equip(s.clone()).await.expect("nothing fatal");
-        assert!(!spec.has(&action::ToolLayer::AskUser));
+        // Without the runtime, which has no sandbox to acquire here: the list
+        // is the same one either way, and what is asserted is what the
+        // capabilities *before* it equipped.
+        let attended: Capabilities = caps
+            .iter()
+            .filter(|c| c.name() != "runtime")
+            .map(|c| c.save().into())
+            .collect();
+        let (spec, _) = attended
+            .equip(&capabilities::testing::loading(), s.clone())
+            .await
+            .expect("nothing fatal");
+        assert!(
+            !capabilities::testing::equipped(spec)
+                .contains(&capabilities::ask_user::TOOL.to_string())
+        );
     }
 }

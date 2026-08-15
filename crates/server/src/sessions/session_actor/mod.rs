@@ -24,10 +24,13 @@
 
 use horsie_actor::ReplyTo;
 mod component;
-mod context;
+pub(crate) mod context;
 mod core;
 mod fork;
-mod hooks;
+/// Visible to the crate for [`hooks::SessionHookSink`] alone: the runtime
+/// capability attaches it to the client it acquires, and the sink routes into
+/// this actor's mailbox, so it cannot live anywhere else.
+pub(crate) mod hooks;
 mod lifecycle;
 mod reads;
 mod run;
@@ -65,7 +68,7 @@ use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, Per
 use horsie_models::now_ms;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Weak},
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -485,39 +488,47 @@ impl SessionActor {
             }
         };
         let key = plan.kind.agent_key();
+        // Built once, here, rather than per turn: it owns the cache of the
+        // client this agent's last load acquired, which `cancel_agent` and the
+        // `Stop` hooks both read.
+        let loading = context::loading_for(
+            plan.kind,
+            self.me(ctx),
+            self.id,
+            context::LoadingDeps {
+                runtimes: self.deps().runtimes.provider(
+                    self.id.to_string(),
+                    // The provision this run speaks to. A session that has never
+                    // provisioned has none, and the empty string is what the
+                    // acquisition below will fail on rather than silently
+                    // addressing some other sandbox.
+                    state
+                        .provisioned_at_ms
+                        .map(|at| at.to_string())
+                        .unwrap_or_default(),
+                    // A create is still outstanding. The journal is the only thing
+                    // that knows, and it has to say so: a substrate that has not
+                    // reported the object yet is indistinguishable from one with
+                    // nothing there, and the difference is between waiting for a
+                    // runtime and declaring it gone.
+                    matches!(state.status, SessionStatus::Provisioning),
+                    self.spec().vendor.clone(),
+                    self.spec().clone(),
+                ),
+                registry: self.deps().provider_registry.clone(),
+                mcp: self.deps().mcp.clone(),
+                memory: self.deps().memory.clone(),
+                services: Some(self.services().clone()),
+                plugin_library: self.deps().plugins.clone(),
+            },
+        );
         let provider = Arc::new(SessionContextProvider {
-            runtimes: self.deps().runtimes.provider(
-                self.id.to_string(),
-                // The provision this run speaks to. A session that has never
-                // provisioned has none, and the empty string is what the
-                // acquisition below will fail on rather than silently
-                // addressing some other sandbox.
-                state
-                    .provisioned_at_ms
-                    .map(|at| at.to_string())
-                    .unwrap_or_default(),
-                // A create is still outstanding. The journal is the only thing
-                // that knows, and it has to say so: a substrate that has not
-                // reported the object yet is indistinguishable from one with
-                // nothing there, and the difference is between waiting for a
-                // runtime and declaring it gone.
-                matches!(state.status, SessionStatus::Provisioning),
-                self.spec().vendor.clone(),
-                self.spec().clone(),
-            ),
-            registry: self.deps().provider_registry.clone(),
-            mcp: self.deps().mcp.clone(),
-            memory: self.deps().memory.clone(),
-            services: Some(self.services().clone()),
+            loading,
             step_result: plan.step_result.clone(),
-            session_id: self.id,
             kind: plan.kind,
             agent_type: plan.agent_type,
             unattended: self.spec().is_unattended(),
-            session: self.me(ctx),
             plugins: self.spec().plugins.clone(),
-            plugin_library: self.deps().plugins.clone(),
-            last_client: Mutex::new(None),
             settings: plan.settings.clone(),
         });
         let mut params = AgentParams::from_def(&AgentRunDef {

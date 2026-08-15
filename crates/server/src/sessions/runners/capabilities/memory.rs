@@ -9,10 +9,11 @@
 //! and matching what the code names means a sixth cannot start being claimed
 //! by a prefix before anything exists to answer it.
 
-use super::{CapSlice, Capability, Decision, SetupError};
-use crate::sessions::runners::action::{AgentSpec, ToolLayer};
+use super::{CapSlice, Capability, Decision, SetupError, or_empty};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::{Caller, Message};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// The tools this capability answers for, as named by the memory toolbox.
 pub const TOOLS: [&str; 5] = [
@@ -47,14 +48,44 @@ impl Capability for MemoryCapability {
         "memory"
     }
 
+    /// Wrap the memory tools on, and render the index of what is already saved.
+    ///
+    /// Both, or neither. The index is what makes the tools worth having — an
+    /// agent that cannot see a memory exists never loads it — so the read
+    /// happens here, once, rather than being left to the first `memory_list`.
+    ///
     /// No spaces, no layer: an agent that names none has nothing to read, and
     /// the tools would only ever refuse.
-    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.spaces.is_empty() {
             return Ok(());
         }
-        spec.layers.push(ToolLayer::Memory {
-            spaces: self.spaces.clone(),
+        let Some(service) = loading.memory.clone() else {
+            return Err(SetupError {
+                capability: self.name(),
+                reason: format!(
+                    "this agent names memory spaces ({}) but no memory service is configured",
+                    self.spaces.join(", ")
+                ),
+                fatal: false,
+            });
+        };
+        let rows = service
+            .memories_in(&self.spaces)
+            .await
+            .map_err(|e| SetupError {
+                capability: self.name(),
+                reason: format!("read the memory index: {e}"),
+                fatal: false,
+            })?;
+        spec.say("memory", crate::memory::render_index(&rows, &self.spaces));
+        let spaces = self.spaces.clone();
+        spec.wrap(move |inner, _| {
+            Arc::new(crate::memory::MemoryToolbox::new(
+                or_empty(inner),
+                service,
+                spaces,
+            ))
         });
         Ok(())
     }
@@ -106,25 +137,54 @@ mod tests {
     /// gets memory tools whose every call is refused.
     #[tokio::test]
     async fn no_spaces_equips_no_layer() {
-        let mut spec = AgentSpec::default();
+        let mut spec = spec();
         MemoryCapability::new(vec![])
-            .setup(&mut spec)
+            .setup(&loading(), &mut spec)
             .await
             .expect("nothing fatal");
-        assert!(spec.layers.is_empty());
+        assert!(spec.prompt.is_empty());
+        assert!(spec.toolbox().is_none());
     }
 
-    /// The named spaces reach the layer verbatim, because that list is what
-    /// bounds the toolbox at run time.
+    /// The named spaces reach the toolbox, which is what bounds an agent's
+    /// reach at run time, and the index reaches the prompt — a memory the agent
+    /// is never told about is one it never loads.
     #[tokio::test]
-    async fn named_spaces_equip_the_layer() {
-        let mut spec = AgentSpec::default();
+    async fn named_spaces_equip_the_tools_and_the_index() {
+        let mut loading = loading();
+        loading.memory = Some(Arc::new(crate::memory::MemoryService::new(
+            crate::memory::MemoryStore::new(
+                crate::db::testing::db().await,
+                crate::auth::UserId::new("1"),
+            ),
+        )));
+        let mut spec = spec();
         MemoryCapability::new(vec!["default".into(), "team".into()])
-            .setup(&mut spec)
+            .setup(&loading, &mut spec)
             .await
             .expect("nothing fatal");
-        assert!(spec.has(&ToolLayer::Memory {
-            spaces: vec!["default".into(), "team".into()],
-        }));
+        let index = spec
+            .prompt
+            .iter()
+            .find(|s| s.key == "memory")
+            .expect("the index is what makes the tools usable");
+        assert!(index.body.contains("# Memories"));
+        let names = equipped(spec);
+        for tool in TOOLS {
+            assert!(names.contains(&tool.to_string()), "{tool} was not equipped");
+        }
+    }
+
+    /// A session that asks for memory with no service behind it loses the tools
+    /// and keeps its turn — the same call MCP makes, for the same reason.
+    #[tokio::test]
+    async fn no_service_is_degraded_rather_than_fatal() {
+        let mut spec = spec();
+        let e = MemoryCapability::new(vec!["default".into()])
+            .setup(&loading(), &mut spec)
+            .await
+            .expect_err("no service is wired");
+        assert!(!e.fatal);
+        assert!(spec.toolbox().is_none());
     }
 }
