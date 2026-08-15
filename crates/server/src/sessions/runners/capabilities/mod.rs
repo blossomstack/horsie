@@ -27,8 +27,15 @@
 //!   Both are sync and pure — they decide, and the session performs.
 //!
 //! So the list a `setup` runs against is built fresh for the agent being
-//! started, and the folded copy stays with the session. They are the same set,
-//! built by the same [`super::assemble`] call, doing two different jobs.
+//! started, and the folded copy stays with the session — the same
+//! [`super::assemble`] call, doing two different jobs.
+//!
+//! Not quite the same *set*, in one case. A workflow adds the step's own
+//! [`step_result::StepResultCapability`] to the copy and not to the folded
+//! list, because what a step promises to return is declared per step and there
+//! is nothing about it to carry between them. It is added with
+//! [`Capabilities::push_front`], since a capability with a fixed tool name must
+//! sort ahead of the open-namespace ones.
 //!
 //! # Dispatch
 //!
@@ -229,22 +236,36 @@ impl Capabilities {
         Self(caps)
     }
 
+    /// Add a capability at the open-namespace end.
+    ///
+    /// Only [`super::assemble`] should reach the end: the last capability
+    /// answers for a namespace nobody can enumerate, so anything pushed after
+    /// it is shadowed. A capability with a fixed tool name wants
+    /// [`Self::push_front`].
     pub fn push(&mut self, cap: impl Capability + 'static) {
         self.0.push(Box::new(cap));
+    }
+
+    /// Add a capability at the fixed-name end, ahead of everything already
+    /// here.
+    ///
+    /// What a per-agent capability needs. A workflow step's `submit_result` is
+    /// added to a copy of its runner's list when the step agent starts, and
+    /// `push` would put it behind the runtime capability — which claims every
+    /// tool call it is offered, and would swallow the step's own result.
+    pub fn push_front(&mut self, cap: impl Capability + 'static) {
+        self.0.insert(0, Box::new(cap));
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Capability>> {
         self.0.iter()
     }
 
+    /// True only for a runner that owns no agents, so there is nothing to equip
+    /// and nothing that could send it a tool call.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 
     #[must_use]
@@ -252,8 +273,7 @@ impl Capabilities {
         self.0.last().map(AsRef::as_ref)
     }
 
-    /// Whether a capability of this name is equipped. The read a test makes,
-    /// and the read `assemble`'s order tests make.
+    /// Whether a capability of this name is equipped.
     #[must_use]
     pub fn has(&self, name: &str) -> bool {
         self.0.iter().any(|c| c.name() == name)
@@ -531,6 +551,47 @@ mod tests {
             round.iter().map(|c| c.name()).collect::<Vec<_>>(),
             names,
             "a capability was dropped or reordered by the journal"
+        );
+    }
+
+    /// Cloning goes through `save()`, and `Action::StartAgent` clones the list
+    /// every time an agent starts — so a `save()` that rebuilt itself from
+    /// config instead of copying itself would silently drop what the runner had
+    /// folded. Pinning the names cannot catch that; only folded state can.
+    #[test]
+    fn cloning_carries_the_folded_state_and_not_just_the_config() {
+        let mut caps = Capabilities::new(vec![Box::new(title::TitleCapability::default())]);
+        caps.apply(&CapEvent::Title(title::Event::Set {
+            name: "the flake".into(),
+        }));
+
+        let copy = caps.clone();
+        let CapSlice::Title(titled) = copy.iter().next().expect("one").save() else {
+            panic!("the clone changed which capability this is");
+        };
+        assert_eq!(
+            titled.title.as_deref(),
+            Some("the flake"),
+            "the clone was rebuilt from config and lost what the runner folded"
+        );
+    }
+
+    /// A per-agent capability is added at the fixed-name end. Appended instead,
+    /// it would sit behind the capability that claims every call it is offered
+    /// — so the tool would be advertised and its calls answered by the sandbox.
+    #[test]
+    fn push_front_puts_a_fixed_name_ahead_of_the_open_namespace() {
+        let mut caps = Capabilities::new(vec![Box::new(runtime::RuntimeCapability)]);
+        caps.push_front(step_result::StepResultCapability::default());
+
+        let taker = caps.iter().find_map(|c| {
+            c.handle(caller(), &tool("submit_result", serde_json::json!({})))
+                .map(|_| c.name())
+        });
+        assert_eq!(
+            taker,
+            Some("step_result"),
+            "the sandbox layer swallowed the step's own result"
         );
     }
 }

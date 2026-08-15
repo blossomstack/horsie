@@ -490,10 +490,6 @@ mod tests {
 
     /// Nobody is watching a routine's run, so its conversation gets no
     /// `ask_user` layer: a question it asked would park the run for ever.
-    ///
-    /// Note it still *holds* the capability — an unattended `AskUserCapability`
-    /// equips nothing but still answers for the tool name, so a model that asks
-    /// anyway is told no rather than falling through to the sandbox.
     #[tokio::test]
     async fn an_unattended_conversation_equips_no_ask_layer() {
         let s = empty_settings();

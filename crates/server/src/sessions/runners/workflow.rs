@@ -388,7 +388,11 @@ impl Runner for State {
         // It joins the copy rather than `capabilities` because it has no state
         // to carry between steps — its `apply` records nothing, since a
         // submitted result is this runner's own `StepConcluded` to fold.
-        equipment.push(StepResultCapability::new(
+        //
+        // At the front, not the back: the list ends with the capability that
+        // claims every tool call offered to it, so a `submit_result` appended
+        // after it would be swallowed by the sandbox layer.
+        equipment.push_front(StepResultCapability::new(
             step.outcomes.clone(),
             step.fields.clone(),
             step.interactive,
