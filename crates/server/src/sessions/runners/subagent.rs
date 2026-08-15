@@ -131,7 +131,7 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    fn apply(&mut self, event: &RunnerEvent) {
+    fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
         // Every other arm belongs to another runner, or is a capability's own
         // event that `RunnerState::apply` has already routed.
         let RunnerEvent::SubAgent(event) = event else {
@@ -259,14 +259,20 @@ mod tests {
         // same single request, not a second one.
         assert_eq!(state.actions(&view()).len(), 1);
 
-        state.apply(&RunnerEvent::SubAgent(Event::Started {
-            agent: AgentId::new_v4(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Started {
+                agent: AgentId::new_v4(),
+            }),
+            0,
+        );
         assert!(state.actions(&view()).is_empty());
 
-        state.apply(&RunnerEvent::SubAgent(Event::Concluded {
-            output: "done".into(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Concluded {
+                output: "done".into(),
+            }),
+            0,
+        );
         assert!(state.actions(&view()).is_empty());
 
         // And a worker that failed before it ever had an agent stays stopped:
@@ -333,9 +339,12 @@ mod tests {
     fn there_is_no_outcome_until_it_ends() {
         let mut state = worker();
         assert!(state.outcome().is_none());
-        state.apply(&RunnerEvent::SubAgent(Event::Started {
-            agent: AgentId::new_v4(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Started {
+                agent: AgentId::new_v4(),
+            }),
+            0,
+        );
         assert!(state.outcome().is_none());
     }
 
@@ -345,9 +354,12 @@ mod tests {
     #[test]
     fn a_concluded_worker_reports_completed_with_its_label() {
         let mut state = worker();
-        state.apply(&RunnerEvent::SubAgent(Event::Concluded {
-            output: "three flakes, all in setup".into(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Concluded {
+                output: "three flakes, all in setup".into(),
+            }),
+            0,
+        );
         let Some(ChildOutcome::SubAgent(SubAgentOutcome::Completed { label, report })) =
             state.outcome()
         else {
@@ -362,9 +374,12 @@ mod tests {
     #[test]
     fn a_failed_worker_reports_failed_with_its_label() {
         let mut state = worker();
-        state.apply(&RunnerEvent::SubAgent(Event::Failed {
-            error: "the sandbox is gone".into(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Failed {
+                error: "the sandbox is gone".into(),
+            }),
+            0,
+        );
         let Some(ChildOutcome::SubAgent(SubAgentOutcome::Failed { label, error })) =
             state.outcome()
         else {
@@ -381,13 +396,19 @@ mod tests {
     fn it_is_busy_only_between_starting_and_ending() {
         let mut state = worker();
         assert!(!state.busy());
-        state.apply(&RunnerEvent::SubAgent(Event::Started {
-            agent: AgentId::new_v4(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Started {
+                agent: AgentId::new_v4(),
+            }),
+            0,
+        );
         assert!(state.busy());
-        state.apply(&RunnerEvent::SubAgent(Event::Concluded {
-            output: "done".into(),
-        }));
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Concluded {
+                output: "done".into(),
+            }),
+            0,
+        );
         assert!(!state.busy());
     }
 
@@ -396,9 +417,10 @@ mod tests {
     #[test]
     fn another_runners_event_is_a_no_op() {
         let mut state = worker();
-        state.apply(&RunnerEvent::Conversation(
-            crate::sessions::runners::conversation::Event::TurnBegan,
-        ));
+        state.apply(
+            &RunnerEvent::Conversation(crate::sessions::runners::conversation::Event::TurnBegan),
+            0,
+        );
         assert!(state.agent.is_none());
         assert!(state.result.is_none());
     }

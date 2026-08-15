@@ -157,9 +157,16 @@ pub enum SessionEvent {
     AgentStarted { runner: RunnerId, agent: AgentId },
     /// Something a runner recorded about itself, or one of its capabilities
     /// about itself. Routed by id and never inspected.
+    ///
+    /// `at_ms` is here rather than inside the runner's own event because it is
+    /// a fact about the journal entry, not about what was decided: a decision
+    /// is made once and folded any number of times, so a time read inside the
+    /// fold would differ on every replay. Every runner that stamps a time —
+    /// a step's start, a conversation's last activity — reads this one.
     Runner {
         id: RunnerId,
         event: Box<RunnerEvent>,
+        at_ms: u64,
     },
     /// Tokens spent, banked against the model that spent them.
     UsageBanked { model: String, spent: UsageTotal },
@@ -214,9 +221,9 @@ impl SessionState {
                     }
                 }
             }
-            SessionEvent::Runner { id, event } => {
+            SessionEvent::Runner { id, event, at_ms } => {
                 if let Some(rec) = self.runners.get_mut(id) {
-                    super::Runner::apply(&mut rec.state, event);
+                    super::Runner::apply(&mut rec.state, event, *at_ms);
                 }
             }
             SessionEvent::UsageBanked { model, spent } => self.bank(model.clone(), spent),
@@ -411,11 +418,17 @@ mod tests {
     /// The recovery contract, and the reason nothing in a fold may reach for a
     /// clock or mint an id: replaying the same log twice has to land the same
     /// state, byte for byte, or a recovered session and a live one diverge.
+    ///
+    /// The `StepStarted` is the part that earns its place. A step's
+    /// `started_at_ms` is a time a fold has to write, and the only honest way
+    /// to write one is to read it off the entry — so the moment anybody reaches
+    /// for a clock inside an `apply`, the two folds differ and this fails.
     #[test]
     fn folding_the_same_log_twice_lands_the_same_state() {
         let root = RunnerId::new_v4();
         let main = AgentId::new_v4();
         let child = RunnerId::new_v4();
+        let run = RunnerId::new_v4();
         let log = vec![
             created(root, RunnerKind::Conversation, None),
             SessionEvent::AgentStarted {
@@ -423,6 +436,22 @@ mod tests {
                 agent: main,
             },
             created(child, RunnerKind::SubAgent, Some(main)),
+            created(run, RunnerKind::Workflow, Some(main)),
+            SessionEvent::Runner {
+                id: run,
+                event: Box::new(RunnerEvent::Workflow(
+                    crate::sessions::runners::workflow::Event::StepStarted {
+                        index: 0,
+                        step: "triage".into(),
+                        agent: AgentId::new_v4(),
+                        attempt: 1,
+                        from: None,
+                        via: None,
+                        input: "the build is red".into(),
+                    },
+                )),
+                at_ms: 1_700_000_000_000,
+            },
             SessionEvent::UsageBanked {
                 model: "sonnet".into(),
                 spent: UsageTotal {
@@ -443,9 +472,21 @@ mod tests {
             for e in log {
                 s.apply(e);
             }
-            serde_json::to_string(&s).unwrap()
+            s
         };
-        assert_eq!(fold(&log), fold(&log));
+        let once = fold(&log);
+        let twice = fold(&log);
+        assert_eq!(
+            serde_json::to_string(&once).unwrap(),
+            serde_json::to_string(&twice).unwrap()
+        );
+
+        // And the stamp is the entry's, not zero: a fold that ignored `at_ms`
+        // would pass the equality above and still lose every time in the state.
+        let RunnerState::Workflow(w) = &once.runners[&run].state else {
+            panic!("the run is a workflow");
+        };
+        assert_eq!(w.steps[0].started_at_ms, 1_700_000_000_000);
     }
 
     /// The state is snapshotted, so a row missing a field must still load.

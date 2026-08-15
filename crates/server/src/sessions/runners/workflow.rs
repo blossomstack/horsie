@@ -452,7 +452,7 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    fn apply(&mut self, event: &RunnerEvent) {
+    fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {
         let RunnerEvent::Workflow(event) = event else {
             return;
         };
@@ -479,10 +479,10 @@ impl Runner for State {
                     input: input.clone(),
                     output: None,
                     error: None,
-                    // A fold has no clock. The session stamps the journal entry
-                    // that carries this event, which is the one place a time
-                    // can be read without making replay differ from live.
-                    started_at_ms: 0,
+                    // A fold has no clock, so the time arrives with the event:
+                    // it is when the session journaled the entry, which is the
+                    // one reading a replay lands on too.
+                    started_at_ms: at_ms,
                     ended_at_ms: None,
                 });
                 self.status = WorkflowRunStatus::Running;
@@ -491,6 +491,7 @@ impl Runner for State {
                 if let Some(s) = self.steps.get_mut(*index as usize) {
                     s.status = StepStatus::Concluded;
                     s.output = Some(output.clone());
+                    s.ended_at_ms = Some(at_ms);
                 }
                 // Reasserted, because of the one path that leaves the status
                 // something else: a step parked on a question set
@@ -503,11 +504,13 @@ impl Runner for State {
                 if let Some(s) = self.steps.get_mut(*index as usize) {
                     s.status = StepStatus::Failed;
                     s.error = Some(error.clone());
+                    s.ended_at_ms = Some(at_ms);
                 }
             }
             Event::StepCancelled { index } => {
                 if let Some(s) = self.steps.get_mut(*index as usize) {
                     s.status = StepStatus::Cancelled;
+                    s.ended_at_ms = Some(at_ms);
                 }
                 self.status = WorkflowRunStatus::Suspended;
             }
@@ -567,7 +570,10 @@ impl AgentLifecycle for State {
                 // last step routed nowhere would sit at `Running` for ever,
                 // with an output nothing ever delivered.
                 let mut next = self.clone();
-                next.apply(&concluded);
+                // Zero, and it is never persisted: this copy exists only to ask
+                // "is the run over", and the time the real fold stamps is the
+                // one the session hands it when it writes the entry.
+                next.apply(&concluded, 0);
                 match next.decide() {
                     Next::Finish { output } => vec![
                         concluded,
@@ -693,13 +699,51 @@ mod tests {
         let agent = started_agent(state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, .. } = state.on_agent_ended(agent, &TurnEnd::Concluded { output });
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         agent
+    }
+
+    /// A step's two timestamps come off the entries that recorded it, because a
+    /// fold may not read a clock. Every ending stamps one: without it a
+    /// cancelled or failed step reads as still running to anything that shows a
+    /// duration.
+    #[test]
+    fn a_step_is_stamped_from_the_entries_that_started_and_ended_it() {
+        for (ending, expected) in [
+            (
+                Event::StepConcluded {
+                    index: 0,
+                    output: Value::Null,
+                },
+                StepStatus::Concluded,
+            ),
+            (
+                Event::StepFailed {
+                    index: 0,
+                    error: "provider 500".into(),
+                },
+                StepStatus::Failed,
+            ),
+            (Event::StepCancelled { index: 0 }, StepStatus::Cancelled),
+        ] {
+            let mut state = run();
+            let agent = started_agent(&state);
+            let Emit { events, .. } = state.on_agent_started(agent);
+            for e in &events {
+                state.apply(e, 100);
+            }
+            assert_eq!(state.steps[0].started_at_ms, 100);
+            assert_eq!(state.steps[0].ended_at_ms, None, "it is still running");
+
+            state.apply(&RunnerEvent::Workflow(ending), 250);
+            assert_eq!(state.steps[0].status, expected);
+            assert_eq!(state.steps[0].ended_at_ms, Some(250));
+        }
     }
 
     /// A run begins at the start step with the run's own input, and the agent
@@ -765,7 +809,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert!(state.actions(&view()).is_empty());
         assert!(
@@ -835,7 +879,7 @@ mod tests {
 
         let Emit { events, .. } = state.on_agent_started(*agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert_eq!(state.steps[1].step, "fix");
         assert_eq!(state.steps[1].from, Some(0));
@@ -855,9 +899,12 @@ mod tests {
             "a concluded step owes the invoker nothing"
         );
 
-        state.apply(&RunnerEvent::Workflow(Event::Finished {
-            output: serde_json::json!({"shipped": true}),
-        }));
+        state.apply(
+            &RunnerEvent::Workflow(Event::Finished {
+                output: serde_json::json!({"shipped": true}),
+            }),
+            0,
+        );
         let Some(ChildOutcome::Workflow(WorkflowOutcome::Finished { output })) = state.outcome()
         else {
             panic!("a finished run reports its terminal output");
@@ -870,9 +917,12 @@ mod tests {
     #[test]
     fn a_failed_run_reports_its_error() {
         let mut state = run();
-        state.apply(&RunnerEvent::Workflow(Event::Failed {
-            error: "step budget exhausted".into(),
-        }));
+        state.apply(
+            &RunnerEvent::Workflow(Event::Failed {
+                error: "step budget exhausted".into(),
+            }),
+            0,
+        );
         let Some(ChildOutcome::Workflow(WorkflowOutcome::Failed { error })) = state.outcome()
         else {
             panic!("a failed run reports why");
@@ -889,7 +939,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert!(state.busy());
         let Emit { events, .. } = state.on_agent_ended(
@@ -899,7 +949,7 @@ mod tests {
             },
         );
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert!(!state.busy());
     }
@@ -935,7 +985,7 @@ mod tests {
         assert!(input.contains("the build is red"));
 
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert_eq!(state.status, WorkflowRunStatus::Running);
         assert_eq!(state.index_of_agent(agent), Some(0));
@@ -951,7 +1001,7 @@ mod tests {
         let second = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(second);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, .. } = state.on_agent_ended(
             second,
@@ -984,7 +1034,7 @@ mod tests {
         let second = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(second);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, .. } = state.on_agent_ended(
             second,
@@ -993,7 +1043,7 @@ mod tests {
             },
         );
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert_eq!(state.status, WorkflowRunStatus::Finished);
         let Some(ChildOutcome::Workflow(WorkflowOutcome::Finished { .. })) = state.outcome() else {
@@ -1017,7 +1067,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, .. } = state.on_agent_ended(
             agent,
@@ -1026,7 +1076,7 @@ mod tests {
             },
         );
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert_eq!(state.status, WorkflowRunStatus::Failed);
         assert!(
@@ -1048,7 +1098,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, .. } = state.on_agent_ended(
             agent,
@@ -1063,7 +1113,7 @@ mod tests {
         assert_eq!(*index, 0);
         assert_eq!(error, "provider 500");
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert!(state.actions(&view()).is_empty());
     }
@@ -1078,7 +1128,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         for end in [TurnEnd::Asked, TurnEnd::Parked, TurnEnd::Interrupted] {
             let Emit { events, actions } = state.on_agent_ended(agent, &end);
@@ -1096,7 +1146,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let stranger = AgentId::new_v4();
         let Emit { events, .. } = state.on_agent_ended(
@@ -1119,7 +1169,7 @@ mod tests {
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         let Emit { events, actions } = state.on_agent_halted(agent, "the person stopped it");
         assert!(actions.is_empty());
@@ -1128,7 +1178,7 @@ mod tests {
         };
         assert_eq!(*index, 0);
         for e in &events {
-            state.apply(e);
+            state.apply(e, 0);
         }
         assert_eq!(state.status, WorkflowRunStatus::Suspended);
         assert!(!state.busy());

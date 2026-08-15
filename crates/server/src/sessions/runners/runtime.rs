@@ -100,7 +100,10 @@ impl Runner for State {
     // Both capability accessors keep the trait's `None`: capabilities equip
     // agents, and this runner starts none.
 
-    fn apply(&mut self, event: &RunnerEvent) {
+    /// `at_ms` is unread here on purpose. [`Event::Succeeded`] carries its own
+    /// stamp, and it means something else: when the *sandbox* came up, not when
+    /// the entry recording it was written.
+    fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
         let RunnerEvent::Runtime(event) = event else {
             return;
         };
@@ -183,9 +186,9 @@ mod tests {
     fn busy_only_while_provisioning() {
         let mut state = State::default();
         assert!(!state.busy(), "nothing has been asked for yet");
-        state.apply(&RunnerEvent::Runtime(Event::Started));
+        state.apply(&RunnerEvent::Runtime(Event::Started), 0);
         assert!(state.busy());
-        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 7 }));
+        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 7 }), 0);
         assert!(!state.busy());
     }
 
@@ -196,13 +199,13 @@ mod tests {
     fn ready_is_the_phase_and_survives_nothing_else() {
         let mut state = State::default();
         assert!(!state.ready());
-        state.apply(&RunnerEvent::Runtime(Event::Started));
+        state.apply(&RunnerEvent::Runtime(Event::Started), 0);
         assert!(!state.ready());
-        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 42 }));
+        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 42 }), 0);
         assert!(state.ready());
         assert_eq!(state.provisioned_at_ms, Some(42));
 
-        state.apply(&RunnerEvent::Runtime(Event::Released));
+        state.apply(&RunnerEvent::Runtime(Event::Released), 0);
         assert!(!state.ready());
         assert_eq!(
             state.provisioned_at_ms,
@@ -216,10 +219,13 @@ mod tests {
     #[test]
     fn a_failure_keeps_the_vendors_words_and_whether_it_is_final() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Runtime(Event::Failed {
-            error: "no capacity in ord".into(),
-            terminal: false,
-        }));
+        state.apply(
+            &RunnerEvent::Runtime(Event::Failed {
+                error: "no capacity in ord".into(),
+                terminal: false,
+            }),
+            0,
+        );
         assert_eq!(state.phase, Phase::Failed { terminal: false });
         assert_eq!(state.detail.as_deref(), Some("no capacity in ord"));
         assert!(!state.ready());
@@ -231,15 +237,21 @@ mod tests {
     #[test]
     fn a_retry_clears_the_last_failures_words() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Runtime(Event::Progress {
-            detail: "pulling the image".into(),
-        }));
+        state.apply(
+            &RunnerEvent::Runtime(Event::Progress {
+                detail: "pulling the image".into(),
+            }),
+            0,
+        );
         assert_eq!(state.detail.as_deref(), Some("pulling the image"));
-        state.apply(&RunnerEvent::Runtime(Event::Failed {
-            error: "vendor refused".into(),
-            terminal: true,
-        }));
-        state.apply(&RunnerEvent::Runtime(Event::Started));
+        state.apply(
+            &RunnerEvent::Runtime(Event::Failed {
+                error: "vendor refused".into(),
+                terminal: true,
+            }),
+            0,
+        );
+        state.apply(&RunnerEvent::Runtime(Event::Started), 0);
         assert_eq!(state.phase, Phase::Provisioning);
         assert!(state.detail.is_none());
     }
@@ -248,10 +260,13 @@ mod tests {
     #[test]
     fn the_slice_round_trips_through_the_journal() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 9 }));
-        state.apply(&RunnerEvent::Runtime(Event::Progress {
-            detail: "warm".into(),
-        }));
+        state.apply(&RunnerEvent::Runtime(Event::Succeeded { at_ms: 9 }), 0);
+        state.apply(
+            &RunnerEvent::Runtime(Event::Progress {
+                detail: "warm".into(),
+            }),
+            0,
+        );
         let back: State = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(back.phase, Phase::Ready);
         assert_eq!(back.provisioned_at_ms, Some(9));

@@ -159,7 +159,14 @@ pub trait Runner {
     }
 
     /// Fold one of my own events. Pure — no clock, no ids, no randomness.
-    fn apply(&mut self, event: &RunnerEvent);
+    ///
+    /// `at_ms` is when the session journaled the entry carrying this event, and
+    /// it is how a fold that may not read a clock still stamps a time. It
+    /// arrives *on the event* rather than being read here, so a replay lands
+    /// exactly the timestamps the live run wrote — which is the whole recovery
+    /// contract, and the reason reaching for `now_ms()` inside an `apply` is
+    /// the one thing this signature exists to prevent.
+    fn apply(&mut self, event: &RunnerEvent, at_ms: u64);
 }
 
 /// What a runner must answer for the agents it starts.
@@ -356,7 +363,7 @@ impl Runner for RunnerState {
         dispatch!(self, capabilities_mut)
     }
 
-    fn apply(&mut self, event: &RunnerEvent) {
+    fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {
         // A capability's event is folded into the capability that owns it,
         // whichever runner is holding it.
         if let RunnerEvent::Capability(e) = event {
@@ -365,7 +372,7 @@ impl Runner for RunnerState {
             }
             return;
         }
-        dispatch!(self, apply, event);
+        dispatch!(self, apply, event, at_ms);
     }
 }
 

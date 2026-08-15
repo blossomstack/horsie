@@ -161,7 +161,7 @@ impl Runner for State {
         Some(&mut self.capabilities)
     }
 
-    fn apply(&mut self, event: &RunnerEvent) {
+    fn apply(&mut self, event: &RunnerEvent, _at_ms: u64) {
         // Every other arm belongs to another runner, or is a capability's own
         // event that `RunnerState::apply` has already routed.
         let RunnerEvent::Conversation(event) = event else {
@@ -284,7 +284,7 @@ mod tests {
         assert!(matches!(first, FirstInput::None));
         assert_eq!(actions.len(), 1);
 
-        state.apply(&started());
+        state.apply(&started(), 0);
         assert!(state.actions(&view()).is_empty());
     }
 
@@ -297,7 +297,7 @@ mod tests {
         let mut state = fork();
         assert!(state.actions(&view()).is_empty());
 
-        state.apply(&RunnerEvent::Conversation(Event::Seeded));
+        state.apply(&RunnerEvent::Conversation(Event::Seeded), 0);
         let actions = state.actions(&view());
         assert_eq!(actions.len(), 1);
         let Action::StartAgent { first, .. } = &actions[0] else {
@@ -315,9 +315,12 @@ mod tests {
     #[test]
     fn a_fork_whose_seed_failed_never_starts() {
         let mut state = fork();
-        state.apply(&RunnerEvent::Conversation(Event::SeedFailed {
-            error: "the copy failed".into(),
-        }));
+        state.apply(
+            &RunnerEvent::Conversation(Event::SeedFailed {
+                error: "the copy failed".into(),
+            }),
+            0,
+        );
         assert_eq!(state.turn, TurnStatus::Failed);
         assert!(state.actions(&view()).is_empty());
     }
@@ -374,7 +377,7 @@ mod tests {
                 error: "the copy failed".into(),
             },
         ] {
-            state.apply(&RunnerEvent::Conversation(event));
+            state.apply(&RunnerEvent::Conversation(event), 0);
             assert!(
                 state.outcome().is_none(),
                 "a conversation reported an outcome from {:?}",
@@ -390,13 +393,13 @@ mod tests {
     fn it_is_busy_only_while_a_turn_runs() {
         let mut state = State::default();
         assert!(!state.busy());
-        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
         assert!(state.busy());
-        state.apply(&RunnerEvent::Conversation(Event::Asked));
+        state.apply(&RunnerEvent::Conversation(Event::Asked), 0);
         assert!(!state.busy());
-        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
         assert!(state.busy());
-        state.apply(&RunnerEvent::Conversation(Event::TurnEnded));
+        state.apply(&RunnerEvent::Conversation(Event::TurnEnded), 0);
         assert!(!state.busy());
     }
 
@@ -405,11 +408,12 @@ mod tests {
     #[test]
     fn another_runners_event_is_a_no_op() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::SubAgent(
-            crate::sessions::runners::subagent::Event::Failed {
+        state.apply(
+            &RunnerEvent::SubAgent(crate::sessions::runners::subagent::Event::Failed {
                 error: "not mine".into(),
-            },
-        ));
+            }),
+            0,
+        );
         assert_eq!(state.turn, TurnStatus::Idle);
         assert!(state.agent.is_none());
     }
@@ -444,10 +448,10 @@ mod tests {
     #[test]
     fn an_ask_parks_the_turn() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
         let event = only_event(ended(&state, &TurnEnd::Asked));
         assert!(matches!(event, Event::Asked));
-        state.apply(&RunnerEvent::Conversation(event));
+        state.apply(&RunnerEvent::Conversation(event), 0);
         assert_eq!(state.turn, TurnStatus::AwaitingInput);
     }
 
@@ -489,10 +493,10 @@ mod tests {
     #[test]
     fn an_interruption_counts_only_during_a_running_turn() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
         let event = only_event(ended(&state, &TurnEnd::Interrupted));
         assert!(matches!(event, Event::TurnInterrupted));
-        state.apply(&RunnerEvent::Conversation(event));
+        state.apply(&RunnerEvent::Conversation(event), 0);
         assert_eq!(state.turn, TurnStatus::Idle);
 
         // Idle, awaiting input and failed all mean the turn's ending was
@@ -529,8 +533,8 @@ mod tests {
     #[test]
     fn a_stopped_turn_goes_back_to_idle() {
         let mut state = State::default();
-        state.apply(&RunnerEvent::Conversation(Event::TurnBegan));
-        state.apply(&RunnerEvent::Conversation(Event::TurnStopped));
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
+        state.apply(&RunnerEvent::Conversation(Event::TurnStopped), 0);
         assert_eq!(state.turn, TurnStatus::Idle);
     }
 }
