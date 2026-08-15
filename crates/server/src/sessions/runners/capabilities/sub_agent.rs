@@ -14,6 +14,26 @@
 //! here to disagree. It is also the re-drive point: delivery tells the parent
 //! before the acknowledgement persists, so a crash in that window replays as a
 //! report still outstanding and it is delivered again.
+//!
+//! # What a spawn is refused for
+//!
+//! Two budgets, both read off [`Caller`] and neither of them a fact this
+//! capability could know on its own: how deep the asking runner already sits,
+//! and how much of the session is already running. A refusal is a
+//! [`Decision::reply`] and journals nothing — the model is told no, and no
+//! trace of a child that never existed reaches the log.
+//!
+//! It is still *claimed*. Declining would hand the call to the next capability,
+//! and the last one is the open-namespace runtime, which answers to every name:
+//! the model would be answered by the sandbox and never learn it had hit a
+//! budget.
+//!
+//! The old session actor made a third refusal here — `"caller is not a known
+//! agent"`, when the spawning agent had no node in the forest. It is not one of
+//! these, and deliberately so: a [`Caller`] is built by the session from the
+//! agent that called, resolved against the agent-to-runner map, so a call this
+//! capability is offered has already been attributed. The refusal belongs at
+//! that lookup, which is the only place that can still fail.
 
 use super::{CapEvent, CapSlice, Capability, Decision, SetupError, or_empty};
 use crate::sessions::runners::action::{Action, RunnerArgs};
@@ -25,7 +45,7 @@ use crate::sessions::runners::message::{
 use crate::sessions::session_actor::AgentKey;
 use crate::sessions::spawn_tool::SubAgentToolbox;
 use crate::sessions::spec::AgentSettings;
-use crate::sessions::subagents::SubAgentParent;
+use crate::sessions::subagents::{MAX_SUBAGENT_DEPTH, SubAgentParent};
 use horsie_models::agent::SubAgentResultPart;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -80,6 +100,10 @@ impl SubAgentCapability {
                     Ok(req) => req,
                     Err(refusal) => return Some(refusal),
                 };
+                // Claimed, not declined: see the note on `refuse`.
+                if let Some(said) = self.refuse(caller) {
+                    return Some(Decision::reply(said));
+                }
                 // Both ids are minted here rather than in `apply`: a decision
                 // may be non-deterministic, a fold may not. Replay must land
                 // the ids the log recorded, so the event and the action name
@@ -115,6 +139,34 @@ impl SubAgentCapability {
             STATUS_TOOL => Some(Decision::reply(self.render_status())),
             _ => None,
         }
+    }
+
+    /// Why this spawn cannot happen, in words the model can act on.
+    ///
+    /// Both numbers come off the [`Caller`] the session built, because neither
+    /// is knowable from this slice: `outstanding` holds the children *this*
+    /// runner is waiting on, and the budgets are properties of the session
+    /// around it.
+    ///
+    /// The cap is read from `child_settings`, which is the *owning* agent's
+    /// settings — [`crate::sessions::runners::assemble`] builds this capability
+    /// from them, and a child inherits them unchanged. So a workflow step's
+    /// spawns are counted against the step's preset, exactly as the session
+    /// actor counted them against the caller's, and the same number that makes
+    /// [`Capability::setup`] advertise nothing at zero is the one that refuses
+    /// here.
+    fn refuse(&self, caller: Caller) -> Option<String> {
+        // `depth` is the *asking* runner's, so the first worker of a
+        // conversation is spawned from depth 0 and lands at 1 — which is why
+        // the bound is `>=` and not `>`.
+        if caller.depth >= MAX_SUBAGENT_DEPTH {
+            return Some(format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached"));
+        }
+        let max = self.child_settings.max_subagents();
+        if caller.active_agents >= max {
+            return Some(format!("{max} subagents already active"));
+        }
+        None
     }
 
     fn on_child(&self, m: &ChildMsg) -> Option<Decision> {
@@ -302,6 +354,24 @@ mod tests {
         SubAgentCapability::new(settings())
     }
 
+    fn spawn_call() -> Message {
+        tool(SPAWN_TOOL, serde_json::json!({"label": "l", "task": "t"}))
+    }
+
+    /// What the model was told, having checked that it was told rather than
+    /// obeyed. A refusal is not a fact about the session, so an event here
+    /// would put a child that never existed in the log.
+    fn refusal(d: &Decision) -> String {
+        assert!(
+            d.events.is_empty(),
+            "a refusal is not a fact about the session"
+        );
+        let [Action::Reply { text }] = d.actions.as_slice() else {
+            panic!("expected one reply, got {:?}", d.actions);
+        };
+        text.clone()
+    }
+
     fn spawn(c: &mut SubAgentCapability, caller: Caller) -> RunnerId {
         let d = c
             .handle(
@@ -356,6 +426,106 @@ mod tests {
         // so an equality that held for a worker would be false for a run.
         assert_ne!(agent.as_uuid(), child.as_uuid());
         assert_eq!(label, "read the flake");
+    }
+
+    /// The bound on nesting. Without it a worker that spawns a worker is a
+    /// machine that runs until something else stops it — which is what
+    /// `MAX_SUBAGENT_DEPTH` exists to be, and the number is the constant's, not
+    /// one written twice.
+    #[test]
+    fn a_spawn_at_the_depth_limit_is_refused() {
+        let c = cap();
+        // The last depth that may still delegate, and the first that may not.
+        let ok = c
+            .handle(
+                Caller {
+                    depth: MAX_SUBAGENT_DEPTH - 1,
+                    ..caller()
+                },
+                &spawn_call(),
+            )
+            .expect("mine");
+        assert!(matches!(ok.actions[0], Action::CreateChild { .. }));
+
+        let d = c
+            .handle(
+                Caller {
+                    depth: MAX_SUBAGENT_DEPTH,
+                    ..caller()
+                },
+                &spawn_call(),
+            )
+            .expect("mine, refused or not");
+        assert_eq!(refusal(&d), "max subagent depth 4 reached");
+    }
+
+    /// The concurrency cap, and where its number comes from: the settings this
+    /// capability was built with — the owning agent's, which a child inherits —
+    /// so a workflow step's spawns are counted against the step's preset rather
+    /// than a session-wide value nothing in a run owns.
+    #[test]
+    fn a_spawn_over_the_concurrency_cap_is_refused() {
+        // The session-wide default, spelled by the caller's count reaching it.
+        let c = cap();
+        let d = c
+            .handle(
+                Caller {
+                    active_agents: 8,
+                    ..caller()
+                },
+                &spawn_call(),
+            )
+            .expect("mine, refused or not");
+        assert_eq!(refusal(&d), "8 subagents already active");
+
+        // And a step whose preset allows one: its budget is spent by one.
+        let mut s = settings();
+        s.max_concurrent_subagents = Some(1);
+        let c = SubAgentCapability::new(s);
+        let ok = c
+            .handle(caller(), &spawn_call())
+            .expect("nothing is running yet");
+        assert!(matches!(ok.actions[0], Action::CreateChild { .. }));
+        let d = c
+            .handle(
+                Caller {
+                    active_agents: 1,
+                    ..caller()
+                },
+                &spawn_call(),
+            )
+            .expect("mine, refused or not");
+        assert_eq!(refusal(&d), "1 subagents already active");
+    }
+
+    /// **A refused spawn must still be claimed.** Declining hands the call to
+    /// the next capability, and the last one is the open-namespace runtime that
+    /// answers to every name — so the model would be answered by the sandbox
+    /// and never learn it had hit a budget.
+    #[test]
+    fn a_refused_spawn_is_claimed_rather_than_left_to_the_sandbox() {
+        let caps = crate::sessions::runners::capabilities::Capabilities::new(vec![
+            Box::new(cap()),
+            Box::new(crate::sessions::runners::capabilities::runtime::RuntimeCapability::default()),
+        ]);
+        for over_budget in [
+            Caller {
+                depth: MAX_SUBAGENT_DEPTH,
+                ..caller()
+            },
+            Caller {
+                active_agents: 8,
+                ..caller()
+            },
+        ] {
+            let taken = caps
+                .iter()
+                .find_map(|c| c.handle(over_budget, &spawn_call()).map(|d| (c.name(), d)));
+            let Some(("sub_agent", d)) = taken else {
+                panic!("the sandbox layer swallowed the spawn: {taken:?}");
+            };
+            assert!(!refusal(&d).is_empty());
+        }
     }
 
     /// `outstanding` says both "a report is owed" and "to whom". A `Started`
