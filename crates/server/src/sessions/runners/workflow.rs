@@ -34,9 +34,9 @@
 //! would ever deliver.
 
 use super::action::{Action, FirstInput};
+use super::capabilities::Capabilities;
 use super::capabilities::ask_user::AskUserCapability;
 use super::capabilities::step_result::StepResultCapability;
-use super::capabilities::{Capabilities, Capability};
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
@@ -372,24 +372,6 @@ impl State {
 /// A step's own capabilities, spliced into the runner's list ahead of the
 /// open-namespace one.
 ///
-/// Ahead, not appended, and both orders say why. A tool call is offered to the
-/// first capability that claims it, and the runtime claims everything — so
-/// `submit_result` appended after it would never be reached. The toolbox is
-/// built from the same list, innermost last, and the runtime's layer is the
-/// sandbox *base*: it wraps nothing, so a layer pushed after it would be built
-/// and then dropped on the floor. Same rule, both ends.
-fn insert_before_runtime(caps: &Capabilities, per_step: Vec<Box<dyn Capability>>) -> Capabilities {
-    let mut list: Vec<Box<dyn Capability>> = caps.iter().map(|c| c.save().into()).collect();
-    let at = list
-        .iter()
-        .position(|c| c.name() == "runtime")
-        .unwrap_or(list.len());
-    for (offset, cap) in per_step.into_iter().enumerate() {
-        list.insert(at + offset, cap);
-    }
-    Capabilities::new(list)
-}
-
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
         let Some(next) = self.next_step() else {
@@ -409,22 +391,25 @@ impl Runner for State {
         // ask, are declared by that step, so step 1 can be interactive and step
         // 2 not. Neither carries state between steps — a submitted result is
         // this runner's own `StepConcluded` to fold.
-        let per_step: Vec<Box<dyn Capability>> = vec![
-            // Equipped either way, and the flag is the whole difference: a step
-            // that may not ask still needs somebody to answer for `ask_user`,
-            // or the call falls through to the sandbox and the model is never
-            // told no.
-            Box::new(match step.interactive {
-                true => AskUserCapability::new(),
-                false => AskUserCapability::not_interactive(),
-            }),
-            Box::new(StepResultCapability::new(
-                step.outcomes.clone(),
-                step.fields.clone(),
-                step.interactive,
-            )),
-        ];
-        let equipment = insert_before_runtime(&self.capabilities, per_step);
+        //
+        // Both go to the front, because both answer for a fixed tool name and
+        // the list ends with the capability that claims everything offered to
+        // it. Same rule read from both ends: appended, `submit_result` would
+        // never be reached, and its layer would be built inside the sandbox
+        // base — which wraps nothing — and dropped on the floor.
+        let mut equipment = self.capabilities.clone();
+        equipment.push_front(StepResultCapability::new(
+            step.outcomes.clone(),
+            step.fields.clone(),
+            step.interactive,
+        ));
+        // Equipped either way, and the flag is the whole difference: a step
+        // that may not ask still needs somebody to answer for `ask_user`, or
+        // the call falls through to the sandbox and the model is never told no.
+        equipment.push_front(match step.interactive {
+            true => AskUserCapability::new(),
+            false => AskUserCapability::not_interactive(),
+        });
         vec![Action::StartAgent {
             agent: next.agent,
             equipment,

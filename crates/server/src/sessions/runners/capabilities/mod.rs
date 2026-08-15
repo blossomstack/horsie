@@ -329,6 +329,14 @@ impl Capabilities {
     }
 }
 
+impl FromIterator<Box<dyn Capability>> for Capabilities {
+    /// For the callers that build a list by mapping over one — a runner
+    /// re-equipping a copy, and the tests that hand-build a set.
+    fn from_iter<I: IntoIterator<Item = Box<dyn Capability>>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 impl Clone for Capabilities {
     /// Through the persisted form, so a clone cannot diverge from what a reload
     /// would produce.
@@ -716,7 +724,7 @@ mod tests {
     /// — so the tool would be advertised and its calls answered by the sandbox.
     #[test]
     fn push_front_puts_a_fixed_name_ahead_of_the_open_namespace() {
-        let mut caps = Capabilities::new(vec![Box::new(runtime::RuntimeCapability)]);
+        let mut caps = Capabilities::new(vec![Box::new(runtime::RuntimeCapability::default())]);
         caps.push_front(step_result::StepResultCapability::default());
 
         let taker = caps.iter().find_map(|c| {
