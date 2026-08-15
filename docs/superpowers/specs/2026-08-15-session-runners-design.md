@@ -150,7 +150,27 @@ It owns the *lifecycle* — provision, narrate, fail, hibernate, release — and
 
 **Everything an agent is equipped with is a capability.** Not only the things that create child runners — the runtime toolbox, the memory layer, the MCP layer, the control-plane layer, `ask_user`, `set_session_title`, `submit_result` are all equipment, and all arrive the same way.
 
-The set: `Runtime`, `Memory`, `Mcp`, `ControlPlane`, `AskUser`, `Title`, `SubAgents`, `Workflows`, `Forks`, `StepResult`.
+Every one is named `XxxxCapability` and lives in its own file under one module, so the set is legible at a glance and a new one has an obvious home:
+
+```
+sessions/runners/
+  mod.rs                    Runner trait, RunnerRecord, RunnerState, RunnerEvent
+  conversation.rs  subagent.rs  workflow.rs  runtime.rs
+  capabilities/
+    mod.rs                  Capability trait and enum, Message, CapEvent
+    runtime.rs              RuntimeCapability
+    memory.rs               MemoryCapability
+    mcp.rs                  McpCapability
+    control_plane.rs        ControlPlaneCapability
+    ask_user.rs             AskUserCapability
+    title.rs                TitleCapability
+    sub_agent.rs            SubAgentCapability
+    workflow.rs             WorkflowCapability
+    fork.rs                 ForkCapability
+    step_result.rs          StepResultCapability
+```
+
+Each file owns its capability's struct, its `Event`, and its request types. The module path supplies the namespace, so the inner types stay plain — `sub_agent::Event`, not `SubAgentCapabilityEvent`.
 
 ```rust
 trait Capability {
@@ -176,12 +196,122 @@ trait Capability {
 
 **Tool calls are offered around; structural messages are looked up.** A tool call goes through `capabilities.iter().find_map(|c| c.handle(from, &msg))`, which is what lets `Runtime` answer for a namespace nobody can enumerate — the sandbox toolbox plus whatever the plugin library scan discovered — while the fixed-name capabilities answer for theirs. A child's outcome and an arriving answer do **not** go through that scan: they route to the capability that created that child or recorded that ask, which is one owner by construction, recorded in that capability's own slice. Scanning there would let two capabilities plausibly claim the same `ChildOutcome`, which is the ambiguity most worth designing out.
 
-Order is therefore the conflict resolution for tool calls, and it must be a written property of assembly rather than an accident of construction: the open-namespace capabilities — `Runtime`, `Mcp` — sort last. This is the behaviour today, where `AskUserToolbox` wraps the plugin toolbox and silently shadows a plugin tool of the same name, so it is not a regression; but it is worth a debug-only assembly pass that offers a synthetic call to every capability and warns when more than one answers.
+Order is therefore the conflict resolution for tool calls, and it must be a written property of assembly rather than an accident of construction: the open-namespace capabilities — `RuntimeCapability`, `McpCapability` — sort last. This is the behaviour today, where `AskUserToolbox` wraps the plugin toolbox and silently shadows a plugin tool of the same name, so it is not a regression; but it is worth a debug-only assembly pass that offers a synthetic call to every capability and warns when more than one answers.
+
+### Message
+
+One enum with nested arms, so a capability's `handle` is a single match — and so the outer arm carries the dispatch rule rather than a comment carrying it.
+
+```rust
+enum Message {
+    /// A tool the agent called. Offered around until one capability takes it.
+    Tool(ToolCall),
+    /// A `/builtin` the person typed, already parsed. Also offered around —
+    /// `/fork` and `/compact` belong to different capabilities.
+    Command(Invocation),
+    /// A runner I created moved. Addressed: the owner is the capability that
+    /// has this child in its own slice.
+    Child(ChildMsg),
+    /// Addressed: the capability holding the pending ask.
+    Ask(AskMsg),
+}
+
+struct ToolCall { id: String, name: String, input: Value }
+
+enum ChildMsg {
+    /// It reached its end, already translated by the child into the
+    /// vocabulary of whoever created it.
+    Outcome { child: RunnerId, outcome: ChildOutcome },
+    /// It is now runnable — a fork whose seed landed.
+    Ready   { child: RunnerId },
+    /// It never started: the create or the seed failed.
+    Failed  { child: RunnerId, error: String },
+}
+
+enum ChildOutcome {
+    SubAgent(SubAgentOutcome),   // Completed { label, report } | Failed { label, error }
+    Workflow(WorkflowOutcome),   // Finished { output }         | Failed { error }
+}
+
+enum AskMsg { Answered { answers: Vec<AskAnswer> } }
+```
+
+The routing rule reads off the variant, so the session needs no table:
+
+```rust
+impl Message {
+    fn routing(&self) -> Routing {
+        match self {
+            Self::Tool(_) | Self::Command(_) => Routing::Offer,
+            Self::Child(m)                   => Routing::Owner(m.child()),
+            Self::Ask(_)                     => Routing::PendingAsk,
+        }
+    }
+}
+```
+
+`ChildOutcome` has no `Fork` arm. A fork owes nobody a result, so it reaches its creator through `Ready`/`Failed` only — the asymmetry stops being a special case and becomes a variant that simply is not there.
+
+Who takes what:
+
+| capability | takes |
+|---|---|
+| `RuntimeCapability` | `Tool(*)` — whatever the sandbox toolbox and plugin scan accept; sorts last |
+| `McpCapability` | `Tool("mcp__…")` |
+| `MemoryCapability` | `Tool("memory_*")` |
+| `ControlPlaneCapability` | `Tool("horsie_*")` |
+| `AskUserCapability` | `Tool("ask_user")`, `Ask(Answered)` |
+| `TitleCapability` | `Tool("set_session_title")` |
+| `SubAgentCapability` | `Tool("spawn_agent" \| "subagent_status")`, `Child(Outcome(SubAgent(_)))` |
+| `WorkflowCapability` | `Tool("invoke_workflow" \| "workflow_status")`, `Child(Outcome(Workflow(_)))` |
+| `ForkCapability` | `Command("/fork" \| "/summary-n-fork")`, `Child(Ready \| Failed)` |
+| `StepResultCapability` | `Tool("submit_result")` |
+
+One handler whole, to fix the shape:
+
+```rust
+impl Capability for SubAgentCapability {
+    fn handle(&self, from: AgentId, msg: &Message)
+        -> Option<(Vec<CapEvent>, Vec<Action>)>
+    {
+        match msg {
+            Message::Tool(t) if t.name == "spawn_agent" => {
+                // The tool's schema and this type are one declaration, so a
+                // call whose arguments no handler accepts is unwritable.
+                let req: sub_agent::Request = serde_json::from_value(t.input.clone()).ok()?;
+                let child = RunnerId::new();
+                Some((
+                    vec![CapEvent::SubAgent(sub_agent::Event::Started { child, from })],
+                    vec![Action::CreateChild {
+                        kind: RunnerKind::SubAgent,
+                        args: req.into_args(self.child_settings.clone()),
+                        parent: from,
+                    }],
+                ))
+            }
+            Message::Tool(t) if t.name == "subagent_status" => { /* a read; no events */ }
+
+            Message::Child(ChildMsg::Outcome { child, outcome: ChildOutcome::SubAgent(o) }) => {
+                let to = *self.outstanding.get(child)?;   // None: not one of mine
+                Some((
+                    vec![CapEvent::SubAgent(sub_agent::Event::Reported { child: *child })],
+                    vec![Action::Deliver { to, from: *child, part: o.into_part() }],
+                ))
+            }
+
+            _ => None,
+        }
+    }
+}
+```
+
+The `?` on `outstanding.get` earns its place: a child this capability did not create falls through as `None` rather than being mishandled, so "addressed by owner" is enforced by the same return type as "not my tool".
 
 A capability is a **value**, not a trait impl on the runner — a runner holds a `Vec<Capability>` where `Capability` is a closed enum with one arm per implementation, so the list serializes into the runner's slice and the trait above is implemented for the enum by delegation. There is one implementation of each; per-runner variation is expressed at construction:
 
 ```rust
-struct SubAgents {
+// capabilities/sub_agent.rs
+struct SubAgentCapability {
     /// Fixed when the owning runner built this: what children inherit.
     child_settings: AgentSettings,
     /// Which child, and which of my agents asked for it. This one map says
@@ -189,7 +319,7 @@ struct SubAgents {
     outstanding: BTreeMap<RunnerId, AgentId>,
 }
 
-enum SubAgentsEvent {
+enum Event {
     Started  { child: RunnerId, from: AgentId },
     Reported { child: RunnerId },
 }
@@ -205,14 +335,14 @@ SessionState
      └── state: RunnerState::Workflow(WorkflowState)
           ├── graph, steps, output, usage
           └── capabilities
-               ├── SubAgents  { child_settings, outstanding }
-               ├── AskUser    { … }
-               └── StepResult { … }
+               ├── SubAgentCapability  { child_settings, outstanding }
+               ├── AskUserCapability   { … }
+               └── StepResultCapability{ … }
 ```
 
 `CapEvent` is a closed enum with one arm per capability rather than an opaque blob: it keeps the journal typed, and a missing arm is a compile error in the right place.
 
-**Instances belong to the runner; equipment is computed per agent.** A `WorkflowRunner` holds one `SubAgents` and one `AskUser`, because their state outlives any single step. Which capabilities a *given* agent is equipped with is decided at spawn, by folding a subset over its `AgentSpec`. That is how a workflow whose step 1 is interactive and step 2 is not gets exactly the right tools, with one mechanism rather than two — and it replaces the four-arm toolbox match and the four-arm prompt-suffix match in `context.rs`.
+**Instances belong to the runner; equipment is computed per agent.** A `WorkflowRunner` holds one `SubAgentCapability` and one `AskUserCapability`, because their state outlives any single step. Which capabilities a *given* agent is equipped with is decided at spawn, by folding a subset over its `AgentSpec`. That is how a workflow whose step 1 is interactive and step 2 is not gets exactly the right tools, with one mechanism rather than two — and it replaces the four-arm toolbox match and the four-arm prompt-suffix match in `context.rs`.
 
 A message every capability declined is an error, never a silent drop — `None` from all of them, checked in the one place the scan lives. That check replaces an exhaustive-match compile error the current code relies on, so it is a real downgrade in safety; making it loud is the least that compensates.
 
@@ -288,7 +418,7 @@ worker ends
   PERSIST #1                                                        <- durable
   fold: R2.status = Done
   ─── boundary ───
-  scan: R2 is Done, parent = A, and W's SubAgents still lists R2
+  scan: R2 is Done, parent = A, and W's SubAgentCapability still lists R2
   R2::outcome() -> SubAgentOutcome::Completed { … }                 <- translation
   W.subagents.handle(ChildOutcome) -> (Reported { R2 }, Deliver { to: A })
   perform Deliver: Enqueue into A                                   <- tell
@@ -299,7 +429,7 @@ One batch would leave no re-drive point. With two, a crash between them replays 
 
 ## Recovery
 
-Nothing separate is recovered. There is one journal — the session's. Replay folds every event, including `Runner(R, SubAgents(Started { child, from }))`, through `SessionState::apply_event`, which routes to `runners[R]`, which routes to the capability owning that arm. When the fold ends, every runner and every capability holds exactly what the log says.
+Nothing separate is recovered. There is one journal — the session's. Replay folds every event, including `Runner(R, SubAgent(Started { child, from }))`, through `SessionState::apply_event`, which routes to `runners[R]`, which routes to the capability owning that arm. When the fold ends, every runner and every capability holds exactly what the log says.
 
 The session then instantiates the runner impls from `RunnerRecord.kind` and calls `actions()` on each. That is the whole of recovery.
 
@@ -312,9 +442,10 @@ The only things outside the fold are live actor handles, which are connections r
 3. A runner impl holds no fields. All state is in the session's fold.
 4. `actions()` is pure and idempotent.
 5. One runner owns exactly one agent role.
-6. **An agent may not conclude while it has outstanding children.** Load-bearing: it is what makes a single `SubAgents` implementation correct for all three parent kinds. Needs an enforcement point — `submit_result` refused, or the conclusion deferred, while `outstanding` is non-empty — and a test.
+6. **An agent may not conclude while it has outstanding children.** Load-bearing: it is what makes a single `SubAgentCapability` implementation correct for all three parent kinds. Needs an enforcement point — `submit_result` refused, or the conclusion deferred, while `outstanding` is non-empty — and a test.
 7. A structural message has exactly one owning capability, found by lookup rather than by offering it around. A tool call declined by every capability is an error.
 8. Capability order within a runner is a written property of assembly — open-namespace capabilities last — not an accident of construction.
+9. `ChildOutcome` has no arm for a child that owes nothing. A fork reaches its creator through `Ready`/`Failed` only, so "a fork reports a result" is unwritable rather than checked.
 
 ## What this deletes
 
