@@ -13,6 +13,26 @@ The immediate driver is a new capability: **an agent should be able to invoke a 
 
 Rather than widen the existing shape, this redesign replaces the organising idea. A session becomes a host for **runners**; a runner owns a unit of work and the agents that carry it out; and everything an agent is equipped with is a **capability** held by its runner.
 
+## The design in six sentences
+
+If a piece of the implementation cannot be placed in this paragraph, it is wrong.
+
+> A **session** is one journal, one sandbox, and a set of **runners**.
+>
+> A **runner** is one unit of work — a conversation, a delegated task, a workflow run. It owns the **agents** that carry it out, and the **capabilities** those agents get.
+>
+> An **agent** is one LLM loop. A **capability** is one thing an agent can do.
+>
+> When an agent is loaded, its own task walks its capabilities' `setup` in order, each one acquiring what it needs and filling in the **agent spec** the loop then runs with.
+>
+> While it runs, the **session actor** routes every message to the runner that owns the agent it came from, offers it to that runner's capabilities, folds what they record, and performs what they ask for.
+>
+> Runners and capabilities only ever **decide**. The session actor is the only thing that **acts** — except for `setup`, which the agent's own task performs, because it must not block the mailbox.
+
+That last clause is a real exception rather than tidy prose, so it is stated rather than left to be discovered.
+
+Four nouns and two verbs. There is no fifth kind of object: anything that is not a runner, a capability, an agent or the session actor is a mistake, and the first draft of this design had one — a nameless "equipment builder" holding the async work that a synchronous `setup` could not do.
+
 ## Goals
 
 - Any agent may create any number of subagents and workflow runs, nested arbitrarily.
@@ -33,7 +53,9 @@ Rather than widen the existing shape, this redesign replaces the organising idea
 2. **Concurrent runs share the session's workspace.** Runs proceed in parallel, each still running one step at a time. This is the contract subagents already have — one workspace, several writers.
 3. **The journal shape breaks.** State fields are renamed and merged and event variants are replaced. Existing sessions are truncated, not migrated.
 4. **Runner state is session state.** There is one journal. A runner's slice, and its capabilities' slices inside it, are nested in the session's fold.
-5. **Runners decide; the session performs.** A runner returns events and requested actions. It never reaches the registry, never spawns an actor, never writes state.
+5. **Runners decide; the session performs.** A runner returns events and requested actions. It never reaches the registry, never spawns an actor, never writes state. The one exception is `Capability::setup`, which is async and runs on the agent's own task.
+6. **The workspace scan is durable.** It is persisted in the runtime capability's slice rather than re-read every turn. Staleness is acceptable *because* the agent has a `scan_workspace` tool: it can notice and refresh. Today's per-turn scan is a sandbox round trip on every single turn.
+7. **Plugins are per agent, not per session.** Each agent provisions its own bundles from its own settings and scans that tree, so a workflow step and the main agent already see different plugin libraries today. A subagent matches its caller only because it inherits the caller's settings — inheritance, not structure.
 
 ## Session state
 
@@ -157,7 +179,7 @@ sessions/runners/
   mod.rs                    Runner trait, RunnerRecord, RunnerState, RunnerEvent
   conversation.rs  subagent.rs  workflow.rs  runtime.rs
   capabilities/
-    mod.rs                  Capability trait and enum, Message, CapEvent
+    mod.rs                  Capability trait, Message, CapEvent, the offer
     runtime.rs              RuntimeCapability
     memory.rs               MemoryCapability
     mcp.rs                  McpCapability
@@ -172,27 +194,86 @@ sessions/runners/
 
 Each file owns its capability's struct, its `Event`, and its request types. The module path supplies the namespace, so the inner types stay plain — `sub_agent::Event`, not `SubAgentCapabilityEvent`.
 
+### The four stages
+
 ```rust
 trait Capability {
-    /// Equip the agent: toolbox layer, prompt section.
-    fn setup(&self, spec: &mut AgentSpec);
+    /// How the journal names my events, and how progress names me while I set
+    /// up. A rename breaks replay, so the set of names is pinned by a test.
+    const NAME: &'static str;
 
-    /// `None` means "not mine" — the runner offers it to the next capability.
-    /// `Some` means I took it, and here is what to journal and what to do.
+    /// Once, when the agent is loaded. Acquire what this agent needs — a
+    /// runtime client, an MCP connection — and fill in the spec.
+    ///
+    /// Async, and run on the *agent's own task*: acquiring a runtime can take
+    /// thirty seconds, and the session's mailbox also carries Stop.
+    async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError>;
+
+    /// Once, when it unloads. Release what setup acquired.
+    async fn teardown(&self);
+
+    /// `None` means "not mine" — the next capability is offered it.
     ///
     /// One method rather than a `supports` predicate beside a handler: a
-    /// capability that answered yes and then could not cope, or a pair edited
+    /// capability that answered yes and then could not cope, and a pair edited
     /// out of step, are states that cannot be written this way.
     ///
-    /// `&Message` rather than by value, because the same message is offered
-    /// to each capability until one takes it; the taker clones what it keeps.
-    fn handle(&self, from: AgentId, msg: &Message)
-        -> Option<(Vec<CapEvent>, Vec<Action>)>;
+    /// `&Message` rather than by value, because the same message is offered to
+    /// each capability until one takes it; the taker clones what it keeps.
+    fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision>;
 
-    /// Fold my own slice.
-    fn apply(&mut self, e: &CapEvent);
+    /// Fold my own durable slice. Pure.
+    fn apply(&mut self, event: &CapEvent);
+}
+
+/// Events to journal, actions for the session to perform.
+struct Decision {
+    events: Vec<CapEvent>,
+    actions: Vec<Action>,
 }
 ```
+
+`setup` is **per agent load, not per turn.** Today's code re-scans the sandbox on every turn; with the scan persisted (below) almost nothing is left that changes between turns. If something ever does, it gets an explicit `before_turn`/`after_turn` pair on this trait rather than a `setup` that quietly re-does itself — visible on the trait, or not happening.
+
+### Two drivers, and which side each runs on
+
+- **The agent's own task drives `setup` and `teardown`.** They are async and must not touch the mailbox.
+- **The session actor drives `handle` and `apply`,** through the runner that owns the calling agent.
+
+So a capability's durable slice lives in the runner's state — `SubAgentCapability.outstanding` has to survive a workflow's steps — and the agent's task prepares from a copy of it. The copy only reads durable state and writes turn resources, so there is nothing to merge back.
+
+That split names the last missing concept: a capability holds a **durable slice** (journalled, folded, replayed) and **turn resources** (the runtime client, the MCP connections — acquired in `setup`, released in `teardown`, never journalled).
+
+### A runtime-composed list, not a closed enum
+
+A runner holds `Vec<Box<dyn Capability>>`, built when it is assembled. A runner that should not delegate simply is not given the capability, rather than holding one that refuses.
+
+The cost, stated because it is real: the durable slice cannot be a closed enum either, so the journal carries `{ capability: NAME, event: … }` and the fold routes by name. A renamed capability then breaks replay at runtime rather than at compile time. `const NAME` plus one test pinning the set is what stands in for the compiler.
+
+### Setup, and what the user sees while it runs
+
+Setup runs in a written order, and the driver narrates it — emitting *starting* and *done* around each capability from its `NAME`, so no capability author has to remember to. A capability pushes its own detail for things only it knows, which is how a vendor's account of a booting machine already reaches the user.
+
+```
+  → "acquiring the runtime"      RuntimeCapability::setup
+       the vendor's own narration arrives as detail
+  → "scanning the workspace"     (same capability)
+       reuses the persisted scan, or refreshes it; writes the workspace,
+       the skills and the agent catalogue into the spec
+  → "connecting mcp: github"     McpCapability::setup
+  → "loading memory"             MemoryCapability::setup
+  → "ready"
+```
+
+Order is also how a dependency between capabilities is expressed. `SubAgentCapability::setup` runs after the runtime's and reads the agent catalogue for its tool description, then keeps it for as long as the agent is loaded, so `handle` can reject an unknown agent type with a message naming what exists. No third party enriches anything: the capability that will answer the call is the one that took the list.
+
+### The agent spec is the real thing
+
+`setup` fills in an **`AgentSpec`**, and when every capability has run, the agent loop runs with it: the provider, the composed system prompt, the assembled toolbox, and the shared facts later capabilities read.
+
+It is not a description that something else realises later. An earlier draft made it one, built at decision time and turned into a real toolbox by a nameless third party, and that third party was the tell.
+
+One consequence: `Runner::actions` cannot hand a finished spec to `Action::StartAgent`, because building one is async. The action names the capability set; the agent's task builds the spec from it. Deciding *to* start an agent and *making* it ready were never the same act.
 
 **Tool calls are offered around; structural messages are looked up.** A tool call goes through `capabilities.iter().find_map(|c| c.handle(from, &msg))`, which is what lets `Runtime` answer for a namespace nobody can enumerate — the sandbox toolbox plus whatever the plugin library scan discovered — while the fixed-name capabilities answer for theirs. A child's outcome and an arriving answer do **not** go through that scan: they route to the capability that created that child or recorded that ask, which is one owner by construction, recorded in that capability's own slice. Scanning there would let two capabilities plausibly claim the same `ChildOutcome`, which is the ambiguity most worth designing out.
 
@@ -307,7 +388,7 @@ impl Capability for SubAgentCapability {
 
 The `?` on `outstanding.get` earns its place: a child this capability did not create falls through as `None` rather than being mishandled, so "addressed by owner" is enforced by the same return type as "not my tool".
 
-A capability is a **value**, not a trait impl on the runner — a runner holds a `Vec<Capability>` where `Capability` is a closed enum with one arm per implementation, so the list serializes into the runner's slice and the trait above is implemented for the enum by delegation. There is one implementation of each; per-runner variation is expressed at construction:
+There is one implementation of each capability; per-runner variation is expressed at construction:
 
 ```rust
 // capabilities/sub_agent.rs
@@ -460,6 +541,8 @@ The only things outside the fold are live actor handles, which are connections r
 Roughly 2,600 lines net removed, against a rewrite of the most load-bearing actor in the server.
 
 ## Open items
+
+**What a spawn carries when the child's plugins differ.** An `agent_type` name only means something relative to a plugin set. Today the name is journalled bare and re-resolved by the child against *its* plugin tree, which works only while parent and child share one. They already need not, and the intended future — a spawn that overrides the child's model, skills, plugins or runtime — makes them deliberately different. A parent naming a plugin agent type means *its* plugin's agent, so the name alone is an under-specified handoff. Either the resolved definition travels with the spawn, or the plugin set does. Not settled.
 
 **Concurrency cap.** The limit is a property of the sandbox — how many agents may run at once — so it moves to the session and is checked before dispatch, beside "does this agent have this tool". Today's per-caller cap is an artifact: a workflow session has no session-wide `AgentSettings`, so the number had to come from the step's preset. Per-runner sub-budgets can be added later as a value on the runner if fan-out starvation turns out to be real; not now.
 

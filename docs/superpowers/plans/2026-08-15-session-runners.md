@@ -1017,17 +1017,11 @@ Phase A modelled an agent's equipment as `ToolLayer` — a *name* for a toolbox 
 
 So `AgentSpec` carries both — `layers: Vec<ToolLayer>` for the service-backed wrappers, and `tools: Vec<ToolSpec>` for everything the session routes — and a capability's `setup` pushes whichever it owns. This also puts a tool's schema next to the handler that answers it, which is the last place the two could drift.
 
-### An open question B1 has to answer first
+### Superseded: the catalogue question
 
-`spawn_agent`'s schema is not static: `spawn_agent_spec(&catalog)` enumerates the plugin-declared agent types this session has installed, and `SubAgentToolbox::resolve_type` rejects an unknown one with an error naming what exists — deliberately, because "an error naming the list is only possible where the list is".
+An earlier draft of this section agonised over where `spawn_agent`'s installed-types list could come from, and offered three options. All three were answers to a problem that only existed because `Capability::setup` was synchronous and therefore had to run on the mailbox, where no scan has happened.
 
-Under the new design neither of those places is available at the right moment. A capability's `setup` runs at *decision* time, on the mailbox, inside `Runner::actions`, where the catalogue has not been scanned; the catalogue is known at *turn-prep*, when the equipment builder assembles the real toolbox. So one of three has to give:
-
-1. The capability pushes a spec whose `agent_type` is a free string, and the equipment builder narrows it to an enum from the catalogue. Validation then has to move too — to the sink, which can reach the account's services.
-2. `SpawnAgent` stays a `ToolLayer` and the builder makes the whole spec. Keeps the catalogue in one place, at the cost of splitting one capability's contribution across two mechanisms.
-3. The catalogue is resolved earlier and carried on the runner, so `setup` has it. Cheapest at the call site, but it makes a runner's slice hold something that can go stale between the scan and the turn.
-
-Option 1 looks right — the spec is mostly static and only its enum is late — but it moves a deliberate piece of error wording, so it wants deciding rather than defaulting into.
+With `setup` async and on the agent's own task, `SubAgentCapability::setup` reads the catalogue directly — the runtime capability put it in the spec a moment earlier — and keeps it for `handle` to validate against. There is nothing to decide.
 
 ### Task B1: `AgentSpec` carries real tool specs
 
