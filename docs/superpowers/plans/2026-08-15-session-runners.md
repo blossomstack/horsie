@@ -19,7 +19,7 @@
 - Every capability is named `XxxxCapability` and lives in its own file under `crates/server/src/sessions/runners/capabilities/`.
 - Inner types are module-scoped and plain: `sub_agent::Event`, `sub_agent::Request` — never `SubAgentCapabilityEvent`.
 - A runner impl holds no fields. All state arrives as a `&State` argument.
-- Decide, never perform: every handler returns `(Vec<Event>, Vec<Action>)`. No I/O, no clock, no `Uuid::new_v4()` inside a fold.
+- Decide, never perform: every handler returns a `Decision { events, actions }`. No I/O, no clock, no `Uuid::new_v4()` inside a fold. The single exception is `Capability::setup`, which is async and runs on the agent's own task.
 - Commit messages: short subject, no body unless the diff hides context. No AI attribution trailers.
 
 ---
@@ -42,7 +42,7 @@ crates/server/src/sessions/runners/
   workflow.rs         WorkflowRunner + workflow::State/Event
   runtime.rs          RuntimeRunner + runtime::State/Event
   capabilities/
-    mod.rs            Capability trait, Capability enum, CapEvent, offer/lookup
+    mod.rs            Capability trait, CapEvent, Decision, the offer
     runtime.rs        RuntimeCapability
     memory.rs         MemoryCapability
     mcp.rs            McpCapability
@@ -55,19 +55,26 @@ crates/server/src/sessions/runners/
     step_result.rs    StepResultCapability
 ```
 
-`AgentSpec` deliberately holds *descriptions* of toolbox layers (`ToolLayer`) rather than live `Arc<dyn Toolbox>` values. That is what keeps Phase A free of the runtime: a capability's `setup` pushes `ToolLayer::SpawnAgent { max }`, and Phase B's context provider turns the list into real toolboxes. Without that seam, testing `setup` would require a sandbox.
+**Superseded — see the spec.** Phase A built `AgentSpec` as a *description* of toolbox layers, so that `setup` could stay synchronous and run at decision time. Design review replaced that: `setup` is async, runs on the agent's own task, and fills in the real `AgentSpec` the loop runs with. What Phase A shipped still compiles and passes; reconciling it is the first task of Phase B, and it removes code rather than adding it.
 
-### Names as built
+### Names as built, and what review changed
 
-A1 and A2 landed first and settled the vocabulary; later tasks and Phase B should use these rather than the sketches above:
+A1 and A2 settled a vocabulary; the design review that followed replaced part of it. Both are recorded, because the code on disk is still the first column:
 
-- The behaviour trait is `capabilities::Handler`, not `Capability`. `Capability` is the closed enum holding one value per implementation, and it implements `Handler` by delegation through a `dispatch!` macro — so a new capability is a compile error in exactly two places.
-- `Decision = (Vec<CapEvent>, Vec<Action>)` is the pair every `handle` returns.
-- `Caller { agent, depth, active_agents }` is what a capability learns about the world outside its own slice. It replaces passing `AgentId` alone, and it is where the recursion budget and the session-wide concurrency cap are read — neither is a per-runner number.
-- `equip(&[Capability], AgentSettings) -> AgentSpec` folds a runner's capabilities over a fresh spec. `offer(&[Capability], Caller, &Message) -> Option<Decision>` is the tool-call scan.
-- `AgentSpec::has(&ToolLayer)` is the read every `setup` test makes. `ToolLayer` is `PartialEq` but not `Eq`, because the generated `StepOutcome`/`StepField` it carries are not.
-- `Action` gained a `Reply { text }` arm: a tool call that answers with a message rather than an effect — a refusal, or a rendered status — needed somewhere to go that was not an event.
-- `AgentSettings` has a `plugins: Vec<String>` field. It is easy to miss when hand-building one in a test.
+| Phase A shipped | The spec now says | Why |
+|---|---|---|
+| `capabilities::Handler` trait | `Capability` trait | `Handler` named nothing; the enum that was holding the name is gone |
+| `Capability` closed enum, `dispatch!` macro | `Vec<Box<dyn Capability>>` | the list is composed at runtime; a runner that should not delegate is not given the capability |
+| `Decision = (Vec<CapEvent>, Vec<Action>)` | `struct Decision { events, actions }` | a tuple at the centre of every handler |
+| `fn setup(&self, spec: &mut AgentSpec)` | `async fn setup(&self, spec: &mut AgentSpec) -> Result<(), SetupError>` plus `async fn teardown` | setup acquires runtimes and connects MCP; it was never synchronous work |
+| `ToolLayer`, a described layer | the real toolbox, assembled in `setup` | the description needed a nameless third party to realise it |
+
+Unchanged and still correct:
+
+- `Caller { agent, depth, active_agents }` — what a capability learns about the world outside its slice, and where the recursion budget and the session-wide concurrency cap are read.
+- `offer(caps, caller, &Message) -> Option<Decision>` — the tool-call scan; structural messages are addressed to their owner instead.
+- `Action::Reply { text }` — a call that answers with a message rather than an effect.
+- `AgentSettings` has a `plugins: Vec<String>` field, easy to miss when hand-building one in a test.
 
 One correction for A8, found while reading the existing code: `WorkflowRunSpec::step_agent_id(session_id, index)` derives a step's agent from the **session** id, which was safe when a session had at most one run. With concurrent runs it collides. Key it on the **runner** id instead.
 
