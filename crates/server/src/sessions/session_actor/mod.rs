@@ -191,9 +191,13 @@ struct AgentPlan {
     /// Whose settings this agent runs under: the session's, or a step's own
     /// preset. This is also where its model and thinking effort come from.
     settings: crate::sessions::spec::AgentSettings,
-    /// What a step promises to return, and whether it may ask. Default for
-    /// every other kind of agent.
-    step_result: crate::sessions::session_actor::context::StepResultDef,
+    /// What this agent can do, assembled by whoever planned it.
+    ///
+    /// Here rather than derived from the kind downstream, because the extras
+    /// only the spawn site knows about — a step's typed `submit_result` and
+    /// whether that step may ask — are part of the same list. It is the list a
+    /// runner will hold and hand to each agent it starts.
+    equipment: crate::sessions::runners::capabilities::Capabilities,
     /// The plugin-declared agent type a typed subagent runs as.
     agent_type: Option<String>,
 }
@@ -524,10 +528,9 @@ impl SessionActor {
         );
         let provider = Arc::new(SessionContextProvider {
             loading,
-            step_result: plan.step_result.clone(),
+            equipment: plan.equipment,
             kind: plan.kind,
             agent_type: plan.agent_type,
-            unattended: self.spec().is_unattended(),
             plugins: self.spec().plugins.clone(),
             settings: plan.settings.clone(),
         });
@@ -585,18 +588,28 @@ impl SessionActor {
 
     /// The session's primary agent, spawned once at load.
     fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState) {
-        let Some(settings) = self.spec().agent_settings() else {
+        let Some(settings) = self.spec().agent_settings().cloned() else {
             // Only an agent session has a main agent; `adopt` gates this call
             // on the kind.
             return;
         };
+        // The session's own conversation: it can ask, name itself and branch.
+        let equipment = crate::sessions::runners::assemble(
+            crate::sessions::runners::RunnerKind::Conversation,
+            &crate::sessions::runners::Assembly {
+                settings: &settings,
+                unattended: self.spec().is_unattended(),
+                fork: None,
+                agent_type: None,
+            },
+        );
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Main,
-                settings: settings.clone(),
-                step_result: Default::default(),
+                settings,
+                equipment,
                 agent_type: None,
             },
         );

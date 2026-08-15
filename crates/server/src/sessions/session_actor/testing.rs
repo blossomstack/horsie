@@ -1291,6 +1291,46 @@ pub(super) fn test_loading(
     )
 }
 
+/// What the spawn site for this kind of agent would have equipped it with.
+///
+/// The kind→list mapping lives at the four `AgentPlan` sites now — that is the
+/// point of it living there — so a provider a test builds by hand has to say
+/// what it is equipped with, exactly as the actor does. This is the same four
+/// arms in one place, and it has to stay in step with them: a step here gets
+/// the extras a step gets, with the empty result schema the tests use.
+pub(super) fn test_equipment(
+    kind: SessionAgentKind,
+    settings: &crate::sessions::spec::AgentSettings,
+    unattended: bool,
+    agent_type: Option<String>,
+) -> crate::sessions::runners::capabilities::Capabilities {
+    use crate::sessions::runners::{
+        Assembly, RunnerId, RunnerKind, assemble,
+        capabilities::{ask_user::AskUserCapability, step_result::StepResultCapability},
+    };
+    let opts = Assembly {
+        settings,
+        unattended,
+        fork: match kind {
+            SessionAgentKind::Fork(id) => Some(RunnerId(id)),
+            SessionAgentKind::Main | SessionAgentKind::Sub(_) | SessionAgentKind::Step(_) => None,
+        },
+        agent_type,
+    };
+    match kind {
+        SessionAgentKind::Main | SessionAgentKind::Fork(_) => {
+            assemble(RunnerKind::Conversation, &opts)
+        }
+        SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
+        SessionAgentKind::Step(_) => {
+            let mut caps = assemble(RunnerKind::Workflow, &opts);
+            caps.push_front(StepResultCapability::new(Vec::new(), Vec::new(), false));
+            caps.push_front(AskUserCapability::not_interactive());
+            caps
+        }
+    }
+}
+
 pub(super) fn catalog_provider(
     f: &ActorFixture,
     session: &SessionRef,
@@ -1298,11 +1338,15 @@ pub(super) fn catalog_provider(
 ) -> SessionContextProvider {
     SessionContextProvider {
         loading: test_loading(f, session, id, SessionAgentKind::Main),
+        equipment: test_equipment(
+            SessionAgentKind::Main,
+            &agent_settings_fixture(),
+            false,
+            None,
+        ),
         settings: agent_settings_fixture(),
-        step_result: Default::default(),
         kind: SessionAgentKind::Main,
         agent_type: None,
-        unattended: false,
         plugins: Vec::new(),
     }
 }
@@ -1389,11 +1433,10 @@ pub(super) fn typed_provider(
     let kind = SessionAgentKind::Sub(sub);
     SessionContextProvider {
         loading: test_loading(f, session, id, kind),
+        equipment: test_equipment(kind, &settings, false, Some("code-reviewer".to_string())),
         settings,
-        step_result: Default::default(),
         kind,
         agent_type: Some("code-reviewer".to_string()),
-        unattended: false,
         plugins: Vec::new(),
     }
 }

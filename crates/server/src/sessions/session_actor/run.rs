@@ -290,17 +290,56 @@ impl SessionActor {
         // looked up — the step's own spec is the same settings a later read
         // resolves by id.
         let settings = step.settings.clone();
+        let unattended = self.spec().is_unattended();
+        let mut equipment = crate::sessions::runners::assemble(
+            crate::sessions::runners::RunnerKind::Workflow,
+            &crate::sessions::runners::Assembly {
+                settings: &settings,
+                unattended,
+                fork: None,
+                agent_type: None,
+            },
+        );
+        // A step's result schema and whether it may ask are declared per step,
+        // so the workflow runner cannot hold either — the run outlives every
+        // step and could only describe one of them. They are equipped when the
+        // step agent starts, which is here.
+        //
+        // Front, not back: the list ends with the capability that claims every
+        // call offered to it, so an appended `submit_result` would be swallowed
+        // by the sandbox.
+        equipment.push_front(
+            crate::sessions::runners::capabilities::step_result::StepResultCapability::new(
+                step.outcomes.clone(),
+                step.fields.clone(),
+                step.interactive,
+            ),
+        );
+        // Equipped either way: a step that may not ask still needs somebody to
+        // answer for `ask_user`, or the call falls through to the sandbox and
+        // the model is never told no.
+        //
+        // Which mute matters, because the model is told which. A step that did
+        // not declare itself interactive is not the same fact as nobody being
+        // there — usually somebody is — and telling an attended run it was
+        // started by a routine is simply false.
+        equipment.push_front({
+            use crate::sessions::runners::capabilities::ask_user::AskUserCapability;
+            match (step.interactive, unattended) {
+                (true, false) => AskUserCapability::new(),
+                // Interactive, but a routine started the run: a question here
+                // would park it on an answer nobody will read.
+                (true, true) => AskUserCapability::unattended(),
+                (false, _) => AskUserCapability::not_interactive(),
+            }
+        });
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Step(agent_id),
                 settings,
-                step_result: crate::sessions::session_actor::context::StepResultDef {
-                    outcomes: step.outcomes.clone(),
-                    fields: step.fields.clone(),
-                    interactive: step.interactive,
-                },
+                equipment,
                 agent_type: None,
             },
         )

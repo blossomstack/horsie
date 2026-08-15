@@ -375,13 +375,25 @@ impl SessionActor {
         let settings = self
             .effective_settings(state, AgentKey::Fork(id))
             .cloned()?;
+        // A conversation, like the agent it branched from. `Assembly::fork` is
+        // the whole difference, and it names which conversation
+        // `set_session_title` renames.
+        let equipment = crate::sessions::runners::assemble(
+            crate::sessions::runners::RunnerKind::Conversation,
+            &crate::sessions::runners::Assembly {
+                settings: &settings,
+                unattended: self.spec().is_unattended(),
+                fork: Some(crate::sessions::runners::RunnerId(id)),
+                agent_type: None,
+            },
+        );
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Fork(id),
                 settings,
-                step_result: Default::default(),
+                equipment,
                 agent_type: None,
             },
         )

@@ -256,13 +256,24 @@ impl SessionActor {
         // step's spawns under the step's preset, a conversation's under the
         // main agent's — never a fabricated session-wide value.
         let settings = self.effective_settings(state, AgentKey::Sub(id)).cloned()?;
+        // A worker owes a report: it can delegate further, but it cannot ask,
+        // name the session or branch it.
+        let equipment = crate::sessions::runners::assemble(
+            crate::sessions::runners::RunnerKind::SubAgent,
+            &crate::sessions::runners::Assembly {
+                settings: &settings,
+                unattended: self.spec().is_unattended(),
+                fork: None,
+                agent_type: agent_type.clone(),
+            },
+        );
         self.spawn_agent(
             ctx,
             state,
             AgentPlan {
                 kind: SessionAgentKind::Sub(id),
                 settings,
-                step_result: Default::default(),
+                equipment,
                 agent_type,
             },
         )

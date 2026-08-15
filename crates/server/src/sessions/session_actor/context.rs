@@ -8,10 +8,12 @@
 //!
 //! One type serves all three kinds of agent a session hosts — main, subagent
 //! and workflow step — because they differ only in what they are equipped with.
-//! What that is, this file no longer decides: [`SessionContextProvider::provide`]
-//! hands a [`Loading`] to the agent's [`Capabilities`] and returns what they
-//! filled in. [`SessionAgentKind`] survives only as the bridge to
-//! [`assemble`]'s vocabulary, and the next change deletes it.
+//! What that is, this file no longer decides at all: the agent's
+//! [`Capabilities`] are built by whoever spawns it and handed over,
+//! [`SessionContextProvider::provide`] hands them a [`Loading`] and returns
+//! what they filled in. That is the shape a runner needs — it holds its own
+//! list and equips the agents it starts — and [`SessionAgentKind`] is left
+//! deciding only who this agent *is*.
 
 use super::{AgentKey, CoreCommand, SessionCommand};
 use crate::{
@@ -22,11 +24,7 @@ use crate::{
     sessions::{
         addressing::SessionRef,
         runners::{
-            Assembly, RunnerId, RunnerKind, assemble,
-            capabilities::{
-                Capabilities, SetupError, ask_user::AskUserCapability, runtime::GONE_PREFIX,
-                step_result::StepResultCapability,
-            },
+            capabilities::{Capabilities, SetupError, runtime::GONE_PREFIX},
             loading::{AgentSpec, Loading},
         },
         spec::AgentSettings,
@@ -98,16 +96,6 @@ fn narration_pump(
 
 /// The baseline system prompt given to every session agent.
 const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
-
-/// What a workflow step promises to return, carried to the toolbox that builds
-/// its `submit_result` tool. Default (empty outcomes, no fields, not
-/// interactive) for every agent that is not a step; those never get the layer.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct StepResultDef {
-    pub(crate) outcomes: Vec<horsie_models::workflow::StepOutcome>,
-    pub(crate) fields: Vec<horsie_models::workflow::StepField>,
-    pub(crate) interactive: bool,
-}
 
 /// Which of a session's agents a [`SessionContextProvider`] serves.
 ///
@@ -231,8 +219,8 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
 ///
 /// Two halves, and the split is [`Loading`]'s: everything the *session* brings
 /// to a load lives in `loading`, and what is left here is this one agent's
-/// config. The capability list reads the first; the second is only what still
-/// has to be translated into a capability list at all.
+/// config. The capability list reads the first, and is itself handed in — this
+/// type composes an agent out of the two, and chooses neither.
 pub(super) struct SessionContextProvider {
     /// The session's services, its address, and the client cache.
     ///
@@ -242,19 +230,20 @@ pub(super) struct SessionContextProvider {
     /// the last load acquired.
     pub(super) loading: Loading,
     pub(super) settings: AgentSettings,
-    /// What a workflow step promises to return, and whether it may ask. Empty
-    /// and false for every other kind of agent, which never gets the
-    /// `submit_result` capability at all.
-    pub(super) step_result: StepResultDef,
+    /// What this agent is equipped with, decided by whoever started it.
+    ///
+    /// Given rather than derived, and that is the point: a kind no longer says
+    /// what an agent can do. The spawn site holds the list — a runner will —
+    /// which is also what lets the per-agent extras a step needs (its typed
+    /// `submit_result`, whether it may ask) be equipped without this file
+    /// knowing steps exist.
+    pub(super) equipment: Capabilities,
     pub(super) kind: SessionAgentKind,
     /// The plugin-declared agent type this agent runs as, for a subagent that
     /// was spawned with one. The *name* only — the definition is resolved from
     /// the library scan on every `provide()`, so a subagent that outlives its
     /// plugin fails rather than running a prompt nobody can point at.
     pub(super) agent_type: Option<String>,
-    /// Whether nobody is watching this session (a routine run). Decides one
-    /// thing: the main agent gets no `ask_user`, and is told why.
-    pub(super) unattended: bool,
     /// The plugin bundles this session selected. With the library in
     /// [`Loading`] they answer "is `/commit` a command?" from the database,
     /// with no runtime involved — which is what lets a prompt merely *starting*
@@ -477,68 +466,6 @@ impl SessionContextProvider {
             .unwrap_or_else(|| "subagent".to_string())
     }
 
-    /// What this agent is equipped with.
-    ///
-    /// The bridge from the session's vocabulary to the runners', and nothing
-    /// else — deliberately temporary. Once a session hosts real runners, the
-    /// runner that owns this agent holds its capability list and hands it over,
-    /// [`SessionAgentKind`] is gone, and so is this method. Until then it is
-    /// the one place a kind still decides anything, and it decides it by
-    /// calling [`assemble`] rather than by listing tools.
-    fn equipment(&self) -> Capabilities {
-        let opts = Assembly {
-            settings: &self.settings,
-            unattended: self.unattended,
-            fork: match self.kind {
-                SessionAgentKind::Fork(id) => Some(RunnerId(id)),
-                SessionAgentKind::Main | SessionAgentKind::Sub(_) | SessionAgentKind::Step(_) => {
-                    None
-                }
-            },
-            agent_type: self.agent_type.clone(),
-        };
-        match self.kind {
-            // A fork is a conversation. Its own runner, not its own kind of
-            // equipment: `Assembly::fork` is the whole difference, and it names
-            // which conversation `set_session_title` renames.
-            SessionAgentKind::Main | SessionAgentKind::Fork(_) => {
-                assemble(RunnerKind::Conversation, &opts)
-            }
-            SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
-            // A step's result schema and whether it may ask are declared per
-            // step, so the workflow runner cannot hold either — the run
-            // outlives every step and could only describe one of them. They
-            // are equipped when the step agent starts, which is here.
-            SessionAgentKind::Step(_) => {
-                let mut caps = assemble(RunnerKind::Workflow, &opts);
-                // Front, not back: the list ends with the capability that
-                // claims every call offered to it, so an appended
-                // `submit_result` would be swallowed by the sandbox.
-                caps.push_front(StepResultCapability::new(
-                    self.step_result.outcomes.clone(),
-                    self.step_result.fields.clone(),
-                    self.step_result.interactive,
-                ));
-                // Equipped either way: a step that may not ask still needs
-                // somebody to answer for `ask_user`, or the call falls through
-                // to the sandbox and the model is never told no.
-                //
-                // Which mute matters, because the model is told which. A step
-                // that did not declare itself interactive is not the same fact
-                // as nobody being there — usually somebody is — and telling an
-                // attended run it was started by a routine is simply false.
-                caps.push_front(match (self.step_result.interactive, self.unattended) {
-                    (true, false) => AskUserCapability::new(),
-                    // Interactive, but a routine started the run: a question
-                    // here would park it on an answer nobody will read.
-                    (true, true) => AskUserCapability::unattended(),
-                    (false, _) => AskUserCapability::not_interactive(),
-                });
-                caps
-            }
-        }
-    }
-
     /// Why the turn cannot be prepared.
     ///
     /// Retryable unless the runtime is *gone*, which is the one failure a
@@ -684,7 +611,7 @@ impl ContextProvider for SessionContextProvider {
     /// and the paragraph that explains it are one edit in one file.
     async fn provide(&self) -> Result<Contexts, ContextError> {
         let (spec, degraded) = self
-            .equipment()
+            .equipment
             .equip(&self.loading, self.settings.clone())
             .await
             .map_err(Self::fatal)?;
@@ -766,18 +693,17 @@ mod tests {
             settings.control_plane = control_plane;
             SessionContextProvider {
                 loading: test_loading(&f, &session, id, kind),
+                equipment: test_equipment(kind, &settings, false, None),
                 settings,
-                step_result: StepResultDef::default(),
                 kind,
                 agent_type: None,
-                unattended: false,
                 plugins: Vec::new(),
             }
         };
 
         assert!(
             !build(SessionAgentKind::Main, None)
-                .equipment()
+                .equipment
                 .has("control_plane"),
             "a preset that never asked must not get them"
         );
@@ -786,7 +712,7 @@ mod tests {
             SessionAgentKind::Fork(Uuid::new_v4()),
         ] {
             assert!(
-                build(kind, Some(true)).equipment().has("control_plane"),
+                build(kind, Some(true)).equipment.has("control_plane"),
                 "a conversation that asked for them must have them"
             );
         }
@@ -795,7 +721,7 @@ mod tests {
             SessionAgentKind::Step(Uuid::new_v4()),
         ] {
             assert!(
-                !build(kind, Some(true)).equipment().has("control_plane"),
+                !build(kind, Some(true)).equipment.has("control_plane"),
                 "a worker inherits the setting but must not inherit the authority"
             );
         }
@@ -807,11 +733,10 @@ mod tests {
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
+            equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
             kind,
             agent_type: None,
-            unattended: false,
             plugins: Vec::new(),
         };
 
@@ -858,11 +783,10 @@ mod tests {
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, SessionAgentKind::Main),
+            equipment: test_equipment(SessionAgentKind::Main, &settings, false, None),
             settings,
-            step_result: StepResultDef::default(),
             kind: SessionAgentKind::Main,
             agent_type: None,
-            unattended: false,
             plugins: Vec::new(),
         };
         let tools: Vec<String> = provider
@@ -889,11 +813,15 @@ mod tests {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
             loading: test_loading(&f, &session, id, SessionAgentKind::Main),
+            equipment: test_equipment(
+                SessionAgentKind::Main,
+                &agent_settings_fixture(),
+                unattended,
+                None,
+            ),
             settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
             kind: SessionAgentKind::Main,
             agent_type: None,
-            unattended,
             plugins: Vec::new(),
         };
         let names = |c: &Contexts| -> Vec<String> {
@@ -1201,11 +1129,15 @@ mod tests {
         let kind = SessionAgentKind::Sub(Uuid::new_v4());
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
+            equipment: test_equipment(
+                kind,
+                &agent_settings_fixture(),
+                false,
+                Some("uninstalled-agent".to_string()),
+            ),
             settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
             kind,
             agent_type: Some("uninstalled-agent".to_string()),
-            unattended: false,
             plugins: Vec::new(),
         };
         let Err(err) = provider.provide().await else {
@@ -1408,11 +1340,10 @@ mod tests {
         );
         SessionContextProvider {
             loading,
+            equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
             kind,
             agent_type: None,
-            unattended: false,
             plugins: Vec::new(),
         }
     }
