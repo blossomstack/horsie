@@ -72,9 +72,23 @@ pub enum FirstInput {
 }
 
 /// What a child runner is created with.
+///
+/// The two kinds that own exactly one agent carry its id, minted beside the
+/// [`RunnerId`] by whichever capability asked for the child. A child that has
+/// to be *addressed* before it has said anything is the ordinary case, not the
+/// exception: `/fork` answers the person with the new conversation's agent, the
+/// fork's row in the session list is keyed on it, and `spawn_agent` hands it
+/// back to the model that called it. Minted at start time instead, all three
+/// would have to wait for an agent that has not been equipped yet.
+///
+/// A workflow carries none, because it owns many agents over time and each
+/// step's is derived from the run — which is exactly why this is a field on two
+/// of the three arms rather than an equality between [`RunnerId`] and
+/// [`AgentId`].
 #[derive(Debug, Clone)]
 pub enum RunnerArgs {
     SubAgent {
+        agent: AgentId,
         label: String,
         task: String,
         agent_type: Option<String>,
@@ -86,6 +100,7 @@ pub enum RunnerArgs {
         input: String,
     },
     Conversation {
+        agent: AgentId,
         /// Where this conversation branched from, if it is a fork.
         seed: Option<Branch>,
         message: String,

@@ -18,6 +18,12 @@
 //! summary of the source's log, and an agent started before it exists would
 //! answer from an empty transcript — so [`State::seeded`] gates
 //! [`Runner::actions`], and a seed that failed leaves it false for good.
+//!
+//! It is nonetheless *addressable* the whole time. [`State::agent`] is decided
+//! when the fork is created, because the reply to `/fork` and the fork's row in
+//! the session list both name it, and both are answered before the copy has
+//! landed. Whether that agent is running is [`State::started`] — the question
+//! the id used to answer by being `None`, which it can no longer do.
 
 use super::action::{Branch, FirstInput};
 use super::capabilities::Capabilities;
@@ -43,9 +49,14 @@ pub enum TurnStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
-    /// The conversation's agent, once started. `None` is what
-    /// [`Runner::actions`] reads as "start it".
-    pub agent: Option<AgentId>,
+    /// The conversation's agent, known from the moment the conversation was
+    /// created rather than from the moment its agent starts.
+    ///
+    /// A fork has to be addressable before it has said anything: the
+    /// `MessageAccepted` that answers `/fork` names it, and so does the fork's
+    /// row in the session list. Minted at start time, both would be answering
+    /// with an id that does not exist yet.
+    pub agent: AgentId,
     /// `None` is the session's own conversation; `Some` is a fork, and names
     /// where it branched from.
     pub seed: Option<Branch>,
@@ -53,6 +64,13 @@ pub struct State {
     /// fork exists — and is listed, and is titled — from the moment it is
     /// created, and only becomes runnable later.
     pub seeded: bool,
+    /// Whether [`Self::agent`] has been started.
+    ///
+    /// The gate [`Runner::actions`] reads, and the one fact standing between a
+    /// recovery and a double start. It used to be `agent.is_some()`; now that
+    /// the id exists from creation, the id can no longer answer the question
+    /// and this does.
+    pub started: bool,
     pub turn: TurnStatus,
     /// The name this conversation was created with. What an agent names itself
     /// with `set_session_title` is the title capability's own slice, folded
@@ -75,9 +93,10 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            agent: None,
+            agent: AgentId::default(),
             seed: None,
             seeded: false,
+            started: false,
             turn: TurnStatus::default(),
             title: None,
             first_message: None,
@@ -90,9 +109,11 @@ impl Default for State {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    Started {
-        agent: AgentId,
-    },
+    /// The agent this conversation was created with is now running.
+    ///
+    /// Carries no id: the id is [`State::agent`], written once at creation, and
+    /// an event that repeated it would be a second writer of one field.
+    Started,
     /// The branch point landed; a fork is now runnable like any other
     /// conversation.
     Seeded,
@@ -114,7 +135,7 @@ pub enum Event {
 
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        if self.agent.is_some() {
+        if self.started {
             return Vec::new();
         }
         // A fork whose branch point has not landed is a conversation with no
@@ -124,10 +145,10 @@ impl Runner for State {
             return Vec::new();
         }
         vec![Action::StartAgent {
-            // Minted here rather than in the fold: a decision may be
-            // non-deterministic, a fold may not. The session journals the
-            // `Started` carrying this id when it performs the action.
-            agent: AgentId::new_v4(),
+            // Read, never minted: this id was decided when the conversation was
+            // created, so recovery asks to start the same agent the log already
+            // named rather than a fresh one nothing can find.
+            agent: self.agent,
             // A fresh copy for the agent's task to equip itself from; the
             // folded one stays here. The clone goes through the persisted
             // form, so the two cannot diverge from what a reload would build.
@@ -168,7 +189,7 @@ impl Runner for State {
             return;
         };
         match event {
-            Event::Started { agent } => self.agent = Some(*agent),
+            Event::Started => self.started = true,
             Event::Seeded => self.seeded = true,
             // `seeded` stays false, so this fork never starts an agent: a
             // conversation with no transcript has nothing to continue.
@@ -242,6 +263,7 @@ mod tests {
 
     fn fork() -> State {
         State {
+            agent: AgentId::new_v4(),
             seed: Some(Branch {
                 source: AgentId::new_v4(),
                 source_seq: 0,
@@ -265,27 +287,57 @@ mod tests {
     }
 
     fn started() -> RunnerEvent {
-        RunnerEvent::Conversation(Event::Started {
-            agent: AgentId::new_v4(),
-        })
+        RunnerEvent::Conversation(Event::Started)
     }
 
-    /// A conversation with no agent starts one, and one with an agent starts
-    /// nothing — the same pure read that lets creation and recovery share a
-    /// path. Its first input is `None`: the session's own conversation waits
-    /// for a person rather than being handed something to answer.
+    /// A conversation that has not started its agent starts it, and one that
+    /// has starts nothing — the same pure read that lets creation and recovery
+    /// share a path. Its first input is `None`: the session's own conversation
+    /// waits for a person rather than being handed something to answer.
     #[test]
     fn a_conversation_with_no_agent_starts_one_and_waits_for_a_person() {
-        let mut state = State::default();
+        let mut state = State {
+            agent: AgentId::new_v4(),
+            ..State::default()
+        };
         let actions = state.actions(&view());
-        let Action::StartAgent { first, .. } = &actions[0] else {
+        let Action::StartAgent { agent, first, .. } = &actions[0] else {
             panic!("expected a start, got {:?}", actions[0]);
         };
+        // The id this conversation was created with, not a fresh one: it is
+        // already what everything outside this runner addresses.
+        assert_eq!(*agent, state.agent);
         assert!(matches!(first, FirstInput::None));
         assert_eq!(actions.len(), 1);
 
         state.apply(&started(), 0);
         assert!(state.actions(&view()).is_empty());
+    }
+
+    /// **A fork is addressable before it can run.** The `MessageAccepted` that
+    /// answers `/fork` names the new conversation's agent, and so does its row
+    /// in the session list — both of which are answered while the copy of the
+    /// source's log is still in flight. Minted when the agent starts instead,
+    /// there would be nothing to name, and the id the person was given would
+    /// belong to no agent at all.
+    #[test]
+    fn a_fork_has_an_addressable_agent_before_its_seed_lands() {
+        let mut state = fork();
+        let addressed = state.agent;
+        assert!(
+            state.actions(&view()).is_empty(),
+            "it must not run before its seed lands"
+        );
+
+        state.apply(&RunnerEvent::Conversation(Event::Seeded), 0);
+        let actions = state.actions(&view());
+        let Action::StartAgent { agent, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        assert_eq!(
+            *agent, addressed,
+            "the fork started an agent nobody had been told about"
+        );
     }
 
     /// **A fork must not run before its branch point is durable.** Started
@@ -362,9 +414,7 @@ mod tests {
         assert!(state.outcome().is_none());
         for event in [
             Event::Seeded,
-            Event::Started {
-                agent: AgentId::new_v4(),
-            },
+            Event::Started,
             Event::TurnBegan,
             Event::Asked,
             Event::TurnEnded,
@@ -415,7 +465,7 @@ mod tests {
             0,
         );
         assert_eq!(state.turn, TurnStatus::Idle);
-        assert!(state.agent.is_none());
+        assert!(!state.started);
     }
 
     /// Starting an agent is the start of a turn. Without this the conversation

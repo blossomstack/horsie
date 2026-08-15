@@ -10,11 +10,16 @@
 //! cannot read, and the only honest report is a failure. The parent never sees
 //! a [`TurnEnd`] and so never learns how a worker is implemented.
 //!
-//! [`Runner::actions`] is the rest of it. It reads the folded state rather
-//! than a flag, so "I have no agent, so start one" is the same code path
-//! whether that state was written a millisecond ago or replayed from a journal
-//! after a restart. A `run()` that fired once would need a second entry for
-//! recovery, and the suppression that implies is what double-starts a worker.
+//! [`Runner::actions`] is the rest of it. It reads the folded state, so "my
+//! agent is not started, so start it" is the same code path whether that state
+//! was written a millisecond ago or replayed from a journal after a restart. A
+//! `run()` that fired once would need a second entry for recovery, and the
+//! suppression that implies is what double-starts a worker.
+//!
+//! The worker's own [`State::agent`] is decided when the runner is created,
+//! not when its agent starts, because `spawn_agent` answers the model with it
+//! the moment the create is durable. [`State::started`] is what says whether
+//! that agent is running — the question the id used to answer by being `None`.
 
 use super::action::FirstInput;
 use super::capabilities::Capabilities;
@@ -38,9 +43,18 @@ pub enum Outcome {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
-    /// The worker, once started. `None` is what [`Runner::actions`] reads as
-    /// "start it".
-    pub agent: Option<AgentId>,
+    /// The worker, known from the moment this runner was created rather than
+    /// from the moment its agent starts: `spawn_agent` answers the model that
+    /// called it with this id, and that reply fires as soon as the create is
+    /// durable — before anything has been equipped.
+    pub agent: AgentId,
+    /// Whether [`Self::agent`] has been started.
+    ///
+    /// The gate [`Runner::actions`] reads. It used to be `agent.is_some()`;
+    /// now that the id exists from creation, the id can no longer answer the
+    /// question and this does — and getting that wrong is what double-starts a
+    /// worker on every recovery.
+    pub started: bool,
     /// What the asking agent called this piece of work. Carried on every
     /// report, because the asker addresses its workers by label and not by id.
     pub label: String,
@@ -67,7 +81,8 @@ pub struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            agent: None,
+            agent: AgentId::default(),
+            started: false,
             label: String::new(),
             task: String::new(),
             agent_type: None,
@@ -81,21 +96,29 @@ impl Default for State {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    Started { agent: AgentId },
-    Concluded { output: String },
-    Failed { error: String },
+    /// The worker this runner was created with is now running. Carries no id:
+    /// the id is [`State::agent`], written once at creation, and an event that
+    /// repeated it would be a second writer of one field.
+    Started,
+    Concluded {
+        output: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl Runner for State {
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        if self.agent.is_some() || self.result.is_some() {
+        if self.started || self.result.is_some() {
             return Vec::new();
         }
         vec![Action::StartAgent {
-            // Minted here rather than in the fold: a decision may be
-            // non-deterministic, a fold may not. The session journals the
-            // `Started` that carries this id when it performs the action.
-            agent: AgentId::new_v4(),
+            // Read, never minted: this id was decided when the worker was
+            // created and already handed back to the agent that asked, so a
+            // recovery starts that agent rather than a fresh one nothing can
+            // find.
+            agent: self.agent,
             // A fresh copy for the agent's task to equip itself from; the
             // folded one stays here. The clone goes through the persisted
             // form, so the two cannot diverge from what a reload would build.
@@ -120,7 +143,7 @@ impl Runner for State {
     }
 
     fn busy(&self) -> bool {
-        self.agent.is_some() && self.result.is_none()
+        self.started && self.result.is_none()
     }
 
     fn capabilities(&self) -> Option<&Capabilities> {
@@ -138,7 +161,7 @@ impl Runner for State {
             return;
         };
         match event {
-            Event::Started { agent } => self.agent = Some(*agent),
+            Event::Started => self.started = true,
             Event::Concluded { output } => {
                 self.result = Some(Outcome::Completed {
                     report: output.clone(),
@@ -219,6 +242,7 @@ mod tests {
 
     fn worker() -> State {
         State {
+            agent: AgentId::new_v4(),
             label: "read the flake".into(),
             task: "look at the last three runs".into(),
             ..State::default()
@@ -254,17 +278,20 @@ mod tests {
     #[test]
     fn starting_is_idempotent() {
         let mut state = worker();
-        assert_eq!(state.actions(&view()).len(), 1);
+        let actions = state.actions(&view());
+        assert_eq!(actions.len(), 1);
+        let Action::StartAgent { agent, .. } = &actions[0] else {
+            panic!("expected a start, got {:?}", actions[0]);
+        };
+        // The id the create decided, not a fresh one: the asking agent was
+        // handed this uuid when the spawn was acknowledged, so a start naming
+        // any other agent hands it a worker it cannot address.
+        assert_eq!(*agent, state.agent);
         // Called again on the same state — nothing has moved, so it is the
         // same single request, not a second one.
         assert_eq!(state.actions(&view()).len(), 1);
 
-        state.apply(
-            &RunnerEvent::SubAgent(Event::Started {
-                agent: AgentId::new_v4(),
-            }),
-            0,
-        );
+        state.apply(&RunnerEvent::SubAgent(Event::Started), 0);
         assert!(state.actions(&view()).is_empty());
 
         state.apply(
@@ -276,7 +303,7 @@ mod tests {
         assert!(state.actions(&view()).is_empty());
 
         // And a worker that failed before it ever had an agent stays stopped:
-        // `agent.is_none()` alone would restart it for ever.
+        // `!started` alone would restart it for ever.
         let failed = State {
             result: Some(Outcome::Failed {
                 error: "the create failed".into(),
@@ -339,12 +366,7 @@ mod tests {
     fn there_is_no_outcome_until_it_ends() {
         let mut state = worker();
         assert!(state.outcome().is_none());
-        state.apply(
-            &RunnerEvent::SubAgent(Event::Started {
-                agent: AgentId::new_v4(),
-            }),
-            0,
-        );
+        state.apply(&RunnerEvent::SubAgent(Event::Started), 0);
         assert!(state.outcome().is_none());
     }
 
@@ -396,12 +418,7 @@ mod tests {
     fn it_is_busy_only_between_starting_and_ending() {
         let mut state = worker();
         assert!(!state.busy());
-        state.apply(
-            &RunnerEvent::SubAgent(Event::Started {
-                agent: AgentId::new_v4(),
-            }),
-            0,
-        );
+        state.apply(&RunnerEvent::SubAgent(Event::Started), 0);
         assert!(state.busy());
         state.apply(
             &RunnerEvent::SubAgent(Event::Concluded {
@@ -421,7 +438,7 @@ mod tests {
             &RunnerEvent::Conversation(crate::sessions::runners::conversation::Event::TurnBegan),
             0,
         );
-        assert!(state.agent.is_none());
+        assert!(!state.started);
         assert!(state.result.is_none());
     }
 

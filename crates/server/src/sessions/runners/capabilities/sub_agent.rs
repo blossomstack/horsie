@@ -80,11 +80,19 @@ impl SubAgentCapability {
                     Ok(req) => req,
                     Err(refusal) => return Some(refusal),
                 };
-                // The child's id is minted here rather than in `apply`: a
-                // decision may be non-deterministic, a fold may not. Replay
-                // must land the id the log recorded, so the event and the
-                // action name the same child and neither invents one.
+                // Both ids are minted here rather than in `apply`: a decision
+                // may be non-deterministic, a fold may not. Replay must land
+                // the ids the log recorded, so the event and the action name
+                // the same child and neither invents one.
+                //
+                // The worker's agent id is minted *with* its runner id, and not
+                // when the worker's agent starts, because `spawn_agent`'s reply
+                // names it and that reply fires as soon as the create is
+                // durable. Two ids and not one: a runner and an agent are
+                // separate spaces, and a workflow runner owns many agents, so
+                // an equality would hold here and be false there.
                 let child = RunnerId::new_v4();
+                let agent = AgentId::new_v4();
                 Some(Decision {
                     events: vec![CapEvent::SubAgent(Event::Started {
                         child,
@@ -94,6 +102,7 @@ impl SubAgentCapability {
                         id: child,
                         kind: RunnerKind::SubAgent,
                         args: RunnerArgs::SubAgent {
+                            agent,
                             label: req.label,
                             task: req.task,
                             agent_type: req.agent_type,
@@ -334,9 +343,14 @@ mod tests {
         assert_eq!(id, child);
         assert_eq!(*kind, RunnerKind::SubAgent);
         assert_eq!(*parent, caller.agent);
-        let RunnerArgs::SubAgent { label, .. } = args else {
+        let RunnerArgs::SubAgent { agent, label, .. } = args else {
             panic!("expected subagent args, got {args:?}");
         };
+        // The worker's agent is decided here, with its runner, because
+        // `spawn_agent`'s reply names it — and it is its *own* id, not the
+        // runner's. Two spaces on purpose: a workflow runner owns many agents,
+        // so an equality that held for a worker would be false for a run.
+        assert_ne!(agent.as_uuid(), child.as_uuid());
         assert_eq!(label, "read the flake");
     }
 

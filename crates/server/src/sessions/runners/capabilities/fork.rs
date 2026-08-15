@@ -76,6 +76,13 @@ impl ForkCapability {
             )));
         }
         let fork = RunnerId::new_v4();
+        // Minted here, beside the runner id, because a fork has to be
+        // addressable before its agent exists: the `MessageAccepted` that
+        // answers `/fork` names this agent, and so does the fork's row in the
+        // session list. Two ids and not one — a runner and an agent are
+        // separate spaces, and a workflow runner owns many agents, so an
+        // equality would hold here and be false there.
+        let agent = AgentId::new_v4();
         Some(Decision {
             events: vec![CapEvent::Fork(Event::Created {
                 fork,
@@ -85,6 +92,7 @@ impl ForkCapability {
                 id: fork,
                 kind: RunnerKind::Conversation,
                 args: RunnerArgs::Conversation {
+                    agent,
                     seed: Some(Branch {
                         source: caller.agent,
                         // Zero, not a guess: the branch point is wherever the
@@ -231,9 +239,20 @@ mod tests {
         assert_eq!(id, fork);
         assert_eq!(*kind, RunnerKind::Conversation);
         assert_eq!(*parent, caller.agent);
-        let RunnerArgs::Conversation { seed, message, .. } = args else {
+        let RunnerArgs::Conversation {
+            agent,
+            seed,
+            message,
+            ..
+        } = args
+        else {
             panic!("expected conversation args, got {args:?}");
         };
+        // The fork's agent is decided here, with its runner, because the reply
+        // to `/fork` names it — and it is its *own* id, not the runner's. Two
+        // spaces on purpose: a workflow runner owns many agents, so an equality
+        // that held for a fork would be false for a run.
+        assert_ne!(agent.as_uuid(), fork.as_uuid());
         assert_eq!(message, "look into the flake");
         let seed = seed.as_ref().expect("a fork has a branch point");
         assert_eq!(seed.source, caller.agent);
