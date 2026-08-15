@@ -57,6 +57,19 @@ pub enum Action {
     },
     /// Stop an agent's run.
     Cancel { agent: AgentId },
+    /// Acquire the sandbox this session runs in.
+    ///
+    /// The one action nobody's agent asks for: it is the runtime runner's, and
+    /// it is what puts provisioning on the same "a `Pending` runner asks for
+    /// its first thing" footing as every other kind. Before it, provisioning
+    /// was driven by a lifecycle command and so had no answer at recovery — a
+    /// session whose sandbox died between the ask and the answer sat `Pending`
+    /// with nothing to restart it.
+    ///
+    /// Carries nothing. What to provision is the session's spec, which the
+    /// session already holds; a runner that copied it would be a second place
+    /// for it to be wrong.
+    Provision,
     /// Answer the caller's tool call with a message rather than an effect —
     /// a refusal, or a rendered status.
     Reply { text: String },

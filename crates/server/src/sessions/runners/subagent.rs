@@ -146,6 +146,18 @@ impl Runner for State {
         self.started && self.result.is_none()
     }
 
+    /// The same field [`Runner::outcome`] reads, in the session's vocabulary.
+    ///
+    /// One source, two readers: a worker whose status said `Done` while its
+    /// `result` was still `None` would be a finished runner with no report to
+    /// deliver, and the agent that asked would wait for ever.
+    fn finished(&self) -> Option<super::RunnerStatus> {
+        Some(match self.result.as_ref()? {
+            Outcome::Completed { .. } => super::RunnerStatus::Done,
+            Outcome::Failed { .. } => super::RunnerStatus::Failed,
+        })
+    }
+
     fn capabilities(&self) -> Option<&Capabilities> {
         Some(&self.capabilities)
     }
@@ -216,6 +228,23 @@ impl AgentLifecycle for State {
     fn on_agent_halted(&self, _agent: AgentId, reason: &str) -> Emit {
         Emit::record(vec![RunnerEvent::SubAgent(Event::Failed {
             error: reason.to_string(),
+        })])
+    }
+
+    /// A stop is a failure, because the agent that asked is blocked on this
+    /// worker: stopping it quietly would leave that agent waiting for a report
+    /// that can never come. The same shape recovery delivers for a child a
+    /// crash left running — the asker hears a failure and carries on.
+    ///
+    /// Only while a report is still owed. A worker that already reported has
+    /// had its one answer delivered, and a second one would arrive in the
+    /// asker's transcript as a contradiction of the first.
+    fn on_agent_stopped(&self, _agent: AgentId) -> Emit {
+        if self.result.is_some() {
+            return Emit::nothing();
+        }
+        Emit::record(vec![RunnerEvent::SubAgent(Event::Failed {
+            error: crate::sessions::subagents::STOPPED_ERROR.to_string(),
         })])
     }
 }
@@ -532,6 +561,69 @@ mod tests {
         let emit = worker().on_agent_started(AgentId::new_v4());
         assert!(emit.events.is_empty());
         assert!(emit.actions.is_empty());
+    }
+
+    /// A stop is a failure, because the agent that asked is blocked on this
+    /// worker: stopping it quietly leaves that agent waiting for a report that
+    /// can never come. And only while one is still owed — a worker that already
+    /// reported would otherwise contradict its own answer.
+    #[test]
+    fn stopping_a_worker_that_still_owes_a_report_fails_it() {
+        let mut state = worker();
+        state.apply(&RunnerEvent::SubAgent(Event::Started), 0);
+        let emit = state.on_agent_stopped(state.agent);
+        assert!(emit.actions.is_empty());
+        let Event::Failed { error } = only_event(emit.events) else {
+            panic!("expected a failure");
+        };
+        assert_eq!(error, crate::sessions::subagents::STOPPED_ERROR);
+
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Concluded {
+                output: "done".into(),
+            }),
+            0,
+        );
+        let emit = state.on_agent_stopped(state.agent);
+        assert!(
+            emit.events.is_empty(),
+            "a worker that already reported was failed a second time"
+        );
+        assert!(emit.actions.is_empty());
+    }
+
+    /// The status the session records is read off the same field the report is,
+    /// so a worker cannot be `Done` for the session while owing its asker a
+    /// report that does not exist.
+    #[test]
+    fn a_worker_finishes_with_the_status_its_result_says() {
+        let mut state = worker();
+        assert!(state.finished().is_none());
+        state.apply(&RunnerEvent::SubAgent(Event::Started), 0);
+        assert!(state.finished().is_none(), "it is still working");
+
+        let mut done = state.clone();
+        done.apply(
+            &RunnerEvent::SubAgent(Event::Concluded {
+                output: "found it".into(),
+            }),
+            0,
+        );
+        assert_eq!(
+            done.finished(),
+            Some(crate::sessions::runners::RunnerStatus::Done)
+        );
+
+        state.apply(
+            &RunnerEvent::SubAgent(Event::Failed {
+                error: "it broke".into(),
+            }),
+            0,
+        );
+        assert_eq!(
+            state.finished(),
+            Some(crate::sessions::runners::RunnerStatus::Failed)
+        );
     }
 
     /// A halt is a failure with the halting reason as the report. Without it, a

@@ -174,6 +174,17 @@ impl Runner for State {
         matches!(self.turn, TurnStatus::Running)
     }
 
+    /// Always `None`, for the same reason [`Runner::outcome`] is.
+    ///
+    /// A conversation is never over. A failed turn is a failed *turn* — the
+    /// next thing a person types starts another one — so a conversation that
+    /// reported `Failed` here would be marked terminal by the session and stop
+    /// being handed anything, which is a session that has to be forked to be
+    /// spoken to again.
+    fn finished(&self) -> Option<super::RunnerStatus> {
+        None
+    }
+
     fn capabilities(&self) -> Option<&Capabilities> {
         Some(&self.capabilities)
     }
@@ -243,6 +254,19 @@ impl AgentLifecycle for State {
         Emit::record(vec![RunnerEvent::Conversation(Event::TurnFailed {
             error: reason.to_string(),
         })])
+    }
+
+    /// Only while a turn is actually running.
+    ///
+    /// The gate is `Running` and deliberately not also `AwaitingInput`:
+    /// stopping does not clear the questions the agent is parked on, so a
+    /// boundary journaled over a park would read `Idle` beside questions still
+    /// waiting for an answer.
+    fn on_agent_stopped(&self, _agent: AgentId) -> Emit {
+        if self.turn != TurnStatus::Running {
+            return Emit::nothing();
+        }
+        Emit::record(vec![RunnerEvent::Conversation(Event::TurnStopped)])
     }
 }
 
@@ -586,5 +610,66 @@ mod tests {
         state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
         state.apply(&RunnerEvent::Conversation(Event::TurnStopped), 0);
         assert_eq!(state.turn, TurnStatus::Idle);
+    }
+
+    /// Stopping counts only against a turn that was actually running.
+    ///
+    /// A person can press stop while the ending is already in flight, so this
+    /// arrives over a settled turn routinely — and a boundary written then
+    /// moves the conversation backwards. `AwaitingInput` is the arm worth
+    /// naming: stopping does not clear the questions the agent is parked on, so
+    /// a stop recorded there would read `Idle` beside questions still waiting.
+    #[test]
+    fn stopping_counts_only_against_a_running_turn() {
+        let mut state = State::default();
+        state.apply(&RunnerEvent::Conversation(Event::TurnBegan), 0);
+        let emit = state.on_agent_stopped(state.agent);
+        assert!(emit.actions.is_empty());
+        assert!(matches!(only_event(emit.events), Event::TurnStopped));
+
+        for turn in [
+            TurnStatus::Idle,
+            TurnStatus::AwaitingInput,
+            TurnStatus::Failed,
+        ] {
+            let settled = State {
+                turn,
+                ..State::default()
+            };
+            let emit = settled.on_agent_stopped(settled.agent);
+            assert!(emit.events.is_empty(), "{turn:?} emitted {:?}", emit.events);
+            assert!(emit.actions.is_empty());
+        }
+    }
+
+    /// **A conversation is never over.** A failed turn is a failed turn; the
+    /// next thing a person types starts another one. Report a status here and
+    /// the session marks the runner terminal and stops handing it anything —
+    /// a conversation that has to be forked to be spoken to again.
+    #[test]
+    fn a_conversation_never_finishes() {
+        let mut state = fork();
+        for event in [
+            Event::Seeded,
+            Event::Started,
+            Event::TurnBegan,
+            Event::Asked,
+            Event::TurnEnded,
+            Event::TurnStopped,
+            Event::TurnInterrupted,
+            Event::TurnFailed {
+                error: "it broke".into(),
+            },
+            Event::SeedFailed {
+                error: "the copy failed".into(),
+            },
+        ] {
+            state.apply(&RunnerEvent::Conversation(event), 0);
+            assert!(
+                state.finished().is_none(),
+                "a conversation finished from {:?}",
+                state.turn
+            );
+        }
     }
 }

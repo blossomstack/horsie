@@ -82,15 +82,20 @@ impl State {
 }
 
 impl Runner for State {
+    /// The same "a `Pending` runner asks for its first thing" every other
+    /// runner is, with a sandbox in place of an agent.
+    ///
+    /// A non-terminal failure asks again, because that is what non-terminal
+    /// means: the vendor had no capacity, or the call timed out, and the next
+    /// boundary is exactly when to retry. A terminal one asks for nothing ever
+    /// again — retrying a refusal is a loop, not a recovery — and neither does
+    /// a sandbox that is coming up, is up, or has been handed back.
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        // Provisioning is not something this runner starts. It is driven by the
-        // session's lifecycle commands, and [`Action`] has no variant that
-        // could ask for it — every arm there is about an agent or a child
-        // runner. That is a real limitation of the enum rather than a property
-        // of the sandbox: Phase B adds the variant, and this becomes the same
-        // "a Pending runner asks for its first thing" that every other runner
-        // already is.
-        Vec::new()
+        match self.phase {
+            Phase::Pending | Phase::Failed { terminal: false } => vec![Action::Provision],
+            Phase::Provisioning | Phase::Ready | Phase::Failed { terminal: true } => Vec::new(),
+            Phase::Released => Vec::new(),
+        }
     }
 
     fn busy(&self) -> bool {
@@ -145,25 +150,66 @@ mod tests {
         }
     }
 
-    /// The one runner that asks for nothing. If an action ever appears here,
-    /// provisioning has acquired a second driver alongside the session's
-    /// lifecycle commands, and a sandbox can be asked for twice.
+    fn phased(phase: Phase) -> State {
+        State {
+            phase,
+            ..State::default()
+        }
+    }
+
+    /// A recorded sandbox nobody has asked for yet asks for itself, and one
+    /// already coming up or already up does not — otherwise every boundary
+    /// would ask for a second sandbox while the first was still booting.
     #[test]
-    fn provisioning_is_never_an_action_this_runner_returns() {
+    fn a_pending_sandbox_asks_to_be_provisioned_and_asks_once() {
+        assert!(matches!(
+            phased(Phase::Pending).actions(&view()).as_slice(),
+            [Action::Provision]
+        ));
+        for phase in [Phase::Provisioning, Phase::Ready, Phase::Released] {
+            assert!(
+                phased(phase).actions(&view()).is_empty(),
+                "{phase:?} asked for a sandbox it should not have"
+            );
+        }
+    }
+
+    /// **A terminal failure asks for nothing, ever again.** `actions` is called
+    /// at every boundary, so a terminal failure that asked again would retry a
+    /// refusal in a loop for as long as the session was resident — against a
+    /// vendor that has already said no. A non-terminal one is the opposite
+    /// case, and the whole reason the flag exists: no capacity or a timeout is
+    /// exactly what the next boundary should try again.
+    #[test]
+    fn a_runtime_that_failed_terminally_asks_for_nothing() {
+        assert!(
+            phased(Phase::Failed { terminal: true })
+                .actions(&view())
+                .is_empty()
+        );
+        assert!(matches!(
+            phased(Phase::Failed { terminal: false })
+                .actions(&view())
+                .as_slice(),
+            [Action::Provision]
+        ));
+    }
+
+    /// The sandbox is not a unit of work, so it never reaches a status. A
+    /// runtime that reported `Failed` here would be marked terminal by the
+    /// session and stop being retried at all.
+    #[test]
+    fn the_sandbox_never_finishes() {
         for phase in [
             Phase::Pending,
             Phase::Provisioning,
             Phase::Ready,
-            Phase::Failed { terminal: false },
+            Phase::Failed { terminal: true },
             Phase::Released,
         ] {
-            let state = State {
-                phase,
-                ..State::default()
-            };
             assert!(
-                state.actions(&view()).is_empty(),
-                "{phase:?} must ask for nothing"
+                phased(phase).finished().is_none(),
+                "{phase:?} reported a terminal status"
             );
         }
     }

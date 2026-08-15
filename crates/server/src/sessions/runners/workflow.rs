@@ -444,6 +444,24 @@ impl Runner for State {
         self.current().is_some()
     }
 
+    /// The **run's** status, and only when the run is over.
+    ///
+    /// `Suspended` is not an ending: a suspended run is one a person can still
+    /// retry a step of, and marking it terminal would take the retry away. The
+    /// two arms here are exactly [`WorkflowRunStatus::is_terminal`]'s, read
+    /// through the same field [`Runner::outcome`] reads, so a run cannot be
+    /// finished for the session and unfinished for the agent that invoked it.
+    fn finished(&self) -> Option<super::RunnerStatus> {
+        match self.status {
+            WorkflowRunStatus::Finished => Some(super::RunnerStatus::Done),
+            WorkflowRunStatus::Failed => Some(super::RunnerStatus::Failed),
+            WorkflowRunStatus::Pending
+            | WorkflowRunStatus::Running
+            | WorkflowRunStatus::Suspended
+            | WorkflowRunStatus::AwaitingInput => None,
+        }
+    }
+
     fn capabilities(&self) -> Option<&Capabilities> {
         Some(&self.capabilities)
     }
@@ -610,6 +628,28 @@ impl AgentLifecycle for State {
         let Some(index) = self.index_of_agent(agent) else {
             return Emit::nothing();
         };
+        Emit::record(vec![RunnerEvent::Workflow(Event::StepCancelled { index })])
+    }
+
+    /// Cancelling the step, which suspends the run.
+    ///
+    /// Cancelling the *agent* is not enough on a run: without a step event the
+    /// log entry stays `Running` for ever, so [`State::current`] never clears
+    /// and nothing starts again — the run wedged while its page read
+    /// "Running". `StepCancelled` suspends it, which is the state a retry can
+    /// move.
+    ///
+    /// Only while that agent's step is the one in flight. A stop arriving
+    /// after the step already ended — or for a step some later execution has
+    /// superseded — would cancel an entry the run has already routed past, and
+    /// suspend a run that is happily working on the next step.
+    fn on_agent_stopped(&self, agent: AgentId) -> Emit {
+        let Some(index) = self.index_of_agent(agent) else {
+            return Emit::nothing();
+        };
+        if self.current() != Some(index) {
+            return Emit::nothing();
+        }
         Emit::record(vec![RunnerEvent::Workflow(Event::StepCancelled { index })])
     }
 }
@@ -1183,6 +1223,65 @@ mod tests {
         assert_eq!(state.status, WorkflowRunStatus::Suspended);
         assert!(!state.busy());
         assert!(state.actions(&view()).is_empty());
+    }
+
+    /// Stopping cancels the step in flight and suspends the run, so nothing
+    /// restarts by itself — and cancels *only* that step. A stop arriving after
+    /// the step ended, or naming an execution a later one superseded, would
+    /// cancel an entry the run has already routed past and suspend a run that
+    /// is happily working on the next step.
+    #[test]
+    fn stopping_cancels_only_the_step_in_flight() {
+        let mut state = run();
+        let first = advance(&mut state, serde_json::json!({"outcome": "p0"}));
+        // Step 0 has concluded and step 1 has not started: nothing is in
+        // flight, so there is nothing a stop can cancel.
+        assert!(state.on_agent_stopped(first).events.is_empty());
+        assert!(
+            state.on_agent_stopped(AgentId::new_v4()).events.is_empty(),
+            "an agent this run never started is somebody else's"
+        );
+
+        let second = started_agent(&state);
+        let Emit { events, .. } = state.on_agent_started(second);
+        for e in &events {
+            state.apply(e, 0);
+        }
+        // The superseded step is still not cancellable; only the live one is.
+        assert!(state.on_agent_stopped(first).events.is_empty());
+        let Emit { events, actions } = state.on_agent_stopped(second);
+        assert!(actions.is_empty());
+        let [RunnerEvent::Workflow(Event::StepCancelled { index })] = events.as_slice() else {
+            panic!("expected one StepCancelled, got {events:?}");
+        };
+        assert_eq!(*index, 1);
+        for e in &events {
+            state.apply(e, 0);
+        }
+        assert_eq!(state.status, WorkflowRunStatus::Suspended);
+    }
+
+    /// A suspended run is not a finished one: a person can still retry a step
+    /// of it, and marking it terminal takes the retry away.
+    #[test]
+    fn only_a_terminal_run_finishes() {
+        for (status, want) in [
+            (WorkflowRunStatus::Pending, None),
+            (WorkflowRunStatus::Running, None),
+            (WorkflowRunStatus::Suspended, None),
+            (WorkflowRunStatus::AwaitingInput, None),
+            (
+                WorkflowRunStatus::Finished,
+                Some(crate::sessions::runners::RunnerStatus::Done),
+            ),
+            (
+                WorkflowRunStatus::Failed,
+                Some(crate::sessions::runners::RunnerStatus::Failed),
+            ),
+        ] {
+            let state = State { status, ..run() };
+            assert_eq!(state.finished(), want, "{status:?}");
+        }
     }
 
     /// A step's own capabilities are spliced in *ahead* of the runtime's, and

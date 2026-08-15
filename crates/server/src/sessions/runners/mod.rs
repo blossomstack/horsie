@@ -142,6 +142,23 @@ pub trait Runner {
     /// Whether I have work in flight, so the session must not unload.
     fn busy(&self) -> bool;
 
+    /// The status I have reached, if I have reached one.
+    ///
+    /// The session reads this at every boundary and journals a
+    /// [`state::SessionEvent::RunnerEnded`] the first time it answers, so
+    /// `RunnerRecord.status` is derived from the runner's own slice rather
+    /// than written twice — the drift the previous shape had, where a fork's
+    /// roster entry and the session's status were separate variables that
+    /// disagreed.
+    ///
+    /// Defaulted to `None` because two of the four kinds never end: a
+    /// conversation owes nobody a result, and the sandbox is not a unit of
+    /// work at all. `Some` is a *terminal* status only; a runner that is
+    /// merely idle is still going.
+    fn finished(&self) -> Option<RunnerStatus> {
+        None
+    }
+
     /// What my agents are equipped with, or `None` when I own no agents.
     ///
     /// `Option` for the same reason [`RunnerState::lifecycle`] is one, and
@@ -188,6 +205,21 @@ pub trait AgentLifecycle {
     fn on_agent_ended(&self, agent: AgentId, end: &TurnEnd) -> Emit;
 
     fn on_agent_halted(&self, agent: AgentId, reason: &str) -> Emit;
+
+    /// A person stopped this agent.
+    ///
+    /// The one thing every impl must get right is the *gate*: stopping
+    /// something that was not working is [`Emit::nothing`], never a failure.
+    /// A boundary journaled over an agent that had already ended rewrites
+    /// history — it moves an idle conversation backwards, or concludes a step
+    /// the run has already routed past — and a stop is the easiest way to
+    /// arrive twice, because a person can press it while the ending is in
+    /// flight.
+    ///
+    /// Separate from [`Self::on_agent_halted`] because a halt comes from a
+    /// hook and carries a reason the agent must be told; a stop is a person
+    /// changing their mind and is not a failure of anything.
+    fn on_agent_stopped(&self, agent: AgentId) -> Emit;
 }
 
 /// What a runner of this kind holds, in the order tool calls are offered
@@ -353,6 +385,10 @@ impl Runner for RunnerState {
 
     fn busy(&self) -> bool {
         dispatch!(self, busy)
+    }
+
+    fn finished(&self) -> Option<RunnerStatus> {
+        dispatch!(self, finished)
     }
 
     fn capabilities(&self) -> Option<&Capabilities> {
