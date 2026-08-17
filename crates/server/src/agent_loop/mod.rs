@@ -13,6 +13,7 @@
 
 mod agent_actor;
 mod agent_log;
+pub mod capabilities;
 pub mod carried_state;
 mod context;
 mod hook_translation;
