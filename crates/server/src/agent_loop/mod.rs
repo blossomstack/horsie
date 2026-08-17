@@ -38,7 +38,7 @@ pub use context::{
 pub use hook_translation::{start_blocked, translate};
 pub use inbox::{
     ABANDONED_ASK_RESULT, AnswerError, AskAnswer, Incoming, MERGE_SEPARATOR, Summarise, Turn,
-    answered_turn, queued_turn,
+    answered_turn, queued_turn, resumed_turn,
 };
 pub use mcp_toolbox::{
     CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,

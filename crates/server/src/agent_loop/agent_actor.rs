@@ -1,4 +1,4 @@
-use crate::agent_loop::capabilities::{self, Act, Msg};
+use crate::agent_loop::capabilities::{self, Act, Msg, TurnEvent};
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion,
 };
@@ -46,6 +46,14 @@ pub struct AgentParams {
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
     /// stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
+    /// What this agent's runner equipped it with.
+    ///
+    /// Config, and only ever read once: the first time this agent loads it is
+    /// journaled as [`AgentDomainEvent::Equipped`], and from then on the
+    /// journal is the source. That is what makes a capability's folded state
+    /// survive an offload — re-equipping from here on every load would hand the
+    /// agent a fresh, empty park every time it woke up.
+    pub capabilities: crate::agent_loop::capabilities::Capabilities,
 }
 
 impl AgentParams {
@@ -57,6 +65,7 @@ impl AgentParams {
             max_retries: def.max_retries.unwrap_or(0),
             thinking_effort: None,
             interactive: false,
+            capabilities: crate::agent_loop::capabilities::Capabilities::default(),
         }
     }
 }
@@ -511,6 +520,16 @@ pub enum AgentDomainEvent {
     /// there is never a moment when only some of them are pending.
     AskRecorded {
         asks: Vec<crate::agent_loop::AskedQuestion>,
+        at_ms: u64,
+    },
+    /// This agent was equipped with these capabilities.
+    ///
+    /// Written once, the first time the agent loads, from what its runner
+    /// supplied. After that the journal is the source: a capability's config
+    /// travels with its folded state, so a reload cannot hand the agent a set
+    /// that has forgotten what it was waiting on.
+    Equipped {
+        capabilities: crate::agent_loop::capabilities::Capabilities,
         at_ms: u64,
     },
     /// One of this agent's capabilities recorded something.
@@ -1376,6 +1395,17 @@ impl AgentActor {
             answered: turn.answered.clone(),
             at_ms: now_ms(),
         }];
+        // Every capability hears the boundary, against the state as it stands —
+        // so one holding a park sees it still open and can record that this
+        // turn is what ended it. Whether the park was answered or abandoned was
+        // decided before this, by whoever built the turn.
+        if let Some(performed) = Self::consult(state, &Msg::Turn(TurnEvent::Began)) {
+            events.extend(performed.events);
+            debug_assert!(
+                performed.answer.is_none() && performed.resume.is_empty(),
+                "a turn boundary has no tool call to answer and nothing to resume from"
+            );
+        }
         // The owner no longer learns a turn began by being the thing that began
         // it, so it is told. Before the work, not after: this is what moves a
         // session to `Running`.
@@ -2378,6 +2408,7 @@ impl EventSourcedActor for AgentActor {
                 // the answer starts the next one.
                 state.turn_in_flight = false;
             }
+            AgentDomainEvent::Equipped { capabilities, .. } => state.capabilities = capabilities,
             AgentDomainEvent::Capability(event) => state.capabilities.apply(&event),
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
@@ -2460,6 +2491,28 @@ impl EventSourcedActor for AgentActor {
                 if self.busy() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
+                }
+                // The capability holding the park answers for it, because the
+                // park is its state. It claims the set only when it covers the
+                // questions exactly, so `None` here means either no capability
+                // holds a park or this set cannot resume one — and the old path
+                // below still owns the diagnostic that says which.
+                if let Some(performed) = Self::consult(state, &Msg::Answer(&answers)) {
+                    let _ = reply.send(Ok(()));
+                    // Folded first, so the `Began` broadcast inside `begin_turn`
+                    // sees a park this answer has already closed and does not
+                    // record it as abandoned. Both events clear the park, so
+                    // this does not change what the agent *is* — it keeps the
+                    // journal from claiming the person's answer was ignored on
+                    // the very turn it was acted on.
+                    let folded = performed
+                        .events
+                        .iter()
+                        .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+                    let turn = crate::agent_loop::resumed_turn(&folded.inbox, performed.resume);
+                    let mut events = performed.events;
+                    events.extend(self.begin_turn(turn, &folded, ctx).await);
+                    return CommandEffect::persist(events);
                 }
                 match crate::agent_loop::answered_turn(&state.inbox, &state.asks, answers) {
                     Ok(turn) => {
@@ -2770,6 +2823,23 @@ impl EventSourcedActor for AgentActor {
         // before — republishing costs nothing and keeps a reader that has been
         // waiting through the offload from having to guess.
         self.publish_revision();
+        // Equip, once ever. An agent whose journal already says what it can do
+        // keeps that, folded state and all — re-equipping from config here
+        // would hand a parked agent an empty park and lose the questions it is
+        // waiting on.
+        if state.capabilities.is_empty() && !self.params.capabilities.is_empty() {
+            let (ack, _) = tokio::sync::oneshot::channel();
+            let _ = ctx
+                .self_ref()
+                .tell(AgentCommand::PersistProgress {
+                    events: vec![AgentDomainEvent::Equipped {
+                        capabilities: self.params.capabilities.clone(),
+                        at_ms: now_ms(),
+                    }],
+                    ack: ReplyTo::from_sender(ack),
+                })
+                .await;
+        }
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
         let now = now_ms();
@@ -7029,5 +7099,177 @@ mod capability_tests {
             outcome,
             ToolOutcome::Result(Value::String("sandbox ran bash".into()))
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod ask_wiring_tests {
+    //! The park, driven through the actor's own routing rather than the
+    //! capability's `handle` directly — which is where the two used to be
+    //! unable to meet.
+
+    use super::*;
+    use crate::agent_loop::capabilities::Capabilities;
+    use crate::agent_loop::capabilities::ask_user::AskUserCapability;
+    use crate::sessions::runners::message::ToolCall;
+
+    fn attended() -> AgentState {
+        AgentState {
+            capabilities: Capabilities::new(vec![Box::new(AskUserCapability::new())]),
+            ..AgentState::default()
+        }
+    }
+
+    fn ask(id: &str, question: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "ask_user".into(),
+            input: serde_json::json!({ "question": question }),
+        }
+    }
+
+    fn fold(state: &AgentState, events: &[AgentDomainEvent]) -> AgentState {
+        events
+            .iter()
+            .fold(state.clone(), |s, e| AgentActor::apply_event(s, e.clone()))
+    }
+
+    /// The whole loop: a call parks the run, the park survives as folded state,
+    /// and an answer resumes it with a result paired to the dangling call.
+    #[test]
+    fn an_ask_parks_and_its_answer_resumes_the_dangling_call() {
+        let state = attended();
+        let parked = AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?")))
+            .expect("ask_user claims its own tool");
+        assert_eq!(
+            parked
+                .answer
+                .as_ref()
+                .map(|a| a.as_ref().expect("no error")),
+            Some(&ToolOutcome::StopRun),
+            "the run has to stop, or the tool_use never dangles"
+        );
+
+        let state = fold(&state, &parked.events);
+        let answers = vec![crate::agent_loop::AskAnswer {
+            tool_call_id: "call-1".into(),
+            text: "the second one".into(),
+        }];
+        let resumed = AgentActor::consult(&state, &Msg::Answer(&answers))
+            .expect("the capability holding the park claims the answer");
+        assert_eq!(
+            resumed
+                .resume
+                .iter()
+                .map(|r| (r.tool_call_id.as_str(), r.output.as_str(), r.is_error))
+                .collect::<Vec<_>>(),
+            vec![("call-1", "the second one", false)],
+            "the result must pair with the call the model is parked on"
+        );
+    }
+
+    /// A turn that begins while the park is still open is one the queue
+    /// abandoned, and the capability stops holding it. `queued_turn` already
+    /// recorded a result for every call, so nothing is left dangling.
+    #[test]
+    fn a_turn_beginning_on_an_open_park_abandons_it() {
+        let state = attended();
+        let parked =
+            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let state = fold(&state, &parked.events);
+
+        let began = AgentActor::consult(&state, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
+        assert_eq!(began.events.len(), 1, "the park should be given up");
+        let after = fold(&state, &began.events);
+        assert!(
+            !serde_json::to_string(&after.capabilities)
+                .expect("serialise")
+                .contains("which?"),
+            "the park outlived the turn that abandoned it"
+        );
+    }
+
+    /// And an answered park is *not* abandoned by the turn its own answer
+    /// starts — the ordering the command handler exists to get right.
+    /// The same broadcast against the state the answer has *not* been folded
+    /// into records the park as abandoned — which is why the command handler
+    /// folds first.
+    ///
+    /// Worth being exact about what this protects: both events clear `pending`,
+    /// so the state is the same either way. What the ordering keeps honest is
+    /// the *record* — an `Abandoned` here would tell every later reader that the
+    /// person's answer was ignored, on the very turn it was acted on.
+    #[test]
+    fn broadcasting_before_folding_the_answer_would_record_a_false_abandonment() {
+        let state = attended();
+        let parked =
+            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let stale = fold(&state, &parked.events);
+
+        let answers = vec![crate::agent_loop::AskAnswer {
+            tool_call_id: "call-1".into(),
+            text: "this one".into(),
+        }];
+        let resumed = AgentActor::consult(&stale, &Msg::Answer(&answers)).expect("mine");
+
+        // Deliberately *not* folded — the mistake the handler must not make.
+        let began = AgentActor::consult(&stale, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
+        assert_eq!(
+            began.events.len(),
+            1,
+            "against stale state the park still looks open, so it is given up"
+        );
+        // And folded, as the handler does it, the same broadcast records nothing.
+        let folded = fold(&stale, &resumed.events);
+        assert!(
+            AgentActor::consult(&folded, &Msg::Turn(TurnEvent::Began))
+                .expect("broadcast")
+                .events
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_turn_an_answer_starts_does_not_abandon_the_park_it_just_closed() {
+        let state = attended();
+        let parked =
+            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let state = fold(&state, &parked.events);
+
+        let answers = vec![crate::agent_loop::AskAnswer {
+            tool_call_id: "call-1".into(),
+            text: "this one".into(),
+        }];
+        let resumed = AgentActor::consult(&state, &Msg::Answer(&answers)).expect("mine");
+        let state = fold(&state, &resumed.events);
+
+        let began = AgentActor::consult(&state, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
+        assert!(
+            began.events.is_empty(),
+            "the answer already closed the park; recording it abandoned would \
+             tell a reader the person was ignored"
+        );
+    }
+
+    /// The queue rides along with a resume, so a subagent that finished while
+    /// the person was typing is not stranded until something else happens.
+    #[test]
+    fn a_resume_carries_whatever_queued_behind_it() {
+        let inbox = vec![crate::agent_loop::Incoming::User {
+            id: "m1".into(),
+            text: "also do this".into(),
+        }];
+        let turn = crate::agent_loop::resumed_turn(
+            &inbox,
+            vec![horsie_models::agent::ToolResultInput {
+                tool_call_id: "call-1".into(),
+                output: "answered".into(),
+                is_error: false,
+            }],
+        );
+        assert_eq!(turn.answered, vec!["call-1"]);
+        assert_eq!(turn.consumed, vec!["m1"]);
+        assert_eq!(turn.message.as_deref(), Some("also do this"));
     }
 }

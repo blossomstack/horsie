@@ -302,6 +302,26 @@ fn summarise(inbox: &[Incoming]) -> Option<Summarise> {
     })
 }
 
+/// The turn a capability's resume starts: the results it supplied, plus
+/// whatever queued behind them.
+///
+/// The new-world twin of [`answered_turn`], and deliberately without its
+/// validation: whether an answer set may resume a park is the parked
+/// capability's question, because the park is its state. By the time this is
+/// called that has been decided, and all that is left is composing the turn.
+///
+/// The queue rides along for the reason it always has: a subagent that finished
+/// while the person was typing their answer is news the same turn wants, and
+/// holding it back would strand it until something else happened to start a
+/// turn.
+#[must_use]
+pub fn resumed_turn(inbox: &[Incoming], results: Vec<ToolResultInput>) -> Turn {
+    let mut turn = drain(inbox);
+    turn.answered = results.iter().map(|r| r.tool_call_id.clone()).collect();
+    turn.results = results;
+    turn
+}
+
 fn drain(inbox: &[Incoming]) -> Turn {
     let texts: Vec<&str> = inbox.iter().filter_map(Incoming::text).collect();
     Turn {
