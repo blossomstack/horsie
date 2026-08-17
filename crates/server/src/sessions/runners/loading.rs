@@ -63,6 +63,22 @@ pub struct AgentFacts {
     pub runtime: Option<RuntimeClient>,
 }
 
+impl std::fmt::Debug for AgentFacts {
+    /// Hand-written because none of the three is `Debug`, and a scan printed in
+    /// full would be every skill body in the workspace. What a reader wants is
+    /// what was *found*, which is a count.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentFacts")
+            .field("workspaces", &self.workspace.workspaces.len())
+            .field(
+                "agent_types",
+                &self.shared.as_ref().map_or(0, |s| s.agents.len()),
+            )
+            .field("runtime", &self.runtime.is_some())
+            .finish()
+    }
+}
+
 /// What an agent runs with, filled in by its capabilities' `setup`.
 ///
 /// Not a description that something else realises later. An earlier draft made

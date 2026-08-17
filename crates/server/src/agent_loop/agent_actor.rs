@@ -172,6 +172,11 @@ pub enum AgentCommand {
     /// passes straight to the sandbox without touching the mailbox.
     CapabilityCall {
         call: crate::sessions::runners::message::ToolCall,
+        /// What this run's `provide` found, carried from the task that made the
+        /// call. The mailbox has no scan of its own, and a capability that
+        /// advertised a list — `spawn_agent`'s agent types — has to refuse
+        /// against the same one it advertised.
+        facts: Arc<crate::sessions::runners::loading::AgentFacts>,
         reply: ReplyTo<Result<ToolOutcome, horsie_agentcore::ToolCallError>>,
     },
     /// Read forward from a cursor: durable entries plus, when the caller has
@@ -268,10 +273,14 @@ struct RunStart {
     history: Vec<Message>,
     /// The prompt size the previous turn left behind, from durable state.
     context_tokens: u32,
-    /// What this agent's capabilities answer for. Read here for the same reason
-    /// as everything else: [`CapabilityToolbox`] runs on the task and cannot
-    /// reach the state that knows.
-    cap_specs: Vec<horsie_agentcore::ToolSpec>,
+    /// What this agent is equipped with, cloned off the mailbox because the
+    /// run's task cannot read state.
+    ///
+    /// The list rather than the specs it produces: an advertisement can depend
+    /// on what the load found — `spawn_agent` lists the installed agent types —
+    /// and the facts only exist after `provide` has run, which is on the task.
+    /// So the specs are computed there, from these.
+    capabilities: crate::agent_loop::capabilities::Capabilities,
     /// A summary this turn was asked for, and what becomes of it.
     summarise: Option<Summarise>,
     /// Whether that summary is all this turn is.
@@ -1614,7 +1623,7 @@ impl AgentActor {
                 input: agent_input,
                 history,
                 context_tokens: folded.context_tokens,
-                cap_specs: folded.capabilities.tools(),
+                capabilities: folded.capabilities.clone(),
                 summarise: summarise.clone(),
                 summarise_only,
             },
@@ -1628,7 +1637,7 @@ impl AgentActor {
             input,
             history,
             context_tokens,
-            cap_specs,
+            capabilities,
             summarise,
             summarise_only,
         } = start;
@@ -1722,9 +1731,19 @@ impl AgentActor {
             });
             // Outermost, so a capability wins a name against the sandbox — the
             // same order the offer scan uses, read from the other end.
+            //
+            // The specs are computed *here*, after `provide`, because that is
+            // the first moment the facts exist: `sub_agent` lists the installed
+            // agent types, and the scan that found them is the runtime
+            // capability's `setup`, which `provide` has just run. Computed on
+            // the mailbox instead, the model would be shown a `spawn_agent` that
+            // names no types at all. The same facts go to the toolbox, so the
+            // call a capability is later offered carries the list it advertised.
+            let facts = Arc::new(contexts.facts);
             let toolbox: Arc<dyn Toolbox> = Arc::new(CapabilityToolbox {
                 inner: toolbox,
-                specs: cap_specs,
+                specs: capabilities.tools(&facts),
+                facts,
                 actor: self_ref.clone(),
             });
             let system_prompt = contexts
@@ -2674,8 +2693,12 @@ impl EventSourcedActor for AgentActor {
                 };
                 self.finish_consult(performed, state, ctx).await
             }
-            AgentCommand::CapabilityCall { call, reply } => {
-                let Some(performed) = Self::consult(state, &Msg::Tool(&call)) else {
+            AgentCommand::CapabilityCall { call, facts, reply } => {
+                let msg = Msg::Tool {
+                    call: &call,
+                    facts: &facts,
+                };
+                let Some(performed) = Self::consult(state, &msg) else {
                     // The layer only sends names a capability advertised, so
                     // nothing claiming one is a disagreement between what was
                     // advertised and what answers — a bug, and the model is
@@ -2971,7 +2994,7 @@ impl EventSourcedActor for AgentActor {
                 input: AgentInput::user_message(new_message_id(), "continue the interrupted task"),
                 history,
                 context_tokens: state.context_tokens,
-                cap_specs: state.capabilities.tools(),
+                capabilities: state.capabilities.clone(),
                 summarise: None,
                 summarise_only: false,
             },
@@ -3275,8 +3298,12 @@ impl AgentActor {
         answer: Result<ToolOutcome, horsie_agentcore::ToolCallError>,
     ) {
         match msg {
-            Msg::Tool(in_flight) if in_flight.id == call => out.answer = Some(answer),
-            Msg::Tool(_)
+            Msg::Tool {
+                call: in_flight, ..
+            } if in_flight.id == call => {
+                out.answer = Some(answer);
+            }
+            Msg::Tool { .. }
             | Msg::Command(_)
             | Msg::Turn(_)
             | Msg::Answer(_)
@@ -3305,6 +3332,10 @@ impl AgentActor {
 struct CapabilityToolbox {
     inner: Arc<dyn Toolbox>,
     specs: Vec<horsie_agentcore::ToolSpec>,
+    /// What this run found, sent on with every call it forwards. The specs above
+    /// were built from it, so a capability refusing an argument on the mailbox
+    /// refuses against the same list the model was shown.
+    facts: Arc<crate::sessions::runners::loading::AgentFacts>,
     actor: ActorRef<AgentCommand>,
 }
 
@@ -3331,8 +3362,9 @@ impl Toolbox for CapabilityToolbox {
             name: name.to_string(),
             input,
         };
+        let facts = Arc::clone(&self.facts);
         self.actor
-            .ask(|reply| AgentCommand::CapabilityCall { call, reply })
+            .ask(|reply| AgentCommand::CapabilityCall { call, facts, reply })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
     }
@@ -4287,6 +4319,7 @@ mod tests {
                     provider: self.0.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
+                    facts: crate::sessions::runners::loading::AgentFacts::default(),
                     context_window: None,
                 })
             }
@@ -4421,6 +4454,7 @@ mod tests {
                     provider: self.llm.clone(),
                     toolbox: Arc::new(EmptyToolbox),
                     system_prompt: None,
+                    facts: crate::sessions::runners::loading::AgentFacts::default(),
                     context_window: None,
                 })
             }
@@ -6706,6 +6740,7 @@ mod queue_tests {
                 provider: self.0.clone(),
                 toolbox: Arc::new(horsie_agentcore::ToolboxImpl::new()),
                 system_prompt: None,
+                facts: crate::sessions::runners::loading::AgentFacts::default(),
                 context_window: None,
             })
         }
@@ -7209,8 +7244,9 @@ mod capability_tests {
     #[test]
     fn a_claimed_call_journals_the_capabilitys_own_events() {
         let state = equipped("fake_tool");
-        let performed = AgentActor::consult(&state, &Msg::Tool(&call("fake_tool")))
-            .expect("the capability claims its own tool");
+        let performed =
+            AgentActor::consult(&state, &capabilities::testing::tool(&call("fake_tool")))
+                .expect("the capability claims its own tool");
         assert_eq!(performed.events.len(), 1);
         assert!(matches!(
             performed.events.first(),
@@ -7223,7 +7259,7 @@ mod capability_tests {
     #[test]
     fn a_call_nobody_claims_is_none() {
         let state = equipped("fake_tool");
-        assert!(AgentActor::consult(&state, &Msg::Tool(&call("bash"))).is_none());
+        assert!(AgentActor::consult(&state, &capabilities::testing::tool(&call("bash"))).is_none());
     }
 
     /// The fold reaches the capability, and replaying lands exactly where the
@@ -7312,6 +7348,7 @@ mod capability_tests {
         CapabilityToolbox {
             inner: Arc::new(Sandbox),
             specs,
+            facts: Arc::new(crate::sessions::runners::loading::AgentFacts::default()),
             actor: crate::testing::spawn_detached(
                 &ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 NeverAsked,
@@ -7393,8 +7430,11 @@ mod ask_wiring_tests {
     #[test]
     fn an_ask_parks_and_its_answer_resumes_the_dangling_call() {
         let state = attended();
-        let parked = AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?")))
-            .expect("ask_user claims its own tool");
+        let parked = AgentActor::consult(
+            &state,
+            &capabilities::testing::tool(&ask("call-1", "which?")),
+        )
+        .expect("ask_user claims its own tool");
         assert_eq!(
             parked
                 .answer
@@ -7428,8 +7468,11 @@ mod ask_wiring_tests {
     #[test]
     fn a_turn_beginning_on_an_open_park_abandons_it() {
         let state = attended();
-        let parked =
-            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let parked = AgentActor::consult(
+            &state,
+            &capabilities::testing::tool(&ask("call-1", "which?")),
+        )
+        .expect("mine");
         let state = fold(&state, &parked.events);
 
         let began = AgentActor::consult(&state, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
@@ -7456,8 +7499,11 @@ mod ask_wiring_tests {
     #[test]
     fn broadcasting_before_folding_the_answer_would_record_a_false_abandonment() {
         let state = attended();
-        let parked =
-            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let parked = AgentActor::consult(
+            &state,
+            &capabilities::testing::tool(&ask("call-1", "which?")),
+        )
+        .expect("mine");
         let stale = fold(&state, &parked.events);
 
         let answers = vec![crate::agent_loop::AskAnswer {
@@ -7486,8 +7532,11 @@ mod ask_wiring_tests {
     #[test]
     fn the_turn_an_answer_starts_does_not_abandon_the_park_it_just_closed() {
         let state = attended();
-        let parked =
-            AgentActor::consult(&state, &Msg::Tool(&ask("call-1", "which?"))).expect("mine");
+        let parked = AgentActor::consult(
+            &state,
+            &capabilities::testing::tool(&ask("call-1", "which?")),
+        )
+        .expect("mine");
         let state = fold(&state, &parked.events);
 
         let answers = vec![crate::agent_loop::AskAnswer {

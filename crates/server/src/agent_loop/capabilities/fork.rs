@@ -294,7 +294,7 @@ impl Capability for ForkCapability {
             // A fork owes nobody a result, so it never holds a conclusion — see
             // the module doc. The agent that branched is free to finish while
             // its branch runs on.
-            Msg::Tool(_) | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. } | Msg::Turn(_) | Msg::Answer(_) => None,
         }
     }
 
@@ -334,7 +334,7 @@ impl Capability for ForkCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::settings;
+    use crate::agent_loop::capabilities::testing::{facts, settings, tool};
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome, ToolCall};
 
@@ -692,7 +692,7 @@ mod tests {
     /// let a model branch the conversation it is having.
     #[test]
     fn it_advertises_no_tool() {
-        assert!(cap().tools().is_empty());
+        assert!(cap().tools(&facts()).is_empty());
     }
 
     /// A seed in flight is what says a fork exists and cannot run yet, so
@@ -728,7 +728,7 @@ mod tests {
         let c = cap();
         assert!(c.handle(&Msg::Command(&command("compact", ""))).is_none());
         assert!(
-            c.handle(&Msg::Tool(&ToolCall {
+            c.handle(&tool(&ToolCall {
                 id: "t1".into(),
                 name: "bash".into(),
                 input: serde_json::json!({}),

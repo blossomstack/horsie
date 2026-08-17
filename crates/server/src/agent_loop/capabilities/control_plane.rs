@@ -115,7 +115,7 @@ impl Capability for ControlPlaneCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{call, equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{call, equipped, facts, loading, spec, tool};
 
     /// Holding the capability is what equips the tools and the prompt that
     /// tells the agent they exist — a tool nobody was told about is not used.
@@ -175,10 +175,10 @@ mod tests {
     #[test]
     fn it_claims_nothing_through_the_mailbox() {
         let c = ControlPlaneCapability;
-        assert!(c.tools().is_empty());
+        assert!(c.tools(&facts()).is_empty());
         for name in ["horsie_sessions", "horsie", "bash"] {
             assert!(
-                c.handle(&Msg::Tool(&call(name))).is_none(),
+                c.handle(&tool(&call(name))).is_none(),
                 "{name} was claimed through the mailbox"
             );
         }

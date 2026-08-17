@@ -523,7 +523,7 @@ impl Capability for RuntimeCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::call;
+    use super::super::testing::{call, facts, tool};
     use super::*;
     use crate::agent_loop::AskAnswer;
     use crate::agent_loop::capabilities::testing::{loading, spec};
@@ -554,8 +554,8 @@ mod tests {
         let reply = SessionReply::Done { call: "t1".into() };
 
         for msg in [
-            Msg::Tool(&bash),
-            Msg::Tool(&plugin_tool),
+            tool(&bash),
+            tool(&plugin_tool),
             Msg::Command(&command),
             Msg::Turn(TurnEvent::Ended),
             Msg::Answer(&answers),
@@ -576,7 +576,7 @@ mod tests {
     /// call should go.
     #[test]
     fn the_base_toolbox_is_a_layer_and_not_an_advertised_tool() {
-        assert!(RuntimeCapability::default().tools().is_empty());
+        assert!(RuntimeCapability::default().tools(&facts()).is_empty());
     }
 
     /// A sandbox that cannot be acquired stops the turn. Every other capability

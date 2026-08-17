@@ -637,6 +637,10 @@ impl ContextProvider for SessionContextProvider {
         // window back to a session that turned compaction off.
         let context_window = spec.context_window;
         let system_prompt = self.compose_prompt(&spec);
+        // Cloned before the spec is consumed. The run needs them for what the
+        // toolbox cannot carry: which tools its capabilities advertise, and
+        // which agent types `spawn_agent` will accept.
+        let facts = spec.facts.clone();
         // Last, because it consumes the spec: the layers each capability pushed
         // are folded here, innermost last.
         let toolbox = spec.toolbox().ok_or_else(|| {
@@ -651,6 +655,7 @@ impl ContextProvider for SessionContextProvider {
             provider,
             toolbox,
             system_prompt,
+            facts,
             context_window,
         })
     }
@@ -739,8 +744,48 @@ mod tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        names.extend(provider.equipment.tools().into_iter().map(|t| t.name));
+        names.extend(
+            provider
+                .equipment
+                .tools(&contexts.facts)
+                .into_iter()
+                .map(|t| t.name),
+        );
         names
+    }
+
+    /// **What `provide` must carry out of the spec, and used to drop.**
+    ///
+    /// `spawn_agent`'s description is the only place a model learns which agent
+    /// types exist, and the list comes from the library scan — which happens
+    /// inside `equip`, in a capability that runs *after* `sub_agent`. So the
+    /// advertisement is built on the run's task from the facts this returns; a
+    /// `provide` that dropped them offers a parameter with nothing behind it,
+    /// and every `agent_type` the model can name is a guess.
+    #[tokio::test]
+    async fn the_scanned_agent_types_reach_the_spawn_tools_description() {
+        let (f, session, id) = agent_harness().await;
+        let kind = SessionAgentKind::Main;
+        let provider = SessionContextProvider {
+            loading: test_loading(&f, &session, id, kind),
+            equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
+            settings: agent_settings_fixture(),
+            kind,
+            agent_type: None,
+            plugins: Vec::new(),
+        };
+        let contexts = provider.provide().await.expect("contexts");
+        let spawn = provider
+            .equipment
+            .tools(&contexts.facts)
+            .into_iter()
+            .find(|t| t.name == "spawn_agent")
+            .expect("spawn_agent is advertised");
+        assert!(
+            spawn.description.contains("- code-reviewer: reviews diffs"),
+            "the scan found an agent type the model is never told about: {}",
+            spawn.description
+        );
     }
 
     #[tokio::test]

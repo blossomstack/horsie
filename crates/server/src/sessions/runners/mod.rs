@@ -625,7 +625,7 @@ impl RunnerState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::{Msg, testing::call};
+    use crate::agent_loop::capabilities::testing::{call, facts, tool};
 
     fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
         Assembly {
@@ -687,7 +687,7 @@ mod tests {
             // And the runtime does not swallow the named tool on the way past.
             let taken = caps
                 .iter()
-                .find_map(|c| c.handle(&Msg::Tool(&call("spawn_agent"))).map(|_| c.name()));
+                .find_map(|c| c.handle(&tool(&call("spawn_agent"))).map(|_| c.name()));
             assert_eq!(
                 taken,
                 Some("sub_agent"),
@@ -732,7 +732,7 @@ mod tests {
         };
         let ask = capabilities::ask_user::TOOL.to_string();
         let names = |caps: Capabilities| -> Vec<String> {
-            caps.tools().into_iter().map(|t| t.name).collect()
+            caps.tools(&facts()).into_iter().map(|t| t.name).collect()
         };
         assert!(
             unattended(true).has("ask_user"),

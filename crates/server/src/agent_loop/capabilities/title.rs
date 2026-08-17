@@ -30,7 +30,7 @@ use super::{
     Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, SetupError,
 };
 use crate::sessions::runners::ids::RunnerId;
-use crate::sessions::runners::loading::{AgentSpec, Loading};
+use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
 use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
@@ -273,7 +273,7 @@ impl Capability for TitleCapability {
     /// this actor's mailbox, because answering it means asking the session and
     /// waiting for a reply, and a layer runs on the agent's task where there is
     /// nothing to ask with.
-    fn tools(&self) -> Vec<ToolSpec> {
+    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
         vec![ToolSpec {
             name: TOOL.to_string(),
             description: "Rename this session at any point with a concise, specific, \
@@ -296,7 +296,7 @@ impl Capability for TitleCapability {
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool(call) if call.name == TOOL => Some(self.asked(call)),
+            Msg::Tool { call, .. } if call.name == TOOL => Some(self.asked(call)),
             // Replies are offered around, so this claims only the ones it can
             // account for: a call it recorded asking about.
             Msg::Reply(reply) if self.pending.contains_key(reply.call()) => {
@@ -308,7 +308,7 @@ impl Capability for TitleCapability {
             // in return — setting a session's title twice to the same string is
             // the same session.
             Msg::Loaded => self.reloaded(),
-            Msg::Tool(_)
+            Msg::Tool { .. }
             | Msg::Command(_)
             | Msg::Turn(_)
             | Msg::Answer(_)
@@ -348,7 +348,7 @@ impl Capability for TitleCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{equipped, facts, loading, spec, tool};
 
     fn set(id: &str, title: &str) -> ToolCall {
         ToolCall {
@@ -369,7 +369,7 @@ mod tests {
     /// Ask for this name, the only way there is to get a request in flight.
     fn asked(id: &str, title: &str) -> TitleCapability {
         let mut c = TitleCapability::new();
-        let d = c.handle(&Msg::Tool(&set(id, title))).expect("mine");
+        let d = c.handle(&tool(&set(id, title))).expect("mine");
         fold(&mut c, &d);
         c
     }
@@ -387,9 +387,7 @@ mod tests {
     #[test]
     fn setting_a_title_asks_the_session() {
         let mut c = TitleCapability::new();
-        let d = c
-            .handle(&Msg::Tool(&set("call-1", "the flake")))
-            .expect("mine");
+        let d = c.handle(&tool(&set("call-1", "the flake"))).expect("mine");
 
         let [CapEvent::Title(Event::Asked { call, name })] = d.events.as_slice() else {
             panic!("expected one Asked event, got {:?}", d.events);
@@ -519,7 +517,7 @@ mod tests {
     fn the_asked_name_is_the_normalized_one() {
         let mut c = TitleCapability::new();
         let d = c
-            .handle(&Msg::Tool(&set("call-1", "  Fix café login ☕  ")))
+            .handle(&tool(&set("call-1", "  Fix café login ☕  ")))
             .expect("mine");
         let [Act::Ask(SessionRequest::SetTitle { title, .. })] = d.acts.as_slice() else {
             panic!("expected an ask, got {:?}", d.acts);
@@ -542,7 +540,7 @@ mod tests {
     fn an_invalid_title_is_refused_and_records_nothing() {
         for bad in ["   ", "one\ntwo"] {
             let d = TitleCapability::new()
-                .handle(&Msg::Tool(&set("call-1", bad)))
+                .handle(&tool(&set("call-1", bad)))
                 .expect("mine");
             assert!(d.events.is_empty(), "{bad:?} was journaled");
             let text = answer(&d);
@@ -551,7 +549,7 @@ mod tests {
         // Arguments that are not a title at all are the same story: owned,
         // answered, and journaled nowhere.
         let d = TitleCapability::new()
-            .handle(&Msg::Tool(&ToolCall {
+            .handle(&tool(&ToolCall {
                 id: "call-1".into(),
                 name: TOOL.into(),
                 input: json!({}),
@@ -579,7 +577,10 @@ mod tests {
                 .await
                 .expect("nothing to acquire");
             assert_eq!(
-                cap.tools().into_iter().map(|t| t.name).collect::<Vec<_>>(),
+                cap.tools(&facts())
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect::<Vec<_>>(),
                 vec![TOOL]
             );
             assert_eq!(
@@ -594,7 +595,7 @@ mod tests {
     /// limit the validation above actually enforces.
     #[test]
     fn the_advertised_schema_quotes_the_limit_it_enforces() {
-        let spec = TitleCapability::new().tools().remove(0);
+        let spec = TitleCapability::new().tools(&facts()).remove(0);
         assert_eq!(spec.name, TOOL);
         assert_eq!(
             spec.input_schema["properties"]["title"]["maxLength"],
@@ -658,7 +659,7 @@ mod tests {
     fn another_tool_is_not_mine() {
         assert!(
             TitleCapability::new()
-                .handle(&Msg::Tool(&ToolCall {
+                .handle(&tool(&ToolCall {
                     id: "call-1".into(),
                     name: "bash".into(),
                     input: json!({}),
@@ -682,7 +683,7 @@ mod tests {
         fold(&mut c, &d);
         // One taken, one still in flight.
         let d = c
-            .handle(&Msg::Tool(&set("call-2", "the other one")))
+            .handle(&tool(&set("call-2", "the other one")))
             .expect("mine");
         fold(&mut c, &d);
 

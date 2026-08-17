@@ -53,9 +53,10 @@
 use super::{
     Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, TurnEvent,
 };
-use crate::agent_loop::Incoming;
+use crate::agent_loop::{AgentCatalog, Incoming};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::{ChildMsg, ChildOutcome, SubAgentOutcome, ToolCall};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::subagents::MAX_SUBAGENT_DEPTH;
@@ -165,7 +166,7 @@ impl SubAgentCapability {
     }
 
     /// The model called `spawn_agent`.
-    fn spawn(&self, call: &ToolCall) -> Decision {
+    fn spawn(&self, call: &ToolCall, facts: &AgentFacts) -> Decision {
         let req: Request = match serde_json::from_value(call.input.clone()) {
             Ok(req) => req,
             // A capability that owns a tool name owns every call to it,
@@ -188,6 +189,16 @@ impl SubAgentCapability {
                 format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached"),
             );
         }
+        // Refused before anything is journaled, and refused *here*, because this
+        // is the layer that advertised the list: an error naming what exists is
+        // only possible where the list is. The child would refuse it too — its
+        // runtime capability resolves the type against the library it loads —
+        // but by then a child exists, and its complaint reaches the model as a
+        // failed worker rather than as an answer to the call that named it.
+        let agent_type = match resolve_type(req.agent_type.as_deref(), facts) {
+            Ok(resolved) => resolved,
+            Err(reason) => return Decision::reply(&call.id, reason),
+        };
         // Both ids are minted here rather than in `apply`: a decision may be
         // non-deterministic, a fold may not. Replay must land the ids the log
         // recorded, so the event and the request name the same child and
@@ -203,7 +214,7 @@ impl SubAgentCapability {
             agent: AgentId::new_v4(),
             label: req.label,
             task: req.task,
-            agent_type: req.agent_type,
+            agent_type,
         };
         let note = format!("spawning subagent {}", pending.label);
         Decision::record(vec![CapEvent::SubAgent(Event::Requested {
@@ -369,6 +380,38 @@ impl SubAgentCapability {
     }
 }
 
+/// The plugin-declared agents this load found, if it found a library at all.
+///
+/// Read off the facts rather than held on the capability: the catalogue is what
+/// the *current* library declares, and a capability is folded from a journal
+/// that may be older than the plugins installed since.
+fn catalog(facts: &AgentFacts) -> Option<&AgentCatalog> {
+    facts.shared.as_deref().map(|shared| shared.agents.as_ref())
+}
+
+/// A requested agent type, checked against the catalogue that was advertised.
+///
+/// `None` for an omitted or blank type, which is the general-purpose worker and
+/// not a mistake. The error is the model's to read, so it names what does exist.
+fn resolve_type(requested: Option<&str>, facts: &AgentFacts) -> Result<Option<String>, String> {
+    let Some(requested) = requested.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(None);
+    };
+    let catalog = catalog(facts);
+    if catalog.is_some_and(|c| c.get(requested).is_some()) {
+        return Ok(Some(requested.to_string()));
+    }
+    let known = catalog.map(AgentCatalog::names).unwrap_or_default();
+    Err(if known.is_empty() {
+        format!("no agent type '{requested}': this session has no agent types installed")
+    } else {
+        format!(
+            "no agent type '{requested}'; installed types are {}",
+            known.join(", ")
+        )
+    })
+}
+
 /// A dead worker's report, in the shape the parent's inbox takes.
 ///
 /// The timestamps are zero because this capability holds neither: they live on
@@ -412,36 +455,75 @@ impl Capability for SubAgentCapability {
     /// A budget the model can only ever be refused by advertises nothing. A
     /// tool like that is worse than no tool: it spends prompt on a capability
     /// that does not exist and invites a retry loop against a fixed number.
-    fn tools(&self) -> Vec<ToolSpec> {
+    ///
+    /// The facts are what carry the agent catalogue, and this is the only reason
+    /// [`Capability::tools`] takes them: the types a session can spawn are found
+    /// by the workspace scan, which runs in a capability that sorts *after* this
+    /// one. A model not shown the list can only guess at a name, and every guess
+    /// is refused.
+    fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
         if self.child_settings.max_subagents() == 0 || self.depth >= MAX_SUBAGENT_DEPTH {
             return Vec::new();
+        }
+        let mut description = "Spawn a subagent to work on a task independently and in parallel. \
+            Returns immediately with the subagent's id; its result or failure is \
+            automatically delivered back to you as a message. Continue with independent \
+            work, or wait if none remains; do not poll subagent_status or call it \
+            repeatedly. Spawning fails when the session's subagent limits (depth or \
+            concurrency) are reached."
+            .to_string();
+        let mut properties = serde_json::Map::new();
+        properties.insert(
+            "label".to_string(),
+            json!({
+                "type": "string",
+                "description": "A short human-readable label for the subagent (a few words)."
+            }),
+        );
+        properties.insert(
+            "task".to_string(),
+            json!({
+                "type": "string",
+                "description": "The complete, self-contained task for the subagent. It \
+                    inherits your model and tools but not your conversation — include \
+                    everything it needs to know."
+            }),
+        );
+        // The catalogue goes in the description, not in a JSON `enum`: a bare
+        // list of names says nothing about when to pick one, and `description`
+        // is the whole point of the frontmatter field. With no agents installed
+        // the parameter is absent entirely, so a session with no plugins sees
+        // exactly the tool it saw before they existed.
+        let catalog = catalog(facts).filter(|c| !c.is_empty());
+        if let Some(catalog) = catalog {
+            let listing = catalog
+                .iter()
+                .map(|a| format!("- {}: {}", a.def.name, a.def.description))
+                .collect::<Vec<_>>()
+                .join("\n");
+            description.push_str(&format!(
+                "\n\nInstalled agent types, each with its own instructions, tools and \
+                 expertise. Pass one as `agent_type` when its description fits the task \
+                 better than a general-purpose subagent would:\n{listing}"
+            ));
+            properties.insert(
+                "agent_type".to_string(),
+                json!({
+                    "type": "string",
+                    "description": "Name of an installed agent type, from the list above. \
+                        Omit for a general-purpose subagent that inherits your own \
+                        instructions and tools."
+                }),
+            );
         }
         vec![
             ToolSpec {
                 name: SPAWN_TOOL.to_string(),
-                description: "Spawn a subagent to work on a task independently and in parallel. \
-                    Returns immediately with the subagent's id; its result or failure is \
-                    automatically delivered back to you as a message. Continue with independent \
-                    work, or wait if none remains; do not poll subagent_status or call it \
-                    repeatedly. Spawning fails when the session's subagent limits (depth or \
-                    concurrency) are reached."
-                    .to_string(),
+                description,
                 input_schema: json!({
                     "type": "object",
                     "required": ["label", "task"],
-                    "properties": {
-                        "label": {
-                            "type": "string",
-                            "description": "A short human-readable label for the subagent (a few \
-                                words)."
-                        },
-                        "task": {
-                            "type": "string",
-                            "description": "The complete, self-contained task for the subagent. \
-                                It inherits your model and tools but not your conversation — \
-                                include everything it needs to know."
-                        }
-                    }
+                    "properties": properties,
                 }),
             },
             ToolSpec {
@@ -458,10 +540,10 @@ impl Capability for SubAgentCapability {
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool(call) if call.name == SPAWN_TOOL => Some(self.spawn(call)),
+            Msg::Tool { call, facts } if call.name == SPAWN_TOOL => Some(self.spawn(call, facts)),
             // A read, so it journals nothing: an event for it would grow the
             // log every time the model looked.
-            Msg::Tool(call) if call.name == STATUS_TOOL => {
+            Msg::Tool { call, .. } if call.name == STATUS_TOOL => {
                 Some(Decision::reply(&call.id, self.render_status()))
             }
             Msg::Reply(reply) => self.replied(reply),
@@ -479,7 +561,7 @@ impl Capability for SubAgentCapability {
                     note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
                 }))
             }
-            Msg::Tool(_) | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. } | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
         }
     }
 
@@ -516,7 +598,7 @@ impl Capability for SubAgentCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::FakeCapability;
+    use super::super::testing::{FakeCapability, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::settings;
@@ -536,6 +618,40 @@ mod tests {
 
     fn spawn_call() -> ToolCall {
         call(SPAWN_TOOL, json!({"label": "l", "task": "t"}))
+    }
+
+    /// The facts a load leaves behind when the shared library declared these
+    /// agents — built the way the runtime's scan builds them, so what the
+    /// capability reads here is the shape it reads in a session.
+    fn facts_with(agents: &[(&str, &str)]) -> AgentFacts {
+        let catalog: AgentCatalog = agents
+            .iter()
+            .map(|(name, description)| crate::agent_loop::CatalogAgent {
+                plugin: "fd".into(),
+                def: horsie_support::plugin::agents::PluginAgentDef {
+                    name: (*name).to_string(),
+                    description: (*description).to_string(),
+                    model: None,
+                    tools: Vec::new(),
+                    prompt: "be one".into(),
+                },
+            })
+            .collect();
+        AgentFacts {
+            shared: Some(std::sync::Arc::new(crate::agent_loop::SharedContext {
+                agents: std::sync::Arc::new(catalog),
+                ..crate::agent_loop::SharedContext::default()
+            })),
+            ..AgentFacts::default()
+        }
+    }
+
+    /// What the model is shown for `spawn_agent` under these facts.
+    fn spawn_spec(c: &SubAgentCapability, facts: &AgentFacts) -> ToolSpec {
+        c.tools(facts)
+            .into_iter()
+            .find(|t| t.name == SPAWN_TOOL)
+            .expect("spawn_agent is advertised")
     }
 
     /// Fold a decision back into the capability that made it, exactly as the
@@ -563,7 +679,7 @@ mod tests {
     /// Ask for a worker and let the session say yes, which is the only way
     /// there is to an outstanding child.
     fn spawned(c: &mut SubAgentCapability) -> RunnerId {
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
@@ -586,7 +702,7 @@ mod tests {
     fn a_spawn_journals_and_asks_for_the_same_child() {
         let mut c = cap();
         let d = c
-            .handle(&Msg::Tool(&call(
+            .handle(&tool(&call(
                 SPAWN_TOOL,
                 json!({"label": "read the flake", "task": "look"}),
             )))
@@ -646,12 +762,12 @@ mod tests {
     fn a_spawn_at_the_depth_limit_is_refused_without_asking_the_session() {
         // The last depth that may still delegate, and the first that may not.
         let ok = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH - 1)
-            .handle(&Msg::Tool(&spawn_call()))
+            .handle(&tool(&spawn_call()))
             .expect("mine");
         assert!(matches!(ok.acts.first(), Some(Act::Ask(_))));
 
         let d = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)
-            .handle(&Msg::Tool(&spawn_call()))
+            .handle(&tool(&spawn_call()))
             .expect("mine, refused or not");
         assert_eq!(refusal(&d), "max subagent depth 4 reached");
         assert!(
@@ -667,7 +783,7 @@ mod tests {
     #[test]
     fn a_cap_refusal_from_the_session_becomes_the_parked_calls_result() {
         let mut c = cap();
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(&mut c, &d);
 
         let d = c
@@ -699,7 +815,7 @@ mod tests {
     #[test]
     fn a_started_child_answers_the_parked_call_and_becomes_outstanding() {
         let mut c = cap();
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(&mut c, &d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
@@ -743,7 +859,7 @@ mod tests {
     #[test]
     fn a_spawn_the_session_never_answered_is_asked_again_on_load() {
         let mut c = cap();
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(&mut c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, args, .. }),
@@ -821,7 +937,7 @@ mod tests {
         // A refusal retracts the intent too, so a load after one asks for
         // nothing rather than re-running into the same budget.
         let mut c = cap();
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(&mut c, &d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Refused {
@@ -858,7 +974,7 @@ mod tests {
         ]);
         let taken = caps
             .iter()
-            .find_map(|c| c.handle(&Msg::Tool(&spawn_call())).map(|d| (c.name(), d)));
+            .find_map(|c| c.handle(&tool(&spawn_call())).map(|d| (c.name(), d)));
         let Some(("sub_agent", d)) = taken else {
             panic!("the sandbox layer swallowed the spawn: {taken:?}");
         };
@@ -870,7 +986,7 @@ mod tests {
     #[test]
     fn a_malformed_spawn_is_refused_in_words_and_journals_nothing() {
         let d = cap()
-            .handle(&Msg::Tool(&call(SPAWN_TOOL, json!({"label": "l"}))))
+            .handle(&tool(&call(SPAWN_TOOL, json!({"label": "l"}))))
             .expect("the name is mine, so the mistake is mine to answer");
         assert!(refusal(&d).contains(SPAWN_TOOL));
     }
@@ -1044,7 +1160,7 @@ mod tests {
     #[test]
     fn a_requested_child_does_not_hold_the_conclusion() {
         let mut c = cap();
-        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        let d = c.handle(&tool(&spawn_call())).expect("mine");
         fold(&mut c, &d);
         assert!(!c.requested.is_empty());
         assert!(!c.holds_conclusion());
@@ -1073,7 +1189,7 @@ mod tests {
         let mut c = cap();
         let child = spawned(&mut c);
         let d = c
-            .handle(&Msg::Tool(&call(STATUS_TOOL, json!({}))))
+            .handle(&tool(&call(STATUS_TOOL, json!({}))))
             .expect("mine");
         assert!(d.events.is_empty());
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
@@ -1083,7 +1199,7 @@ mod tests {
 
         c.apply(&CapEvent::SubAgent(Event::Reported { child }));
         let d = c
-            .handle(&Msg::Tool(&call(STATUS_TOOL, json!({}))))
+            .handle(&tool(&call(STATUS_TOOL, json!({}))))
             .expect("mine");
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
             panic!("expected one answer, got {:?}", d.acts);
@@ -1098,12 +1214,123 @@ mod tests {
     fn it_advertises_both_tools() {
         assert_eq!(
             cap()
-                .tools()
+                .tools(&facts())
                 .into_iter()
                 .map(|t| t.name)
                 .collect::<Vec<_>>(),
             vec![SPAWN_TOOL, STATUS_TOOL]
         );
+    }
+
+    /// **The catalogue is the whole reason `tools` takes facts.**
+    ///
+    /// The types a session can spawn are found by the workspace scan, which runs
+    /// in a capability equipped *after* this one — `sub_agent` sorts early so it
+    /// wins the `spawn_agent` name against the open-namespace sandbox. So the
+    /// list cannot be known when this capability is built, and is read at
+    /// advertisement time instead. Without it the model is told a parameter
+    /// exists and never told what may go in it, which is a guess with a refusal
+    /// waiting behind it.
+    ///
+    /// In the description rather than a JSON `enum`, because a bare list of
+    /// names says nothing about when to pick one.
+    #[test]
+    fn the_scans_agent_types_are_advertised_with_their_descriptions() {
+        let facts = facts_with(&[("code-reviewer", "reviews diffs for real bugs")]);
+        let spawn = spawn_spec(&cap(), &facts);
+        assert!(
+            spawn
+                .description
+                .contains("- code-reviewer: reviews diffs for real bugs"),
+            "the model is not told which agent types exist: {}",
+            spawn.description
+        );
+        assert!(
+            spawn.input_schema["properties"]["agent_type"].is_object(),
+            "a listed type the model cannot pass is no offer at all"
+        );
+    }
+
+    /// And a scan that found none leaves no trace: a session with no plugins
+    /// sees exactly the tool it saw before agent types existed — no vestigial
+    /// parameter, no empty list to reason about.
+    #[test]
+    fn with_no_agent_types_found_the_parameter_is_absent() {
+        for facts in [facts(), facts_with(&[])] {
+            let spawn = spawn_spec(&cap(), &facts);
+            assert!(spawn.input_schema["properties"]["agent_type"].is_null());
+            assert!(!spawn.description.contains("agent_type"));
+        }
+    }
+
+    /// **Refused where the list is.** An error naming what exists is only
+    /// possible where the catalogue is, and it is the same one the description
+    /// was built from — the facts ride in on the call. The child would refuse
+    /// this too, when it failed to load as a type nothing declares, but by then
+    /// a worker has been journaled and the model reads a dead subagent instead
+    /// of an answer.
+    #[test]
+    fn an_unknown_agent_type_is_refused_and_names_the_installed_ones() {
+        let installed = facts_with(&[("code-reviewer", "reviews"), ("scout", "searches")]);
+        let d = cap()
+            .handle(&Msg::Tool {
+                call: &call(
+                    SPAWN_TOOL,
+                    json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
+                ),
+                facts: &installed,
+            })
+            .expect("the name is mine, so the mistake is mine to answer");
+        assert_eq!(
+            refusal(&d),
+            "no agent type 'reviewer'; installed types are code-reviewer, scout"
+        );
+        assert!(
+            !d.acts.iter().any(|a| matches!(a, Act::Ask(_))),
+            "a refused spawn must not reach the session"
+        );
+
+        // With nothing installed the refusal says so, rather than naming an
+        // empty list.
+        let d = cap()
+            .handle(&Msg::Tool {
+                call: &call(
+                    SPAWN_TOOL,
+                    json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
+                ),
+                facts: &facts(),
+            })
+            .expect("mine");
+        assert_eq!(
+            refusal(&d),
+            "no agent type 'reviewer': this session has no agent types installed"
+        );
+    }
+
+    /// A type that exists reaches the worker, and an omitted or blank one is the
+    /// general-purpose worker rather than a mistake.
+    #[test]
+    fn an_installed_type_is_carried_to_the_child_and_a_blank_one_is_not() {
+        let facts = facts_with(&[("code-reviewer", "reviews")]);
+        for (input, expected) in [
+            (
+                json!({"label": "l", "task": "t", "agent_type": "code-reviewer"}),
+                Some("code-reviewer"),
+            ),
+            (json!({"label": "l", "task": "t", "agent_type": "  "}), None),
+            (json!({"label": "l", "task": "t"}), None),
+        ] {
+            let d = cap()
+                .handle(&Msg::Tool {
+                    call: &call(SPAWN_TOOL, input),
+                    facts: &facts,
+                })
+                .expect("mine");
+            let [CapEvent::SubAgent(Event::Requested { pending, .. })] = d.events.as_slice() else {
+                panic!("expected one Requested event, got {:?}", d.events);
+            };
+            assert_eq!(pending.agent_type.as_deref(), expected);
+        }
     }
 
     /// A budget the model can only ever be refused by advertises no tool at
@@ -1112,10 +1339,10 @@ mod tests {
     fn a_spent_budget_advertises_nothing() {
         let mut zero = settings();
         zero.max_concurrent_subagents = Some(0);
-        assert!(SubAgentCapability::new(zero, 0).tools().is_empty());
+        assert!(SubAgentCapability::new(zero, 0).tools(&facts()).is_empty());
         assert!(
             SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)
-                .tools()
+                .tools(&facts())
                 .is_empty()
         );
     }
@@ -1147,7 +1374,7 @@ mod tests {
     #[test]
     fn another_message_is_not_mine() {
         let c = cap();
-        assert!(c.handle(&Msg::Tool(&call("bash", json!({})))).is_none());
+        assert!(c.handle(&tool(&call("bash", json!({})))).is_none());
         assert!(
             c.handle(&Msg::Command(&crate::sessions::runners::message::Command {
                 name: "fork".into(),

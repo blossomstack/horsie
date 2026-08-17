@@ -34,6 +34,7 @@ use super::{
 use crate::agent_loop::Incoming;
 use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
+use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::{ChildMsg, ChildOutcome, ToolCall, WorkflowOutcome};
 use horsie_agentcore::ToolSpec;
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
@@ -333,7 +334,7 @@ impl Capability for WorkflowCapability {
 
     /// Both tools, advertised here rather than pushed as a toolbox layer — see
     /// the module doc for why that is what made advertising them honest.
-    fn tools(&self) -> Vec<ToolSpec> {
+    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
         vec![
             ToolSpec {
                 name: INVOKE_TOOL.to_string(),
@@ -372,10 +373,10 @@ impl Capability for WorkflowCapability {
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool(call) if call.name == INVOKE_TOOL => Some(self.invoke(call)),
+            Msg::Tool { call, .. } if call.name == INVOKE_TOOL => Some(self.invoke(call)),
             // A read, so it journals nothing: an event for it would grow the
             // log every time the model looked.
-            Msg::Tool(call) if call.name == STATUS_TOOL => {
+            Msg::Tool { call, .. } if call.name == STATUS_TOOL => {
                 Some(Decision::reply(&call.id, self.render_status()))
             }
             Msg::Reply(reply) => self.replied(reply),
@@ -391,7 +392,7 @@ impl Capability for WorkflowCapability {
                     note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
                 }))
             }
-            Msg::Tool(_) | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. } | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
         }
     }
 
@@ -430,6 +431,7 @@ impl Capability for WorkflowCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
+    use crate::agent_loop::capabilities::testing::{facts, tool};
     use crate::sessions::runners::message::SubAgentOutcome;
 
     fn call(name: &str, input: Value) -> ToolCall {
@@ -456,7 +458,7 @@ mod tests {
     /// Invoke, and let the session say yes — the only way there is to a run in
     /// flight.
     fn invoked(c: &mut WorkflowCapability) -> RunnerId {
-        let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
+        let d = c.handle(&tool(&invoke_call())).expect("mine");
         fold(c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
@@ -480,7 +482,7 @@ mod tests {
     #[test]
     fn an_invocation_journals_and_asks_for_the_same_run() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
+        let d = c.handle(&tool(&invoke_call())).expect("mine");
 
         let [CapEvent::Workflow(Event::Requested { call, pending })] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
@@ -523,7 +525,7 @@ mod tests {
     #[test]
     fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
         let d = WorkflowCapability::default()
-            .handle(&Msg::Tool(&call(INVOKE_TOOL, json!({"workflow": "nope"}))))
+            .handle(&tool(&call(INVOKE_TOOL, json!({"workflow": "nope"}))))
             .expect("the name is mine, so the mistake is mine to answer");
         assert!(
             d.events.is_empty(),
@@ -556,7 +558,7 @@ mod tests {
     #[test]
     fn a_refusal_from_the_session_becomes_the_parked_calls_result() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
+        let d = c.handle(&tool(&invoke_call())).expect("mine");
         fold(&mut c, &d);
 
         let d = c
@@ -584,7 +586,7 @@ mod tests {
     #[test]
     fn a_run_the_session_never_answered_is_asked_again_on_load() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
+        let d = c.handle(&tool(&invoke_call())).expect("mine");
         fold(&mut c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, .. }),
@@ -813,7 +815,7 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let child = invoked(&mut c);
         let d = c
-            .handle(&Msg::Tool(&call(STATUS_TOOL, json!({}))))
+            .handle(&tool(&call(STATUS_TOOL, json!({}))))
             .expect("mine");
         assert!(d.events.is_empty());
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
@@ -823,7 +825,7 @@ mod tests {
 
         c.apply(&CapEvent::Workflow(Event::Reported { child }));
         let d = c
-            .handle(&Msg::Tool(&call(STATUS_TOOL, json!({}))))
+            .handle(&tool(&call(STATUS_TOOL, json!({}))))
             .expect("mine");
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
             panic!("expected one answer, got {:?}", d.acts);
@@ -837,7 +839,7 @@ mod tests {
     fn it_advertises_both_tools() {
         assert_eq!(
             WorkflowCapability::default()
-                .tools()
+                .tools(&facts())
                 .into_iter()
                 .map(|t| t.name)
                 .collect::<Vec<_>>(),
@@ -869,7 +871,7 @@ mod tests {
     #[test]
     fn another_message_is_not_mine() {
         let c = WorkflowCapability::default();
-        assert!(c.handle(&Msg::Tool(&call("bash", json!({})))).is_none());
+        assert!(c.handle(&tool(&call("bash", json!({})))).is_none());
         assert!(
             c.handle(&Msg::Command(&crate::sessions::runners::message::Command {
                 name: "fork".into(),

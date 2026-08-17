@@ -165,9 +165,9 @@ All ten capabilities are ported to the agent-side trait. What the build taught u
 
 ## Known gaps, deliberately left
 
-- **`spawn_agent` no longer lists the installed agent types.** `Capability::tools()` takes no `AgentFacts`, and the catalogue only exists after the runtime's workspace scan — which is what the old compose-time toolbox layer was for. `agent_type` is still parsed and forwarded, and an unknown one is still refused, but the model is no longer *told* which exist. Fixing it means either facts at advertise time or holding the catalogue as capability config. **This is a real regression, not a simplification.**
+- **`spawn_agent` no longer lists the installed agent types.** `Capability::tools()` takes no `AgentFacts`, and the catalogue only exists after the runtime's workspace scan — which is what the old compose-time toolbox layer was for. `agent_type` is still parsed and forwarded, and an unknown one is still refused, but the model is no longer *told* which exist. Fixing it means either facts at advertise time or holding the catalogue as capability config. **This is a real regression, not a simplification.** Being fixed by giving `tools()` the `AgentFacts` and computing the specs on the run's task after `provide()`, which is where the scan exists — the same reason the deleted toolbox was a compose-time layer.
 - **`subagent_status` takes no `id`.** The old tool could report one child's status from the session's forest; agent-side there is only "what I am still owed".
-- **The crash window is not closed.** A capability journals its request before asking, but nothing re-asks a dangling one on load, and the session does not dedupe `StartRunner` by call id. Needs a `Msg` the actor broadcasts after recovery.
+- ~~**The crash window is not closed.**~~ Closed: `Msg::Loaded` is broadcast after recovery, a capability holding a dangling request re-emits `Act::Ask` with the ids it already journaled, and the session dedupes on the agent id the capability minted — checked in the `Spawn` handler, where the tree actually lives, rather than at the sink.
 
 ## One behavioural difference still open
 

@@ -161,6 +161,15 @@ pub struct Contexts {
     /// agent's configured prompt" — workflow agents carry a static prompt in
     /// their params and return `None` here.
     pub system_prompt: Option<String>,
+    /// What equipping this agent found: the workspace scan, the shared plugin
+    /// library, the runtime.
+    ///
+    /// Carried out of `provide` rather than dropped with the spec, because the
+    /// run has two uses for it that the toolbox composition cannot serve: the
+    /// tools a capability advertises are computed from it, and the tool calls
+    /// that come back carry it — see
+    /// [`Msg::Tool`](crate::agent_loop::capabilities::Msg::Tool).
+    pub facts: crate::sessions::runners::loading::AgentFacts,
     /// This run's model's context window, when its card declares one.
     ///
     /// Resolved here rather than by the agent because an agent does not know
@@ -332,6 +341,10 @@ impl ContextProvider for FixedContextProvider {
             provider: self.provider.clone(),
             toolbox: self.toolbox.clone(),
             system_prompt: None,
+            // A fixed-context agent scanned nothing: its toolbox was handed to
+            // it whole. Capabilities that read the facts advertise nothing here,
+            // which is the honest answer rather than a missing one.
+            facts: crate::sessions::runners::loading::AgentFacts::default(),
             // A fixed-context agent is a workflow step or a test fixture; it has
             // no model card to read a window from and never auto-compacts.
             context_window: None,

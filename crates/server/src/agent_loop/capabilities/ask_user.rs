@@ -52,7 +52,7 @@
 
 use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError, TurnEvent};
 use crate::agent_loop::{AnswerError, AskAnswer};
-use crate::sessions::runners::loading::{AgentSpec, Loading};
+use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
 use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec};
 use horsie_models::agent::ToolResultInput;
@@ -303,7 +303,7 @@ impl Capability for AskUserCapability {
 
     /// Nothing when muted, which is the whole of "a muted agent has no
     /// `ask_user`".
-    fn tools(&self) -> Vec<ToolSpec> {
+    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
         if self.mute.is_some() {
             return Vec::new();
         }
@@ -343,7 +343,7 @@ impl Capability for AskUserCapability {
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool(call) if call.name == TOOL => Some(self.asked(call)),
+            Msg::Tool { call, .. } if call.name == TOOL => Some(self.asked(call)),
             Msg::Answer(answers) => self.answered(answers),
             // The park did not survive; see the module doc for why this is
             // `Began` and not `Ended`.
@@ -352,7 +352,7 @@ impl Capability for AskUserCapability {
             }
             // Nothing to re-ask: this capability's park is answered by a person,
             // not by the session, so a load leaves it exactly where it was.
-            Msg::Tool(_)
+            Msg::Tool { .. }
             | Msg::Command(_)
             | Msg::Turn(_)
             | Msg::Child(_)
@@ -389,7 +389,7 @@ impl Capability for AskUserCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::FakeCapability;
+    use super::super::testing::{FakeCapability, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
@@ -421,7 +421,7 @@ mod tests {
     fn parked(questions: &[(&str, &str)]) -> AskUserCapability {
         let mut c = AskUserCapability::new();
         for (id, q) in questions {
-            let d = c.handle(&Msg::Tool(&ask(id, q))).expect("mine");
+            let d = c.handle(&tool(&ask(id, q))).expect("mine");
             fold(&mut c, &d);
         }
         c
@@ -455,12 +455,15 @@ mod tests {
             vec!["unattended"]
         );
         assert!(spec.toolbox().is_none());
-        assert!(c.tools().is_empty(), "a muted agent advertises no ask_user");
+        assert!(
+            c.tools(&facts()).is_empty(),
+            "a muted agent advertises no ask_user"
+        );
 
         // And a call that arrives anyway is refused in words rather than
         // declined — see the test below for what declining would cost.
         let said = refusal(
-            &c.handle(&Msg::Tool(&ask("t1", "which?")))
+            &c.handle(&tool(&ask("t1", "which?")))
                 .expect("mine even when muted"),
         );
         assert!(said.contains("routine"), "{said}");
@@ -481,10 +484,9 @@ mod tests {
             // it claims the name too, and it is the one that answers if this
             // capability declines.
             let caps = Capabilities::new(vec![Box::new(c), Box::new(FakeCapability::new(TOOL))]);
-            let taker = caps.iter().find_map(|c| {
-                c.handle(&Msg::Tool(&ask("t1", "which?")))
-                    .map(|d| (c.name(), d))
-            });
+            let taker = caps
+                .iter()
+                .find_map(|c| c.handle(&tool(&ask("t1", "which?"))).map(|d| (c.name(), d)));
             let Some(("ask_user", d)) = taker else {
                 panic!("the sandbox layer swallowed the question: {taker:?}");
             };
@@ -516,9 +518,9 @@ mod tests {
         // Still equips nothing, exactly as unattended does — and the refusal
         // says the other reason, not this one.
         assert!(spec.toolbox().is_none());
-        assert!(c.tools().is_empty());
+        assert!(c.tools(&facts()).is_empty());
         let said = refusal(
-            &c.handle(&Msg::Tool(&ask("t1", "which?")))
+            &c.handle(&tool(&ask("t1", "which?")))
                 .expect("mine even when muted"),
         );
         assert!(
@@ -547,7 +549,10 @@ mod tests {
             "the tool is dispatched through the mailbox, not through a layer"
         );
         assert_eq!(
-            c.tools().into_iter().map(|t| t.name).collect::<Vec<_>>(),
+            c.tools(&facts())
+                .into_iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>(),
             vec![TOOL]
         );
     }
@@ -558,7 +563,7 @@ mod tests {
     /// a multi-select asked as a single choice loses every answer but one.
     #[test]
     fn the_advertised_schema_offers_multi_select_and_a_free_text_fallback() {
-        let spec = AskUserCapability::new().tools().remove(0);
+        let spec = AskUserCapability::new().tools(&facts()).remove(0);
         let props = spec
             .input_schema
             .get("properties")
@@ -589,7 +594,7 @@ mod tests {
     fn an_ask_journals_the_question_and_parks() {
         let mut c = AskUserCapability::new();
         let d = c
-            .handle(&Msg::Tool(&ask("call-1", "which database?")))
+            .handle(&tool(&ask("call-1", "which database?")))
             .expect("mine");
 
         let [CapEvent::AskUser(Event::Asked { call, question })] = d.events.as_slice() else {

@@ -68,7 +68,7 @@ pub mod workflow;
 
 use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
-use crate::sessions::runners::loading::{AgentSpec, Loading};
+use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::{ChildMsg, Command, ToolCall};
 use horsie_agentcore::ToolSpec;
 use horsie_models::agent::ToolResultInput;
@@ -81,8 +81,18 @@ use serde::{Deserialize, Serialize};
 /// it keeps.
 #[derive(Debug)]
 pub enum Msg<'a> {
-    /// A tool the model called.
-    Tool(&'a ToolCall),
+    /// A tool the model called, and what the run that called it found.
+    ///
+    /// The facts ride with the call because they are the same ones the
+    /// advertisement was built from — [`Capability::tools`] is computed on that
+    /// run's task from this very value — so a refusal here names exactly the
+    /// catalogue the model was shown. Nothing else carries them: facts exist for
+    /// as long as a run does, and a tool call is the only message that is always
+    /// inside one.
+    Tool {
+        call: &'a ToolCall,
+        facts: &'a AgentFacts,
+    },
     /// A `/builtin` the person typed, already parsed.
     Command(&'a Command),
     /// This agent's turn reached a boundary.
@@ -144,7 +154,9 @@ impl Msg<'_> {
         match self {
             // Exactly one capability owns a tool name, a slash command, a
             // child, or the request a reply answers.
-            Self::Tool(_) | Self::Command(_) | Self::Child(_) | Self::Reply(_) => Routing::Offer,
+            Self::Tool { .. } | Self::Command(_) | Self::Child(_) | Self::Reply(_) => {
+                Routing::Offer
+            }
             // An answer set is offered too: the capability holding the park is
             // the one that recorded it, and no other can claim it.
             Self::Answer(_) => Routing::Offer,
@@ -161,7 +173,7 @@ impl Msg<'_> {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Tool(t) => format!("tool call `{}`", t.name),
+            Self::Tool { call, .. } => format!("tool call `{}`", call.name),
             Self::Command(c) => format!("command `/{}`", c.name),
             Self::Turn(t) => format!("turn {t:?}"),
             Self::Answer(a) => format!("{} answer(s)", a.len()),
@@ -424,7 +436,15 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
     /// on the actor, so it can park, journal and ask the session. A layer pushed
     /// in `setup` runs on the agent's task and can do none of those things,
     /// which is exactly right for the sandbox and wrong for everything else.
-    fn tools(&self) -> Vec<ToolSpec> {
+    ///
+    /// [`AgentFacts`] rather than nothing, because an advertisement can depend on
+    /// what the load found: `sub_agent` lists the installed agent types, and only
+    /// the workspace scan knows them. Facts are why these are computed on the
+    /// run's own task after `provide` rather than on the mailbox before it — a
+    /// capability that sorts ahead of `runtime`, as `sub_agent` must to win the
+    /// `spawn_agent` name, has no scan of its own to read.
+    fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
+        let _ = facts;
         Vec::new()
     }
 
@@ -566,11 +586,11 @@ impl Capabilities {
     /// The same order tool calls are dispatched in, so a name claimed by two
     /// capabilities is advertised once by the one that will actually answer it.
     #[must_use]
-    pub fn tools(&self) -> Vec<ToolSpec> {
+    pub fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
         let mut seen = std::collections::HashSet::new();
         self.0
             .iter()
-            .flat_map(|c| c.tools())
+            .flat_map(|c| c.tools(facts))
             .filter(|t| seen.insert(t.name.clone()))
             .collect()
     }
@@ -740,7 +760,7 @@ pub mod testing {
             "fake"
         }
 
-        fn tools(&self) -> Vec<ToolSpec> {
+        fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
             vec![ToolSpec {
                 name: self.tool.clone(),
                 description: String::new(),
@@ -750,7 +770,7 @@ pub mod testing {
 
         fn handle(&self, msg: &Msg) -> Option<Decision> {
             match msg {
-                Msg::Tool(call) => (call.name == self.tool).then(|| {
+                Msg::Tool { call, .. } => (call.name == self.tool).then(|| {
                     Decision::record(vec![CapEvent::Fake(FakeEvent {
                         tool: self.tool.clone(),
                         what: format!("tool:{}", call.name),
@@ -789,6 +809,29 @@ pub mod testing {
             id: "t1".into(),
             name: name.into(),
             input: serde_json::json!({}),
+        }
+    }
+
+    /// What a load that found nothing leaves behind: no workspace scan, no
+    /// plugin library, no runtime. The facts every capability but `sub_agent`
+    /// advertises the same tools under.
+    #[must_use]
+    pub fn facts() -> AgentFacts {
+        AgentFacts::default()
+    }
+
+    /// A tool call made under a load that found nothing.
+    ///
+    /// What every capability but one is tested against: the facts are the
+    /// workspace scan, and only `sub_agent` reads them. A capability that wants
+    /// facts of its own writes [`Msg::Tool`] out and supplies them.
+    #[must_use]
+    pub fn tool(call: &ToolCall) -> Msg<'_> {
+        static NOTHING: std::sync::LazyLock<AgentFacts> =
+            std::sync::LazyLock::new(AgentFacts::default);
+        Msg::Tool {
+            call,
+            facts: &NOTHING,
         }
     }
 
@@ -937,7 +980,7 @@ mod tests {
             FakeCapability::new("second"),
         ]);
         let d = caps
-            .offer(&Msg::Tool(&call("second")))
+            .offer(&tool(&call("second")))
             .expect("someone takes it");
         let Some(CapEvent::Fake(e)) = d.events.first() else {
             panic!("expected the fake's own event, got {:?}", d.events);
@@ -950,9 +993,9 @@ mod tests {
     #[test]
     fn a_call_nobody_claims_is_none() {
         let caps = caps(vec![FakeCapability::new("only")]);
-        assert!(caps.offer(&Msg::Tool(&call("nope"))).is_none());
+        assert!(caps.offer(&tool(&call("nope"))).is_none());
         assert_eq!(
-            Msg::Tool(&call("nope")).describe(),
+            tool(&call("nope")).describe(),
             "tool call `nope`",
             "the diagnostic has to name the call"
         );
@@ -1004,7 +1047,7 @@ mod tests {
     /// call would produce two results for one `tool_use` id.
     #[test]
     fn a_tool_call_is_offered_and_a_turn_is_broadcast() {
-        assert_eq!(Msg::Tool(&call("x")).routing(), Routing::Offer);
+        assert_eq!(tool(&call("x")).routing(), Routing::Offer);
         assert_eq!(Msg::Turn(TurnEvent::Began).routing(), Routing::Broadcast);
         assert_eq!(
             Msg::Answer(&[AskAnswer {
@@ -1057,7 +1100,7 @@ mod tests {
         // Both claim the same name; the front one answers.
         assert_eq!(caps.iter().count(), 2);
         assert_eq!(
-            caps.tools().len(),
+            caps.tools(&facts()).len(),
             1,
             "a name claimed twice is advertised once, by whoever will answer it"
         );
@@ -1069,8 +1112,8 @@ mod tests {
     fn an_empty_set_claims_nothing() {
         let caps = Capabilities::default();
         assert!(caps.is_empty());
-        assert!(caps.tools().is_empty());
-        assert!(caps.offer(&Msg::Tool(&call("x"))).is_none());
+        assert!(caps.tools(&facts()).is_empty());
+        assert!(caps.offer(&tool(&call("x"))).is_none());
         assert!(caps.broadcast(&Msg::Turn(TurnEvent::Ended)).acts.is_empty());
     }
 }

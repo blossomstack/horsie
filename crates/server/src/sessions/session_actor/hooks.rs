@@ -658,6 +658,64 @@ mod tests {
     use super::super::*;
     use super::*;
 
+    /// **A repeat is not a second child.**
+    ///
+    /// A capability journals its request before sending it, so a process that
+    /// dies in that window replays the identical request on load — same call,
+    /// same runner, same worker. Twice through the sink is exactly what the
+    /// session sees, and the tree must come out of it with one node: a crash
+    /// that silently doubles the fleet is worse than the one it recovered from.
+    #[tokio::test]
+    async fn the_same_request_twice_starts_one_child() {
+        let gate = BlockingProvider::new();
+        let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
+        let parent = SessionParent::new(session.clone(), AgentKey::Main);
+        let worker = crate::sessions::runners::ids::AgentId::new_v4();
+        let request = SessionRequest::StartRunner {
+            call: "call-1".to_string(),
+            id: RunnerId::new_v4(),
+            kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+            args: Box::new(RunnerArgs::SubAgent {
+                agent: worker,
+                label: "research".to_string(),
+                task: "dig into the flake".to_string(),
+                agent_type: None,
+                settings: Box::new(crate::sessions::runners::empty_settings()),
+            }),
+        };
+
+        let first = parent.request(request.clone()).await;
+        assert!(
+            matches!(first, SessionReply::Done { .. }),
+            "the first ask must create the child: {first:?}"
+        );
+        wait_for_tree(&journal, id, |t| t.node(worker.as_uuid()).is_some()).await;
+
+        let second = parent.request(request).await;
+        assert!(
+            matches!(second, SessionReply::Done { .. }),
+            "a repeat answered with a refusal tells the model its spawn failed \
+             when the child is running: {second:?}"
+        );
+
+        // Counted in the journal, not in the tree. The tree is a map keyed by
+        // the worker, so a second spawn of the same id overwrites the node and
+        // leaves the count at one — while having journaled the spawn twice,
+        // started a second child actor and queued the task again. What "one
+        // child" means is one `SubAgentSpawned`.
+        let spawns = journaled_events(&journal, id)
+            .await
+            .into_iter()
+            .filter(|e| e.contains("SubAgentSpawned"))
+            .count();
+        assert_eq!(
+            spawns, 1,
+            "the repeat spawned a second worker, so a crash doubles the work"
+        );
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(state.subagents.ids(), vec![worker.as_uuid()]);
+    }
+
     /// A blocking `Stop` means *blocked from stopping*: the turn does not
     /// conclude, and the reason becomes the input to another run. The opposite
     /// of a `PreToolUse` refusal.

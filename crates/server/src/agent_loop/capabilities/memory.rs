@@ -130,7 +130,7 @@ impl Capability for MemoryCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::call;
+    use super::super::testing::{call, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
@@ -198,11 +198,11 @@ mod tests {
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = MemoryCapability::new(vec!["default".into()]);
         for name in TOOLS {
-            assert!(c.handle(&Msg::Tool(&call(name))).is_none(), "{name}");
+            assert!(c.handle(&tool(&call(name))).is_none(), "{name}");
         }
-        assert!(c.handle(&Msg::Tool(&call("bash"))).is_none());
+        assert!(c.handle(&tool(&call("bash"))).is_none());
         assert!(
-            c.tools().is_empty(),
+            c.tools(&facts()).is_empty(),
             "the five are advertised by the toolbox that will run them"
         );
     }

@@ -23,7 +23,7 @@
 //! twice by two different owners.
 
 use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
-use crate::sessions::runners::loading::{AgentSpec, Loading};
+use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
 use horsie_agentcore::ToolSpec;
@@ -131,7 +131,7 @@ impl Capability for StepResultCapability {
     /// its tool and the answer that comes back, and a second advertisement of
     /// the same tool from over here would offer a question nothing could route
     /// the answer to.
-    fn tools(&self) -> Vec<ToolSpec> {
+    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
         vec![ToolSpec {
             name: SUBMIT_RESULT_TOOL.to_string(),
             description: TOOL_DESCRIPTION.to_string(),
@@ -141,10 +141,10 @@ impl Capability for StepResultCapability {
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool(call) if call.name == SUBMIT_RESULT_TOOL => Some(self.submitted(call)),
+            Msg::Tool { call, .. } if call.name == SUBMIT_RESULT_TOOL => Some(self.submitted(call)),
             // Nothing to re-ask: this capability asks the session for nothing,
             // so it holds nothing a load could have to send again.
-            Msg::Tool(_)
+            Msg::Tool { .. }
             | Msg::Command(_)
             | Msg::Turn(_)
             | Msg::Answer(_)
@@ -167,7 +167,9 @@ impl Capability for StepResultCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{equipped, loading, settings, spec};
+    use crate::agent_loop::capabilities::testing::{
+        equipped, facts, loading, settings, spec, tool,
+    };
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
     use horsie_models::workflow::StepFieldType;
     use serde_json::{Value, json};
@@ -208,7 +210,7 @@ mod tests {
 
     /// The advertised schema, as the model is shown it.
     fn schema(c: &StepResultCapability) -> Value {
-        c.tools()
+        c.tools(&facts())
             .into_iter()
             .find(|s| s.name == SUBMIT_RESULT_TOOL)
             .expect("a step is equipped to submit")
@@ -228,7 +230,7 @@ mod tests {
             "owner": "shawn",
         });
         let d = cap(false)
-            .handle(&Msg::Tool(&submit("call-1", submitted.clone())))
+            .handle(&tool(&submit("call-1", submitted.clone())))
             .expect("mine");
 
         let [CapEvent::StepResult(Event::Submitted { output })] = d.events.as_slice() else {
@@ -249,7 +251,7 @@ mod tests {
     #[test]
     fn an_undeclared_outcome_is_refused_and_journals_nothing() {
         let d = cap(false)
-            .handle(&Msg::Tool(&submit(
+            .handle(&tool(&submit(
                 "call-1",
                 json!({"outcome": "p9", "description": "x", "owner": "shawn"}),
             )))
@@ -279,7 +281,7 @@ mod tests {
     #[test]
     fn a_missing_required_field_is_refused() {
         let d = cap(false)
-            .handle(&Msg::Tool(&submit(
+            .handle(&tool(&submit(
                 "call-1",
                 json!({"outcome": "p0", "description": "did it"}),
             )))
@@ -374,7 +376,7 @@ mod tests {
             .expect("nothing fatal");
         assert!(degraded.is_empty());
 
-        let names: Vec<String> = caps.tools().into_iter().map(|t| t.name).collect();
+        let names: Vec<String> = caps.tools(&facts()).into_iter().map(|t| t.name).collect();
         assert!(names.contains(&super::super::ask_user::TOOL.to_string()));
         assert!(names.contains(&SUBMIT_RESULT_TOOL.to_string()));
     }
@@ -405,7 +407,7 @@ mod tests {
     fn another_tool_is_not_mine() {
         let c = cap(false);
         assert!(
-            c.handle(&Msg::Tool(&ToolCall {
+            c.handle(&tool(&ToolCall {
                 id: "t1".into(),
                 name: "bash".into(),
                 input: json!({}),
