@@ -61,6 +61,12 @@ The one capability needing no session at all, which is why it goes first: it pro
 
 **Test:** port every existing ask test. The reconciliation ones (`Incomplete { missing, unexpected }`) move to the capability. Fail-first: break the set comparison and watch them fail.
 
+**Done so far** (commits `3b062967`, `7c8a92ef`): the capability, plus `AgentParams.capabilities` → `AgentDomainEvent::Equipped` → the fold, and `AgentCommand::Answer` consulting the park before the old path. Nothing equips it yet, so the old path is still what runs.
+
+**Settled while building it — where abandonment lives.** The first cut left the rule in `queued_turn` and gave the capability bookkeeping on `TurnEvent::Began`, which is right about `Began` (a park *ends its own turn*, so clearing on `Ended` would discard the park it just made) but wrong about the data. `queued_turn` reads `state.asks` to build the abandonment results, so the park would live on both sides — decision #7 says a fact lives on exactly one.
+
+The switch therefore has to move the *results* to the capability: `Msg::Turn(Began)` returns `Act::Resume` carrying `ABANDONED_ASK_RESULT` for each call it still holds. `queued_turn` keeps the rule it actually owns — which arriving item may override a park, and only a person may — and reads a generic "is parked" flag rather than the questions. Then `AgentState.asks` can go, which it cannot while `queued_turn` needs it.
+
 ---
 
 ### Task 4 — `submit_result` migrates
@@ -70,7 +76,9 @@ Also needs no session — a step's output travels on its outcome.
 **Create:** `agent_loop/capabilities/step_result.rs`.
 **Delete:** `sessions/workflow/toolbox.rs`, `runners/capabilities/step_result.rs`.
 
-**Test:** an undeclared outcome is refused and journals nothing; a valid submission parks then concludes.
+**`Act` grows a sixth verb here, deliberately.** `submit_result` does not park: it *concludes*. Both return `StopRun` to the toolbox, which is why the old code could treat them alike and sort them out afterwards in `interpret` by matching tool names — but a park owes a result later and a conclusion owes nothing ever, and `AgentOutcome::Concluded` carries an output that `Act::Park` has nowhere to put. So `Act::Conclude { output }`, and `interpret`'s name-matching on `SUBMIT_RESULT_TOOL`/`ASK_USER_TOOL` goes with it: the actor stops recognising two tool names and instead performs what a capability asked for.
+
+**Test:** an undeclared outcome is refused and journals nothing; a valid submission concludes. Plus: the nudge budget (`MAX_RESULT_NUDGES`) has no unit test today — `ended_without_result` is covered only through `run.rs` integration tests. Give it one while it moves.
 
 ---
 
