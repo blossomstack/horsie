@@ -55,6 +55,8 @@
 //! above all — sort last, because they answer for a namespace nobody can
 //! enumerate. See [`Capabilities::push_front`].
 
+pub mod ask_user;
+
 use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::{AgentSpec, Loading};
@@ -373,19 +375,19 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
 /// and facts about the agent belong in its state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapSlice {
-    /// The only arm until a real capability lands, so the round-trip and
-    /// folded-state rules have something to be tested against. Each migration
-    /// adds its own arm beside this one; the last of them deletes it.
+    AskUser(ask_user::AskUserCapability),
+    /// A capability with no behaviour of its own, so the round-trip and
+    /// folded-state rules have something to be tested against that cannot break
+    /// when a real capability changes. Each migration adds its own arm beside
+    /// these; nothing deletes this one.
     #[cfg(test)]
     Fake(testing::FakeCapability),
 }
 
 impl From<CapSlice> for Box<dyn Capability> {
-    /// Outside tests this is an empty match over an uninhabited enum, which is
-    /// the honest shape until the first real capability lands: there is nothing
-    /// a journal could hold, so there is nothing to rehydrate.
     fn from(slice: CapSlice) -> Self {
         match slice {
+            CapSlice::AskUser(c) => Box::new(c),
             #[cfg(test)]
             CapSlice::Fake(c) => Box::new(c),
         }
@@ -398,6 +400,7 @@ impl From<CapSlice> for Box<dyn Capability> {
 /// change fails to compile where it should.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapEvent {
+    AskUser(ask_user::Event),
     #[cfg(test)]
     Fake(testing::FakeEvent),
 }
@@ -639,9 +642,11 @@ pub mod testing {
         }
 
         fn apply(&mut self, event: &CapEvent) {
-            let CapEvent::Fake(e) = event;
-            if e.tool == self.tool {
-                self.seen.push(e.what.clone());
+            // Every capability is offered every event, so an arm that is not
+            // mine is a no-op rather than an error.
+            match event {
+                CapEvent::Fake(e) if e.tool == self.tool => self.seen.push(e.what.clone()),
+                CapEvent::Fake(_) | CapEvent::AskUser(_) => {}
             }
         }
 
@@ -685,7 +690,9 @@ mod tests {
         let d = caps
             .offer(&Msg::Tool(&call("second")))
             .expect("someone takes it");
-        let CapEvent::Fake(e) = d.events.first().expect("one event");
+        let Some(CapEvent::Fake(e)) = d.events.first() else {
+            panic!("expected the fake's own event, got {:?}", d.events);
+        };
         assert_eq!(e.tool, "second");
     }
 
@@ -718,7 +725,10 @@ mod tests {
         let tools: Vec<&str> = d
             .events
             .iter()
-            .map(|CapEvent::Fake(e)| e.tool.as_str())
+            .filter_map(|e| match e {
+                CapEvent::Fake(e) => Some(e.tool.as_str()),
+                CapEvent::AskUser(_) => None,
+            })
             .collect();
         assert_eq!(
             tools,
@@ -772,7 +782,9 @@ mod tests {
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Fake(fake) = read.iter().next().expect("one").save();
+        let CapSlice::Fake(fake) = read.iter().next().expect("one").save() else {
+            panic!("the journal changed which capability this is");
+        };
         assert_eq!(
             fake.seen,
             vec!["tool:a"],
@@ -780,7 +792,9 @@ mod tests {
         );
 
         // And the in-memory clone takes the same path, so the two cannot drift.
-        let CapSlice::Fake(cloned) = caps.clone().iter().next().expect("one").save();
+        let CapSlice::Fake(cloned) = caps.clone().iter().next().expect("one").save() else {
+            panic!("the clone changed which capability this is");
+        };
         assert_eq!(cloned.seen, vec!["tool:a"]);
     }
 
