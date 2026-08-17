@@ -1,0 +1,583 @@
+//! `set_session_title`: the agent naming the conversation it is in.
+//!
+//! A conversation's own capability. A fork holds one too and names *itself*,
+//! not the session it lives in — the model should not have to know which kind
+//! of conversation it is in to name it.
+//!
+//! # The first capability that genuinely needs the session
+//!
+//! Everything else moved here because the fact it wanted was the agent's. This
+//! one is the other way round: a session's name is the *session's* state, and no
+//! agent can write it. So the tool is answered in two halves — the call decides
+//! and asks with [`Act::Ask`], and the session's [`SessionReply`] is what
+//! finally answers the model, possibly on a later process.
+//!
+//! That is why the name in flight is journaled rather than held in a field. Two
+//! things need it after the asking turn is over: the confirmation the model
+//! reads, which quotes the name back, and [`Capability::handle`] itself — a
+//! reply is *offered* around the capabilities, so the only way this one can
+//! recognise an answer to its own request is to have recorded the call it made.
+//!
+//! # Which conversation gets renamed
+//!
+//! [`SessionRequest::SetTitle`] names no target, and does not need one: the
+//! session knows which of its conversations the asking agent belongs to, and
+//! that is the same fact the old `SetTitle` command carried its `agent` field
+//! for. [`TitleCapability::fork`] therefore only says *that* this agent is a
+//! fork, which is what the prompt below turns on.
+
+use super::{
+    Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, SetupError,
+};
+use crate::sessions::runners::ids::RunnerId;
+use crate::sessions::runners::loading::{AgentSpec, Loading};
+use crate::sessions::runners::message::ToolCall;
+use crate::sessions::title_tool::{SESSION_TITLE_MAX_CHARS, normalize_session_title};
+use horsie_agentcore::ToolSpec;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::BTreeMap;
+
+/// Appended to a fork's system prompt.
+///
+/// A fork is a conversation, so almost nothing a subagent is told applies: it
+/// can ask the user, and it owes nobody a report. What it does need is to know
+/// it is one of several under one session sharing one workspace, and that its
+/// title is how a person tells them apart — which is why this paragraph is
+/// here, with the tool it tells the fork to call, rather than with
+/// [`super::fork`], which answers for *making* a fork.
+const FORK_PROMPT_SUFFIX: &str = "# Forked conversation\n\
+You are a fork: a conversation branched from another one in this session, carrying its \
+history up to the branch point. You share one workspace with it — what you change on disk \
+is what it sees. Name yourself with set_session_title as soon as the new direction is \
+clear; that title is how a person tells this conversation from the one it came from.";
+
+/// The tool this capability answers for.
+pub const TOOL: &str = "set_session_title";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TitleCapability {
+    /// The name the session accepted, if it has accepted one.
+    pub title: Option<String>,
+    /// The fork this names, if it names one. `None` titles the session.
+    pub fork: Option<RunnerId>,
+    /// Names asked for and not yet answered: `tool_call_id` -> name.
+    ///
+    /// Folded from this capability's own events, so it survives an offload and
+    /// a restart — the session's answer may arrive after the process that asked
+    /// is gone, and both the confirmation text and "is this reply mine?" are
+    /// read out of here.
+    #[serde(default)]
+    pub pending: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Event {
+    /// The agent asked the session for this name, on this call.
+    Asked { call: String, name: String },
+    /// The session took it. The conversation is now called this.
+    Set { call: String, name: String },
+    /// The session would not take it, so the request is no longer in flight.
+    ///
+    /// A record that the ask ended, not a record of the name: a title that
+    /// never took must not replay as one that did.
+    Refused { call: String },
+}
+
+/// The tool's arguments. Deserialised here so the schema and this type are one
+/// declaration rather than two that can drift.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Request {
+    pub title: String,
+}
+
+impl TitleCapability {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn for_fork(fork: RunnerId) -> Self {
+        Self {
+            fork: Some(fork),
+            ..Self::default()
+        }
+    }
+
+    /// The model called `set_session_title`.
+    ///
+    /// Validation lives here, with the capability that owns the tool, rather
+    /// than with whoever receives the request: a name the session would refuse
+    /// must not reach the log as one it accepted. What is asked for is the
+    /// *normalized* name, so what is journaled, what the session is told and
+    /// what the model is finally shown are one string.
+    fn asked(&self, call: &ToolCall) -> Decision {
+        // A capability that owns a tool name owns every call to it, including
+        // the malformed ones: declining would hand the call to the next
+        // capability, and the last of those claims every name.
+        let request: Request = match serde_json::from_value(call.input.clone()) {
+            Ok(request) => request,
+            Err(e) => {
+                return Decision::reply(
+                    &call.id,
+                    format!("`{TOOL}` was called with arguments it cannot read: {e}"),
+                );
+            }
+        };
+        let name = match normalize_session_title(&request.title) {
+            Ok(name) => name,
+            // A refusal journals nothing: nothing was renamed.
+            Err(error) => return Decision::reply(&call.id, error.to_string()),
+        };
+        Decision::record(vec![CapEvent::Title(Event::Asked {
+            call: call.id.clone(),
+            name: name.clone(),
+        })])
+        .then(Act::Ask(SessionRequest::SetTitle {
+            call: call.id.clone(),
+            title: name,
+        }))
+    }
+
+    /// The session answered a rename this capability asked for.
+    ///
+    /// The tool call has been dangling since the asking turn, so both arms end
+    /// in [`Act::Answer`] — a refusal the model cannot see is a tool call that
+    /// never returns.
+    fn answered(&self, reply: &SessionReply) -> Decision {
+        match reply {
+            SessionReply::Done { call } => {
+                let name = self.pending.get(call).cloned().unwrap_or_default();
+                Decision::record(vec![CapEvent::Title(Event::Set {
+                    call: call.clone(),
+                    name: name.clone(),
+                })])
+                .then(Act::Answer {
+                    call: call.clone(),
+                    // The sentence the session-owned toolbox used to render
+                    // around the bare name it was handed. There is no toolbox
+                    // in the way now, so it is written once, here.
+                    text: format!("Session title set to \"{name}\"."),
+                })
+            }
+            // Verbatim: the session is the only thing that knows why, and a
+            // reason reworded here is a reason the model cannot act on.
+            SessionReply::Refused { call, reason } => Decision::record(vec![CapEvent::Title(
+                Event::Refused { call: call.clone() },
+            )])
+            .then(Act::Answer {
+                call: call.clone(),
+                text: reason.clone(),
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Capability for TitleCapability {
+    fn name(&self) -> &'static str {
+        "title"
+    }
+
+    /// One tool, two kinds of conversation. A fork names *itself*; every other
+    /// conversation names the session — and the model never has to know which
+    /// it is in, so the only difference here is which paragraph it is given.
+    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+        match self.fork {
+            // What a fork is, and why naming itself matters. Its own paragraph
+            // rather than the generic one below: a fork already knows it should
+            // name itself, what it needs told is that the conversation it
+            // branched from is still there beside it.
+            Some(_) => spec.say("fork_role", FORK_PROMPT_SUFFIX),
+            None => spec.say(
+                "title",
+                "Name this conversation with `set_session_title` once you \
+                 know what it is about.",
+            ),
+        }
+        Ok(())
+    }
+
+    /// Through `tools()` rather than a toolbox layer: the call has to reach
+    /// this actor's mailbox, because answering it means asking the session and
+    /// waiting for a reply, and a layer runs on the agent's task where there is
+    /// nothing to ask with.
+    fn tools(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: TOOL.to_string(),
+            description: "Rename this session at any point with a concise, specific, \
+                single-line title. The latest successful call wins."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": SESSION_TITLE_MAX_CHARS,
+                        "description": "A concise single-line session title, at most 60 characters. The latest successful call renames the session."
+                    }
+                }
+            }),
+        }]
+    }
+
+    fn handle(&self, msg: &Msg) -> Option<Decision> {
+        match msg {
+            Msg::Tool(call) if call.name == TOOL => Some(self.asked(call)),
+            // Replies are offered around, so this claims only the ones it can
+            // account for: a call it recorded asking about.
+            Msg::Reply(reply) if self.pending.contains_key(reply.call()) => {
+                Some(self.answered(reply))
+            }
+            Msg::Tool(_)
+            | Msg::Command(_)
+            | Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Child(_)
+            | Msg::Reply(_) => None,
+        }
+    }
+
+    fn apply(&mut self, event: &CapEvent) {
+        // `let ... else` rather than a match with an arm per sibling: every
+        // capability is offered every event, and listing the other nine here
+        // would make adding a tenth a change to all of them.
+        let CapEvent::Title(event) = event else {
+            return;
+        };
+        match event {
+            Event::Asked { call, name } => {
+                self.pending.insert(call.clone(), name.clone());
+            }
+            Event::Set { call, name } => {
+                self.pending.remove(call);
+                self.title = Some(name.clone());
+            }
+            Event::Refused { call } => {
+                self.pending.remove(call);
+            }
+        }
+    }
+
+    fn save(&self) -> CapSlice {
+        CapSlice::Title(self.clone())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::capabilities::Capabilities;
+    use crate::sessions::runners::capabilities::testing::{equipped, loading, spec};
+
+    fn set(id: &str, title: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: TOOL.into(),
+            input: json!({ "title": title }),
+        }
+    }
+
+    /// Fold a decision back into the capability that made it, exactly as the
+    /// actor does — a capability that decided something has not yet changed.
+    fn fold(c: &mut TitleCapability, d: &Decision) {
+        for event in &d.events {
+            c.apply(event);
+        }
+    }
+
+    /// Ask for this name, the only way there is to get a request in flight.
+    fn asked(id: &str, title: &str) -> TitleCapability {
+        let mut c = TitleCapability::new();
+        let d = c.handle(&Msg::Tool(&set(id, title))).expect("mine");
+        fold(&mut c, &d);
+        c
+    }
+
+    fn answer(d: &Decision) -> String {
+        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
+            panic!("expected one answer, got {:?}", d.acts);
+        };
+        text.clone()
+    }
+
+    /// The call decides and asks; the session renames. Nothing is called
+    /// anything yet — journaling the name here would replay a rename the
+    /// session may still refuse.
+    #[test]
+    fn setting_a_title_asks_the_session() {
+        let mut c = TitleCapability::new();
+        let d = c
+            .handle(&Msg::Tool(&set("call-1", "the flake")))
+            .expect("mine");
+
+        let [CapEvent::Title(Event::Asked { call, name })] = d.events.as_slice() else {
+            panic!("expected one Asked event, got {:?}", d.events);
+        };
+        assert_eq!(call, "call-1");
+        assert_eq!(name, "the flake");
+        let [Act::Ask(SessionRequest::SetTitle { call, title })] = d.acts.as_slice() else {
+            panic!("a title that did not ask the session: {:?}", d.acts);
+        };
+        assert_eq!(call, "call-1");
+        assert_eq!(title, "the flake");
+
+        fold(&mut c, &d);
+        assert_eq!(
+            c.pending.get("call-1").map(String::as_str),
+            Some("the flake")
+        );
+        assert_eq!(c.title, None, "the session has not answered yet");
+    }
+
+    /// The session took it: the conversation is named, and the model — whose
+    /// call has been dangling since the asking turn — is told so.
+    #[test]
+    fn the_session_taking_it_names_the_conversation_and_answers_the_model() {
+        let mut c = asked("call-1", "the flake");
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Done {
+                call: "call-1".into(),
+            }))
+            .expect("mine");
+        assert_eq!(answer(&d), "Session title set to \"the flake\".");
+
+        fold(&mut c, &d);
+        assert_eq!(c.title.as_deref(), Some("the flake"));
+        assert!(c.pending.is_empty(), "an answered request is over");
+    }
+
+    /// **A refusal is passed back to the model verbatim.** The session is the
+    /// only thing that knows why it would not take the name, so the reason
+    /// reaches the model unedited — and nothing is renamed by a request that
+    /// was refused.
+    #[test]
+    fn a_refused_rename_is_passed_back_to_the_model_verbatim() {
+        let mut c = asked("call-1", "the flake");
+        let reason = "this session belongs to a routine and cannot be renamed";
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Refused {
+                call: "call-1".into(),
+                reason: reason.into(),
+            }))
+            .expect("mine");
+        assert_eq!(answer(&d), reason, "the session's reason was reworded");
+
+        fold(&mut c, &d);
+        assert_eq!(c.title, None, "a refused name was recorded as taken");
+        assert!(
+            c.pending.is_empty(),
+            "a refused request stayed in flight for ever"
+        );
+    }
+
+    /// A reply for a call this capability never made is not its own. Replies
+    /// are offered around, so claiming one would answer for whichever
+    /// capability actually asked.
+    #[test]
+    fn a_reply_for_someone_elses_request_is_not_mine() {
+        let c = asked("call-1", "the flake");
+        assert!(
+            c.handle(&Msg::Reply(&SessionReply::Done {
+                call: "call-9".into()
+            }))
+            .is_none()
+        );
+        // And one that has asked nothing at all claims nothing.
+        assert!(
+            TitleCapability::new()
+                .handle(&Msg::Reply(&SessionReply::Done {
+                    call: "call-1".into()
+                }))
+                .is_none()
+        );
+    }
+
+    /// Normalization happens before the ask, so what is journaled, what the
+    /// session is told and what the model is shown are the same string.
+    #[test]
+    fn the_asked_name_is_the_normalized_one() {
+        let mut c = TitleCapability::new();
+        let d = c
+            .handle(&Msg::Tool(&set("call-1", "  Fix café login ☕  ")))
+            .expect("mine");
+        let [Act::Ask(SessionRequest::SetTitle { title, .. })] = d.acts.as_slice() else {
+            panic!("expected an ask, got {:?}", d.acts);
+        };
+        assert_eq!(title, "Fix café login ☕");
+
+        fold(&mut c, &d);
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Done {
+                call: "call-1".into(),
+            }))
+            .expect("mine");
+        assert_eq!(answer(&d), "Session title set to \"Fix café login ☕\".");
+    }
+
+    /// A title the session would refuse is refused here, and journals nothing:
+    /// a name that never took must not replay as one that did. Refused rather
+    /// than declined, because the capability behind this one claims every name.
+    #[test]
+    fn an_invalid_title_is_refused_and_records_nothing() {
+        for bad in ["   ", "one\ntwo"] {
+            let d = TitleCapability::new()
+                .handle(&Msg::Tool(&set("call-1", bad)))
+                .expect("mine");
+            assert!(d.events.is_empty(), "{bad:?} was journaled");
+            let text = answer(&d);
+            assert!(text.contains("session title must"), "{text}");
+        }
+        // Arguments that are not a title at all are the same story: owned,
+        // answered, and journaled nowhere.
+        let d = TitleCapability::new()
+            .handle(&Msg::Tool(&ToolCall {
+                id: "call-1".into(),
+                name: TOOL.into(),
+                input: json!({}),
+            }))
+            .expect("mine");
+        assert!(d.events.is_empty());
+        assert!(answer(&d).contains("cannot read"));
+    }
+
+    /// Both variants advertise the one tool: the model calls
+    /// `set_session_title` whichever kind of conversation it is in, and the
+    /// session is what decides which conversation that renames.
+    ///
+    /// Through `tools()` rather than a toolbox layer, which is the change the
+    /// move made: a layer runs on the agent's task, where there is nothing to
+    /// ask the session with.
+    #[tokio::test]
+    async fn either_variant_advertises_the_tool_without_equipping_a_layer() {
+        for cap in [
+            TitleCapability::new(),
+            TitleCapability::for_fork(RunnerId::new_v4()),
+        ] {
+            let mut spec = spec();
+            cap.setup(&loading(), &mut spec)
+                .await
+                .expect("nothing to acquire");
+            assert_eq!(
+                cap.tools().into_iter().map(|t| t.name).collect::<Vec<_>>(),
+                vec![TOOL]
+            );
+            assert_eq!(
+                equipped(spec),
+                Vec::<String>::new(),
+                "the tool is dispatched through the mailbox, not through a layer"
+            );
+        }
+    }
+
+    /// The advertised spec is the session-side toolbox's, to the byte. The two
+    /// coexist while the move is in flight, and a model told about a different
+    /// length limit depending on which one equipped it is the drift this pins
+    /// shut.
+    #[tokio::test]
+    async fn the_advertised_spec_matches_the_one_the_toolbox_offers() {
+        let l = loading();
+        let toolbox = crate::sessions::title_tool::SessionTitleToolbox::new(
+            std::sync::Arc::new(horsie_agentcore::EmptyToolbox),
+            l.session.clone(),
+            l.agent,
+        );
+        let theirs = horsie_agentcore::Toolbox::specs(&toolbox)
+            .into_iter()
+            .find(|s| s.name == TOOL)
+            .expect("the toolbox offers it");
+        let ours = TitleCapability::new().tools().remove(0);
+        assert_eq!(ours.name, theirs.name);
+        assert_eq!(ours.description, theirs.description);
+        assert_eq!(ours.input_schema, theirs.input_schema);
+        assert_eq!(
+            ours.input_schema["properties"]["title"]["maxLength"],
+            json!(SESSION_TITLE_MAX_CHARS)
+        );
+    }
+
+    /// A fork is told it is one, and told it by the capability that owns the
+    /// tool the paragraph tells it to call. The plain conversation gets the
+    /// plain nudge instead — telling every conversation it is a branch of
+    /// something is how a model starts apologising for a fork that never
+    /// happened.
+    #[tokio::test]
+    async fn only_a_fork_is_told_it_is_one() {
+        let mut forked = spec();
+        TitleCapability::for_fork(RunnerId::new_v4())
+            .setup(&loading(), &mut forked)
+            .await
+            .expect("nothing to acquire");
+        let keys: Vec<&str> = forked.prompt.iter().map(|s| s.key).collect();
+        assert_eq!(keys, vec!["fork_role"]);
+        assert!(forked.prompt[0].body.starts_with("# Forked conversation"));
+
+        let mut plain = spec();
+        TitleCapability::new()
+            .setup(&loading(), &mut plain)
+            .await
+            .expect("nothing to acquire");
+        let keys: Vec<&str> = plain.prompt.iter().map(|s| s.key).collect();
+        assert_eq!(keys, vec!["title"]);
+    }
+
+    #[test]
+    fn another_tool_is_not_mine() {
+        assert!(
+            TitleCapability::new()
+                .handle(&Msg::Tool(&ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    input: json!({}),
+                }))
+                .is_none()
+        );
+    }
+
+    /// The name in flight is what the reply is answered with, and the reply may
+    /// land on a process that has since rehydrated the session — so losing it
+    /// in the journal loses both the confirmation and the capability's claim on
+    /// its own reply.
+    #[test]
+    fn the_name_and_the_request_survive_a_slice_round_trip() {
+        let mut c = asked("call-1", "the flake");
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Done {
+                call: "call-1".into(),
+            }))
+            .expect("mine");
+        fold(&mut c, &d);
+        // One taken, one still in flight.
+        let d = c
+            .handle(&Msg::Tool(&set("call-2", "the other one")))
+            .expect("mine");
+        fold(&mut c, &d);
+
+        let caps = Capabilities::new(vec![Box::new(c)]);
+        let written = serde_json::to_string(&caps).expect("write");
+        let read: Capabilities = serde_json::from_str(&written).expect("read");
+        let CapSlice::Title(back) = read.iter().next().expect("one").save() else {
+            panic!("the journal changed which capability this is");
+        };
+        assert_eq!(back.title.as_deref(), Some("the flake"));
+        assert_eq!(
+            back.pending.into_iter().collect::<Vec<_>>(),
+            vec![("call-2".to_string(), "the other one".to_string())],
+            "the reload was rebuilt from config and lost the request in flight"
+        );
+
+        // And a fork keeps knowing it is one, which is what its prompt turns on.
+        let fork = RunnerId::new_v4();
+        let forked = Capabilities::new(vec![Box::new(TitleCapability::for_fork(fork))]);
+        let read: Capabilities =
+            serde_json::from_str(&serde_json::to_string(&forked).expect("write")).expect("read");
+        let CapSlice::Title(back) = read.iter().next().expect("one").save() else {
+            panic!("the journal changed which capability this is");
+        };
+        assert_eq!(back.fork, Some(fork));
+    }
+}

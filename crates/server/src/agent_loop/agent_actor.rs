@@ -156,6 +156,13 @@ pub enum AgentCommand {
         action: crate::agent_loop::task_list::TaskListAction,
         reply: ReplyTo<Result<String, String>>,
     },
+    /// The session answered something a capability asked it for.
+    ///
+    /// Internal, and arriving on the mailbox rather than being awaited inline:
+    /// the ask is sent from a detached task, so a session busy starting the
+    /// child cannot block this agent's queue, and the reply is ordered against
+    /// everything else this agent does.
+    SessionReplied { reply: capabilities::SessionReply },
     /// A tool call one of this agent's capabilities answers for.
     ///
     /// Sent by [`CapabilityToolbox`] from the run's own task, so the capability
@@ -520,6 +527,22 @@ pub enum AgentDomainEvent {
     /// there is never a moment when only some of them are pending.
     AskRecorded {
         asks: Vec<crate::agent_loop::AskedQuestion>,
+        at_ms: u64,
+    },
+    /// A capability parked the run on this call.
+    ///
+    /// The actor's own record, distinct from whatever the capability keeps:
+    /// being parked governs things no capability can see — whether the queue
+    /// may start a turn, and which dangling calls recovery must leave alone.
+    /// `note` says what is being waited for, which for `ask_user` is the
+    /// question and for anything else is its own words.
+    ///
+    /// Folds into the same place `AskRecorded` does, because they are the same
+    /// fact recorded by the old owner and the new one; `AskRecorded` goes when
+    /// the last capability that parks has moved.
+    ParkedOn {
+        call: String,
+        note: String,
         at_ms: u64,
     },
     /// This agent was equipped with these capabilities.
@@ -1222,6 +1245,18 @@ pub struct AgentActor {
     /// `handle_finished`. In-memory: a process that died mid-nudge starts the
     /// turn again from the queue, and a fresh attempt is the right default.
     pending_tool_choice: Option<horsie_agentcore::ToolChoice>,
+    /// What a capability concluded this turn, waiting for the run to report
+    /// back so it can be delivered as the agent's result.
+    ///
+    /// In-memory and per-turn, like `pending_tool_choice` above and for the
+    /// same reason: a process that died between the tool call and the run
+    /// ending replays the turn from the queue, and a fresh attempt is the right
+    /// default. The durable copy is the capability's own journaled event.
+    ///
+    /// This is what replaces `interpret` recognising `submit_result` by name:
+    /// the actor no longer knows which tools finish a run, it knows what its
+    /// capabilities asked it to do.
+    pending_conclusion: Option<Value>,
     /// A prepare step is in flight. Gates a second `Resume` exactly as `running`
     /// does: between `Resume` and `StartPrepared` no run exists yet, so
     /// `running` alone would let two turns through and land two runs on one
@@ -1269,6 +1304,7 @@ impl AgentActor {
             next_run_id: 0,
             ready,
             pending_tool_choice: None,
+            pending_conclusion: None,
             preparing: false,
             start_hook_fired: false,
             cancel_acks: Vec::new(),
@@ -1848,7 +1884,7 @@ impl AgentActor {
                 self.persist_maybe_snapshot(drained)
             }
             RunOutcome::Stopped { calls } => {
-                match Self::interpret(calls) {
+                match self.interpret(state, calls) {
                     Conclusion::Output(output) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
@@ -1879,6 +1915,27 @@ impl AgentActor {
                         }
                         events.extend(self.try_drain(&folded, ctx).await);
                         self.persist_maybe_snapshot(events)
+                    }
+                    Conclusion::Parked => {
+                        parent
+                            .deliver(AgentOutcome::UsageRecorded {
+                                agent,
+                                usage_total: state.usage_total,
+                            })
+                            .await;
+                        // The park is already in the journal, put there by the
+                        // capability that made it. All that is left is telling
+                        // the owner, which is what moves the session to
+                        // `AwaitingInput`.
+                        parent
+                            .deliver(AgentOutcome::Asked {
+                                agent,
+                                asks: state.asks.clone(),
+                            })
+                            .await;
+                        let events = self.try_drain(state, ctx).await;
+                        self.events_since_snapshot = 0;
+                        CommandEffect::persist(events).and_snapshot()
                     }
                     Conclusion::Ask(asks) => {
                         parent
@@ -2004,9 +2061,29 @@ impl AgentActor {
     /// A match on names, and nothing else. Each of these tools does exactly one
     /// thing, so there is no payload shape to disambiguate — which is the whole
     /// reason they are separate tools rather than one with a `kind` field.
-    fn interpret(calls: Vec<StoppedCall>) -> Conclusion {
+    fn interpret(&mut self, state: &AgentState, calls: Vec<StoppedCall>) -> Conclusion {
         if calls.is_empty() {
             return Conclusion::Output(Value::Null);
+        }
+        // What a capability decided comes first, and needs no names at all.
+        //
+        // A conclusion carries its output; a park is already journaled, so it
+        // is only reported. Between them these are what let the actor stop
+        // knowing which tools finish a run — the two name matches below are the
+        // old toolboxes' path, and they go when those do.
+        if let Some(output) = self.pending_conclusion.take() {
+            return Conclusion::Output(output);
+        }
+        let parked: std::collections::HashSet<&str> = state
+            .asks
+            .iter()
+            .filter_map(|a| a.tool_call_id.as_deref())
+            .collect();
+        if calls
+            .iter()
+            .all(|c| parked.contains(c.tool_call_id.as_str()))
+        {
+            return Conclusion::Parked;
         }
         // Several questions in one turn is ordinary: they are asked together and
         // answered together.
@@ -2258,7 +2335,12 @@ fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
 #[derive(Debug)]
 enum Conclusion {
     Output(Value),
-    /// One or more questions, all parked on together.
+    /// A capability parked the run, and has already journaled the park. Nothing
+    /// left to record — only the owner to tell.
+    Parked,
+    /// One or more questions, all parked on together. The old toolboxes' path,
+    /// which journals the park here because nothing else did; it goes when they
+    /// do, and [`Self::Parked`] is what replaces it.
     Ask(Vec<AskedQuestion>),
     /// Two turn-enders at once. The calls are named so each can be told why.
     Contradiction(Vec<StoppedCall>),
@@ -2406,6 +2488,15 @@ impl EventSourcedActor for AgentActor {
                 state.asks = asks;
                 // Parking on a question is a turn boundary: the run is over and
                 // the answer starts the next one.
+                state.turn_in_flight = false;
+            }
+            AgentDomainEvent::ParkedOn { call, note, .. } => {
+                state.asks.push(AskedQuestion {
+                    tool_call_id: Some(call),
+                    question: note,
+                });
+                // Parking is a turn boundary: the run is over, and whatever the
+                // capability is waiting for starts the next one.
                 state.turn_in_flight = false;
             }
             AgentDomainEvent::Equipped { capabilities, .. } => state.capabilities = capabilities,
@@ -2641,6 +2732,21 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
+            AgentCommand::SessionReplied { reply } => {
+                let Some(performed) = Self::consult(state, &Msg::Reply(&reply)) else {
+                    // Every request carries the call that prompted it, and the
+                    // capability that asked is the one that recognises it. So
+                    // nothing claiming a reply means the capability is gone —
+                    // an agent re-equipped without it, say — and the model is
+                    // still parked on a call nobody will answer.
+                    tracing::error!(
+                        call = reply.call(),
+                        "the session replied and no capability recognised it"
+                    );
+                    return CommandEffect::none();
+                };
+                self.finish_consult(performed, state, ctx).await
+            }
             AgentCommand::CapabilityCall { call, reply } => {
                 let Some(performed) = Self::consult(state, &Msg::Tool(&call)) else {
                     // The layer only sends names a capability advertised, so
@@ -2665,6 +2771,13 @@ impl EventSourcedActor for AgentActor {
                         tool = call.name,
                         "a capability asked to resume from a tool call still in flight"
                     );
+                }
+                self.dispatch_asks(performed.asks, ctx);
+                if let Some(output) = performed.conclusion {
+                    // Held until the run reports back, which is the moment the
+                    // owner can be told. Answering `StopRun` here is what ends
+                    // the run that produces that report.
+                    self.pending_conclusion = Some(output);
                 }
                 // Answered before the write lands, like every other tool that
                 // journals — see the boundary's note on perform-then-persist. A
@@ -3049,6 +3162,11 @@ struct Performed {
     /// Tool results a capability supplied for calls it had parked, which start
     /// the next turn.
     resume: Vec<horsie_models::agent::ToolResultInput>,
+    /// A capability said this agent's work is finished, and this is its result.
+    conclusion: Option<Value>,
+    /// Things a capability wants from the session. Sent off the mailbox, and
+    /// their replies come back as [`Msg::Reply`].
+    asks: Vec<capabilities::SessionRequest>,
 }
 
 impl AgentActor {
@@ -3077,6 +3195,63 @@ impl AgentActor {
         Some(out)
     }
 
+    /// Send what capabilities asked the session for, off the mailbox.
+    ///
+    /// One detached task per request: a session busy starting the child must
+    /// not block this agent's queue, and a capability that asked for two things
+    /// gets two answers rather than one that waited for the other.
+    fn dispatch_asks(
+        &self,
+        asks: Vec<capabilities::SessionRequest>,
+        ctx: &ActorContext<AgentCommand>,
+    ) {
+        for request in asks {
+            let parent = Arc::clone(&self.ctx.parent);
+            let me = ctx.self_ref();
+            tokio::spawn(async move {
+                let reply = parent.request(request).await;
+                let _ = me.tell(AgentCommand::SessionReplied { reply }).await;
+            });
+        }
+    }
+
+    /// Journal what capabilities decided, send what they asked for, and start
+    /// the turn they resumed, if any.
+    ///
+    /// The tail every consultation shares except a tool call's, which has a
+    /// reply channel to answer as well.
+    async fn finish_consult(
+        &mut self,
+        performed: Performed,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let Performed {
+            mut events,
+            answer,
+            resume,
+            conclusion,
+            asks,
+        } = performed;
+        if answer.is_some() {
+            tracing::error!("a capability answered a tool call with no run waiting on it");
+        }
+        if conclusion.is_some() {
+            tracing::error!("a capability concluded outside a turn");
+        }
+        self.dispatch_asks(asks, ctx);
+        if !resume.is_empty() {
+            // Folded first, so the `Began` broadcast sees whatever these events
+            // closed rather than the state before them.
+            let folded = events
+                .iter()
+                .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+            let turn = crate::agent_loop::resumed_turn(&folded.inbox, resume);
+            events.extend(self.begin_turn(turn, &folded, ctx).await);
+        }
+        self.persist_maybe_snapshot(events)
+    }
+
     /// Turn one act into events, an answer, or queued work.
     fn perform(out: &mut Performed, act: Act, msg: &Msg<'_>) {
         match act {
@@ -3088,21 +3263,31 @@ impl AgentActor {
                     Ok(ToolOutcome::Result(Value::String(text))),
                 );
             }
-            Act::Park { call } => Self::answer_call(out, msg, &call, Ok(ToolOutcome::StopRun)),
+            Act::Park { call, note } => {
+                // Journaled by the actor, because *being* parked governs things
+                // no capability can see: whether the queue may start a turn,
+                // and which dangling calls recovery must leave alone.
+                out.events.push(AgentDomainEvent::ParkedOn {
+                    call: call.clone(),
+                    note,
+                    at_ms: now_ms(),
+                });
+                Self::answer_call(out, msg, &call, Ok(ToolOutcome::StopRun));
+            }
             Act::Resume { results } => out.resume.extend(results),
+            Act::Conclude { output } => out.conclusion = Some(output),
             Act::Enqueue { item } => out.events.push(AgentDomainEvent::Received {
                 item,
                 at_ms: now_ms(),
             }),
-            // Task 5 gives this a session to ask. Until then no capability is
-            // equipped that can produce one, so this is unreachable rather than
-            // unwritten — and it says so loudly instead of dropping the ask.
-            Act::Ask(request) => {
-                tracing::error!(
-                    call = request.call(),
-                    "a capability asked the session for something before that path exists"
-                );
-            }
+            Act::Record(event) => out.events.push(AgentDomainEvent::LifecycleRecorded {
+                event: *event,
+                at_ms: now_ms(),
+            }),
+            // Collected rather than sent here: `perform` is a pure decision,
+            // and asking the session is I/O that must not happen on the
+            // mailbox. The caller sends them once it has journaled.
+            Act::Ask(request) => out.asks.push(request),
         }
     }
 
@@ -3921,6 +4106,20 @@ mod tests {
             .collect()
     }
 
+    /// A bare actor, for the decisions that need one but no journal and no run.
+    fn bare_actor() -> AgentActor {
+        AgentActor::new(
+            AgentRuntimeContext {
+                context_provider: Arc::new(StubContext),
+                revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+                parent: Arc::new(StubParent),
+                journal_id: uuid::Uuid::new_v4(),
+                ready: true,
+            },
+            AgentParams::from_def(&def_fixture()),
+        )
+    }
+
     /// The whole of the interpretation: a match on the tool's name. There is no
     /// payload shape to disambiguate, which is why these are separate tools
     /// rather than one with a `kind` field.
@@ -3930,7 +4129,7 @@ mod tests {
             SUBMIT_RESULT_TOOL,
             serde_json::json!({"outcome": "p0", "description": "did it"}),
         )]);
-        match AgentActor::interpret(calls) {
+        match bare_actor().interpret(&AgentState::default(), calls) {
             Conclusion::Output(v) => {
                 assert_eq!(v["outcome"], "p0");
                 assert_eq!(v["description"], "did it");
@@ -3942,7 +4141,7 @@ mod tests {
     #[test]
     fn one_ask_parks_on_one_question() {
         let calls = stopped(&[(ASK_USER_TOOL, serde_json::json!({"question": "which?"}))]);
-        match AgentActor::interpret(calls) {
+        match bare_actor().interpret(&AgentState::default(), calls) {
             Conclusion::Ask(asks) => {
                 assert_eq!(asks.len(), 1);
                 assert_eq!(asks[0].question, "which?");
@@ -3960,7 +4159,7 @@ mod tests {
             (ASK_USER_TOOL, serde_json::json!({"question": "first?"})),
             (ASK_USER_TOOL, serde_json::json!({"question": "second?"})),
         ]);
-        match AgentActor::interpret(calls) {
+        match bare_actor().interpret(&AgentState::default(), calls) {
             Conclusion::Ask(asks) => {
                 let questions: Vec<&str> = asks.iter().map(|a| a.question.as_str()).collect();
                 assert_eq!(questions, vec!["first?", "second?"]);
@@ -3979,7 +4178,7 @@ mod tests {
             (ASK_USER_TOOL, serde_json::json!({"question": "or?"})),
         ]);
         assert!(matches!(
-            AgentActor::interpret(calls),
+            bare_actor().interpret(&AgentState::default(), calls),
             Conclusion::Contradiction(c) if c.len() == 2
         ));
     }
@@ -3991,7 +4190,7 @@ mod tests {
             (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p2"})),
         ]);
         assert!(matches!(
-            AgentActor::interpret(calls),
+            bare_actor().interpret(&AgentState::default(), calls),
             Conclusion::Contradiction(_)
         ));
     }

@@ -124,6 +124,27 @@ pub enum AgentOutcome {
 #[async_trait]
 pub trait AgentOutcomeSink: Send + Sync {
     async fn deliver(&self, outcome: AgentOutcome);
+
+    /// Ask the owner for something only it can do — start a child runner,
+    /// cancel an agent, name the session.
+    ///
+    /// The same channel as [`Self::deliver`] rather than a second one, because
+    /// it is the same relationship: this agent's owner. What differs is that an
+    /// outcome is news and this is a request, so this one waits for an answer.
+    ///
+    /// The default refuses, which is right for every owner that is not a
+    /// session — a test harness, a bare agent — and means a capability asking
+    /// one of those gets a refusal it can show the model rather than a silence
+    /// it cannot.
+    async fn request(
+        &self,
+        request: crate::agent_loop::capabilities::SessionRequest,
+    ) -> crate::agent_loop::capabilities::SessionReply {
+        crate::agent_loop::capabilities::SessionReply::Refused {
+            call: request.call().to_string(),
+            reason: "this agent has no session to ask".to_string(),
+        }
+    }
 }
 
 /// The per-run contexts an agent run executes within — the provider it calls,

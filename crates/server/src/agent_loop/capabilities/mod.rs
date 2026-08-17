@@ -56,6 +56,15 @@
 //! enumerate. See [`Capabilities::push_front`].
 
 pub mod ask_user;
+pub mod control_plane;
+pub mod fork;
+pub mod mcp;
+pub mod memory;
+pub mod runtime;
+pub mod step_result;
+pub mod sub_agent;
+pub mod title;
+pub mod workflow;
 
 use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
@@ -208,12 +217,34 @@ pub enum Act {
     /// The parked agent *is* that dangling `tool_use`: the result arrives
     /// against it, possibly days later, on a process that has since rehydrated
     /// the session.
-    Park { call: String },
+    ///
+    /// `note` says what is being waited for, in words. The actor holds it —
+    /// see `AgentState::parked` — because *being* parked governs things no
+    /// capability can see: whether the queue may start a turn, and which
+    /// dangling calls recovery must not repair. The capability keeps whatever
+    /// it needs beyond that, which for `ask_user` is the question itself.
+    Park { call: String, note: String },
     /// Supply results for calls left dangling by an earlier [`Self::Park`], and
     /// start a turn carrying them.
     Resume { results: Vec<ToolResultInput> },
+    /// This agent's work is finished, and this is its result.
+    ///
+    /// Not a park, though both stop the run — which is exactly why the old code
+    /// could treat `ask_user` and `submit_result` alike and sort them out
+    /// afterwards by matching tool names. A park owes a result later; a
+    /// conclusion owes nothing ever, and carries an output [`Self::Park`] has
+    /// nowhere to put.
+    Conclude { output: serde_json::Value },
     /// Put something in this agent's own queue.
     Enqueue { item: Incoming },
+    /// Record something in this agent's log, where a reader will see it.
+    ///
+    /// A capability's own events are folded but append nothing a client can
+    /// read, which is the trap this exists for: `ask_user` journaling its park
+    /// purely as a [`CapEvent`] would leave the question invisible in the UI —
+    /// green tests, and only a browser would notice. So what a person should
+    /// see is said explicitly, in the vocabulary the log already has.
+    Record(Box<horsie_agentcore::LifecycleEvent>),
     /// Ask the session for something only it can do.
     ///
     /// The reply comes back as [`Msg::Reply`], which is why every request
@@ -376,6 +407,15 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapSlice {
     AskUser(ask_user::AskUserCapability),
+    ControlPlane(control_plane::ControlPlaneCapability),
+    Fork(fork::ForkCapability),
+    Mcp(mcp::McpCapability),
+    Memory(memory::MemoryCapability),
+    Runtime(runtime::RuntimeCapability),
+    StepResult(step_result::StepResultCapability),
+    SubAgent(sub_agent::SubAgentCapability),
+    Title(title::TitleCapability),
+    Workflow(workflow::WorkflowCapability),
     /// A capability with no behaviour of its own, so the round-trip and
     /// folded-state rules have something to be tested against that cannot break
     /// when a real capability changes. Each migration adds its own arm beside
@@ -388,6 +428,15 @@ impl From<CapSlice> for Box<dyn Capability> {
     fn from(slice: CapSlice) -> Self {
         match slice {
             CapSlice::AskUser(c) => Box::new(c),
+            CapSlice::ControlPlane(c) => Box::new(c),
+            CapSlice::Fork(c) => Box::new(c),
+            CapSlice::Mcp(c) => Box::new(c),
+            CapSlice::Memory(c) => Box::new(c),
+            CapSlice::Runtime(c) => Box::new(c),
+            CapSlice::StepResult(c) => Box::new(c),
+            CapSlice::SubAgent(c) => Box::new(c),
+            CapSlice::Title(c) => Box::new(c),
+            CapSlice::Workflow(c) => Box::new(c),
             #[cfg(test)]
             CapSlice::Fake(c) => Box::new(c),
         }
@@ -401,6 +450,15 @@ impl From<CapSlice> for Box<dyn Capability> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapEvent {
     AskUser(ask_user::Event),
+    ControlPlane(control_plane::Event),
+    Fork(fork::Event),
+    Mcp(mcp::Event),
+    Memory(memory::Event),
+    Runtime(runtime::Event),
+    StepResult(step_result::Event),
+    SubAgent(sub_agent::Event),
+    Title(title::Event),
+    Workflow(workflow::Event),
     #[cfg(test)]
     Fake(testing::FakeEvent),
 }
@@ -643,10 +701,11 @@ pub mod testing {
 
         fn apply(&mut self, event: &CapEvent) {
             // Every capability is offered every event, so an arm that is not
-            // mine is a no-op rather than an error.
-            match event {
-                CapEvent::Fake(e) if e.tool == self.tool => self.seen.push(e.what.clone()),
-                CapEvent::Fake(_) | CapEvent::AskUser(_) => {}
+            // mine is a no-op rather than an error. `let ... else` rather than
+            // a match, so a tenth capability is not a change to all nine.
+            let CapEvent::Fake(e) = event else { return };
+            if e.tool == self.tool {
+                self.seen.push(e.what.clone());
             }
         }
 
@@ -725,9 +784,9 @@ mod tests {
         let tools: Vec<&str> = d
             .events
             .iter()
-            .filter_map(|e| match e {
-                CapEvent::Fake(e) => Some(e.tool.as_str()),
-                CapEvent::AskUser(_) => None,
+            .filter_map(|e| {
+                let CapEvent::Fake(e) = e else { return None };
+                Some(e.tool.as_str())
             })
             .collect();
         assert_eq!(

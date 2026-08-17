@@ -17,6 +17,7 @@ use super::{
     context::{SessionAgentKind, SessionContextProvider},
 };
 use crate::agent_loop::AgentCommand;
+use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::spec::SessionStatus;
@@ -53,6 +54,51 @@ impl AgentOutcomeSink for SessionParent {
             .target
             .tell(SessionCommand::AgentOutcome(outcome))
             .await;
+    }
+
+    /// Turn a capability's request into the session command that already does
+    /// it.
+    ///
+    /// Deliberately not a new session command per request: creating a subagent,
+    /// naming a session and cancelling a run are things the session already
+    /// knows how to do, and a second way in would be a second place for the
+    /// gates to be wrong. What is new is only who asks — an agent's capability
+    /// rather than a toolbox layer holding a `SessionRef`.
+    async fn request(&self, request: SessionRequest) -> SessionReply {
+        let call = request.call().to_string();
+        let refused = |reason: String| SessionReply::Refused {
+            call: call.clone(),
+            reason,
+        };
+        match request {
+            SessionRequest::SetTitle { title, .. } => {
+                match self
+                    .target
+                    .ask(|reply| {
+                        SessionCommand::Core(super::CoreCommand::SetTitle {
+                            // The handler discards this: a title is the
+                            // session's, and which agent asked changes nothing
+                            // about it. Nil rather than a fabricated id, so
+                            // nothing can come to depend on a lie.
+                            agent: crate::sessions::runners::ids::AgentId::default(),
+                            title,
+                            reply,
+                        })
+                    })
+                    .await
+                {
+                    Ok(Ok(_)) => SessionReply::Done { call },
+                    Ok(Err(e)) => refused(e),
+                    Err(e) => refused(e.to_string()),
+                }
+            }
+            // Every other request creates or stops a runner, which is the one
+            // thing the session's own swap has still to grow a command for.
+            // Refused rather than dropped, so the model is told.
+            SessionRequest::StartRunner { .. } | SessionRequest::Cancel { .. } => {
+                refused("the session cannot start runners yet".to_string())
+            }
+        }
     }
 }
 

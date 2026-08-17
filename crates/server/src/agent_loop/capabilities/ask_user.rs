@@ -54,7 +54,7 @@ use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError, Turn
 use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec};
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -221,10 +221,20 @@ impl AskUserCapability {
             .to_string();
         Decision::record(vec![CapEvent::AskUser(Event::Asked {
             call: call.id.clone(),
-            question,
+            question: question.clone(),
         })])
+        // The question has to reach the agent's log or it never reaches the
+        // person: a client reads an ask as `AskRecorded`, and a capability's
+        // own events append nothing readable.
+        .then(Act::Record(Box::new(LifecycleEvent::AskRecorded(
+            AskLifecycle {
+                tool_call_id: Some(call.id.clone()),
+                question: question.clone(),
+            },
+        ))))
         .then(Act::Park {
             call: call.id.clone(),
+            note: question,
         })
     }
 
@@ -345,18 +355,22 @@ impl Capability for AskUserCapability {
     }
 
     fn apply(&mut self, event: &CapEvent) {
+        // `let ... else` rather than a match with an arm per sibling: every
+        // capability is offered every event, and listing the other nine here
+        // would make adding a tenth a change to all of them.
+        let CapEvent::AskUser(event) = event else {
+            return;
+        };
         match event {
-            CapEvent::AskUser(Event::Asked { call, question }) => {
+            Event::Asked { call, question } => {
                 self.pending.insert(call.clone(), question.clone());
             }
-            CapEvent::AskUser(Event::Answered { calls }) => {
+            Event::Answered { calls } => {
                 for call in calls {
                     self.pending.remove(call);
                 }
             }
-            CapEvent::AskUser(Event::Abandoned) => self.pending.clear(),
-            #[cfg(test)]
-            CapEvent::Fake(_) => {}
+            Event::Abandoned => self.pending.clear(),
         }
     }
 
@@ -569,10 +583,16 @@ mod tests {
         };
         assert_eq!(call, "call-1");
         assert_eq!(question, "which database?");
-        let [Act::Park { call }] = d.acts.as_slice() else {
-            panic!("an ask that did not park: {:?}", d.acts);
+        // The record comes before the park: a question the person never sees is
+        // a park nobody can end.
+        let [Act::Record(_), Act::Park { call, note }] = d.acts.as_slice() else {
+            panic!("an ask that did not record and park: {:?}", d.acts);
         };
         assert_eq!(call, "call-1");
+        assert_eq!(
+            note, "which database?",
+            "the actor's own park record has to say what is being waited for"
+        );
 
         fold(&mut c, &d);
         assert_eq!(
