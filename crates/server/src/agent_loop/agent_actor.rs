@@ -3,7 +3,6 @@ use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion,
 };
 use crate::agent_loop::inbox::Summarise;
-use crate::sessions::ask_tool::ASK_USER_TOOL;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
@@ -12,9 +11,8 @@ use horsie_actor::{
 use horsie_agentcore::ToolOutcome;
 use horsie_agentcore::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentInput, AgentLogBody, AgentLogEntry,
-    AgentResult, AskLifecycle, CompactionEntry, ContentPart, EventSink, EventSinkError,
-    LifecycleEvent, LlmProvider, Message, QueuedLifecycle, Role, StoppedCall, Toolbox,
-    TurnBeganLifecycle, Usage,
+    AgentResult, CompactionEntry, ContentPart, EventSink, EventSinkError, LifecycleEvent,
+    LlmProvider, Message, QueuedLifecycle, Role, StoppedCall, Toolbox, TurnBeganLifecycle, Usage,
 };
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
@@ -522,13 +520,6 @@ pub enum AgentDomainEvent {
         answered: Vec<String>,
         at_ms: u64,
     },
-    /// The agent parked on these questions. One event for the whole park rather
-    /// than one per question: they are asked together and answered together, so
-    /// there is never a moment when only some of them are pending.
-    AskRecorded {
-        asks: Vec<crate::agent_loop::AskedQuestion>,
-        at_ms: u64,
-    },
     /// A capability parked the run on this call.
     ///
     /// The actor's own record, distinct from whatever the capability keeps:
@@ -537,9 +528,8 @@ pub enum AgentDomainEvent {
     /// `note` says what is being waited for, which for `ask_user` is the
     /// question and for anything else is its own words.
     ///
-    /// Folds into the same place `AskRecorded` does, because they are the same
-    /// fact recorded by the old owner and the new one; `AskRecorded` goes when
-    /// the last capability that parks has moved.
+    /// One event per call rather than one per park: a turn may ask several
+    /// questions, and each is parked on as its own tool call.
     ParkedOn {
         call: String,
         note: String,
@@ -1396,7 +1386,7 @@ impl AgentActor {
     /// case, not a fault, and the queue simply waits for the next boundary.
     ///
     /// `state` must be the state as the caller's own events leave it, not the
-    /// pre-command snapshot: an agent that has just journaled `AskRecorded` is
+    /// pre-command snapshot: an agent that has just journaled `ParkedOn` is
     /// parked as far as this decision is concerned, and asking against the
     /// snapshot would drain a report the park is supposed to hold.
     async fn try_drain(
@@ -1937,37 +1927,6 @@ impl AgentActor {
                         self.events_since_snapshot = 0;
                         CommandEffect::persist(events).and_snapshot()
                     }
-                    Conclusion::Ask(asks) => {
-                        parent
-                            .deliver(AgentOutcome::UsageRecorded {
-                                agent,
-                                usage_total: state.usage_total,
-                            })
-                            .await;
-                        parent
-                            .deliver(AgentOutcome::Asked {
-                                agent,
-                                asks: asks.clone(),
-                            })
-                            .await;
-                        // Recorded before the drain is decided, and the drain is
-                        // asked against the folded result: an ask is a turn
-                        // boundary, but a parked agent only drains for a person
-                        // changing their mind — a report queued behind the
-                        // question waits for it to be answered.
-                        let recorded = AgentDomainEvent::AskRecorded {
-                            asks,
-                            at_ms: now_ms(),
-                        };
-                        let folded = Self::apply_event(state.clone(), recorded.clone());
-                        let mut events = vec![recorded];
-                        events.extend(self.try_drain(&folded, ctx).await);
-                        // Snapshot to compact the incrementally-persisted log.
-                        // Unconditional now that no cursor is a journal position:
-                        // history and streams read state, so compaction is invisible.
-                        self.events_since_snapshot = 0;
-                        CommandEffect::persist(events).and_snapshot()
-                    }
                     Conclusion::Contradiction(calls) => {
                         parent
                             .deliver(AgentOutcome::UsageRecorded {
@@ -2058,19 +2017,14 @@ impl AgentActor {
 
     /// What the tools that ended this run meant.
     ///
-    /// A match on names, and nothing else. Each of these tools does exactly one
-    /// thing, so there is no payload shape to disambiguate — which is the whole
-    /// reason they are separate tools rather than one with a `kind` field.
+    /// No tool names at all: what a call meant is the capability that owns it to
+    /// say, and it has already said so by the time the run reports back. A
+    /// conclusion carries its output; a park is already journaled, so it is only
+    /// reported.
     fn interpret(&mut self, state: &AgentState, calls: Vec<StoppedCall>) -> Conclusion {
         if calls.is_empty() {
             return Conclusion::Output(Value::Null);
         }
-        // What a capability decided comes first, and needs no names at all.
-        //
-        // A conclusion carries its output; a park is already journaled, so it
-        // is only reported. Between them these are what let the actor stop
-        // knowing which tools finish a run — the two name matches below are the
-        // old toolboxes' path, and they go when those do.
         if let Some(output) = self.pending_conclusion.take() {
             return Conclusion::Output(output);
         }
@@ -2079,34 +2033,14 @@ impl AgentActor {
             .iter()
             .filter_map(|a| a.tool_call_id.as_deref())
             .collect();
+        // Several questions in one turn is ordinary: they are asked together and
+        // answered together, so the run is parked when every call that stopped
+        // it is one a capability parked on.
         if calls
             .iter()
             .all(|c| parked.contains(c.tool_call_id.as_str()))
         {
             return Conclusion::Parked;
-        }
-        // Several questions in one turn is ordinary: they are asked together and
-        // answered together.
-        if calls.iter().all(|c| c.tool == ASK_USER_TOOL) {
-            return Conclusion::Ask(
-                calls
-                    .into_iter()
-                    .map(|call| AskedQuestion {
-                        tool_call_id: Some(call.tool_call_id),
-                        question: call
-                            .input
-                            .get("question")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    })
-                    .collect(),
-            );
-        }
-        if let [only] = calls.as_slice()
-            && only.tool == SUBMIT_RESULT_TOOL
-        {
-            return Conclusion::Output(only.input.clone());
         }
         // Finishing *and* asking, or submitting twice: contradictory, and only
         // the model can resolve it. Every call gets an error result, so nothing
@@ -2350,10 +2284,6 @@ enum Conclusion {
     /// A capability parked the run, and has already journaled the park. Nothing
     /// left to record — only the owner to tell.
     Parked,
-    /// One or more questions, all parked on together. The old toolboxes' path,
-    /// which journals the park here because nothing else did; it goes when they
-    /// do, and [`Self::Parked`] is what replaces it.
-    Ask(Vec<AskedQuestion>),
     /// Two turn-enders at once. The calls are named so each can be told why.
     Contradiction(Vec<StoppedCall>),
 }
@@ -2486,21 +2416,6 @@ impl EventSourcedActor for AgentActor {
                 // record a result for every call before the turn starts.
                 state.asks.clear();
                 state.turn_in_flight = true;
-            }
-            AgentDomainEvent::AskRecorded { asks, at_ms } => {
-                for ask in &asks {
-                    state.push(
-                        at_ms,
-                        AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(AskLifecycle {
-                            tool_call_id: ask.tool_call_id.clone(),
-                            question: ask.question.clone(),
-                        })),
-                    );
-                }
-                state.asks = asks;
-                // Parking on a question is a turn boundary: the run is over and
-                // the answer starts the next one.
-                state.turn_in_flight = false;
             }
             AgentDomainEvent::ParkedOn { call, note, .. } => {
                 state.asks.push(AskedQuestion {
@@ -4154,78 +4069,47 @@ mod tests {
         )
     }
 
-    /// The whole of the interpretation: a match on the tool's name. There is no
-    /// payload shape to disambiguate, which is why these are separate tools
-    /// rather than one with a `kind` field.
+    /// A turn may park on several calls at once — questions are asked together
+    /// and answered together — and the run is parked when every call that
+    /// stopped it is one a capability parked on. No tool name is consulted:
+    /// which calls those are is already in the agent's own state.
     #[test]
-    fn a_submit_is_the_steps_result_verbatim() {
-        let calls = stopped(&[(
-            SUBMIT_RESULT_TOOL,
-            serde_json::json!({"outcome": "p0", "description": "did it"}),
-        )]);
-        match bare_actor().interpret(&AgentState::default(), calls) {
-            Conclusion::Output(v) => {
-                assert_eq!(v["outcome"], "p0");
-                assert_eq!(v["description"], "did it");
-            }
-            other => panic!("expected the step's result, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn one_ask_parks_on_one_question() {
-        let calls = stopped(&[(ASK_USER_TOOL, serde_json::json!({"question": "which?"}))]);
-        match bare_actor().interpret(&AgentState::default(), calls) {
-            Conclusion::Ask(asks) => {
-                assert_eq!(asks.len(), 1);
-                assert_eq!(asks[0].question, "which?");
-                assert_eq!(asks[0].tool_call_id.as_deref(), Some("toolu_0"));
-            }
-            other => panic!("expected an ask, got {other:?}"),
-        }
-    }
-
-    /// Several questions in one turn are ordinary — they are asked together and
-    /// answered together — so all of them are parked on.
-    #[test]
-    fn several_asks_park_on_all_of_them() {
+    fn a_run_stopped_only_by_parked_calls_is_parked() {
+        let state = AgentState {
+            asks: vec![
+                AskedQuestion {
+                    tool_call_id: Some("toolu_0".into()),
+                    question: "first?".into(),
+                },
+                AskedQuestion {
+                    tool_call_id: Some("toolu_1".into()),
+                    question: "second?".into(),
+                },
+            ],
+            ..AgentState::default()
+        };
         let calls = stopped(&[
-            (ASK_USER_TOOL, serde_json::json!({"question": "first?"})),
-            (ASK_USER_TOOL, serde_json::json!({"question": "second?"})),
-        ]);
-        match bare_actor().interpret(&AgentState::default(), calls) {
-            Conclusion::Ask(asks) => {
-                let questions: Vec<&str> = asks.iter().map(|a| a.question.as_str()).collect();
-                assert_eq!(questions, vec!["first?", "second?"]);
-            }
-            other => panic!("expected two asks, got {other:?}"),
-        }
-    }
-
-    /// Finishing and asking at once has no honest reading, and neither does
-    /// submitting twice. Only the model can resolve it, so every call is told
-    /// why and the turn runs again.
-    #[test]
-    fn two_different_finishing_tools_are_a_contradiction() {
-        let calls = stopped(&[
-            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
-            (ASK_USER_TOOL, serde_json::json!({"question": "or?"})),
+            ("ask_user", serde_json::json!({"question": "first?"})),
+            ("ask_user", serde_json::json!({"question": "second?"})),
         ]);
         assert!(matches!(
-            bare_actor().interpret(&AgentState::default(), calls),
-            Conclusion::Contradiction(c) if c.len() == 2
+            bare_actor().interpret(&state, calls),
+            Conclusion::Parked
         ));
     }
 
+    /// A call that stopped the run and that nothing accounted for — no
+    /// capability concluded, no park holds it — has no honest reading, and only
+    /// the model can resolve it. Every call is told why and the turn runs again.
     #[test]
-    fn submitting_twice_is_a_contradiction() {
+    fn stopped_calls_nothing_accounted_for_are_a_contradiction() {
         let calls = stopped(&[
             (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
             (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p2"})),
         ]);
         assert!(matches!(
             bare_actor().interpret(&AgentState::default(), calls),
-            Conclusion::Contradiction(_)
+            Conclusion::Contradiction(c) if c.len() == 2
         ));
     }
 
@@ -7151,11 +7035,9 @@ mod interruption_tests {
     async fn a_parked_turn_is_not_reported() {
         let mut outcomes = recover_with(&[
             began(),
-            AgentDomainEvent::AskRecorded {
-                asks: vec![crate::agent_loop::AskedQuestion {
-                    tool_call_id: Some("call-1".into()),
-                    question: "which one?".into(),
-                }],
+            AgentDomainEvent::ParkedOn {
+                call: "call-1".into(),
+                note: "which one?".into(),
                 at_ms: 1,
             },
         ])

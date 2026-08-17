@@ -835,7 +835,7 @@ mod tests {
         let unattended_provider = build(true);
         let unattended = unattended_provider.provide().await.unwrap();
         let tools = offered(&unattended_provider, &unattended);
-        assert!(!tools.contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
+        assert!(!tools.contains(&crate::agent_loop::capabilities::ask_user::TOOL.to_string()));
         // Everything else the main agent has is untouched.
         assert!(tools.contains(&"set_session_title".to_string()));
         assert!(tools.contains(&"spawn_agent".to_string()));
@@ -851,7 +851,7 @@ mod tests {
         let attended = attended_provider.provide().await.unwrap();
         assert!(
             offered(&attended_provider, &attended)
-                .contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string())
+                .contains(&crate::agent_loop::capabilities::ask_user::TOOL.to_string())
         );
         assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
     }

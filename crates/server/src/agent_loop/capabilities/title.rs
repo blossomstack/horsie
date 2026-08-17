@@ -32,7 +32,6 @@ use super::{
 use crate::sessions::runners::ids::RunnerId;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
-use crate::sessions::title_tool::{SESSION_TITLE_MAX_CHARS, normalize_session_title};
 use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -54,6 +53,53 @@ clear; that title is how a person tells this conversation from the one it came f
 
 /// The tool this capability answers for.
 pub const TOOL: &str = "set_session_title";
+
+/// Maximum session title length in Unicode characters.
+pub(crate) const SESSION_TITLE_MAX_CHARS: usize = 60;
+
+/// Why a model-supplied title was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionTitleError {
+    Empty,
+    Multiline,
+    TooLong { max: usize },
+}
+
+impl std::fmt::Display for SessionTitleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SessionTitleError::Empty => write!(f, "session title must not be empty"),
+            SessionTitleError::Multiline => {
+                write!(f, "session title must be a single line")
+            }
+            SessionTitleError::TooLong { max } => {
+                write!(f, "session title must be at most {max} characters")
+            }
+        }
+    }
+}
+
+/// Normalize and validate a model-supplied title. This is the authoritative
+/// validation; the JSON schema is only model-facing documentation.
+///
+/// It lives with the capability that owns the tool, and the session applies the
+/// same rule to whatever reaches it by another road — a name that never passed
+/// through here must not become one a conversation is called.
+pub(crate) fn normalize_session_title(input: &str) -> Result<String, SessionTitleError> {
+    let title = input.trim();
+    if title.is_empty() {
+        return Err(SessionTitleError::Empty);
+    }
+    if title.chars().any(|c| c == '\n' || c == '\r') {
+        return Err(SessionTitleError::Multiline);
+    }
+    if title.chars().count() > SESSION_TITLE_MAX_CHARS {
+        return Err(SessionTitleError::TooLong {
+            max: SESSION_TITLE_MAX_CHARS,
+        });
+    }
+    Ok(title.to_string())
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TitleCapability {
@@ -474,29 +520,42 @@ mod tests {
         }
     }
 
-    /// The advertised spec is the session-side toolbox's, to the byte. The two
-    /// coexist while the move is in flight, and a model told about a different
-    /// length limit depending on which one equipped it is the drift this pins
-    /// shut.
-    #[tokio::test]
-    async fn the_advertised_spec_matches_the_one_the_toolbox_offers() {
-        let l = loading();
-        let toolbox = crate::sessions::title_tool::SessionTitleToolbox::new(
-            std::sync::Arc::new(horsie_agentcore::EmptyToolbox),
-            l.session.clone(),
-            l.agent,
-        );
-        let theirs = horsie_agentcore::Toolbox::specs(&toolbox)
-            .into_iter()
-            .find(|s| s.name == TOOL)
-            .expect("the toolbox offers it");
-        let ours = TitleCapability::new().tools().remove(0);
-        assert_eq!(ours.name, theirs.name);
-        assert_eq!(ours.description, theirs.description);
-        assert_eq!(ours.input_schema, theirs.input_schema);
+    /// The schema is only model-facing documentation, so it has to quote the
+    /// limit the validation above actually enforces.
+    #[test]
+    fn the_advertised_schema_quotes_the_limit_it_enforces() {
+        let spec = TitleCapability::new().tools().remove(0);
+        assert_eq!(spec.name, TOOL);
         assert_eq!(
-            ours.input_schema["properties"]["title"]["maxLength"],
+            spec.input_schema["properties"]["title"]["maxLength"],
             json!(SESSION_TITLE_MAX_CHARS)
+        );
+        assert_eq!(spec.input_schema["required"], json!(["title"]));
+    }
+
+    #[test]
+    fn normalize_title_trims_and_accepts_unicode() {
+        let title = normalize_session_title("  Fix café login ☕  ").unwrap();
+        assert_eq!(title, "Fix café login ☕");
+    }
+
+    #[test]
+    fn normalize_title_rejects_empty_multiline_and_too_long() {
+        assert_eq!(
+            normalize_session_title("   "),
+            Err(SessionTitleError::Empty)
+        );
+        assert_eq!(
+            normalize_session_title("one\ntwo"),
+            Err(SessionTitleError::Multiline)
+        );
+        assert_eq!(
+            normalize_session_title("one\rtwo"),
+            Err(SessionTitleError::Multiline)
+        );
+        assert_eq!(
+            normalize_session_title(&"é".repeat(61)),
+            Err(SessionTitleError::TooLong { max: 60 })
         );
     }
 

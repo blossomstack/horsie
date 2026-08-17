@@ -22,6 +22,10 @@ use horsie_agentcore::{
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
+use horsie_server::agent_loop::capabilities::ask_user::{
+    AskUserCapability, Event as AskUserEvent,
+};
+use horsie_server::agent_loop::capabilities::{CapEvent, Capabilities};
 use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRuntimeContext, FixedContextProvider,
@@ -279,7 +283,7 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
 /// real `AgentActor` on it, and answers the ask.
 #[tokio::test]
 async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
-    /// Advertises `ask_user`, like the server's `AskUserToolbox`. Executing it
+    /// Advertises `ask_user`, like the server's ask-user capability. Executing it
     /// is a test failure: a handoff tool is never run.
     struct AskUserToolbox;
     #[async_trait]
@@ -322,11 +326,22 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             // What the agent journals when it parks. Recovered, it is what
             // makes the answer below answerable — a park is durable agent
             // state now, not something the session holds on the agent's behalf.
-            AgentDomainEvent::AskRecorded {
-                asks: vec![horsie_server::agent_loop::AskedQuestion {
-                    tool_call_id: Some("ask-1".into()),
-                    question: "which commands?".into(),
-                }],
+            //
+            // Three events, because the park has two halves: the capability
+            // that asked holds the question, and the actor holds the fact that
+            // it is parked. Both are folded from the journal, and the
+            // capability comes back with the list the agent was equipped with.
+            AgentDomainEvent::Equipped {
+                capabilities: Capabilities::new(vec![Box::new(AskUserCapability::new())]),
+                at_ms: 0,
+            },
+            AgentDomainEvent::Capability(CapEvent::AskUser(AskUserEvent::Asked {
+                call: "ask-1".into(),
+                question: "which commands?".into(),
+            })),
+            AgentDomainEvent::ParkedOn {
+                call: "ask-1".into(),
+                note: "which commands?".into(),
                 at_ms: 0,
             },
         ],

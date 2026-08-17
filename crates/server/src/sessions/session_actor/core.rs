@@ -9,14 +9,14 @@ use super::CoreCommand;
 use super::component::Component;
 use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
 use crate::agent_loop::AgentCommand;
+use crate::agent_loop::capabilities::title::normalize_session_title;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
-use crate::sessions::title_tool::normalize_session_title;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
 
 /// Longest auto-derived session title, in characters.
-const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
+const TITLE_MAX_CHARS: usize = crate::agent_loop::capabilities::title::SESSION_TITLE_MAX_CHARS;
 
 /// A short title derived from a user's first message.
 fn derive_title(text: &str) -> Option<String> {

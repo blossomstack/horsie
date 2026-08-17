@@ -159,14 +159,14 @@ impl ForkedAgents {
             ForkCommand::SetTitle {
                 id, title, reply, ..
             } => {
-                let normalized = match crate::sessions::title_tool::normalize_session_title(&title)
-                {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = reply.send(Err(e.to_string()));
-                        return CommandEffect::none();
-                    }
-                };
+                let normalized =
+                    match crate::agent_loop::capabilities::title::normalize_session_title(&title) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let _ = reply.send(Err(e.to_string()));
+                            return CommandEffect::none();
+                        }
+                    };
                 if !state.forks.contains(id) {
                     let _ = reply.send(Err(format!("no such fork: {id}")));
                     return CommandEffect::none();

@@ -11,7 +11,6 @@
 use serde::{Deserialize, Serialize};
 
 pub mod addressing;
-pub mod ask_tool;
 pub mod builder;
 pub mod clock;
 pub mod events;
@@ -23,7 +22,6 @@ pub mod session_actor;
 pub mod spec;
 pub mod subagents;
 pub mod supervisor;
-pub mod title_tool;
 pub mod workflow;
 
 /// How many times an agent has moved. Opaque: a reader compares it with the

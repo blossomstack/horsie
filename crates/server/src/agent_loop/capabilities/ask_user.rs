@@ -545,27 +545,34 @@ mod tests {
         );
     }
 
-    /// The advertised spec is the session-side toolbox's, to the byte. The two
-    /// coexist while the move is in flight, and a model told about different
-    /// `choices` semantics depending on which one equipped it is the drift this
-    /// pins shut.
+    /// The schema has to keep saying that `choices` are suggestions: a model
+    /// that reads them as a closed set stops accepting the answer a person
+    /// actually typed. `multiple` has to stay expressible for the same reason —
+    /// a multi-select asked as a single choice loses every answer but one.
     #[test]
-    fn the_advertised_spec_matches_the_one_the_toolbox_offers() {
-        let toolbox = crate::sessions::ask_tool::AskUserToolbox::new(std::sync::Arc::new(
-            horsie_agentcore::EmptyToolbox,
-        ));
-        let theirs = horsie_agentcore::Toolbox::specs(&toolbox)
-            .into_iter()
-            .find(|s| s.name == TOOL)
-            .expect("the toolbox offers it");
-        let ours = AskUserCapability::new().tools().remove(0);
-        assert_eq!(ours.name, theirs.name);
-        assert_eq!(ours.description, theirs.description);
-        assert_eq!(ours.input_schema, theirs.input_schema);
+    fn the_advertised_schema_offers_multi_select_and_a_free_text_fallback() {
+        let spec = AskUserCapability::new().tools().remove(0);
+        let props = spec
+            .input_schema
+            .get("properties")
+            .expect("schema has properties");
+        assert_eq!(
+            props.get("multiple").and_then(|m| m.get("type")),
+            Some(&json!("boolean"))
+        );
+        assert_eq!(
+            spec.input_schema.get("required"),
+            Some(&json!(["question"])),
+            "a plain free-text question is still one field"
+        );
+        let choices_doc = props
+            .get("choices")
+            .and_then(|c| c.get("description"))
+            .and_then(Value::as_str)
+            .expect("choices is documented");
         assert!(
-            ours.description.contains("own words")
-                || ours.input_schema.to_string().contains("own words"),
-            "the model must be told choices are suggestions, not a constraint"
+            choices_doc.contains("own words"),
+            "the model must be told choices are suggestions, not a constraint: {choices_doc}"
         );
     }
 

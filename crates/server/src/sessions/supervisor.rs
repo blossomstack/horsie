@@ -1139,13 +1139,14 @@ impl EventSourcedActor for SessionSupervisor {
                     .and_ack(reply)
             }
             SessionSupervisorCommand::SetSessionTitle { id, name, reply } => {
-                let title = match crate::sessions::title_tool::normalize_session_title(&name) {
-                    Ok(title) => title,
-                    Err(e) => {
-                        let _ = reply.send(Err(RenameSessionError::Invalid(e.to_string())));
-                        return CommandEffect::none();
-                    }
-                };
+                let title =
+                    match crate::agent_loop::capabilities::title::normalize_session_title(&name) {
+                        Ok(title) => title,
+                        Err(e) => {
+                            let _ = reply.send(Err(RenameSessionError::Invalid(e.to_string())));
+                            return CommandEffect::none();
+                        }
+                    };
                 if !state.sessions.contains_key(&id) {
                     let _ = reply.send(Err(RenameSessionError::NotFound(id)));
                     return CommandEffect::none();

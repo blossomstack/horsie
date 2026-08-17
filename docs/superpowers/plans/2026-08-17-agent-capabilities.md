@@ -168,3 +168,9 @@ All ten capabilities are ported to the agent-side trait. What the build taught u
 - **`spawn_agent` no longer lists the installed agent types.** `Capability::tools()` takes no `AgentFacts`, and the catalogue only exists after the runtime's workspace scan — which is what the old compose-time toolbox layer was for. `agent_type` is still parsed and forwarded, and an unknown one is still refused, but the model is no longer *told* which exist. Fixing it means either facts at advertise time or holding the catalogue as capability config. **This is a real regression, not a simplification.**
 - **`subagent_status` takes no `id`.** The old tool could report one child's status from the session's forest; agent-side there is only "what I am still owed".
 - **The crash window is not closed.** A capability journals its request before asking, but nothing re-asks a dangling one on load, and the session does not dedupe `StartRunner` by call id. Needs a `Msg` the actor broadcasts after recovery.
+
+## One behavioural difference still open
+
+A `submit_result` whose payload fails validation used to come back as `Err(ToolCallError::InvalidInput(reason))` — a tool **error**, `is_error: true` in the transcript. The ported capability answers `Decision::reply(...)`, which is a plain tool **result** carrying the same words.
+
+The model is told the same thing either way, so it is tempting to call this uniformity: every other refusal in the tree (`ask_user` muted, `spawn_agent` past its depth) was already a plain result. But `is_error` is not decoration — agentcore's loop detector and the nudge budget both read the transcript, and a step that submits the same invalid outcome five times is exactly the case where the difference shows. Preserve it: `Act::Refuse { call, reason }` mapping to `Err(ToolCallError::InvalidInput(reason))`, used by `step_result` alone, with the other refusals left as plain results because that is what they always were.

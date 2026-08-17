@@ -372,28 +372,6 @@ mod tests {
         assert!(names.contains(&SUBMIT_RESULT_TOOL.to_string()));
     }
 
-    /// The advertised spec is the session-side toolbox's, to the byte. The two
-    /// coexist while the move is in flight, and a step told something different
-    /// about what submitting does depending on which one equipped it is the
-    /// drift this pins shut.
-    #[test]
-    fn the_advertised_spec_matches_the_one_the_toolbox_offers() {
-        let toolbox = crate::sessions::workflow::StepResultToolbox::wrap(
-            std::sync::Arc::new(horsie_agentcore::EmptyToolbox),
-            outcomes(),
-            fields(),
-        );
-        let theirs = toolbox
-            .specs()
-            .into_iter()
-            .find(|s| s.name == SUBMIT_RESULT_TOOL)
-            .expect("the toolbox offers it");
-        let ours = cap(false).tools().remove(0);
-        assert_eq!(ours.name, theirs.name);
-        assert_eq!(ours.description, theirs.description);
-        assert_eq!(ours.input_schema, theirs.input_schema);
-    }
-
     /// The declaration a step is built from survives the journal. A reload that
     /// lost it would advertise the default outcomes and validate against nothing
     /// the author wrote.
