@@ -197,6 +197,18 @@ impl Decision {
         }
     }
 
+    /// Answer the model with an error, journalling nothing.
+    #[must_use]
+    pub fn refuse(call: &str, reason: impl Into<String>) -> Self {
+        Self {
+            events: Vec::new(),
+            acts: vec![Act::Refuse {
+                call: call.to_string(),
+                reason: reason.into(),
+            }],
+        }
+    }
+
     #[must_use]
     pub fn then(mut self, act: Act) -> Self {
         self.acts.push(act);
@@ -247,6 +259,14 @@ pub enum Act {
     /// not conclude, and must not be nudged either, because a nudge is for a
     /// turn that ended with *nothing* coming.
     Hold { note: String },
+    /// Answer a tool call with an *error*, and let the run carry on.
+    ///
+    /// Distinct from [`Self::Answer`] because `is_error` is not decoration:
+    /// agentcore's loop detector and the nudge budget both read the transcript,
+    /// and a step submitting the same invalid outcome five times is exactly
+    /// where the difference shows. Most refusals in the tree are plain results
+    /// and always were — this is for the one that was not.
+    Refuse { call: String, reason: String },
     /// Put something in this agent's own queue.
     Enqueue { item: Incoming },
     /// Record something in this agent's log, where a reader will see it.

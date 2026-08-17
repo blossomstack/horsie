@@ -3222,6 +3222,12 @@ impl AgentActor {
                 });
                 Self::answer_call(out, msg, &call, Ok(ToolOutcome::StopRun));
             }
+            Act::Refuse { call, reason } => Self::answer_call(
+                out,
+                msg,
+                &call,
+                Err(horsie_agentcore::ToolCallError::InvalidInput(reason)),
+            ),
             Act::Resume { results } => out.resume.extend(results),
             Act::Conclude { output } => out.conclusion = Some(output),
             Act::Hold { note } => out.hold.push(note),

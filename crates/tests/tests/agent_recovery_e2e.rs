@@ -22,9 +22,7 @@ use horsie_agentcore::{
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
-use horsie_server::agent_loop::capabilities::ask_user::{
-    AskUserCapability, Event as AskUserEvent,
-};
+use horsie_server::agent_loop::capabilities::ask_user::{AskUserCapability, Event as AskUserEvent};
 use horsie_server::agent_loop::capabilities::{CapEvent, Capabilities};
 use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,

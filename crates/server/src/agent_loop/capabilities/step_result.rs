@@ -95,7 +95,7 @@ impl StepResultCapability {
             // go back, against the call the model actually made, so it can
             // correct the field it got wrong.
             Err(reason) => {
-                Decision::reply(&call.id, format!("submit_result was rejected: {reason}"))
+                Decision::refuse(&call.id, format!("submit_result was rejected: {reason}"))
             }
         }
     }
@@ -253,8 +253,12 @@ mod tests {
             .expect("mine");
 
         assert!(d.events.is_empty(), "nothing undeclared reaches the log");
-        let [Act::Answer { call, text }] = d.acts.as_slice() else {
-            panic!("expected one Answer, got {:?}", d.acts)
+        // `Refuse`, not `Answer`: this reaches the model as a tool *error*.
+        // `is_error` is read by agentcore's loop detector and the nudge budget,
+        // and a step resubmitting the same bad outcome is exactly where it
+        // shows.
+        let [Act::Refuse { call, reason: text }] = d.acts.as_slice() else {
+            panic!("expected one Refuse, got {:?}", d.acts)
         };
         // Against the model's own call id. A literal here would answer the wrong
         // call: a turn runs its tool calls concurrently, and the id is what an
@@ -278,8 +282,8 @@ mod tests {
             )))
             .expect("mine");
         assert!(d.events.is_empty());
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one Answer, got {:?}", d.acts)
+        let [Act::Refuse { reason: text, .. }] = d.acts.as_slice() else {
+            panic!("expected one Refuse, got {:?}", d.acts)
         };
         assert!(text.contains("'owner' is required"), "{text}");
     }
