@@ -1,7 +1,7 @@
 # Session Runners and Capabilities Design
 
 **Date:** 2026-08-15
-**Status:** Draft — awaiting review
+**Status:** Revised 2026-08-17 — capabilities moved to the agent actor
 
 ## Context
 
@@ -11,27 +11,35 @@ Three of those — `resolve_agent`, `stop_target`, `reach` — answer "what kind
 
 The immediate driver is a new capability: **an agent should be able to invoke a workflow**, any agent, any number of times, and eventually with a graph built at runtime rather than looked up by name. That does not fit the current shape. `SessionState.run` is a single `Option<WorkflowRunState>`, the graph lives on the `SessionSpec` frozen at session creation, and a subagent's owning tree is inferred from "which step is in flight" (`root_owner()`) — an inference with no answer once two runs are live.
 
-Rather than widen the existing shape, this redesign replaces the organising idea. A session becomes a host for **runners**; a runner owns a unit of work and the agents that carry it out; and everything an agent is equipped with is a **capability** held by its runner.
+Rather than widen the existing shape, this redesign replaces the organising idea. A session becomes a host for **runners**; a runner owns a unit of work and the agents that carry it out; and everything an agent is equipped with is a **capability**, held by the agent itself.
 
 ## The design in six sentences
 
 If a piece of the implementation cannot be placed in this paragraph, it is wrong.
 
-> A **session** is one journal, one sandbox, and a set of **runners**.
+> A **session** is one sandbox, a set of **runners**, and the tree they form.
 >
-> A **runner** is one unit of work — a conversation, a delegated task, a workflow run. It owns the **agents** that carry it out, and the **capabilities** those agents get.
+> A **runner** is one unit of work — a conversation, a delegated task, a workflow run. It owns the **agents** that carry it out.
 >
-> An **agent** is one LLM loop. A **capability** is one thing an agent can do.
+> An **agent** is one LLM loop and one journal. A **capability** is one thing that agent can do.
 >
-> When an agent is loaded, its own task walks its capabilities' `setup` in order, each one acquiring what it needs and filling in the **agent spec** the loop then runs with.
+> When an agent is loaded, its capabilities' `setup` runs in order, each acquiring what it needs and filling in the **agent spec** the loop then runs with.
 >
-> While it runs, the **session actor** routes every message to the runner that owns the agent it came from, offers it to that runner's capabilities, folds what they record, and performs what they ask for.
+> While it runs, the **agent actor** routes every tool call, answer, child report and turn boundary to its capabilities, folds what they record into its own journal, and performs what they ask for.
 >
-> Runners and capabilities only ever **decide**. The session actor is the only thing that **acts** — except for `setup`, which the agent's own task performs, because it must not block the mailbox.
+> The **session actor** is infrastructure: it starts runners, forwards what people send, and tracks the tree. It holds no capabilities and no per-agent state.
 
-That last clause is a real exception rather than tidy prose, so it is stated rather than left to be discovered.
+Four nouns and two verbs. Capabilities only ever **decide**; the agent actor is the only thing that **acts** — except for `setup`, which is async and runs before the loop starts. There is no fifth kind of object: anything that is not a runner, a capability, an agent or an actor is a mistake, and two drafts of this design had one. The first was a nameless "equipment builder" holding async work a synchronous `setup` could not do. The second was a bundle of four types — `Description`, `Listing`, `AgentDescription`, `RunDescription` — invented so the read side could avoid a per-kind match. Both were caught the same way: by asking which of the four nouns they were, and getting no answer.
 
-Four nouns and two verbs. There is no fifth kind of object: anything that is not a runner, a capability, an agent or the session actor is a mistake, and the first draft of this design had one — a nameless "equipment builder" holding the async work that a synchronous `setup` could not do.
+### Where the capability lives, and why it moved
+
+An earlier draft put capabilities in the session, folded into each runner's slice. That draft could not express its own two most important capabilities.
+
+`ask_user` and `submit_result` do not send the session anything. Their tool returns `StopRun`, the turn ends, and the meaning arrives later and indirectly as an outcome. So their capabilities' `handle` was unreachable code: no message ever arrived for them to claim. Worse, the ask's identity is a `tool_call_id` — a pointer into the agent's own transcript — so the one fact those capabilities needed was in a journal they could not write to.
+
+The fix is not a new message type. It is that **a capability belongs in the actor whose state it needs**, and for every capability that is the agent. What is left in the session is not a capability at all: it is the runner tree, which is structure.
+
+The test that settled it: under this split, `ask_user` involves the session **not at all** — not more honestly, not less often, but zero times. A design where the sharpest case needs no coordination is in the right place.
 
 ## Goals
 
@@ -45,17 +53,21 @@ Four nouns and two verbs. There is no fifth kind of object: anything that is not
 
 - The `invoke_workflow` tool itself, and ad-hoc graph construction. This spec makes both expressible; neither ships here.
 - Multiple runtimes per session. The runtime becomes a runner, which makes this possible later; one is still the rule.
-- Any change to `AgentActor`, the agent journal, or the provider layer.
+- The provider layer: the LLM call, retries, streaming. Capabilities are extensions to the loop, never the loop itself.
+
+`AgentActor` **is** in scope, and that is a change from the first version of this spec. The capability machinery lives there now, so its state, its journal and its command handling all move. That was the cost of putting capabilities where their state is, and it is worth paying: it is what lets `ask_user` and `submit_result` be capabilities at all.
 
 ## Locked decisions
 
 1. **One session, many runners.** An invoked workflow runs inside the session that invoked it. There is no child session.
 2. **Concurrent runs share the session's workspace.** Runs proceed in parallel, each still running one step at a time. This is the contract subagents already have — one workspace, several writers.
-3. **The journal shape breaks.** State fields are renamed and merged and event variants are replaced. Existing sessions are truncated, not migrated.
-4. **Runner state is session state.** There is one journal. A runner's slice, and its capabilities' slices inside it, are nested in the session's fold.
-5. **Runners decide; the session performs.** A runner returns events and requested actions. It never reaches the registry, never spawns an actor, never writes state. The one exception is `Capability::setup`, which is async and runs on the agent's own task.
-6. **The workspace scan is durable.** It is persisted in the runtime capability's slice rather than re-read every turn. Staleness is acceptable *because* the agent has a `scan_workspace` tool: it can notice and refresh. Today's per-turn scan is a sandbox round trip on every single turn.
-7. **Plugins are per agent, not per session.** Each agent provisions its own bundles from its own settings and scans that tree, so a workflow step and the main agent already see different plugin libraries today. A subagent matches its caller only because it inherits the caller's settings — inheritance, not structure.
+3. **The journal shape breaks, on both sides.** State fields are renamed and merged and event variants are replaced, in the session's journal and the agent's. Existing sessions are truncated, not migrated.
+4. **Capability state is agent state.** A capability is folded from its agent's journal. A runner holds no capabilities, and the session's journal carries none of their events. This is the decision every other one below follows from.
+5. **The session has no capabilities.** It starts runners, forwards what people send, tracks the tree, and holds session-level facts — the title, the sandbox, usage by model. Anything an agent can *do* is a capability, and lives with the agent.
+6. **Capabilities decide; the agent actor acts.** A capability returns events and requested acts. It never touches the mailbox, never spawns, never writes state. The one exception is `setup`, which is async and runs before the loop starts.
+7. **A fact lives on exactly one side.** Two journals mean a fact recorded in both can disagree after a crash, with nothing to detect it. Questions belong to the agent; outstanding children belong to the agent that is waiting; the runner tree belongs to the session. Anything derivable is derived, never stored twice.
+8. **The workspace scan is durable.** It is persisted in the runtime capability's slice rather than re-read every turn. Staleness is acceptable *because* the agent has a `scan_workspace` tool: it can notice and refresh. Today's per-turn scan is a sandbox round trip on every single turn.
+9. **Plugins are per agent, not per session.** Each agent provisions its own bundles from its own settings and scans that tree, so a workflow step and the main agent already see different plugin libraries today. A subagent matches its caller only because it inherits the caller's settings — inheritance, not structure.
 
 ## Session state
 
@@ -114,7 +126,6 @@ struct ConversationState {
     turn: TurnStatus,
     title: Option<String>,
     usage: UsageTotal,
-    capabilities: Capabilities,
 }
 ```
 
@@ -129,7 +140,6 @@ struct SubAgentState {
     task: String,
     agent_type: Option<String>,
     usage: UsageTotal,
-    capabilities: Capabilities,
 }
 ```
 
@@ -148,7 +158,6 @@ struct WorkflowState {
     output: Option<Value>,
     error: Option<String>,
     usage: UsageTotal,
-    capabilities: Capabilities,
 }
 ```
 
@@ -172,27 +181,40 @@ It owns the *lifecycle* — provision, narrate, fail, hibernate, release — and
 
 **Everything an agent is equipped with is a capability.** Not only the things that create child runners — the runtime toolbox, the memory layer, the MCP layer, the control-plane layer, `ask_user`, `set_session_title`, `submit_result` are all equipment, and all arrive the same way.
 
-Every one is named `XxxxCapability` and lives in its own file under one module, so the set is legible at a glance and a new one has an obvious home:
+They live with the agent, not the session — `agent_loop/capabilities/`, beside the loop they extend:
 
 ```
+agent_loop/
+  capabilities/
+    mod.rs                  Capability trait, Msg, Decision, Act, CapEvent, CapSlice
+    runtime.rs  memory.rs  mcp.rs  control_plane.rs
+    ask_user.rs  title.rs  sub_agent.rs  workflow.rs  fork.rs  step_result.rs
+
 sessions/runners/
   mod.rs                    Runner trait, RunnerRecord, RunnerState, RunnerEvent
   conversation.rs  subagent.rs  workflow.rs  runtime.rs
-  capabilities/
-    mod.rs                  Capability trait, Message, CapEvent, the offer
-    runtime.rs              RuntimeCapability
-    memory.rs               MemoryCapability
-    mcp.rs                  McpCapability
-    control_plane.rs        ControlPlaneCapability
-    ask_user.rs             AskUserCapability
-    title.rs                TitleCapability
-    sub_agent.rs            SubAgentCapability
-    workflow.rs             WorkflowCapability
-    fork.rs                 ForkCapability
-    step_result.rs          StepResultCapability
 ```
 
 Each file owns its capability's struct, its `Event`, and its request types. The module path supplies the namespace, so the inner types stay plain — `sub_agent::Event`, not `SubAgentCapabilityEvent`.
+
+### What an agent actor is responsible for
+
+Five things, and nothing else:
+
+1. Driving the loop — the provider call, retries, streaming, compaction's mechanism.
+2. Persisting its transcript **and its capabilities' state**, by the same event-sourcing fold.
+3. Routing commands and events to its capabilities.
+4. Dispatching loop lifecycle — turn started, ended, failed, stopped — to all of them.
+5. Offering capabilities the few things only it can do: answer a call, park one, resume parked ones, enqueue into its own inbox, ask the session.
+
+Point 5 is the whole of `Act`. If a capability needs something that is not on that list, either the list grows deliberately or the capability is reaching past its boundary.
+
+### What a session actor is responsible for
+
+1. Starting runners — the main conversation, subagents, workflow runs, forks.
+2. Forwarding what people send to the agent that should get it.
+3. Tracking the tree: which agent belongs to which runner, and each runner's status.
+4. Session-level state only — the spec, the sandbox, the title, usage by model. Status and usage are the deliberate exception to "no per-agent state", and they are non-functional: nothing decides anything from them, they are what the list and the usage page read.
 
 ### The four stages
 
@@ -213,45 +235,81 @@ trait Capability {
     /// Once, when it unloads. Release what setup acquired.
     async fn teardown(&self);
 
+    /// The tools I put in front of the model.
+    ///
+    /// One generic toolbox layer dispatches by name to whoever answers for it,
+    /// so no capability needs a `Toolbox` of its own. This deletes
+    /// `AskUserToolbox`, `StepResultToolbox`, `SubAgentToolbox` and
+    /// `SessionTitleToolbox` — four types whose whole job was to turn one tool
+    /// name into one message.
+    fn tools(&self) -> Vec<ToolSpec> { Vec::new() }
+
     /// `None` means "not mine" — the next capability is offered it.
     ///
     /// One method rather than a `supports` predicate beside a handler: a
     /// capability that answered yes and then could not cope, and a pair edited
     /// out of step, are states that cannot be written this way.
-    ///
-    /// `&Message` rather than by value, because the same message is offered to
-    /// each capability until one takes it; the taker clones what it keeps.
-    fn handle(&self, caller: Caller, msg: &Message) -> Option<Decision>;
+    fn handle(&self, msg: &Msg) -> Option<Decision>;
 
-    /// Fold my own durable slice. Pure. Every capability is offered every
-    /// event, so an arm that is not mine is a no-op rather than an error.
+    /// Fold my own durable slice, from *my agent's* journal. Pure.
     fn apply(&mut self, event: &CapEvent) {}
 
     /// Me, in the form the journal stores.
     fn save(&self) -> CapSlice;
 }
 
-/// Events to journal, actions for the session to perform.
+/// Everything the agent actor routes to its capabilities.
+enum Msg<'a> {
+    Tool(&'a ToolCall),
+    /// Loop lifecycle. Broadcast to every capability rather than offered until
+    /// one claims: a turn ending is news for all of them, not a message with
+    /// one owner.
+    Turn(TurnEvent),
+    Answer(&'a [AskAnswer]),
+    /// A runner I started has news.
+    Child(&'a ChildReport),
+    /// The session answered a request of mine.
+    Reply(&'a SessionReply),
+}
+
+/// Events for my agent's journal, acts for my agent actor.
 struct Decision {
     events: Vec<CapEvent>,
-    actions: Vec<Action>,
+    acts: Vec<Act>,
+}
+
+/// The five things only the agent actor can do. If a capability needs a sixth,
+/// this list grows deliberately — it does not reach around.
+enum Act {
+    Answer  { call: String, text: String },
+    /// Stop the run; this call stays open until something resumes it.
+    Park    { call: String },
+    Resume  { results: Vec<(String, String)> },
+    Enqueue { item: Incoming },
+    Ask(SessionRequest),
+}
+
+/// The whole agent -> session vocabulary, replacing six ad-hoc channels.
+enum SessionRequest {
+    StartRunner { kind: RunnerKind, args: RunnerArgs },
+    Cancel      { agent: AgentId },
+    SetTitle    { title: String },
 }
 ```
 
 `setup` is **per agent load, not per turn.** Today's code re-scans the sandbox on every turn; with the scan persisted (below) almost nothing is left that changes between turns. If something ever does, it gets an explicit `before_turn`/`after_turn` pair on this trait rather than a `setup` that quietly re-does itself — visible on the trait, or not happening.
 
-### Two drivers, and which side each runs on
+`Park` and `Resume` are the two verbs the transport lacks today, and their absence is exactly why `ask_user` and `submit_result` could not be capabilities. A tool that returns a value could always be forwarded and answered; a tool that *parks* had no way to say so, so it hardcoded `StopRun` and let its meaning arrive later as an outcome. With these two, parking is something a capability's decision asks for rather than something a toolbox knows.
 
-- **The agent's own task drives `setup` and `teardown`.** They are async and must not touch the mailbox.
-- **The session actor drives `handle` and `apply`,** through the runner that owns the calling agent.
+### One driver
 
-So a capability's durable slice lives in the runner's state — `SubAgentCapability.outstanding` has to survive a workflow's steps — and the agent's task prepares from a copy of it. The copy only reads durable state and writes turn resources, so there is nothing to merge back.
+The **agent actor** drives all of it — `setup` and `teardown` before the loop starts, `handle` and `apply` while it runs. There is no second driver and no copy to keep in step. The previous draft had two, and the seam between them is where `ask_user` fell through.
 
-That split names the last missing concept: a capability holds a **durable slice** (journalled, folded, replayed) and **turn resources** (the runtime client, the MCP connections — acquired in `setup`, released in `teardown`, never journalled).
+A capability still holds two kinds of thing: a **durable slice** (journalled in its agent's log, folded, replayed) and **turn resources** (the runtime client, the MCP connections — acquired in `setup`, released in `teardown`, never journalled).
 
 ### A runtime-composed list, not a closed enum
 
-A runner holds `Vec<Box<dyn Capability>>`, built when it is assembled. A runner that should not delegate simply is not given the capability, rather than holding one that refuses.
+An agent holds `Vec<Box<dyn Capability>>`, built by `assemble` and carried in its `AgentSpec`. An agent that should not delegate simply is not given the capability, rather than holding one that refuses.
 
 An earlier draft of this section accepted a cost that turned out not to be necessary: that the journal would have to carry `{ capability: name, event: … }` and route the fold by name, so a rename broke replay at runtime rather than at compile time. It does not. What has to be open is the *dispatch* — which capabilities a runner holds, and in what order. Persistence is a separate question, and it stays closed:
 
@@ -491,15 +549,19 @@ One gate in front of all of it: nothing starts unless the `RuntimeRunner` is `Re
 
 ## Routing
 
-Every message from an agent goes to the runner that owns it:
+Two routings, one in each actor, and neither is a search.
+
+**Inside an agent**, a message is offered to each capability until one claims it — except `Msg::Turn`, which is broadcast to all of them, because a turn ending is news for everyone rather than a message with an owner. A child's report is claimed by its `outstanding` gate rather than by an owner lookup somebody else performs, which means the agent actor needs no notion of who owns what.
+
+**Inside the session**, everything an agent sends is addressed by the agent that sent it:
 
 ```rust
 let runner = state.agents[&agent];
 ```
 
-That single lookup replaces `on_agent_outcome`'s identity probing, `stop_target`'s three-registry walk, and the same walk in `resolve_agent` and `reach`. Within the runner, a tool call is offered to each capability until one takes it, and a structural message is looked up in the capability that owns it.
+That single lookup replaces `on_agent_outcome`'s identity probing, `stop_target`'s three-registry walk, and the same walk in `resolve_agent` and `reach`.
 
-Usage, turn-preparation progress and hook records mean the same thing for every runner; the session answers those itself rather than routing them, so no runner grows a tail of variants it ignores.
+Usage, turn-preparation progress and hook records mean the same thing for every runner; the session records those itself rather than routing them, so no runner grows a tail of variants it ignores.
 
 Cross-runner facts are **pushed, never read**: a runner is handed `on_child_result`, `on_agent_ended`, `on_runtime_ready`. It reads its own slice plus a small `SessionView` (is the runtime ready, what is my depth, what is the spec). Handing every runner the whole `SessionState` would let a workflow runner read a conversation's turn status, which is the coupling this removes.
 
@@ -544,9 +606,11 @@ The only things outside the fold are live actor handles, which are connections r
 3. A runner impl holds no fields. All state is in the session's fold.
 4. `actions()` is pure and idempotent.
 5. One runner owns exactly one agent role.
-6. **An agent may not conclude while it has outstanding children.** Load-bearing: it is what makes a single `SubAgentCapability` implementation correct for all three parent kinds. Needs an enforcement point — `submit_result` refused, or the conclusion deferred, while `outstanding` is non-empty — and a test.
-7. A structural message has exactly one owning capability, found by lookup rather than by offering it around. A tool call declined by every capability is an error.
-8. Capability order within a runner is a written property of assembly — open-namespace capabilities last — not an accident of construction.
+6. **An agent may not conclude while it has outstanding children.** Enforced where it is cheapest: the capability holding `outstanding` is the same one offered `Msg::Turn(Ended)`, in the same actor, with no coordination. Under the previous draft the fact lived in the session and the question was asked in the agent, which is why this invariant needed an enforcement point at all.
+7. A child's report reaches exactly one capability, gated by its own `outstanding` — not by an owner lookup someone else performs. A tool call declined by every capability is an error.
+8. Capability order is a written property of assembly — open-namespace capabilities last — not an accident of construction.
+10. **A capability never reaches past `Act`.** Five verbs, and a sixth is added deliberately rather than worked around.
+11. **Nothing is journalled twice.** Decision 7 restated as something a reviewer can check: for any fact, name the one journal that holds it.
 9. `ChildOutcome` has no arm for a child that owes nothing. A fork reaches its creator through `Ready`/`Failed` only, so "a fork reports a result" is unwritable rather than checked.
 
 ## What this deletes
@@ -558,16 +622,22 @@ The only things outside the fold are live actor handles, which are connections r
 - `AgentKey` and `SessionAgentKind` — one flat `AgentId` space, owner resolved by lookup.
 - `effective_settings` and `effective_settings_for_parent`.
 - The defensive `TurnEnd::Asked`/`Parked` arms in `on_sub_agent_outcome`.
+- `AskUserToolbox`, `StepResultToolbox`, `SubAgentToolbox`, `SessionTitleToolbox` — one generic layer dispatches by name to the capability that answers for it.
+- `answered_turn` in `inbox.rs`, and `AgentState.asks` — the reconciliation moves to the capability that asked.
+- The six ad-hoc agent-to-session channels, replaced by `SessionRequest`'s three verbs.
+- `AgentOutcome`'s double life: turn lifecycle stays, `Asked` and `ForkSummary` become capability business, `UsageRecorded` becomes a report.
 
-Roughly 2,600 lines net removed, against a rewrite of the most load-bearing actor in the server.
+Roughly 3,400 lines net removed, against a rewrite of the two most load-bearing actors in the server.
 
 ## Open items
 
 **What a spawn carries when the child's plugins differ.** An `agent_type` name only means something relative to a plugin set. Today the name is journalled bare and re-resolved by the child against *its* plugin tree, which works only while parent and child share one. They already need not, and the intended future — a spawn that overrides the child's model, skills, plugins or runtime — makes them deliberately different. A parent naming a plugin agent type means *its* plugin's agent, so the name alone is an under-specified handoff. Either the resolved definition travels with the spawn, or the plugin set does. Not settled.
 
-**Concurrency cap.** The limit is a property of the sandbox — how many agents may run at once — so it moves to the session and is checked before dispatch, beside "does this agent have this tool". Today's per-caller cap is an artifact: a workflow session has no session-wide `AgentSettings`, so the number had to come from the step's preset. Per-runner sub-budgets can be added later as a value on the runner if fan-out starvation turns out to be real; not now.
+**Concurrency cap — settled by the move.** The limit is a property of the sandbox, so the count belongs to the session, which owns the tree. But the capability asking is agent-side and cannot see that count. So the session enforces it when it is asked to `StartRunner`, and the refusal comes back as a `SessionReply` the capability turns into a tool result. The capability asks; the session says no; the model is told why.
 
-**A superseded step.** If a step agent's execution ends before a subagent it spawned finishes, delivery wakes an agent whose step is closed, and a second conclusion lands on an index the run already routed past. Invariant 6 is the intended answer — the step cannot conclude while children run — so this stays open pending that enforcement. Note this looks like a latent defect in the current code too: `owed_deliveries` deliberately routes to the superseded step (`orchestrator.rs`: *"a step that has since been superseded is still what asked"*), and `on_step_outcome` maps the second conclusion onto `StepConcluded { index }`, whose fold overwrites the entry's output and resets the run to `Running`. Worth a test before designing around it.
+That is better than either half alone. Today's per-caller cap is an artifact — a workflow session has no session-wide `AgentSettings`, so the number had to come from the step's preset, while the *count* was already session-wide. Putting the check where the count lives ends that mismatch. Per-runner sub-budgets can be added later as a value on the runner if fan-out starvation turns out to be real.
+
+**A superseded step.** If a step agent's execution ends before a subagent it spawned finishes, delivery wakes an agent whose step is closed, and a second conclusion lands on an index the run already routed past. Invariant 6 is the answer, and it is now cheap: the capability holding `outstanding` is the same one offered `Msg::Turn(Ended)`, in the same actor, so the step simply does not conclude. Note this looks like a latent defect in the current code too: `owed_deliveries` deliberately routes to the superseded step (`orchestrator.rs`: *"a step that has since been superseded is still what asked"*), and `on_step_outcome` maps the second conclusion onto `StepConcluded { index }`, whose fold overwrites the entry's output and resets the run to `Running`. Worth a test before designing around it.
 
 **Cancel cascade.** Cancelling a runner must cancel the runners parented on its agents, recursively — the same walk a depth budget uses. Not yet designed; retrying a step today would leave an invoked run orphaned with a dead parent agent.
 
@@ -582,6 +652,53 @@ Roughly 2,600 lines net removed, against a rewrite of the most load-bearing acto
 - Capability dispatch: a tool call every capability declines errors rather than vanishing; a fixed-name capability wins over the open-namespace one that sorts after it.
 - Nesting: a subagent of a step agent behaves identically to a subagent of a main agent, and a workflow invoked by a subagent delivers its terminal output to that subagent.
 - Invariant 6: an agent that tries to conclude with outstanding children does not.
+
+## Two flows, in full
+
+The two capabilities that stress the split hardest: one that needs the session for nothing, and one that cannot proceed without it.
+
+### `ask_user` — the session is not involved
+
+```
+model ──ask_user──▶ AgentActor
+        offer Msg::Tool ─▶ AskUser claims
+        events [Asked{call, question}]   acts [Park{call}]
+        journal ▸ fold (pending += call) ▸ stop the run
+        report status AwaitingInput ─▶ SessionActor   (status only, never the question)
+
+person ──HTTP──▶ SessionActor ──forward──▶ AgentActor
+        offer Msg::Answer ─▶ AskUser claims
+        events [Answered]   acts [Resume{call → text}]
+        journal ▸ fold ▸ fill the tool_results ▸ the turn continues
+```
+
+The questions never leave the actor that owns the transcript they point into. The session sees one status change. `answered_turn` and `AgentState.asks` both disappear, because the capability that asked is the one that reconciles.
+
+### `spawn_agent` — the round trip, and its crash window
+
+```
+model ──spawn_agent──▶ AgentActor(parent)
+        offer Msg::Tool ─▶ SubAgent claims
+        events [Requested{call}]   acts [Ask(StartRunner), Park{call}]
+        journal ▸ fold ▸ park ──────▶ SessionActor
+                                       creates the runner and the child actor
+                                       journals RunnerCreated
+                     ◀──── SessionReply::Started{call, agent} ────
+        offer Msg::Reply ─▶ SubAgent
+        events [Spawned{child}]   acts [Resume{call → "Subagent spawned: {id}"}]
+        journal ▸ fold (outstanding += child) ▸ the turn continues
+
+  ... the child works, and concludes ...
+
+AgentActor(child) ──outcome──▶ SessionActor ──ChildReport──▶ AgentActor(parent)
+        offer Msg::Child ─▶ SubAgent, gated on its own `outstanding`
+        events [Reported{child}]   acts [Enqueue(Incoming::SubAgent)]
+        journal ▸ fold ▸ inbox — the next turn picks it up
+```
+
+**`Requested` is journalled before the ask, and that is the one price this design pays.** Two journals mean a crash between the ask and the reply leaves the session holding a runner the parent has never heard of. So the parent records its intent first; on load, a `Requested` with no `Spawned` is re-asked, and the session dedupes `StartRunner` by call id. Without that pair the window either loses a child or spawns it twice.
+
+Note what invariant 6 costs here: nothing. The capability holding `outstanding` is the same one offered `Msg::Turn(Ended)`, in the same actor, folded from the same journal.
 
 ## Sequence reference
 
