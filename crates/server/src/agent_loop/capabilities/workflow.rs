@@ -49,13 +49,11 @@ pub const STATUS_TOOL: &str = "workflow_status";
 /// One agent's workflow runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkflowCapability {
-    /// Runs asked of the session and not yet answered: the model's call, and
-    /// the run it named.
+    /// Runs asked of the session and not yet answered, by the model's call.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
-    /// an intent the session can be asked about again — and it dedupes by the
-    /// same call id rather than starting a second run.
-    pub requested: BTreeMap<String, RunnerId>,
+    /// an intent [`Msg::Loaded`] asks about again, naming the same run.
+    pub requested: BTreeMap<String, Pending>,
     /// Runs that exist and still owe their output.
     ///
     /// A set rather than the session-side map to an `AgentId`: the capability
@@ -64,11 +62,24 @@ pub struct WorkflowCapability {
     pub outstanding: BTreeSet<RunnerId>,
 }
 
+/// One run asked of the session and not yet answered.
+///
+/// The whole request rather than its id alone, because a re-ask on load has to
+/// send the *same* request again — and the name the model wrote is the only
+/// thing that says which graph the run is of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    /// The runner the run will be, and the session's dedupe key.
+    pub child: RunnerId,
+    pub workflow: String,
+    pub input: String,
+}
+
 /// What this capability records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    /// A run was asked of the session, and this is the runner it named.
-    Requested { call: String, child: RunnerId },
+    /// A run was asked of the session, and this is what was asked for.
+    Requested { call: String, pending: Pending },
     /// The session created it, so an output is now owed.
     Started { call: String },
     /// The session would not create it. Journaled because the
@@ -123,32 +134,50 @@ impl WorkflowCapability {
         // Minted here, not in `apply`: a decision may be non-deterministic, a
         // fold may not. The event and the request then name the same run, and
         // replay lands the id the log has.
-        let child = RunnerId::new_v4();
-        let workflow = req.workflow.clone();
+        let pending = Pending {
+            child: RunnerId::new_v4(),
+            workflow: req.workflow,
+            input: req.input,
+        };
+        let note = format!("starting workflow {}", pending.workflow);
         Decision::record(vec![CapEvent::Workflow(Event::Requested {
             call: call.id.clone(),
-            child,
+            pending: pending.clone(),
         })])
-        .then(Act::Ask(SessionRequest::StartRunner {
-            call: call.id.clone(),
-            id: child,
-            kind: RunnerKind::Workflow,
-            args: Box::new(RunnerArgs::Workflow {
-                source: WorkflowSource::Named(req.workflow),
-                input: req.input,
-            }),
-        }))
+        .then(Act::Ask(ask(&call.id, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message.
         .then(Act::Park {
             call: call.id.clone(),
-            note: format!("starting workflow {workflow}"),
+            note,
         })
+    }
+
+    /// Everything asked for and never answered, asked again.
+    ///
+    /// A `Requested` still in the fold is a request the dead process may never
+    /// have sent, and the model is parked on the call that made it. Re-asked
+    /// with the id already recorded, so the session can tell a repeat from a
+    /// second invocation.
+    ///
+    /// Nothing is journaled: the [`Event::Requested`] this reads is still the
+    /// only fact, and a second copy would say a second run was wanted.
+    fn reloaded(&self) -> Option<Decision> {
+        if self.requested.is_empty() {
+            return None;
+        }
+        Some(
+            self.requested
+                .iter()
+                .fold(Decision::default(), |d, (call, pending)| {
+                    d.then(Act::Ask(ask(call, pending)))
+                }),
+        )
     }
 
     /// The session answered a run this capability asked for.
     fn replied(&self, reply: &SessionReply) -> Option<Decision> {
-        let child = *self.requested.get(reply.call())?;
+        let child = self.requested.get(reply.call())?.child;
         Some(match reply {
             SessionReply::Done { call } => {
                 Decision::record(vec![CapEvent::Workflow(Event::Started {
@@ -267,6 +296,24 @@ fn render(output: &Value) -> String {
     serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
 }
 
+/// The request a [`Pending`] names.
+///
+/// One function and two callers — the invocation, and the re-ask on load —
+/// because the second has to send exactly what the first sent. A free function
+/// rather than a method: nothing about the capability's own state belongs in a
+/// request, and this is where that shows.
+fn ask(call: &str, pending: &Pending) -> SessionRequest {
+    SessionRequest::StartRunner {
+        call: call.to_string(),
+        id: pending.child,
+        kind: RunnerKind::Workflow,
+        args: Box::new(RunnerArgs::Workflow {
+            source: WorkflowSource::Named(pending.workflow.clone()),
+            input: pending.input.clone(),
+        }),
+    }
+}
+
 /// Supply a parked call's result, and start the turn that carries it.
 fn result(call: &str, output: String, is_error: bool) -> Act {
     Act::Resume {
@@ -333,6 +380,9 @@ impl Capability for WorkflowCapability {
             }
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
+            // The crash window: a run journaled and never answered is re-asked
+            // with the id the log already holds.
+            Msg::Loaded => self.reloaded(),
             // Invariant 6: a run in flight is an outstanding child, and its
             // output is work this agent has not seen yet. `Act::Hold` because a
             // turn boundary is broadcast and merged — see `sub_agent`.
@@ -353,12 +403,12 @@ impl Capability for WorkflowCapability {
             return;
         };
         match event {
-            Event::Requested { call, child } => {
-                self.requested.insert(call.clone(), *child);
+            Event::Requested { call, pending } => {
+                self.requested.insert(call.clone(), pending.clone());
             }
             Event::Started { call } => {
-                if let Some(child) = self.requested.remove(call) {
-                    self.outstanding.insert(child);
+                if let Some(pending) = self.requested.remove(call) {
+                    self.outstanding.insert(pending.child);
                 }
             }
             Event::Dropped { call } => {
@@ -432,9 +482,10 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
 
-        let [CapEvent::Workflow(Event::Requested { call, child })] = d.events.as_slice() else {
+        let [CapEvent::Workflow(Event::Requested { call, pending })] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
         };
+        let child = &pending.child;
         assert_eq!(call, "t1");
         let [
             Act::Ask(SessionRequest::StartRunner {
@@ -524,6 +575,64 @@ mod tests {
         fold(&mut c, &d);
         assert!(c.requested.is_empty());
         assert!(c.outstanding.is_empty());
+    }
+
+    /// **The crash window.** A journal that stops between `Requested` and the
+    /// session's answer is a run the session may never have heard of, and the
+    /// model is parked on the call that asked for it. The load asks again, with
+    /// the id and the arguments the log already holds.
+    #[test]
+    fn a_run_the_session_never_answered_is_asked_again_on_load() {
+        let mut c = WorkflowCapability::default();
+        let d = c.handle(&Msg::Tool(&invoke_call())).expect("mine");
+        fold(&mut c, &d);
+        let [
+            Act::Ask(SessionRequest::StartRunner { call, id, .. }),
+            Act::Park { .. },
+        ] = d.acts.as_slice()
+        else {
+            panic!("expected an ask and a park, got {:?}", d.acts);
+        };
+        let (first_call, child) = (call.clone(), *id);
+
+        // The cut: nothing past the request is folded, and what comes back is
+        // read off the journal the way a new process reads it.
+        let caps = Capabilities::new(vec![Box::new(c)]);
+        let written = serde_json::to_string(&caps).expect("write");
+        let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
+
+        let d = reloaded.broadcast(&Msg::Loaded);
+        assert!(d.events.is_empty(), "a re-ask is not a second invocation");
+        let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
+        else {
+            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        };
+        assert_eq!(
+            *call, first_call,
+            "a re-ask under a different call answers a park nobody is holding"
+        );
+        assert_eq!(*id, child, "the re-ask names a run the log never recorded");
+        let RunnerArgs::Workflow { source, input } = args.as_ref() else {
+            panic!("expected workflow args, got {args:?}");
+        };
+        let WorkflowSource::Named(name) = source else {
+            panic!("a re-ask names a workflow; it never writes a graph");
+        };
+        // Without these the session is asked to start a run of nothing.
+        assert_eq!(name, "release");
+        assert_eq!(input, "cut 1.2.0");
+    }
+
+    /// And a run the session already answered is not asked for again, or every
+    /// load starts the runs of the last one.
+    #[test]
+    fn a_run_the_session_answered_is_not_asked_again() {
+        let mut c = WorkflowCapability::default();
+        let _ = invoked(&mut c);
+        assert!(
+            c.handle(&Msg::Loaded).is_none(),
+            "the session already started this run; asking again duplicates it"
+        );
     }
 
     /// A reply for a call this capability never made belongs to whichever

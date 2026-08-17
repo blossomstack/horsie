@@ -218,6 +218,30 @@ impl TitleCapability {
             }),
         }
     }
+
+    /// Every rename asked for and never answered, asked again.
+    ///
+    /// `Asked` is journaled before the request goes out, so one still in the
+    /// fold may never have reached the session — and the tool call it was made
+    /// from has been dangling ever since.
+    ///
+    /// Nothing is journaled: the [`Event::Asked`] this reads is still the only
+    /// fact.
+    fn reloaded(&self) -> Option<Decision> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(
+            self.pending
+                .iter()
+                .fold(Decision::default(), |d, (call, name)| {
+                    d.then(Act::Ask(SessionRequest::SetTitle {
+                        call: call.clone(),
+                        title: name.clone(),
+                    }))
+                }),
+        )
+    }
 }
 
 #[async_trait::async_trait]
@@ -278,6 +302,12 @@ impl Capability for TitleCapability {
             Msg::Reply(reply) if self.pending.contains_key(reply.call()) => {
                 Some(self.answered(reply))
             }
+            // The crash window, and the cheapest case of it: a rename journaled
+            // and never answered is asked again, with the call the model is
+            // still parked on and the name already recorded. No dedupe is owed
+            // in return — setting a session's title twice to the same string is
+            // the same session.
+            Msg::Loaded => self.reloaded(),
             Msg::Tool(_)
             | Msg::Command(_)
             | Msg::Turn(_)
@@ -378,6 +408,46 @@ mod tests {
             Some("the flake")
         );
         assert_eq!(c.title, None, "the session has not answered yet");
+    }
+
+    /// **The crash window.** `Asked` is journaled before the request goes out,
+    /// so one still in the fold may never have reached the session — and the
+    /// model has been parked on that call ever since. The load asks again,
+    /// under the same call and for the same name.
+    ///
+    /// No dedupe comes back the other way, and none is owed: naming a session
+    /// the same thing twice leaves one session with one name.
+    #[test]
+    fn a_rename_the_session_never_answered_is_asked_again_on_load() {
+        let c = asked("call-1", "the flake");
+
+        // The cut: the reply is never folded, and what comes back is read off
+        // the journal the way a new process reads it.
+        let caps = Capabilities::new(vec![Box::new(c)]);
+        let written = serde_json::to_string(&caps).expect("write");
+        let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
+
+        let d = reloaded.broadcast(&Msg::Loaded);
+        assert!(d.events.is_empty(), "a re-ask is not a second rename");
+        let [Act::Ask(SessionRequest::SetTitle { call, title })] = d.acts.as_slice() else {
+            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        };
+        assert_eq!(call, "call-1", "the answer would reach nobody");
+        assert_eq!(title, "the flake");
+    }
+
+    /// And a rename the session already answered is not asked for again, or
+    /// every load renames the session to whatever it was last called.
+    #[test]
+    fn a_rename_the_session_answered_is_not_asked_again() {
+        let mut c = asked("call-1", "the flake");
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Done {
+                call: "call-1".into(),
+            }))
+            .expect("mine");
+        fold(&mut c, &d);
+        assert!(c.handle(&Msg::Loaded).is_none());
     }
 
     /// The session took it: the conversation is named, and the model — whose

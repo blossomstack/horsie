@@ -142,12 +142,15 @@ impl Capability for StepResultCapability {
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Tool(call) if call.name == SUBMIT_RESULT_TOOL => Some(self.submitted(call)),
+            // Nothing to re-ask: this capability asks the session for nothing,
+            // so it holds nothing a load could have to send again.
             Msg::Tool(_)
             | Msg::Command(_)
             | Msg::Turn(_)
             | Msg::Answer(_)
             | Msg::Child(_)
-            | Msg::Reply(_) => None,
+            | Msg::Reply(_)
+            | Msg::Loaded => None,
         }
     }
 

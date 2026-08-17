@@ -41,12 +41,30 @@ impl SubAgents {
         match cmd {
             SubAgentCommand::Spawn {
                 caller,
+                agent,
                 label,
                 task,
                 agent_type,
                 reply,
-                ..
             } => {
+                // The dedupe, and it goes first because a repeat is not a
+                // request: a capability journals what it wants before asking
+                // for it, so a crash in that window replays the identical
+                // request — same worker id and all — at a session that may
+                // already have created it. Answered with the worker it already
+                // has, which is what the asking capability was owed the first
+                // time and never heard.
+                //
+                // Here rather than in the sink that sends the request, because
+                // this is the only place the check and the create are one step.
+                // A `SessionRef` can only read by a second `ask`, and two of
+                // those with a gap between them is a check that two concurrent
+                // repeats both pass.
+                let id = agent.as_uuid();
+                if state.subagents.node(id).is_some() {
+                    let _ = reply.send(Ok(id));
+                    return CommandEffect::none();
+                }
                 let owner = state.subagents.owner_for(caller, state.root_owner());
                 let Some(parent_depth) = owner
                     .and_then(|owner| state.subagents.tree(owner))
@@ -81,7 +99,6 @@ impl SubAgents {
                 // Persist first, spawn second: a crash between the two replays
                 // as a Running node with no actor, which recovery reconciles
                 // to failed — never an untracked agent.
-                let id = Uuid::new_v4();
                 let spawned = SessionDomainEvent::SubAgentSpawned {
                     at_ms: now_ms(),
                     id,

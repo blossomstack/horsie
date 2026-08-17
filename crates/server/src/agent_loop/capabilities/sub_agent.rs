@@ -81,13 +81,12 @@ pub struct SubAgentCapability {
     /// How deep the agent holding this already sits. Also fixed at equip time,
     /// which is what lets the depth gate be answered without asking anyone.
     pub depth: u32,
-    /// Spawns asked for and not yet answered: the model's call, and the child
-    /// it named.
+    /// Spawns asked for and not yet answered, by the model's call.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
-    /// an intent the session can be asked about again — and it dedupes by the
-    /// same call id rather than starting a second child.
-    pub requested: BTreeMap<String, RunnerId>,
+    /// an intent [`Msg::Loaded`] asks about again — and the session dedupes on
+    /// the worker's agent id rather than starting a second child.
+    pub requested: BTreeMap<String, Pending>,
     /// Children that exist and still owe a report.
     ///
     /// A set rather than the session-side map to an `AgentId`: the capability
@@ -98,11 +97,30 @@ pub struct SubAgentCapability {
     pub outstanding: BTreeSet<RunnerId>,
 }
 
+/// One spawn asked of the session and not yet answered.
+///
+/// The whole request rather than its ids alone, because a re-ask on load has to
+/// send the *same* request again: a `Requested` that recorded only the child
+/// would come back after a crash knowing a worker was wanted and unable to say
+/// what for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pending {
+    /// The runner the worker will be.
+    pub child: RunnerId,
+    /// The worker's own agent, and the session's dedupe key: a replayed request
+    /// carries the same id, so the session recognises a child it has already
+    /// created instead of starting a second one.
+    pub agent: AgentId,
+    pub label: String,
+    pub task: String,
+    pub agent_type: Option<String>,
+}
+
 /// What this capability records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
-    /// A spawn was asked of the session, and this is the child it named.
-    Requested { call: String, child: RunnerId },
+    /// A spawn was asked of the session, and this is what was asked for.
+    Requested { call: String, pending: Pending },
     /// The session created it, so a report is now owed.
     Started { call: String },
     /// The session would not create it. Journaled because the
@@ -180,32 +198,70 @@ impl SubAgentCapability {
         // Two ids and not one: a runner and an agent are separate spaces, and a
         // workflow runner owns many agents, so an equality would hold here and
         // be false there.
-        let child = RunnerId::new_v4();
-        let agent = AgentId::new_v4();
-        let label = req.label.clone();
+        let pending = Pending {
+            child: RunnerId::new_v4(),
+            agent: AgentId::new_v4(),
+            label: req.label,
+            task: req.task,
+            agent_type: req.agent_type,
+        };
+        let note = format!("spawning subagent {}", pending.label);
         Decision::record(vec![CapEvent::SubAgent(Event::Requested {
             call: call.id.clone(),
-            child,
+            pending: pending.clone(),
         })])
-        .then(Act::Ask(SessionRequest::StartRunner {
-            call: call.id.clone(),
-            id: child,
-            kind: RunnerKind::SubAgent,
-            args: Box::new(RunnerArgs::SubAgent {
-                agent,
-                label: req.label,
-                task: req.task,
-                agent_type: req.agent_type,
-                settings: Box::new(self.child_settings.clone()),
-            }),
-        }))
+        .then(Act::Ask(self.ask(&call.id, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message. The dangling
         // `tool_use` is what the reply fills in.
         .then(Act::Park {
             call: call.id.clone(),
-            note: format!("spawning subagent {label}"),
+            note,
         })
+    }
+
+    /// The request a [`Pending`] names.
+    ///
+    /// One function and two callers — the spawn, and the re-ask on load —
+    /// because the second has to send exactly what the first sent. Built from
+    /// the journaled request plus this capability's own config, so nothing in
+    /// it is minted twice.
+    fn ask(&self, call: &str, pending: &Pending) -> SessionRequest {
+        SessionRequest::StartRunner {
+            call: call.to_string(),
+            id: pending.child,
+            kind: RunnerKind::SubAgent,
+            args: Box::new(RunnerArgs::SubAgent {
+                agent: pending.agent,
+                label: pending.label.clone(),
+                task: pending.task.clone(),
+                agent_type: pending.agent_type.clone(),
+                settings: Box::new(self.child_settings.clone()),
+            }),
+        }
+    }
+
+    /// Everything asked for and never answered, asked again.
+    ///
+    /// A `Requested` still in the fold is a request the dead process may never
+    /// have sent: the journal write comes first, so the window between it and
+    /// the session hearing anything is exactly what this closes. Re-asked with
+    /// the ids already recorded — the same call, the same child, the same agent
+    /// — which is what lets the session tell a repeat from a new spawn.
+    ///
+    /// Nothing is journaled: the [`Event::Requested`] this reads is still the
+    /// only fact, and a second copy of it would say a second spawn was wanted.
+    fn reloaded(&self) -> Option<Decision> {
+        if self.requested.is_empty() {
+            return None;
+        }
+        Some(
+            self.requested
+                .iter()
+                .fold(Decision::default(), |d, (call, pending)| {
+                    d.then(Act::Ask(self.ask(call, pending)))
+                }),
+        )
     }
 
     /// The session answered a spawn this capability asked for.
@@ -213,7 +269,7 @@ impl SubAgentCapability {
     /// `None` for a call this capability never made, so a reply meant for
     /// another capability is not claimed by whichever sorted first.
     fn replied(&self, reply: &SessionReply) -> Option<Decision> {
-        let child = *self.requested.get(reply.call())?;
+        let child = self.requested.get(reply.call())?.child;
         Some(match reply {
             SessionReply::Done { call } => {
                 Decision::record(vec![CapEvent::SubAgent(Event::Started {
@@ -410,6 +466,9 @@ impl Capability for SubAgentCapability {
             }
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
+            // The crash window: a spawn journaled and never answered is re-asked
+            // with the ids the log already holds.
+            Msg::Loaded => self.reloaded(),
             // Invariant 6. The turn is over and a report is still owed, so this
             // agent is not finished — it has work arriving that it has not
             // seen. `Act::Hold` rather than a claimed-but-empty decision: a
@@ -432,12 +491,12 @@ impl Capability for SubAgentCapability {
             return;
         };
         match event {
-            Event::Requested { call, child } => {
-                self.requested.insert(call.clone(), *child);
+            Event::Requested { call, pending } => {
+                self.requested.insert(call.clone(), pending.clone());
             }
             Event::Started { call } => {
-                if let Some(child) = self.requested.remove(call) {
-                    self.outstanding.insert(child);
+                if let Some(pending) = self.requested.remove(call) {
+                    self.outstanding.insert(pending.child);
                 }
             }
             Event::Dropped { call } => {
@@ -533,9 +592,10 @@ mod tests {
             )))
             .expect("mine");
 
-        let [CapEvent::SubAgent(Event::Requested { call, child })] = d.events.as_slice() else {
+        let [CapEvent::SubAgent(Event::Requested { call, pending })] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
         };
+        let child = &pending.child;
         assert_eq!(call, "t1");
         let [
             Act::Ask(SessionRequest::StartRunner {
@@ -564,12 +624,18 @@ mod tests {
         // runner's. Two spaces on purpose: a workflow runner owns many agents,
         // so an equality that held for a worker would be false for a run.
         assert_ne!(agent.as_uuid(), child.as_uuid());
+        assert_eq!(
+            *agent, pending.agent,
+            "the agent asked for is not the one journaled, so a replay would \
+             mint a second worker the session cannot recognise"
+        );
         assert_eq!(label, "read the flake");
 
         // Nothing is outstanding yet: the session has not said it exists.
+        let pending = pending.clone();
         fold(&mut c, &d);
         assert!(c.outstanding.is_empty());
-        assert_eq!(c.requested.get("t1"), Some(child));
+        assert_eq!(c.requested.get("t1"), Some(&pending));
     }
 
     /// The bound on nesting, and the one gate that stays agent-side: how deep
@@ -662,6 +728,109 @@ mod tests {
             ),
             "the id the model was told is not the child that is outstanding"
         );
+    }
+
+    /// **The crash window, and the only test that closes it.**
+    ///
+    /// A journal that stops between `Requested` and the session's answer is a
+    /// spawn the session may never have heard of — the write comes first, so
+    /// the window is real — and the model is parked on a call that will never
+    /// be answered. The load has to ask again.
+    ///
+    /// Everything asserted here is an *identity*: the same call, the same
+    /// child, the same worker. That is the whole mechanism — it is what makes
+    /// the second ask recognisable as a repeat rather than a second spawn.
+    #[test]
+    fn a_spawn_the_session_never_answered_is_asked_again_on_load() {
+        let mut c = cap();
+        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        fold(&mut c, &d);
+        let [
+            Act::Ask(SessionRequest::StartRunner { call, id, args, .. }),
+            Act::Park { .. },
+        ] = d.acts.as_slice()
+        else {
+            panic!("expected an ask and a park, got {:?}", d.acts);
+        };
+        let (first_call, child) = (call.clone(), *id);
+        let RunnerArgs::SubAgent { agent, .. } = args.as_ref() else {
+            panic!("expected subagent args, got {args:?}");
+        };
+        let worker = *agent;
+
+        // The cut. Nothing is folded past the request, and what comes back is
+        // read off the journal the way a new process reads it.
+        let caps = Capabilities::new(vec![Box::new(c)]);
+        let written = serde_json::to_string(&caps).expect("write");
+        let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
+
+        let d = reloaded.broadcast(&Msg::Loaded);
+        assert!(
+            d.events.is_empty(),
+            "a re-ask journals nothing: the Requested it reads is still the \
+             only record, and a second copy would say a second spawn was wanted"
+        );
+        let [
+            Act::Ask(SessionRequest::StartRunner {
+                call,
+                id,
+                kind,
+                args,
+            }),
+        ] = d.acts.as_slice()
+        else {
+            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        };
+        assert_eq!(
+            *call, first_call,
+            "a re-ask under a different call answers a park nobody is holding"
+        );
+        assert_eq!(
+            *id, child,
+            "the re-ask names a child the log never recorded"
+        );
+        assert_eq!(*kind, RunnerKind::SubAgent);
+        let RunnerArgs::SubAgent {
+            agent, label, task, ..
+        } = args.as_ref()
+        else {
+            panic!("expected subagent args, got {args:?}");
+        };
+        assert_eq!(
+            *agent, worker,
+            "a re-ask that mints a fresh worker id is a second child the \
+             session has no way to recognise"
+        );
+        // And the request itself survived, or the session would be asked for a
+        // worker with nothing to do.
+        assert_eq!(label, "l");
+        assert_eq!(task, "t");
+    }
+
+    /// The other half: a request the session already answered must not be asked
+    /// for again, or every load spawns the children of the last one.
+    #[test]
+    fn a_spawn_the_session_answered_is_not_asked_again() {
+        let mut c = cap();
+        let _ = spawned(&mut c);
+        assert!(
+            c.handle(&Msg::Loaded).is_none(),
+            "the session already created this child; asking again duplicates it"
+        );
+
+        // A refusal retracts the intent too, so a load after one asks for
+        // nothing rather than re-running into the same budget.
+        let mut c = cap();
+        let d = c.handle(&Msg::Tool(&spawn_call())).expect("mine");
+        fold(&mut c, &d);
+        let d = c
+            .handle(&Msg::Reply(&SessionReply::Refused {
+                call: "t1".into(),
+                reason: "8 subagents already active".into(),
+            }))
+            .expect("mine");
+        fold(&mut c, &d);
+        assert!(c.handle(&Msg::Loaded).is_none());
     }
 
     /// A reply for a call this capability never made belongs to whichever

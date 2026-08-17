@@ -96,6 +96,20 @@ pub enum Msg<'a> {
     Child(&'a ChildMsg),
     /// The session answered something a capability asked it for.
     Reply(&'a SessionReply),
+    /// This agent has finished folding its journal.
+    ///
+    /// The one message that is not news about something happening: it says the
+    /// fold is complete, so whatever a capability is still holding now is
+    /// everything the dead process left it.
+    ///
+    /// That is what closes the crash window. A request is journaled *before*
+    /// it is sent, so a `Requested` with no answer folded after it may never
+    /// have reached the session at all — and the model is parked on a call
+    /// nobody will ever answer. A capability holding one re-emits
+    /// [`Act::Ask`] here, with the ids it already recorded, which is what
+    /// makes the second ask recognisable as a repeat rather than a new
+    /// request.
+    Loaded,
 }
 
 /// A turn boundary, as a capability sees it.
@@ -136,6 +150,10 @@ impl Msg<'_> {
             Self::Answer(_) => Routing::Offer,
             // A turn ending is news for all of them.
             Self::Turn(_) => Routing::Broadcast,
+            // And so is a load: any of them may be holding a request the dead
+            // process never got to send, so offering would stop at the first
+            // and leave the rest parked for ever.
+            Self::Loaded => Routing::Broadcast,
         }
     }
 
@@ -149,6 +167,7 @@ impl Msg<'_> {
             Self::Answer(a) => format!("{} answer(s)", a.len()),
             Self::Child(c) => format!("child {}", c.child()),
             Self::Reply(r) => format!("session reply for call {}", r.call()),
+            Self::Loaded => "load".to_string(),
         }
     }
 }
@@ -743,7 +762,9 @@ pub mod testing {
                         what: format!("turn:{t:?}"),
                     })])
                 }),
-                Msg::Command(_) | Msg::Answer(_) | Msg::Child(_) | Msg::Reply(_) => None,
+                Msg::Command(_) | Msg::Answer(_) | Msg::Child(_) | Msg::Reply(_) | Msg::Loaded => {
+                    None
+                }
             }
         }
 

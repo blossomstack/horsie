@@ -60,6 +60,16 @@ impl SessionParent {
     /// they are, on the session, because every one of them is a fact about the
     /// tree and the tree is the session's. A capability asks; it does not get
     /// to decide whether it may.
+    ///
+    /// **A repeat is not a second child.** A capability journals its request
+    /// before sending it, so the process can die in between and replay the
+    /// identical request on load — same `call`, same runner, same `agent`. The
+    /// dedupe is the `agent` id travelling in [`RunnerArgs::SubAgent`]: it is
+    /// the session's id for that worker, so the spawn handler recognises one it
+    /// already has and answers with it. Checked *there* rather than here
+    /// because only there are the check and the create one step; from a
+    /// `SessionRef` a check is a second `ask`, and two concurrent repeats would
+    /// both pass it before either wrote anything.
     async fn start_runner(&self, id: RunnerId, args: RunnerArgs, call: String) -> SessionReply {
         let refused = |reason: String| SessionReply::Refused {
             call: call.clone(),

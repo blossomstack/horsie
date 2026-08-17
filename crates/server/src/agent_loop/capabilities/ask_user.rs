@@ -350,7 +350,14 @@ impl Capability for AskUserCapability {
             Msg::Turn(TurnEvent::Began) if !self.pending.is_empty() => {
                 Some(Decision::record(vec![CapEvent::AskUser(Event::Abandoned)]))
             }
-            Msg::Tool(_) | Msg::Command(_) | Msg::Turn(_) | Msg::Child(_) | Msg::Reply(_) => None,
+            // Nothing to re-ask: this capability's park is answered by a person,
+            // not by the session, so a load leaves it exactly where it was.
+            Msg::Tool(_)
+            | Msg::Command(_)
+            | Msg::Turn(_)
+            | Msg::Child(_)
+            | Msg::Reply(_)
+            | Msg::Loaded => None,
         }
     }
 

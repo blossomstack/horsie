@@ -151,13 +151,13 @@ pub enum SubAgentCommand {
     /// The `spawn_agent` tool: start a subagent under `caller`.
     Spawn {
         caller: SubAgentParent,
-        /// The agent that called the tool, in the runners' flat id space.
+        /// The worker this spawn is for, minted by the capability that asked.
         ///
-        /// Beside `caller` rather than replacing it because
-        /// [`SubAgentParent`] collapses `Main`, a step and a fork into one
-        /// variant — a distinction the runners keep and the old tree cannot
-        /// express. The old handler still reads `caller`; the runner reads
-        /// this.
+        /// The session's id for it, not a second one beside it: a capability
+        /// journals its request *before* sending it, so a crash in that window
+        /// replays the same request with the same id — and an id the session
+        /// chose for itself could not tell that repeat from a new spawn. The
+        /// handler recognises a worker it already has and answers with it.
         agent: AgentId,
         label: String,
         task: String,

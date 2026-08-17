@@ -2890,6 +2890,22 @@ impl EventSourcedActor for AgentActor {
                 })
                 .await;
         }
+        // Now tell them the fold is over, which closes the crash window a
+        // request opens. A capability journals what it wants *before* asking
+        // for it, so a `Requested` that survived to here may never have reached
+        // the session at all — and the model is parked on a tool call nobody
+        // will ever answer. Whoever is holding one asks again, with the ids it
+        // already recorded, and the session recognises the repeat.
+        //
+        // After the `Equipped` above, and it only ever fires for a *recovered*
+        // agent: a fresh one has nothing folded, so its capabilities are empty
+        // here and the broadcast reaches nobody. Nothing is journaled either —
+        // the `Requested` being re-asked is still the only record of it.
+        let reloaded = Self::consult(state, &Msg::Loaded).unwrap_or_default();
+        if !reloaded.events.is_empty() {
+            tracing::error!("a capability journaled something on a load; discarded");
+        }
+        self.dispatch_asks(reloaded.asks, ctx);
         // Re-arm every surviving timer with its remaining delay (fires immediately if
         // already due). Do this whether parked or mid-run, so timers keep firing.
         let now = now_ms();
@@ -3265,7 +3281,8 @@ impl AgentActor {
             | Msg::Turn(_)
             | Msg::Answer(_)
             | Msg::Child(_)
-            | Msg::Reply(_) => {
+            | Msg::Reply(_)
+            | Msg::Loaded => {
                 tracing::error!(
                     call,
                     message = msg.describe(),
@@ -6945,6 +6962,27 @@ mod interruption_tests {
         }
     }
 
+    /// A session that records what its agent asked for and answers nothing.
+    ///
+    /// Never answering is the point: a re-ask is judged by what the session
+    /// *hears*, and an answer would fold the request away and hide whether it
+    /// was ever sent.
+    struct RequestChannel(
+        tokio::sync::mpsc::UnboundedSender<crate::agent_loop::capabilities::SessionRequest>,
+    );
+    #[async_trait]
+    impl AgentOutcomeSink for RequestChannel {
+        async fn deliver(&self, _outcome: AgentOutcome) {}
+
+        async fn request(
+            &self,
+            request: crate::agent_loop::capabilities::SessionRequest,
+        ) -> crate::agent_loop::capabilities::SessionReply {
+            let _ = self.0.send(request);
+            std::future::pending().await
+        }
+    }
+
     /// Never asked: these agents recover and report, they do not run.
     struct HangingContext;
     #[async_trait]
@@ -6993,12 +7031,106 @@ mod interruption_tests {
         rx
     }
 
+    /// The same, for an agent whose owner records requests instead of outcomes.
+    async fn recover_asking(
+        events: &[AgentDomainEvent],
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::agent_loop::capabilities::SessionRequest> {
+        let id = uuid::Uuid::new_v4();
+        let journal = Arc::new(InMemoryJournal::new());
+        let encoded: Vec<Vec<u8>> = events
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap())
+            .collect();
+        journal
+            .persist(&AgentActor::persistence_id_for(id), &encoded, 0)
+            .await
+            .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingContext),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(RequestChannel(tx)),
+            journal_id: id,
+            ready: true,
+        };
+        let mut params =
+            AgentParams::from_def(&crate::agent_loop::agent_actor::tests::def_fixture());
+        params.interactive = true;
+        let _agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        rx
+    }
+
     fn began() -> AgentDomainEvent {
         AgentDomainEvent::TurnBegan {
             consumed: Vec::new(),
             answered: Vec::new(),
             at_ms: 0,
         }
+    }
+
+    /// **The re-ask is wired, or none of the capability work matters.**
+    ///
+    /// A journal cut between `Requested` and the session's answer, loaded from
+    /// scratch: the actor has to broadcast the load and send what comes back.
+    /// Without this test the whole mechanism could be unreachable and every
+    /// capability's own test would still pass — the capability decides, and
+    /// only the actor can act on it.
+    #[tokio::test]
+    async fn a_request_the_session_never_answered_is_re_asked_when_the_agent_loads() {
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, SessionRequest, sub_agent};
+        use crate::sessions::runners::action::RunnerArgs;
+
+        let pending = sub_agent::Pending {
+            child: crate::sessions::runners::ids::RunnerId::new_v4(),
+            agent: crate::sessions::runners::ids::AgentId::new_v4(),
+            label: "research".into(),
+            task: "dig into the flake".into(),
+            agent_type: None,
+        };
+        let mut requests = recover_asking(&[
+            AgentDomainEvent::Equipped {
+                capabilities: Capabilities::new(vec![Box::new(
+                    sub_agent::SubAgentCapability::new(
+                        crate::sessions::runners::empty_settings(),
+                        0,
+                    ),
+                )]),
+                at_ms: 0,
+            },
+            AgentDomainEvent::Capability(CapEvent::SubAgent(sub_agent::Event::Requested {
+                call: "call-1".into(),
+                pending: pending.clone(),
+            })),
+            // The park the spawn made. What the dead process left behind is a
+            // dangling `tool_use` and a request nobody may have heard.
+            AgentDomainEvent::ParkedOn {
+                call: "call-1".into(),
+                note: "spawning subagent research".into(),
+                at_ms: 1,
+            },
+        ])
+        .await;
+
+        let Ok(SessionRequest::StartRunner { call, id, args, .. }) = requests.try_recv() else {
+            panic!("the load re-asked for nothing; the model is parked for ever");
+        };
+        assert_eq!(call, "call-1", "the answer would reach nobody");
+        assert_eq!(id, pending.child);
+        let RunnerArgs::SubAgent { agent, .. } = args.as_ref() else {
+            panic!("expected subagent args, got {args:?}");
+        };
+        assert_eq!(
+            *agent, pending.agent,
+            "a re-ask with a fresh worker id is a second child"
+        );
+        assert!(
+            requests.try_recv().is_err(),
+            "one dangling request, one re-ask"
+        );
     }
 
     /// A journal ending at `TurnBegan` is what a process killed mid-run leaves
