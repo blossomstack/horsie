@@ -1,3 +1,4 @@
+use crate::agent_loop::capabilities::{self, Act, Msg};
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion,
 };
@@ -146,6 +147,19 @@ pub enum AgentCommand {
         action: crate::agent_loop::task_list::TaskListAction,
         reply: ReplyTo<Result<String, String>>,
     },
+    /// A tool call one of this agent's capabilities answers for.
+    ///
+    /// Sent by [`CapabilityToolbox`] from the run's own task, so the capability
+    /// decides on the mailbox — where its state is — while the run waits. That
+    /// is what lets a tool journal something and *then* answer the model, which
+    /// no toolbox layer can do on its own.
+    ///
+    /// Only names a capability advertised reach here; everything else the layer
+    /// passes straight to the sandbox without touching the mailbox.
+    CapabilityCall {
+        call: crate::sessions::runners::message::ToolCall,
+        reply: ReplyTo<Result<ToolOutcome, horsie_agentcore::ToolCallError>>,
+    },
     /// Read forward from a cursor: durable entries plus, when the caller has
     /// caught up to the tail, the deltas of the message still being written.
     ///
@@ -227,6 +241,27 @@ pub enum AgentCommand {
     /// preserve may have been changed by a tool call earlier in that same turn.
     /// Reading a copy taken at run start would carry a stale one.
     CarriedState { reply: ReplyTo<String> },
+}
+
+/// Everything a run starts from, gathered on the mailbox.
+///
+/// A struct because the run's own task cannot read state: whatever it needs has
+/// to be read here and travel with it. Grouping them also keeps the two callers
+/// honest — a new thing a run starts from is a field, and both callers have to
+/// say what they pass for it.
+struct RunStart {
+    input: AgentInput,
+    history: Vec<Message>,
+    /// The prompt size the previous turn left behind, from durable state.
+    context_tokens: u32,
+    /// What this agent's capabilities answer for. Read here for the same reason
+    /// as everything else: [`CapabilityToolbox`] runs on the task and cannot
+    /// reach the state that knows.
+    cap_specs: Vec<horsie_agentcore::ToolSpec>,
+    /// A summary this turn was asked for, and what becomes of it.
+    summarise: Option<Summarise>,
+    /// Whether that summary is all this turn is.
+    summarise_only: bool,
 }
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
@@ -478,6 +513,15 @@ pub enum AgentDomainEvent {
         asks: Vec<crate::agent_loop::AskedQuestion>,
         at_ms: u64,
     },
+    /// One of this agent's capabilities recorded something.
+    ///
+    /// The event is the capability's own, and the fold hands it to every
+    /// capability rather than looking one up by name: a capability that does
+    /// not own the arm ignores it, which is the same rule the journal already
+    /// uses for a runner's slice. Wrapping rather than flattening keeps
+    /// `AgentDomainEvent` a list of things the *actor* does, with one arm for
+    /// things its capabilities do.
+    Capability(crate::agent_loop::capabilities::CapEvent),
 }
 
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
@@ -575,6 +619,17 @@ pub struct AgentState {
     /// right now.
     #[serde(default)]
     pub context_tokens: u32,
+    /// What this agent can do, and whatever each of those has folded.
+    ///
+    /// Durable like the task list and the timers, and for the same reason: a
+    /// capability's state is a fact about this agent. The one that forced it
+    /// here is `ask_user` — the questions an agent is parked on are a pointer
+    /// into this transcript, so nothing outside this journal can hold them.
+    ///
+    /// Round-trips as `Vec<CapSlice>`, which keeps the journal typed while
+    /// dispatch stays open; see [`crate::agent_loop::capabilities`].
+    #[serde(default)]
+    pub capabilities: crate::agent_loop::capabilities::Capabilities,
 }
 
 /// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
@@ -759,6 +814,11 @@ impl AgentState {
     /// `next_seq` becomes `at_seq` for the same reason: the fork's own entries
     /// number on from where the copied ones stop, so every cursor into the
     /// copied log still resolves and nothing collides.
+    ///
+    /// Capabilities do not carry either, and it is the same rule rather than a
+    /// new one: a capability's folded state is what this agent has in flight —
+    /// the questions it is parked on above all — so inheriting it is inheriting
+    /// the ask. A fork is equipped when it loads, from its own runner.
     #[must_use]
     pub fn scrub_for_fork(&self, at_seq: u64) -> Self {
         Self {
@@ -779,6 +839,7 @@ impl AgentState {
             turn_in_flight: false,
             usage_total: UsageTotal::default(),
             last_turn_usage: None,
+            capabilities: crate::agent_loop::capabilities::Capabilities::default(),
         }
     }
 
@@ -1493,28 +1554,28 @@ impl AgentActor {
             });
         }
         self.start_run(
-            agent_input,
+            RunStart {
+                input: agent_input,
+                history,
+                context_tokens: folded.context_tokens,
+                cap_specs: folded.capabilities.tools(),
+                summarise: summarise.clone(),
+                summarise_only,
+            },
             ctx,
-            history,
-            folded.context_tokens,
-            summarise.clone(),
-            summarise_only,
         );
         events
     }
 
-    fn start_run(
-        &mut self,
-        input: AgentInput,
-        ctx: &ActorContext<AgentCommand>,
-        history: Vec<Message>,
-        // The prompt size the previous turn left behind, from durable state.
-        context_tokens: u32,
-        // A summary this turn was asked for, and what becomes of it.
-        summarise: Option<Summarise>,
-        // Whether that summary is all this turn is.
-        summarise_only: bool,
-    ) {
+    fn start_run(&mut self, start: RunStart, ctx: &ActorContext<AgentCommand>) {
+        let RunStart {
+            input,
+            history,
+            context_tokens,
+            cap_specs,
+            summarise,
+            summarise_only,
+        } = start;
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
         self.next_run_id += 1;
@@ -1601,6 +1662,13 @@ impl AgentActor {
             // that needs gating per agent.
             let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
                 inner: toolbox,
+                actor: self_ref.clone(),
+            });
+            // Outermost, so a capability wins a name against the sandbox — the
+            // same order the offer scan uses, read from the other end.
+            let toolbox: Arc<dyn Toolbox> = Arc::new(CapabilityToolbox {
+                inner: toolbox,
+                specs: cap_specs,
                 actor: self_ref.clone(),
             });
             let system_prompt = contexts
@@ -2310,6 +2378,7 @@ impl EventSourcedActor for AgentActor {
                 // the answer starts the next one.
                 state.turn_in_flight = false;
             }
+            AgentDomainEvent::Capability(event) => state.capabilities.apply(&event),
             AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
             AgentDomainEvent::TimerCancelled { ids, .. } => {
                 state.timers.retain(|t| !ids.contains(&t.id));
@@ -2519,6 +2588,43 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
+            AgentCommand::CapabilityCall { call, reply } => {
+                let Some(performed) = Self::consult(state, &Msg::Tool(&call)) else {
+                    // The layer only sends names a capability advertised, so
+                    // nothing claiming one is a disagreement between what was
+                    // advertised and what answers — a bug, and the model is
+                    // told rather than left waiting.
+                    tracing::error!(
+                        tool = call.name,
+                        "a capability advertised a tool and then did not claim its call"
+                    );
+                    let _ = reply.send(Err(horsie_agentcore::ToolCallError::ExecutionFailed(
+                        format!("`{}` is advertised but nothing answers it", call.name),
+                    )));
+                    return CommandEffect::none();
+                };
+                if !performed.resume.is_empty() {
+                    // Resuming supplies results for calls left dangling by an
+                    // earlier park. A call still in flight is not one of those,
+                    // so this would pair a result with a `tool_use` that is
+                    // about to get one anyway.
+                    tracing::error!(
+                        tool = call.name,
+                        "a capability asked to resume from a tool call still in flight"
+                    );
+                }
+                // Answered before the write lands, like every other tool that
+                // journals — see the boundary's note on perform-then-persist. A
+                // crash in the window replays the call, which is why a
+                // capability's events have to be idempotent under replay.
+                let answer = performed.answer.unwrap_or_else(|| {
+                    // Claimed, but asked for nothing: the honest reply is an
+                    // empty result rather than a hung call.
+                    Ok(ToolOutcome::Result(Value::Null))
+                });
+                let _ = reply.send(answer);
+                self.persist_maybe_snapshot(performed.events)
+            }
             AgentCommand::RecordLifecycle { event, at_ms } => {
                 // Almost every one of these is something a reader sees and this
                 // agent does nothing about. The runtime arriving is the one
@@ -2725,12 +2831,15 @@ impl EventSourcedActor for AgentActor {
         }
         let history = repair_unanswered_tool_calls(state.prompt_messages());
         self.start_run(
-            AgentInput::user_message(new_message_id(), "continue the interrupted task"),
+            RunStart {
+                input: AgentInput::user_message(new_message_id(), "continue the interrupted task"),
+                history,
+                context_tokens: state.context_tokens,
+                cap_specs: state.capabilities.tools(),
+                summarise: None,
+                summarise_only: false,
+            },
             ctx,
-            history,
-            state.context_tokens,
-            None,
-            false,
         );
     }
 }
@@ -2854,6 +2963,151 @@ impl Toolbox for TimerToolbox {
             }
             _ => self.inner.execute(name, input, tool_call_id).await,
         }
+    }
+}
+
+/// What a capability's acts came to: events to journal, and — when the message
+/// was a tool call — the answer to give the model.
+///
+/// A struct rather than a tuple because both halves are optional in different
+/// ways, and a caller that swapped them would still compile.
+#[derive(Default)]
+struct Performed {
+    events: Vec<AgentDomainEvent>,
+    /// `Some` once some capability answered or parked the call in flight.
+    answer: Option<Result<ToolOutcome, horsie_agentcore::ToolCallError>>,
+    /// Tool results a capability supplied for calls it had parked, which start
+    /// the next turn.
+    resume: Vec<horsie_models::agent::ToolResultInput>,
+}
+
+impl AgentActor {
+    /// Route a message to this agent's capabilities and work out what they
+    /// asked for.
+    ///
+    /// Pure apart from the logging: it decides, and the caller journals and
+    /// starts turns. [`Msg::routing`] picks offer or broadcast, so there is no
+    /// table here to keep in step with the message type.
+    fn consult(state: &AgentState, msg: &Msg<'_>) -> Option<Performed> {
+        let decision = match msg.routing() {
+            capabilities::Routing::Offer => state.capabilities.offer(msg)?,
+            capabilities::Routing::Broadcast => state.capabilities.broadcast(msg),
+        };
+        let mut out = Performed {
+            events: decision
+                .events
+                .into_iter()
+                .map(AgentDomainEvent::Capability)
+                .collect(),
+            ..Performed::default()
+        };
+        for act in decision.acts {
+            Self::perform(&mut out, act, msg);
+        }
+        Some(out)
+    }
+
+    /// Turn one act into events, an answer, or queued work.
+    fn perform(out: &mut Performed, act: Act, msg: &Msg<'_>) {
+        match act {
+            Act::Answer { call, text } => {
+                Self::answer_call(
+                    out,
+                    msg,
+                    &call,
+                    Ok(ToolOutcome::Result(Value::String(text))),
+                );
+            }
+            Act::Park { call } => Self::answer_call(out, msg, &call, Ok(ToolOutcome::StopRun)),
+            Act::Resume { results } => out.resume.extend(results),
+            Act::Enqueue { item } => out.events.push(AgentDomainEvent::Received {
+                item,
+                at_ms: now_ms(),
+            }),
+            // Task 5 gives this a session to ask. Until then no capability is
+            // equipped that can produce one, so this is unreachable rather than
+            // unwritten — and it says so loudly instead of dropping the ask.
+            Act::Ask(request) => {
+                tracing::error!(
+                    call = request.call(),
+                    "a capability asked the session for something before that path exists"
+                );
+            }
+        }
+    }
+
+    /// Deliver an answer to the tool call in flight, or complain.
+    ///
+    /// A capability may answer a call from a message that is not that call —
+    /// a session reply arriving turns later, say — and there is no run waiting
+    /// on it then. Task 5 gives that case a path; here it is a bug worth
+    /// hearing about rather than a silent drop.
+    fn answer_call(
+        out: &mut Performed,
+        msg: &Msg<'_>,
+        call: &str,
+        answer: Result<ToolOutcome, horsie_agentcore::ToolCallError>,
+    ) {
+        match msg {
+            Msg::Tool(in_flight) if in_flight.id == call => out.answer = Some(answer),
+            Msg::Tool(_)
+            | Msg::Command(_)
+            | Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Child(_)
+            | Msg::Reply(_) => {
+                tracing::error!(
+                    call,
+                    message = msg.describe(),
+                    "a capability answered a tool call that nothing is waiting on"
+                );
+            }
+        }
+    }
+}
+
+/// Wraps an agent's toolbox, adding every tool this agent's capabilities answer
+/// for.
+///
+/// One layer for all of them rather than a decorator each: which capability
+/// owns a name is decided by the offer scan on the mailbox, so a second place
+/// deciding it here could only disagree. `names` is what the scan will accept,
+/// captured when the run started — everything else goes straight to the sandbox
+/// without a mailbox round trip, which is what keeps an ordinary `bash` call as
+/// cheap as it was.
+struct CapabilityToolbox {
+    inner: Arc<dyn Toolbox>,
+    specs: Vec<horsie_agentcore::ToolSpec>,
+    actor: ActorRef<AgentCommand>,
+}
+
+#[async_trait]
+impl Toolbox for CapabilityToolbox {
+    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
+        let mut specs = self.inner.specs();
+        specs.extend(self.specs.iter().cloned());
+        specs
+    }
+
+    async fn execute(
+        &self,
+        name: &str,
+        input: Value,
+        tool_call_id: &str,
+    ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
+        use horsie_agentcore::ToolCallError;
+        if !self.specs.iter().any(|s| s.name == name) {
+            return self.inner.execute(name, input, tool_call_id).await;
+        }
+        let call = crate::sessions::runners::message::ToolCall {
+            id: tool_call_id.to_string(),
+            name: name.to_string(),
+            input,
+        };
+        self.actor
+            .ask(|reply| AgentCommand::CapabilityCall { call, reply })
+            .await
+            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
     }
 }
 
@@ -6606,6 +6860,174 @@ mod interruption_tests {
         assert!(
             outcomes.try_recv().is_err(),
             "an agent parked on a question has no interrupted turn to report"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod capability_tests {
+    use super::*;
+    use crate::agent_loop::capabilities::testing::{FakeCapability, call};
+    use crate::agent_loop::capabilities::{CapEvent, Capabilities};
+    use horsie_actor::{ActorSystem, InMemoryJournal};
+    use horsie_agentcore::{ToolCallError, ToolSpec};
+
+    fn equipped(tool: &str) -> AgentState {
+        AgentState {
+            capabilities: Capabilities::new(vec![Box::new(FakeCapability::new(tool))]),
+            ..AgentState::default()
+        }
+    }
+
+    /// A call a capability claims comes back as its events, wrapped so the
+    /// agent's journal stays a list of things the actor did with one arm for
+    /// things its capabilities did.
+    #[test]
+    fn a_claimed_call_journals_the_capabilitys_own_events() {
+        let state = equipped("fake_tool");
+        let performed = AgentActor::consult(&state, &Msg::Tool(&call("fake_tool")))
+            .expect("the capability claims its own tool");
+        assert_eq!(performed.events.len(), 1);
+        assert!(matches!(
+            performed.events.first(),
+            Some(AgentDomainEvent::Capability(CapEvent::Fake(_)))
+        ));
+    }
+
+    /// Nothing claiming it is `None`, which the command handler turns into an
+    /// error the model can see. A silent drop would hang the call for ever.
+    #[test]
+    fn a_call_nobody_claims_is_none() {
+        let state = equipped("fake_tool");
+        assert!(AgentActor::consult(&state, &Msg::Tool(&call("bash"))).is_none());
+    }
+
+    /// The fold reaches the capability, and replaying lands exactly where the
+    /// live fold did — which is the whole of how a recovered agent comes back
+    /// with the capabilities it had.
+    #[test]
+    fn folding_a_capability_event_reaches_it_and_replays_identically() {
+        let state = equipped("fake_tool");
+        let event = AgentDomainEvent::Capability(CapEvent::Fake(
+            crate::agent_loop::capabilities::testing::FakeEvent {
+                tool: "fake_tool".into(),
+                what: "tool:fake_tool".into(),
+            },
+        ));
+
+        let seen = |s: &AgentState| {
+            serde_json::to_string(&s.capabilities).expect("capabilities serialise")
+        };
+        let live = AgentActor::apply_event(state.clone(), event.clone());
+        let recovered = AgentActor::apply_event(state, event);
+
+        assert!(
+            seen(&live).contains("tool:fake_tool"),
+            "the fold never reached the capability, so a recovered agent would \
+             come back with its capabilities blank"
+        );
+        assert_eq!(
+            seen(&live),
+            seen(&recovered),
+            "replaying the journal must land where the live fold did"
+        );
+    }
+
+    /// An actor that fails the test if anything reaches its mailbox.
+    struct NeverAsked;
+
+    #[async_trait]
+    impl EventSourcedActor for NeverAsked {
+        type Command = AgentCommand;
+        type Event = ();
+        type State = ();
+
+        fn persistence_id(&self) -> PersistenceId {
+            PersistenceId::new("capability-test", "never-asked")
+        }
+
+        fn initial_state() {}
+
+        fn apply_event((): (), (): ()) {}
+
+        async fn handle_command(
+            &mut self,
+            (): &(),
+            _cmd: AgentCommand,
+            _ctx: &mut ActorContext<AgentCommand>,
+        ) -> CommandEffect<()> {
+            panic!("an ordinary tool call must never reach the mailbox");
+        }
+    }
+
+    struct Sandbox;
+
+    #[async_trait]
+    impl Toolbox for Sandbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "bash".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            _input: Value,
+            _tool_call_id: &str,
+        ) -> Result<ToolOutcome, ToolCallError> {
+            Ok(ToolOutcome::Result(Value::String(format!(
+                "sandbox ran {name}"
+            ))))
+        }
+    }
+
+    fn layer(specs: Vec<ToolSpec>) -> CapabilityToolbox {
+        CapabilityToolbox {
+            inner: Arc::new(Sandbox),
+            specs,
+            actor: crate::testing::spawn_detached(
+                &ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                NeverAsked,
+            ),
+        }
+    }
+
+    fn spec(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    /// The layer advertises what the capabilities answer for *alongside* the
+    /// sandbox's own tools, rather than replacing them.
+    #[tokio::test]
+    async fn the_layer_advertises_capabilities_beside_the_sandbox() {
+        let names: Vec<String> = layer(vec![spec("ask_user")])
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, vec!["bash", "ask_user"]);
+    }
+
+    /// An ordinary sandbox call goes straight through. The mailbox is not a
+    /// cheap place to send every `bash` call, and this is what keeps it out --
+    /// the stub actor panics if the round trip happens.
+    #[tokio::test]
+    async fn an_ordinary_call_never_touches_the_mailbox() {
+        let outcome = layer(vec![spec("ask_user")])
+            .execute("bash", Value::Null, "tc1")
+            .await
+            .expect("the sandbox answers");
+        assert_eq!(
+            outcome,
+            ToolOutcome::Result(Value::String("sandbox ran bash".into()))
         );
     }
 }
