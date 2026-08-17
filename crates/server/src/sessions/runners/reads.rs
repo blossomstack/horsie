@@ -1212,9 +1212,7 @@ mod tests {
     /// ships.
     #[test]
     fn a_fork_that_named_itself_is_listed_under_that_name() {
-        use crate::sessions::runners::capabilities::{
-            CapEvent, Capabilities, title::TitleCapability,
-        };
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, title::TitleCapability};
         let (mut s, main) = session();
         let branch = AgentId::new_v4();
         let runner = put(
@@ -1241,7 +1239,8 @@ mod tests {
         Runner::apply(
             &mut rec.state,
             &crate::sessions::runners::RunnerEvent::Capability(CapEvent::Title(
-                crate::sessions::runners::capabilities::title::Event::Set {
+                crate::agent_loop::capabilities::title::Event::Set {
+                    call: "t".into(),
                     name: "the setup flake".into(),
                 },
             )),

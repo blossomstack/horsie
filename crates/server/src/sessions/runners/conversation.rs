@@ -26,10 +26,10 @@
 //! the id used to answer by being `None`, which it can no longer do.
 
 use super::action::{Branch, FirstInput};
-use super::capabilities::{CapSlice, Capabilities};
 use super::message::ChildOutcome;
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
+use crate::agent_loop::capabilities::{CapSlice, Capabilities};
 use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::supervisor::ForkRow;
@@ -160,7 +160,7 @@ impl State {
     /// field here would make two writers of one fact, and they would disagree
     /// the first time a rename took one path and not the other.
     ///
-    /// Read through [`super::capabilities::Capability::save`] because a
+    /// Read through [`crate::agent_loop::capabilities::Capability::save`] because a
     /// capability is a `dyn` value: a runner composes its list at runtime, so
     /// there is no enum to match on and nothing to downcast to.
     fn name(&self) -> Option<String> {
@@ -425,8 +425,8 @@ impl AgentLifecycle for State {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::title::TitleCapability;
     use crate::sessions::forks::ForkMode;
-    use crate::sessions::runners::capabilities::title::TitleCapability;
 
     fn view() -> SessionView {
         SessionView {
@@ -555,8 +555,8 @@ mod tests {
     /// Equipment comes from folding this conversation's capabilities, which is
     /// what replaces the per-kind toolbox match: a fork is equipped by holding
     /// different capabilities, not by being a different kind of agent.
-    #[tokio::test]
-    async fn the_agent_is_equipped_by_folding_the_capabilities() {
+    #[test]
+    fn the_agent_is_equipped_by_folding_the_capabilities() {
         let state = State {
             capabilities: Capabilities::new(vec![Box::new(TitleCapability::default())]),
             ..State::default()
@@ -565,16 +565,10 @@ mod tests {
         let Action::StartAgent { equipment, .. } = &actions[0] else {
             panic!("expected a start, got {:?}", actions[0]);
         };
-        let (spec, _) = equipment
-            .equip(
-                &crate::sessions::runners::capabilities::testing::loading(),
-                state.settings.clone(),
-            )
-            .await
-            .expect("nothing fatal");
+        let tools: Vec<String> = equipment.tools().into_iter().map(|t| t.name).collect();
         assert_eq!(
-            crate::sessions::runners::capabilities::testing::equipped(spec),
-            vec![crate::sessions::runners::capabilities::title::TOOL],
+            tools,
+            vec![crate::agent_loop::capabilities::title::TOOL],
             "the capability it holds is what its agent runs with"
         );
     }

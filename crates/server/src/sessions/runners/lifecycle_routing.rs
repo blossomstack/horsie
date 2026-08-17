@@ -365,11 +365,18 @@ fn from_workflow(runner: RunnerId, event: &workflow::Event, state: &SessionState
 /// have something to show has to say so here.
 fn from_capability(event: &capabilities::CapEvent) -> Vec<Entry> {
     match event {
-        capabilities::CapEvent::Title(_)
-        | capabilities::CapEvent::SubAgent(_)
-        | capabilities::CapEvent::Workflow(_)
+        capabilities::CapEvent::AskUser(_)
+        | capabilities::CapEvent::ControlPlane(_)
         | capabilities::CapEvent::Fork(_)
-        | capabilities::CapEvent::StepResult(_) => Vec::new(),
+        | capabilities::CapEvent::Mcp(_)
+        | capabilities::CapEvent::Memory(_)
+        | capabilities::CapEvent::Runtime(_)
+        | capabilities::CapEvent::StepResult(_)
+        | capabilities::CapEvent::SubAgent(_)
+        | capabilities::CapEvent::Title(_)
+        | capabilities::CapEvent::Workflow(_) => Vec::new(),
+        #[cfg(test)]
+        capabilities::CapEvent::Fake(_) => Vec::new(),
     }
 }
 
@@ -774,7 +781,10 @@ mod tests {
             on(
                 world.root,
                 RunnerEvent::Capability(capabilities::CapEvent::Title(
-                    capabilities::title::Event::Set { name: "n".into() },
+                    capabilities::title::Event::Set {
+                        call: "t".into(),
+                        name: "n".into(),
+                    },
                 )),
             ),
             on(
@@ -836,11 +846,17 @@ mod tests {
             SessionEvent::Runner { event, .. } => match event.as_ref() {
                 RunnerEvent::Usage { .. } => true,
                 RunnerEvent::Capability(cap) => match cap {
-                    capabilities::CapEvent::Title(_)
-                    | capabilities::CapEvent::SubAgent(_)
-                    | capabilities::CapEvent::Workflow(_)
+                    capabilities::CapEvent::AskUser(_)
+                    | capabilities::CapEvent::ControlPlane(_)
+                    | capabilities::CapEvent::Fake(_)
                     | capabilities::CapEvent::Fork(_)
-                    | capabilities::CapEvent::StepResult(_) => true,
+                    | capabilities::CapEvent::Mcp(_)
+                    | capabilities::CapEvent::Memory(_)
+                    | capabilities::CapEvent::Runtime(_)
+                    | capabilities::CapEvent::StepResult(_)
+                    | capabilities::CapEvent::SubAgent(_)
+                    | capabilities::CapEvent::Title(_)
+                    | capabilities::CapEvent::Workflow(_) => true,
                 },
                 RunnerEvent::Runtime(e) => match e {
                     runtime::Event::Released => true,

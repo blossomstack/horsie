@@ -384,6 +384,10 @@ impl SessionActor {
             crate::sessions::runners::RunnerKind::Conversation,
             &crate::sessions::runners::Assembly {
                 settings: &settings,
+                agent: crate::sessions::runners::AgentId(id),
+                // A fork roots its own subagent tree, for the same reason a
+                // step does: nothing is waiting on it for a report.
+                depth: 0,
                 unattended: self.spec().is_unattended(),
                 fork: Some(crate::sessions::runners::RunnerId(id)),
                 agent_type: None,

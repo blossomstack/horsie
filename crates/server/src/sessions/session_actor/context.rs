@@ -18,15 +18,14 @@
 use super::{AgentKey, CoreCommand, SessionCommand};
 use crate::{
     agent_loop::{
-        ContextError, ContextProvider, Contexts, StartTurn, TurnPreparation, compose_system_prompt,
+        ContextError, ContextProvider, Contexts, StartTurn, TurnPreparation,
+        capabilities::{Capabilities, SetupError, runtime::GONE_PREFIX},
+        compose_system_prompt,
     },
     runtime_manager::{NARRATION_BUFFER, RuntimeError},
     sessions::{
         addressing::SessionRef,
-        runners::{
-            capabilities::{Capabilities, SetupError, runtime::GONE_PREFIX},
-            loading::{AgentSpec, Loading},
-        },
+        runners::loading::{AgentSpec, Loading},
         spec::AgentSettings,
     },
 };
@@ -727,6 +726,23 @@ mod tests {
         }
     }
 
+    /// Every tool this agent will actually be offered.
+    ///
+    /// Two halves, because that is how the agent runs: the layers `provide`
+    /// composed — the sandbox, MCP, memory — plus what its capabilities answer
+    /// for on the mailbox, which the agent actor advertises beside them. A test
+    /// reading only the toolbox would pass with `ask_user` missing entirely.
+    fn offered(provider: &SessionContextProvider, contexts: &Contexts) -> Vec<String> {
+        let mut names: Vec<String> = contexts
+            .toolbox
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        names.extend(provider.equipment.tools().into_iter().map(|t| t.name));
+        names
+    }
+
     #[tokio::test]
     async fn subagent_toolbox_strips_session_metadata_tools() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
@@ -740,8 +756,9 @@ mod tests {
             plugins: Vec::new(),
         };
 
-        let main = build(SessionAgentKind::Main).provide().await.unwrap();
-        let main_tools: Vec<String> = main.toolbox.specs().into_iter().map(|s| s.name).collect();
+        let main_provider = build(SessionAgentKind::Main);
+        let main = main_provider.provide().await.unwrap();
+        let main_tools = offered(&main_provider, &main);
         for t in [
             "spawn_agent",
             "subagent_status",
@@ -752,11 +769,9 @@ mod tests {
         }
 
         let sub_id = Uuid::new_v4();
-        let sub = build(SessionAgentKind::Sub(sub_id))
-            .provide()
-            .await
-            .unwrap();
-        let sub_tools: Vec<String> = sub.toolbox.specs().into_iter().map(|s| s.name).collect();
+        let sub_provider = build(SessionAgentKind::Sub(sub_id));
+        let sub = sub_provider.provide().await.unwrap();
+        let sub_tools = offered(&sub_provider, &sub);
         for t in ["spawn_agent", "subagent_status"] {
             assert!(sub_tools.contains(&t.to_string()), "sub lacks {t}");
         }
@@ -789,15 +804,8 @@ mod tests {
             agent_type: None,
             plugins: Vec::new(),
         };
-        let tools: Vec<String> = provider
-            .provide()
-            .await
-            .unwrap()
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let contexts = provider.provide().await.unwrap();
+        let tools = offered(&provider, &contexts);
         // Disabled, not merely unusable: an advertised tool that always
         // rejects reads as a bug to the model.
         for t in ["spawn_agent", "subagent_status"] {
@@ -824,12 +832,9 @@ mod tests {
             agent_type: None,
             plugins: Vec::new(),
         };
-        let names = |c: &Contexts| -> Vec<String> {
-            c.toolbox.specs().into_iter().map(|s| s.name).collect()
-        };
-
-        let unattended = build(true).provide().await.unwrap();
-        let tools = names(&unattended);
+        let unattended_provider = build(true);
+        let unattended = unattended_provider.provide().await.unwrap();
+        let tools = offered(&unattended_provider, &unattended);
         assert!(!tools.contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
         // Everything else the main agent has is untouched.
         assert!(tools.contains(&"set_session_title".to_string()));
@@ -842,8 +847,12 @@ mod tests {
             "an unattended run must be told there is no user"
         );
 
-        let attended = build(false).provide().await.unwrap();
-        assert!(names(&attended).contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
+        let attended_provider = build(false);
+        let attended = attended_provider.provide().await.unwrap();
+        assert!(
+            offered(&attended_provider, &attended)
+                .contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string())
+        );
         assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
     }
 

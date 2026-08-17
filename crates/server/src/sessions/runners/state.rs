@@ -166,7 +166,7 @@ pub enum SessionEvent {
     ///
     /// Distinct from `set_session_title`, which is an agent naming the
     /// conversation it is in and belongs to
-    /// [`super::capabilities::title::TitleCapability`]. This one needs no
+    /// [`crate::agent_loop::capabilities::title::TitleCapability`]. This one needs no
     /// capability, because nobody's agent asked for it — which is also why a
     /// workflow-root session, whose steps get no title layer, can still be
     /// renamed.

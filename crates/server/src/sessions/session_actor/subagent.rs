@@ -265,6 +265,11 @@ impl SessionActor {
             crate::sessions::runners::RunnerKind::SubAgent,
             &crate::sessions::runners::Assembly {
                 settings: &settings,
+                agent: crate::sessions::runners::AgentId(id),
+                // This worker's own depth, off the node the tree already holds
+                // — the number the depth gate is answered from when it spawns a
+                // worker of its own.
+                depth: state.subagents.node(id).map_or(0, |rec| rec.depth),
                 unattended: self.spec().is_unattended(),
                 fork: None,
                 agent_type: agent_type.clone(),

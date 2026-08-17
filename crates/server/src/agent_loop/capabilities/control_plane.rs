@@ -115,8 +115,7 @@ impl Capability for ControlPlaneCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::call;
-    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{call, equipped, loading, spec};
 
     /// Holding the capability is what equips the tools and the prompt that
     /// tells the agent they exist — a tool nobody was told about is not used.

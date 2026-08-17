@@ -282,10 +282,27 @@ struct Decision {
 /// this list grows deliberately — it does not reach around.
 enum Act {
     Answer  { call: String, text: String },
-    /// Stop the run; this call stays open until something resumes it.
-    Park    { call: String },
+    /// Stop the run; this call stays open until something resumes it. `note`
+    /// says what is being waited for -- the actor keeps its own record of the
+    /// park, because being parked governs the queue and recovery, which no
+    /// capability can see.
+    Park    { call: String, note: String },
     Resume  { results: Vec<(String, String)> },
+    /// The work is finished, and this is its result. Not a park: both stop the
+    /// run, which is why the old code sorted `ask_user` and `submit_result` out
+    /// afterwards by matching tool names, but a conclusion owes nothing ever
+    /// and carries an output `Park` has nowhere to put.
+    Conclude { output: Value },
     Enqueue { item: Incoming },
+    /// Do not treat this turn's end as the agent finishing. A verb rather than
+    /// a claimed-but-empty `Decision`, because a turn boundary is *broadcast*
+    /// and the results are merged -- so "I claimed this" is invisible to the
+    /// actor by construction. This is invariant 6.
+    Hold    { note: String },
+    /// Say something a person should see. A capability's own events are folded
+    /// but append nothing readable, so without this an `ask_user` question
+    /// would vanish from the UI with every test still green.
+    Record(LifecycleEvent),
     Ask(SessionRequest),
 }
 

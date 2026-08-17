@@ -295,6 +295,10 @@ impl SessionActor {
             crate::sessions::runners::RunnerKind::Workflow,
             &crate::sessions::runners::Assembly {
                 settings: &settings,
+                agent: crate::sessions::runners::AgentId(agent_id),
+                // A step roots its own subagent tree: nothing is waiting on it
+                // for a report, so its spawns are that tree's `Main`.
+                depth: 0,
                 unattended,
                 fork: None,
                 agent_type: None,
@@ -309,7 +313,7 @@ impl SessionActor {
         // call offered to it, so an appended `submit_result` would be swallowed
         // by the sandbox.
         equipment.push_front(
-            crate::sessions::runners::capabilities::step_result::StepResultCapability::new(
+            crate::agent_loop::capabilities::step_result::StepResultCapability::new(
                 step.outcomes.clone(),
                 step.fields.clone(),
                 step.interactive,
@@ -324,7 +328,7 @@ impl SessionActor {
         // there — usually somebody is — and telling an attended run it was
         // started by a routine is simply false.
         equipment.push_front({
-            use crate::sessions::runners::capabilities::ask_user::AskUserCapability;
+            use crate::agent_loop::capabilities::ask_user::AskUserCapability;
             match (step.interactive, unattended) {
                 (true, false) => AskUserCapability::new(),
                 // Interactive, but a routine started the run: a question here

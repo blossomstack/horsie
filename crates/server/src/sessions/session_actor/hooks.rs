@@ -137,18 +137,27 @@ impl AgentOutcomeSink for SessionParent {
         }
         match request {
             SessionRequest::SetTitle { title, .. } => {
+                // Which title depends on who asked, and the request cannot
+                // say: a fork naming itself and a conversation naming the
+                // session are the same tool call. `key` is the only thing that
+                // knows, which is why this sink carries it. Routing both to
+                // `Core` would let a fork rename the whole session.
                 match self
                     .target
-                    .ask(|reply| {
-                        SessionCommand::Core(super::CoreCommand::SetTitle {
-                            // The handler discards this: a title is the
-                            // session's, and which agent asked changes nothing
-                            // about it. Nil rather than a fabricated id, so
-                            // nothing can come to depend on a lie.
+                    .ask(|reply| match self.key {
+                        AgentKey::Fork(id) => SessionCommand::Fork(super::ForkCommand::SetTitle {
+                            id,
                             agent: crate::sessions::runners::ids::AgentId::default(),
-                            title,
+                            title: title.clone(),
                             reply,
-                        })
+                        }),
+                        AgentKey::Main | AgentKey::Sub(_) | AgentKey::Step(_) => {
+                            SessionCommand::Core(super::CoreCommand::SetTitle {
+                                agent: crate::sessions::runners::ids::AgentId::default(),
+                                title: title.clone(),
+                                reply,
+                            })
+                        }
                     })
                     .await
                 {

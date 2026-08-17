@@ -197,7 +197,7 @@ struct AgentPlan {
     /// only the spawn site knows about — a step's typed `submit_result` and
     /// whether that step may ask — are part of the same list. It is the list a
     /// runner will hold and hand to each agent it starts.
-    equipment: crate::sessions::runners::capabilities::Capabilities,
+    equipment: crate::agent_loop::capabilities::Capabilities,
     /// The plugin-declared agent type a typed subagent runs as.
     agent_type: Option<String>,
 }
@@ -526,6 +526,12 @@ impl SessionActor {
                 plugin_library: self.deps().plugins.clone(),
             },
         );
+        // The same list twice, deliberately: the provider equips the agent from
+        // it — the toolbox layers each capability pushes — and the agent itself
+        // holds it, journals `Equipped` once, and advertises what its
+        // capabilities answer for. Two copies of one decision, never two
+        // decisions.
+        let capabilities = plan.equipment.clone();
         let provider = Arc::new(SessionContextProvider {
             loading,
             equipment: plan.equipment,
@@ -544,6 +550,7 @@ impl SessionActor {
         // A step is the only agent that owes a structured result, and the only
         // one for which a turn ending with plain text is not an answer.
         params.requires_result = matches!(plan.kind, SessionAgentKind::Step(_));
+        params.capabilities = capabilities;
         params.thinking_effort = plan
             .settings
             .thinking_effort
@@ -598,6 +605,11 @@ impl SessionActor {
             crate::sessions::runners::RunnerKind::Conversation,
             &crate::sessions::runners::Assembly {
                 settings: &settings,
+                // The main agent journals under the session's own id — its
+                // transcript *is* the session's — so that is the id it is
+                // known by here too.
+                agent: crate::sessions::runners::AgentId(self.id),
+                depth: 0,
                 unattended: self.spec().is_unattended(),
                 fork: None,
                 agent_type: None,

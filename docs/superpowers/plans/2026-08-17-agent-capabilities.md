@@ -144,3 +144,27 @@ Runners lose their capability lists. `SessionState` loses every `CapEvent`. The 
 Tasks 3 and 4 need no session, so they prove the agent-side machinery in isolation. Task 5 opens the cross-actor path and pays its crash-window cost once. Tasks 6–8 are then the same shape three times. Task 9 is bulk with little risk. Tasks 10–11 are deletion, which is where `-D warnings` does the work.
 
 The riskiest task is 5, not 7 — the dedupe-and-re-ask pair is the only genuinely new distributed reasoning in the whole plan.
+
+---
+
+## Settled while implementing (2026-08-17)
+
+All ten capabilities are ported to the agent-side trait. What the build taught us, beyond the plan:
+
+**`Act` has eight verbs, and each growth was forced.** `Answer`, `Park`, `Resume`, `Enqueue`, `Ask` were the plan's five. Then:
+
+- **`Conclude { output }`** — `submit_result` does not park, it concludes. Both stop the run, which is exactly why the old code could treat it and `ask_user` alike and sort them out afterwards by matching tool names in `interpret`. A park owes a result later; a conclusion owes nothing ever and carries an output `Park` has nowhere to put.
+- **`Record(LifecycleEvent)`** — a capability's own events are folded but append nothing a client can read. `ask_user` journaling its park purely as a `CapEvent` would have left the question invisible in the UI: green tests, and only a browser would have noticed.
+- **`Hold { note }`** — invariant 6. A turn boundary is *broadcast*, and `Capabilities::broadcast` merges what comes back, so a capability claiming the boundary with an empty `Decision` is invisible to the actor **by construction**. Only something in the merged result can carry "do not treat this ending as the agent finishing". The first cut used a claimed-but-empty decision and could never have worked.
+
+**`Park` carries a `note`, and the actor journals its own record of it.** Being parked governs what no capability can see — whether the queue may start a turn, and which dangling calls recovery must leave alone. The capability keeps whatever it needs beyond that, which for `ask_user` is the question. Two facts about one call, not one fact twice.
+
+**`interpret` no longer knows which tools finish a run.** It asks what its capabilities decided: a conclusion they carried, or a park they already journaled. The two name matches that remain are the old toolboxes' path and go with them.
+
+**`Act::Ask` reaches the session through `AgentOutcomeSink::request`** rather than a new channel — it is the same relationship, and the same gates. `StopHookParent` must delegate it explicitly: the trait's default refuses, and it is the sink actually installed, so inheriting the default would fail every request with a reason that is not true.
+
+## Known gaps, deliberately left
+
+- **`spawn_agent` no longer lists the installed agent types.** `Capability::tools()` takes no `AgentFacts`, and the catalogue only exists after the runtime's workspace scan — which is what the old compose-time toolbox layer was for. `agent_type` is still parsed and forwarded, and an unknown one is still refused, but the model is no longer *told* which exist. Fixing it means either facts at advertise time or holding the catalogue as capability config. **This is a real regression, not a simplification.**
+- **`subagent_status` takes no `id`.** The old tool could report one child's status from the session's forest; agent-side there is only "what I am still owed".
+- **The crash window is not closed.** A capability journals its request before asking, but nothing re-asks a dangling one on load, and the session does not dedupe `StartRunner` by call id. Needs a `Msg` the actor broadcasts after recovery.

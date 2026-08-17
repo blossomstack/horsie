@@ -26,8 +26,8 @@
 //!
 //! The catch is that a decorator needs its inner toolbox when it is built,
 //! while `setup` has to run front-to-back for an unrelated reason:
-//! [`super::capabilities::mcp`] must deposit its connections before
-//! [`super::capabilities::runtime`] builds the base out of them. So a
+//! [`crate::agent_loop::capabilities::mcp`] must deposit its connections before
+//! [`crate::agent_loop::capabilities::runtime`] builds the base out of them. So a
 //! capability does not build a toolbox — it pushes a [`Layer`], and the spec
 //! composes them at the end, innermost last.
 

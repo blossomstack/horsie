@@ -34,13 +34,13 @@
 //! would ever deliver.
 
 use super::action::{Action, FirstInput};
-use super::capabilities::Capabilities;
-use super::capabilities::ask_user::AskUserCapability;
-use super::capabilities::step_result::StepResultCapability;
 use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
+use crate::agent_loop::capabilities::Capabilities;
+use crate::agent_loop::capabilities::ask_user::AskUserCapability;
+use crate::agent_loop::capabilities::step_result::StepResultCapability;
 use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::workflow::{
@@ -891,7 +891,7 @@ impl AgentLifecycle for State {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::runners::capabilities::testing::settings;
+    use crate::agent_loop::capabilities::testing::settings;
     use crate::sessions::workflow::{TransitionSpec, WorkflowStepSpec};
     use horsie_models::workflow::{OutcomeFilter, OutcomeIn};
 
@@ -1573,6 +1573,8 @@ mod tests {
             crate::sessions::runners::RunnerKind::Workflow,
             &crate::sessions::runners::Assembly {
                 settings: &s,
+                agent: crate::sessions::runners::AgentId::new_v4(),
+                depth: 0,
                 unattended: false,
                 fork: None,
                 agent_type: None,
@@ -1602,8 +1604,8 @@ mod tests {
     /// It still *holds* the capability: something has to answer for `ask_user`,
     /// or a step that asks anyway falls through to the sandbox and is never
     /// told no.
-    #[tokio::test]
-    async fn a_non_interactive_step_holds_ask_user_but_equips_no_tool() {
+    #[test]
+    fn a_non_interactive_step_holds_ask_user_but_equips_no_tool() {
         let state = run();
         let actions = state.actions(&view());
         let Action::StartAgent { equipment, .. } = &actions[0] else {
@@ -1618,15 +1620,8 @@ mod tests {
             .filter(|c| c.name() == "ask_user")
             .map(|c| c.save().into())
             .collect();
-        let (spec, _) = asks
-            .equip(
-                &crate::sessions::runners::capabilities::testing::loading(),
-                settings(),
-            )
-            .await
-            .expect("nothing fatal");
         assert!(
-            spec.toolbox().is_none(),
+            asks.tools().is_empty(),
             "a step that may not ask must be equipped with no ask tool"
         );
     }

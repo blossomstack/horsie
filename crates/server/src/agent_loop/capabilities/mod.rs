@@ -235,6 +235,18 @@ pub enum Act {
     /// conclusion owes nothing ever, and carries an output [`Self::Park`] has
     /// nowhere to put.
     Conclude { output: serde_json::Value },
+    /// Do not treat this turn's end as the agent finishing: something this
+    /// capability is holding will wake it.
+    ///
+    /// A verb rather than a claimed-but-empty [`Decision`], because a turn
+    /// boundary is *broadcast* and [`Capabilities::broadcast`] merges what comes
+    /// back — so "I claimed this" is invisible to the actor by construction,
+    /// and only something in the merged result can carry it.
+    ///
+    /// This is invariant 6: a step whose subagent still owes it a report must
+    /// not conclude, and must not be nudged either, because a nudge is for a
+    /// turn that ended with *nothing* coming.
+    Hold { note: String },
     /// Put something in this agent's own queue.
     Enqueue { item: Incoming },
     /// Record something in this agent's log, where a reader will see it.

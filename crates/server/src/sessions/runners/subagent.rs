@@ -22,10 +22,10 @@
 //! that agent is running — the question the id used to answer by being `None`.
 
 use super::action::FirstInput;
-use super::capabilities::Capabilities;
 use super::message::{ChildOutcome, SubAgentOutcome};
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
+use crate::agent_loop::capabilities::Capabilities;
 use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
@@ -325,7 +325,7 @@ fn render(output: &serde_json::Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::runners::capabilities::title::TitleCapability;
+    use crate::agent_loop::capabilities::title::TitleCapability;
 
     fn worker() -> State {
         State {
@@ -431,7 +431,7 @@ mod tests {
         };
         let (spec, _) = equipment
             .equip(
-                &crate::sessions::runners::capabilities::testing::loading(),
+                &crate::agent_loop::capabilities::testing::loading(),
                 state.settings.clone(),
             )
             .await
@@ -440,9 +440,10 @@ mod tests {
         // under what its parent decided, not under whatever the session's are
         // by the time it wakes.
         assert_eq!(spec.settings.model, state.settings.model);
+        let tools: Vec<String> = equipment.tools().into_iter().map(|t| t.name).collect();
         assert_eq!(
-            crate::sessions::runners::capabilities::testing::equipped(spec),
-            vec![crate::sessions::runners::capabilities::title::TOOL],
+            tools,
+            vec![crate::agent_loop::capabilities::title::TOOL],
             "the capability it holds is what its agent runs with"
         );
     }

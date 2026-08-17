@@ -334,8 +334,13 @@ impl Capability for WorkflowCapability {
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
             // Invariant 6: a run in flight is an outstanding child, and its
-            // output is work this agent has not seen yet.
-            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => Some(Decision::noop()),
+            // output is work this agent has not seen yet. `Act::Hold` because a
+            // turn boundary is broadcast and merged — see `sub_agent`.
+            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => {
+                Some(Decision::default().then(Act::Hold {
+                    note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
+                }))
+            }
             Msg::Tool(_) | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
         }
     }

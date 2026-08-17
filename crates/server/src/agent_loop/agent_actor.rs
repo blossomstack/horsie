@@ -2139,7 +2139,19 @@ impl AgentActor {
         if !drained.is_empty() {
             return self.persist_maybe_snapshot(drained);
         }
-        if !state.timers.is_empty()
+        // Invariant 6: a capability holding something that will wake this agent
+        // — a subagent still owing a report, a run still going — says so here,
+        // and the turn ending is not the agent finishing. Broadcast, because
+        // more than one of them may be holding something, and merged, because
+        // any one of them is enough.
+        let held = Self::consult(state, &Msg::Turn(TurnEvent::Ended))
+            .map(|performed| performed.hold)
+            .unwrap_or_default();
+        if !held.is_empty() {
+            tracing::debug!(?held, "a turn ended with something still owed");
+        }
+        if !held.is_empty()
+            || !state.timers.is_empty()
             || crate::agent_loop::carried_state::has_running_subagents(state)
         {
             parent.deliver(AgentOutcome::Parked { agent }).await;
@@ -2773,9 +2785,10 @@ impl EventSourcedActor for AgentActor {
                     );
                 }
                 self.dispatch_asks(performed.asks, ctx);
+                let concluded = performed.conclusion.is_some();
                 if let Some(output) = performed.conclusion {
                     // Held until the run reports back, which is the moment the
-                    // owner can be told. Answering `StopRun` here is what ends
+                    // owner can be told. Answering `StopRun` below is what ends
                     // the run that produces that report.
                     self.pending_conclusion = Some(output);
                 }
@@ -2783,10 +2796,19 @@ impl EventSourcedActor for AgentActor {
                 // journals — see the boundary's note on perform-then-persist. A
                 // crash in the window replays the call, which is why a
                 // capability's events have to be idempotent under replay.
-                let answer = performed.answer.unwrap_or_else(|| {
-                    // Claimed, but asked for nothing: the honest reply is an
-                    // empty result rather than a hung call.
-                    Ok(ToolOutcome::Result(Value::Null))
+                let answer = performed.answer.unwrap_or({
+                    match concluded {
+                        // A conclusion is the agent's work finishing, so the
+                        // run has to stop for `interpret` to read it back. A
+                        // result here instead would answer the call and carry
+                        // on, and the model — having nothing left to do —
+                        // submits the same result again until the loop
+                        // detector ends the step.
+                        true => Ok(ToolOutcome::StopRun),
+                        // Claimed, but asked for nothing: the honest reply is
+                        // an empty result rather than a hung call.
+                        false => Ok(ToolOutcome::Result(Value::Null)),
+                    }
                 });
                 let _ = reply.send(answer);
                 self.persist_maybe_snapshot(performed.events)
@@ -3167,6 +3189,9 @@ struct Performed {
     /// Things a capability wants from the session. Sent off the mailbox, and
     /// their replies come back as [`Msg::Reply`].
     asks: Vec<capabilities::SessionRequest>,
+    /// Why this turn's end is not the agent finishing, from every capability
+    /// holding something. Non-empty parks the agent.
+    hold: Vec<String>,
 }
 
 impl AgentActor {
@@ -3232,7 +3257,15 @@ impl AgentActor {
             resume,
             conclusion,
             asks,
+            hold,
         } = performed;
+        if !hold.is_empty() {
+            // Only a turn boundary can be held, and this is not one.
+            tracing::error!(
+                ?hold,
+                "a capability held a boundary that is not a turn ending"
+            );
+        }
         if answer.is_some() {
             tracing::error!("a capability answered a tool call with no run waiting on it");
         }
@@ -3276,6 +3309,7 @@ impl AgentActor {
             }
             Act::Resume { results } => out.resume.extend(results),
             Act::Conclude { output } => out.conclusion = Some(output),
+            Act::Hold { note } => out.hold.push(note),
             Act::Enqueue { item } => out.events.push(AgentDomainEvent::Received {
                 item,
                 at_ms: now_ms(),

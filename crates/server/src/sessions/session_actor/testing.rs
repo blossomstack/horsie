@@ -1304,13 +1304,20 @@ pub(super) fn test_equipment(
     settings: &crate::sessions::spec::AgentSettings,
     unattended: bool,
     agent_type: Option<String>,
-) -> crate::sessions::runners::capabilities::Capabilities {
-    use crate::sessions::runners::{
-        Assembly, RunnerId, RunnerKind, assemble,
-        capabilities::{ask_user::AskUserCapability, step_result::StepResultCapability},
+) -> crate::agent_loop::capabilities::Capabilities {
+    use crate::agent_loop::capabilities::{
+        ask_user::AskUserCapability, step_result::StepResultCapability,
     };
+    use crate::sessions::runners::{AgentId, Assembly, RunnerId, RunnerKind, assemble};
     let opts = Assembly {
         settings,
+        agent: AgentId(match kind {
+            SessionAgentKind::Main => Uuid::nil(),
+            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
+                id
+            }
+        }),
+        depth: 0,
         unattended,
         fork: match kind {
             SessionAgentKind::Fork(id) => Some(RunnerId(id)),

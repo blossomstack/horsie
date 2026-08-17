@@ -6,7 +6,7 @@
 //! sight.
 //!
 //! What an agent runs with is [`super::loading::AgentSpec`], built by
-//! [`super::capabilities::Capabilities::equip`] — which is async, so no
+//! [`crate::agent_loop::capabilities::Capabilities::equip`] — which is async, so no
 //! decision here can produce one. [`Action::StartAgent`] carries the
 //! ingredients instead, and the agent's own task does the equipping.
 
@@ -24,7 +24,7 @@ pub enum Action {
     /// Start an agent for this runner, and put `first` in its queue.
     ///
     /// Carries the capability set rather than a finished [`AgentSpec`], because
-    /// building the spec is [`super::capabilities::Capability::setup`] and that
+    /// building the spec is [`crate::agent_loop::capabilities::Capability::setup`] and that
     /// is async: it acquires a sandbox, scans a workspace, connects MCP. The
     /// session hands this list to the agent's own task, which equips itself.
     /// A decision stays sync, and the slow part never touches the mailbox.
@@ -35,7 +35,7 @@ pub enum Action {
     /// a large model and step 2 on a small one.
     StartAgent {
         agent: AgentId,
-        equipment: super::capabilities::Capabilities,
+        equipment: crate::agent_loop::capabilities::Capabilities,
         settings: Box<AgentSettings>,
         first: FirstInput,
     },

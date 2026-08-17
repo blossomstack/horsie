@@ -412,9 +412,14 @@ impl Capability for SubAgentCapability {
             Msg::Child(m) => self.child(m),
             // Invariant 6. The turn is over and a report is still owed, so this
             // agent is not finished — it has work arriving that it has not
-            // seen. Claimed rather than declined so the boundary carries the
-            // answer; the conclusion is held until the last child reports.
-            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => Some(Decision::noop()),
+            // seen. `Act::Hold` rather than a claimed-but-empty decision: a
+            // turn boundary is broadcast and merged, so claiming it is
+            // invisible to the actor and only an act can carry the answer.
+            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => {
+                Some(Decision::default().then(Act::Hold {
+                    note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
+                }))
+            }
             Msg::Tool(_) | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
         }
     }
