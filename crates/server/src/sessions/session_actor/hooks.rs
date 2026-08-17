@@ -20,7 +20,11 @@ use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::sessions::addressing::{SessionInbox, SessionRef};
+use crate::sessions::runners::action::RunnerArgs;
+use crate::sessions::runners::ids::RunnerId;
+use crate::sessions::session_actor::types::SubAgentCommand;
 use crate::sessions::spec::SessionStatus;
+use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
@@ -39,11 +43,68 @@ use tokio::sync::oneshot;
 /// by `run_id`, so every outcome that arrives here is one the session asked for.
 pub(super) struct SessionParent {
     target: SessionRef,
+    /// Which agent reports through this sink. Only requests need it — a
+    /// subagent's parent has to be named, and the caller is the one thing a
+    /// capability cannot say about itself.
+    key: AgentKey,
 }
 
 impl SessionParent {
-    pub(super) fn new(target: SessionRef) -> Self {
-        Self { target }
+    pub(super) fn new(target: SessionRef, key: AgentKey) -> Self {
+        Self { target, key }
+    }
+
+    /// Create a child runner by the command the session already has for it.
+    ///
+    /// The gates — depth, the concurrency cap, an unknown caller — stay where
+    /// they are, on the session, because every one of them is a fact about the
+    /// tree and the tree is the session's. A capability asks; it does not get
+    /// to decide whether it may.
+    async fn start_runner(&self, id: RunnerId, args: RunnerArgs, call: String) -> SessionReply {
+        let refused = |reason: String| SessionReply::Refused {
+            call: call.clone(),
+            reason,
+        };
+        let caller = match self.key {
+            AgentKey::Main => SubAgentParent::Main,
+            AgentKey::Sub(id) => SubAgentParent::SubAgent(id),
+            // A step and a fork each root a subagent tree of their own, so a
+            // spawn from one is that tree's `Main`.
+            AgentKey::Step(_) | AgentKey::Fork(_) => SubAgentParent::Main,
+        };
+        match args {
+            RunnerArgs::SubAgent {
+                agent,
+                label,
+                task,
+                agent_type,
+                ..
+            } => match self
+                .target
+                .ask(|reply| {
+                    SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                        caller,
+                        agent,
+                        label,
+                        task,
+                        agent_type,
+                        reply,
+                    })
+                })
+                .await
+            {
+                Ok(Ok(_)) => SessionReply::Done { call: call.clone() },
+                Ok(Err(e)) => refused(e),
+                Err(e) => refused(e.to_string()),
+            },
+            // A fork is asked for by a person typing `/fork`, and a run is
+            // started through the API. Neither reaches the session this way
+            // yet, and saying so is better than a child nobody created.
+            RunnerArgs::Workflow { .. } | RunnerArgs::Conversation { .. } => {
+                let _ = id;
+                refused("this session cannot start that kind of runner yet".to_string())
+            }
+        }
     }
 }
 
@@ -66,10 +127,14 @@ impl AgentOutcomeSink for SessionParent {
     /// rather than a toolbox layer holding a `SessionRef`.
     async fn request(&self, request: SessionRequest) -> SessionReply {
         let call = request.call().to_string();
-        let refused = |reason: String| SessionReply::Refused {
-            call: call.clone(),
-            reason,
-        };
+        // By value rather than a closure over `call`, so a branch that hands
+        // `call` on to a helper is not fighting a borrow the refusal holds.
+        fn refused(call: &str, reason: String) -> SessionReply {
+            SessionReply::Refused {
+                call: call.to_string(),
+                reason,
+            }
+        }
         match request {
             SessionRequest::SetTitle { title, .. } => {
                 match self
@@ -88,15 +153,19 @@ impl AgentOutcomeSink for SessionParent {
                     .await
                 {
                     Ok(Ok(_)) => SessionReply::Done { call },
-                    Ok(Err(e)) => refused(e),
-                    Err(e) => refused(e.to_string()),
+                    Ok(Err(e)) => refused(&call, e),
+                    Err(e) => refused(&call, e.to_string()),
                 }
             }
-            // Every other request creates or stops a runner, which is the one
-            // thing the session's own swap has still to grow a command for.
-            // Refused rather than dropped, so the model is told.
-            SessionRequest::StartRunner { .. } | SessionRequest::Cancel { .. } => {
-                refused("the session cannot start runners yet".to_string())
+            SessionRequest::StartRunner { id, args, .. } => {
+                self.start_runner(id, *args, call).await
+            }
+            // Cancelling reaches the session as a command from a person today,
+            // and no capability asks for it yet. Refused visibly rather than
+            // dropped: a capability that grows the need will see this and not a
+            // silence.
+            SessionRequest::Cancel { .. } => {
+                refused(&call, "an agent cannot cancel another agent".to_string())
             }
         }
     }
@@ -194,7 +263,7 @@ impl StopHookParent {
         provider: Arc<SessionContextProvider>,
     ) -> Arc<dyn AgentOutcomeSink> {
         Arc::new(Self {
-            inner: Arc::new(SessionParent::new(session.clone())),
+            inner: Arc::new(SessionParent::new(session.clone(), key)),
             session,
             key,
             provider,
@@ -205,6 +274,15 @@ impl StopHookParent {
 
 #[async_trait]
 impl AgentOutcomeSink for StopHookParent {
+    /// Straight through. `Stop` hooks are about a turn *ending*; a request is
+    /// an agent asking for something mid-turn, and there is no hook for that.
+    /// Delegating explicitly matters because the trait's default refuses, and
+    /// this is the sink actually installed — inheriting the default would make
+    /// every capability's request fail with a reason that is not true.
+    async fn request(&self, request: SessionRequest) -> SessionReply {
+        self.inner.request(request).await
+    }
+
     async fn deliver(&self, outcome: AgentOutcome) {
         // `Stop` fires when a turn *ends*. An ask or a park is a turn still in
         // progress, and a failure is not a stop the hook could act on.

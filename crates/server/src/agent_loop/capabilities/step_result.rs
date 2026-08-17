@@ -164,8 +164,8 @@ impl Capability for StepResultCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::testing::{equipped, loading, settings, spec};
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
-    use crate::sessions::runners::capabilities::testing::{equipped, loading, settings, spec};
     use horsie_models::workflow::StepFieldType;
     use serde_json::{Value, json};
 

@@ -623,6 +623,22 @@ impl<'de> Deserialize<'de> for Capabilities {
     }
 }
 
+/// The layer a decorator wraps, or an empty one when it is the innermost.
+///
+/// Every server-owned toolbox layer here decorates: it answers for its own
+/// tools and delegates the rest inward. `None` reaches whichever one ended up
+/// innermost, which happens whenever a capability set has no runtime — a
+/// prompt-only agent, or a test. Wrapping [`horsie_agentcore::EmptyToolbox`]
+/// then is the honest answer: the decorator still advertises its own tools, and
+/// a call for anything else is refused by the same code path that refuses an
+/// unknown tool today.
+#[must_use]
+pub(crate) fn or_empty(
+    inner: Option<std::sync::Arc<dyn horsie_agentcore::Toolbox>>,
+) -> std::sync::Arc<dyn horsie_agentcore::Toolbox> {
+    inner.unwrap_or_else(|| std::sync::Arc::new(horsie_agentcore::EmptyToolbox))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod testing {
@@ -721,6 +737,127 @@ pub mod testing {
             name: name.into(),
             input: serde_json::json!({}),
         }
+    }
+
+    /// The shared empty settings, re-exported so a capability test does not
+    /// have to know where it lives.
+    #[must_use]
+    pub fn settings() -> crate::sessions::spec::AgentSettings {
+        crate::sessions::runners::empty_settings()
+    }
+
+    /// A fresh spec over those settings — what `equip` starts every agent from.
+    #[must_use]
+    pub fn spec() -> AgentSpec {
+        AgentSpec::new(settings())
+    }
+
+    /// What a capability loads from, with nothing behind it.
+    ///
+    /// A session mailbox that answers nothing, a runtime provider that knows no
+    /// vendor, and no MCP, memory, services or plugin library. Enough for every
+    /// capability that composes a toolbox out of what it already holds; the two
+    /// that reach outward — `mcp` and `runtime` — are what the `None`s are for,
+    /// and their tests assert on how they degrade rather than pretending a
+    /// sandbox is there.
+    #[must_use]
+    pub fn loading() -> Loading {
+        use crate::sessions::addressing::SessionRef;
+        use crate::sessions::session_actor::AgentKey;
+        use horsie_actor::{ActorSystem, InMemoryJournal};
+        use std::sync::{Arc, Mutex, RwLock};
+
+        let session_id = uuid::Uuid::new_v4();
+        let session = SessionRef::new(
+            crate::testing::spawn_detached(
+                &ActorSystem::new(Arc::new(InMemoryJournal::new())),
+                Inert,
+            ),
+            crate::auth::UserId::bootstrap(),
+            session_id,
+            None,
+        );
+        let vendors: crate::sessions::spec::RuntimeVendorMap =
+            Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let runtimes = crate::runtime_manager::test_runtime_manager(&vendors).provider(
+            session_id.to_string(),
+            "incarnation".to_string(),
+            false,
+            "none".to_string(),
+            session_spec(),
+        );
+        Loading {
+            session,
+            session_id,
+            key: AgentKey::Main,
+            agent: AgentId::new_v4(),
+            narrate: false,
+            runtimes,
+            registry: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            mcp: None,
+            memory: None,
+            services: None,
+            plugin_library: None,
+            last_client: Mutex::new(None),
+        }
+    }
+
+    fn session_spec() -> crate::sessions::spec::SessionSpec {
+        crate::sessions::spec::SessionSpec {
+            name: Some("test".into()),
+            kind: crate::sessions::spec::SessionKind::Agent {
+                settings: settings(),
+            },
+            workspaces: vec![crate::sessions::spec::WorkspaceDef {
+                name: "main".into(),
+            }],
+            provision: vec![],
+            vendor: "none".into(),
+            plugins: vec![],
+            origin: crate::sessions::spec::SessionOrigin::User,
+            environment: None,
+            env_vars: vec![],
+        }
+    }
+
+    /// A session mailbox that takes every command and does nothing with it.
+    /// A capability's `setup` only ever needs the address, never an answer.
+    struct Inert;
+
+    #[async_trait::async_trait]
+    impl horsie_actor::EventSourcedActor for Inert {
+        type Command = crate::sessions::addressing::SessionInbox;
+        type Event = ();
+        type State = ();
+
+        fn persistence_id(&self) -> horsie_actor::PersistenceId {
+            horsie_actor::PersistenceId::new("capability-test", "inert")
+        }
+
+        fn initial_state() {}
+
+        fn apply_event((): (), (): ()) {}
+
+        async fn handle_command(
+            &mut self,
+            (): &(),
+            _cmd: crate::sessions::addressing::SessionInbox,
+            _ctx: &mut horsie_actor::ActorContext<crate::sessions::addressing::SessionInbox>,
+        ) -> horsie_actor::CommandEffect<()> {
+            horsie_actor::CommandEffect::none()
+        }
+    }
+
+    /// The names the composed toolbox advertises, innermost first.
+    ///
+    /// What a `setup` test asserts on now that a spec holds real toolboxes
+    /// rather than a list of layer names: the question "is this tool equipped?"
+    /// is answered by asking the thing the agent will actually run with.
+    #[must_use]
+    pub fn equipped(spec: AgentSpec) -> Vec<String> {
+        spec.toolbox().map_or_else(Vec::new, |t| {
+            t.specs().into_iter().map(|s| s.name).collect()
+        })
     }
 }
 

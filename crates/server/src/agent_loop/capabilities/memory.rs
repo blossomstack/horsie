@@ -24,7 +24,7 @@
 //! not is a real drift, and one that is otherwise silent.
 
 use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
-use crate::sessions::runners::capabilities::or_empty;
+use crate::agent_loop::capabilities::or_empty;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -133,7 +133,7 @@ mod tests {
     use super::super::testing::call;
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::sessions::runners::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
 
     /// No spaces named, no layer equipped. If this regresses every agent gets
     /// memory tools whose every call is refused.

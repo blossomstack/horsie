@@ -272,7 +272,7 @@ impl Capability for TitleCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::sessions::runners::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
 
     fn set(id: &str, title: &str) -> ToolCall {
         ToolCall {

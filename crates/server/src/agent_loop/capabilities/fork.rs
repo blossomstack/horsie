@@ -272,8 +272,8 @@ impl Capability for ForkCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::testing::settings;
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
-    use crate::sessions::runners::capabilities::testing::settings;
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome, ToolCall};
 
     fn cap() -> ForkCapability {

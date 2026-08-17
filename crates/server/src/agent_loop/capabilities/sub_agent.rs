@@ -164,7 +164,7 @@ impl SubAgentCapability {
         // conversation is spawned from depth 0 and lands at 1 — which is why
         // the bound is `>=` and not `>`. The concurrency cap is not checked
         // here: see the module doc.
-        if self.depth > MAX_SUBAGENT_DEPTH {
+        if self.depth >= MAX_SUBAGENT_DEPTH {
             return Decision::reply(
                 &call.id,
                 format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached"),
@@ -455,7 +455,7 @@ mod tests {
     use super::super::testing::FakeCapability;
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::sessions::runners::capabilities::testing::settings;
+    use crate::agent_loop::capabilities::testing::settings;
     use crate::sessions::runners::message::WorkflowOutcome;
 
     fn cap() -> SubAgentCapability {

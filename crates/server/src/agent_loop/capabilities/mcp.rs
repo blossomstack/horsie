@@ -120,7 +120,7 @@ mod tests {
     use super::super::testing::call;
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::sessions::runners::capabilities::testing::{loading, spec};
+    use crate::agent_loop::capabilities::testing::{loading, spec};
 
     /// No servers named, nothing connected and nothing asked of the service.
     /// If this regresses every agent pays for a connection round it never

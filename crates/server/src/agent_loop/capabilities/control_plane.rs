@@ -23,8 +23,8 @@
 //! answers it before the actor is involved.
 
 use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use crate::agent_loop::capabilities::or_empty;
 use crate::control::toolbox::ControlToolbox;
-use crate::sessions::runners::capabilities::or_empty;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -116,7 +116,7 @@ impl Capability for ControlPlaneCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::call;
-    use crate::sessions::runners::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
 
     /// Holding the capability is what equips the tools and the prompt that
     /// tells the agent they exist — a tool nobody was told about is not used.

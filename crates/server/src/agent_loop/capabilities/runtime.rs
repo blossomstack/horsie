@@ -526,8 +526,8 @@ mod tests {
     use super::super::testing::call;
     use super::*;
     use crate::agent_loop::AskAnswer;
+    use crate::agent_loop::capabilities::testing::{loading, spec};
     use crate::agent_loop::capabilities::{Capabilities, SessionReply, TurnEvent};
-    use crate::sessions::runners::capabilities::testing::{loading, spec};
     use crate::sessions::runners::message::{ChildMsg, Command};
 
     /// **The change the move made.** Its session-side twin claimed every tool

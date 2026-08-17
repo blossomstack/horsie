@@ -28,7 +28,6 @@
 #![allow(dead_code)] // Phase A: built and tested here, wired into the actor in Phase B.
 
 pub mod action;
-pub mod capabilities;
 pub mod conversation;
 pub mod ids;
 pub mod lifecycle_routing;
@@ -43,12 +42,12 @@ pub mod workflow;
 pub use ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
 pub use state::{RunnerRecord, SessionState};
 
+use crate::agent_loop::capabilities::{self, Capabilities};
 use crate::sessions::session_actor::AgentEntry;
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::supervisor::ForkRow;
 use crate::sessions::workflow::{WorkflowRunSpec, WorkflowRunState};
 use action::Action;
-use capabilities::Capabilities;
 use message::ChildOutcome;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -352,7 +351,7 @@ pub trait AgentLifecycle {
 /// Put it first and it silently shadows every named tool behind it.
 #[must_use]
 pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
-    use capabilities::{
+    use crate::agent_loop::capabilities::{
         ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
         mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
         sub_agent::SubAgentCapability, title::TitleCapability, workflow::WorkflowCapability,
@@ -368,7 +367,7 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
 
     // Delegation: every runner that owns an agent can delegate, which is what
     // makes nesting uniform rather than a privilege of the main agent.
-    caps.push(SubAgentCapability::new(s.clone()));
+    caps.push(SubAgentCapability::new(s.clone(), opts.depth));
     caps.push(WorkflowCapability::default());
 
     match kind {
@@ -382,7 +381,7 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
                 Some(fork) => TitleCapability::for_fork(fork),
                 None => TitleCapability::default(),
             });
-            caps.push(ForkCapability::new(s.clone()));
+            caps.push(ForkCapability::new(opts.agent, s.clone()));
         }
         // A step's `submit_result` and its `ask_user` are declared per step, so
         // they are equipped when the step agent starts rather than held here.
@@ -409,6 +408,16 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
 /// What `assemble` needs beyond the kind.
 pub struct Assembly<'a> {
     pub settings: &'a crate::sessions::spec::AgentSettings,
+    /// The agent being equipped. A capability holds it rather than reading it
+    /// off a caller, because the messages that reach one say what was asked and
+    /// never who by — [`capabilities::fork::ForkCapability`] names the
+    /// conversation a branch is cut from, and that is the id it names.
+    pub agent: AgentId,
+    /// How deep in the subagent tree this agent sits: the main agent, a step
+    /// and a fork are all 0, and a worker is its parent's depth plus one.
+    /// [`capabilities::sub_agent::SubAgentCapability`] answers the depth gate
+    /// from it, which is what lets a spawn be refused without asking anyone.
+    pub depth: u32,
     /// Nobody is watching, so no `ask_user`: a question would park for ever.
     pub unattended: bool,
     /// Set when this conversation is a fork, so it names itself rather than
@@ -616,23 +625,17 @@ impl RunnerState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use message::{Caller, Message, ToolCall};
+    use crate::agent_loop::capabilities::{Msg, testing::call};
 
     fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
         Assembly {
             settings,
+            agent: AgentId::new_v4(),
+            depth: 0,
             unattended: false,
             fork: None,
             agent_type: None,
         }
-    }
-
-    fn call(name: &str) -> Message {
-        Message::Tool(ToolCall {
-            id: "t".into(),
-            name: name.into(),
-            input: serde_json::json!({}),
-        })
     }
 
     /// The runtime capability answers for a namespace nobody can enumerate, so
@@ -647,7 +650,10 @@ mod tests {
             RunnerKind::Workflow,
         ] {
             let caps = assemble(kind, &opts(&s));
-            let last = caps.last().expect("every agent-owning runner equips one");
+            let last = caps
+                .iter()
+                .last()
+                .expect("every agent-owning runner equips one");
             assert_eq!(
                 last.name(),
                 "runtime",
@@ -670,11 +676,6 @@ mod tests {
     #[test]
     fn every_agent_owning_runner_can_delegate() {
         let s = empty_settings();
-        let caller = Caller {
-            agent: AgentId::new_v4(),
-            depth: 0,
-            active_agents: 0,
-        };
         for kind in [
             RunnerKind::Conversation,
             RunnerKind::SubAgent,
@@ -686,7 +687,7 @@ mod tests {
             // And the runtime does not swallow the named tool on the way past.
             let taken = caps
                 .iter()
-                .find_map(|c| c.handle(caller, &call("spawn_agent")).map(|_| c.name()));
+                .find_map(|c| c.handle(&Msg::Tool(&call("spawn_agent"))).map(|_| c.name()));
             assert_eq!(
                 taken,
                 Some("sub_agent"),
@@ -707,35 +708,37 @@ mod tests {
         assert!(!caps.has("fork"));
     }
 
-    /// Nobody is watching a routine's run, so its conversation gets no
-    /// `ask_user` layer: a question it asked would park the run for ever.
-    #[tokio::test]
-    async fn an_unattended_conversation_equips_no_ask_layer() {
+    /// Nobody is watching a routine's run, so its conversation advertises no
+    /// `ask_user`: a question it asked would park the run for ever.
+    ///
+    /// It still *holds* the capability — something has to answer for the name,
+    /// or the call falls through to the sandbox and the model is never told no
+    /// — so what is asserted is what it advertises rather than what it is.
+    #[test]
+    fn an_unattended_conversation_advertises_no_ask_user() {
         let s = empty_settings();
-        let caps = assemble(
-            RunnerKind::Conversation,
-            &Assembly {
-                settings: &s,
-                unattended: true,
-                fork: None,
-                agent_type: None,
-            },
-        );
-        // Without the runtime, which has no sandbox to acquire here: the list
-        // is the same one either way, and what is asserted is what the
-        // capabilities *before* it equipped.
-        let attended: Capabilities = caps
-            .iter()
-            .filter(|c| c.name() != "runtime")
-            .map(|c| c.save().into())
-            .collect();
-        let (spec, _) = attended
-            .equip(&capabilities::testing::loading(), s.clone())
-            .await
-            .expect("nothing fatal");
+        let unattended = |unattended| {
+            assemble(
+                RunnerKind::Conversation,
+                &Assembly {
+                    settings: &s,
+                    agent: AgentId::new_v4(),
+                    depth: 0,
+                    unattended,
+                    fork: None,
+                    agent_type: None,
+                },
+            )
+        };
+        let ask = capabilities::ask_user::TOOL.to_string();
+        let names = |caps: Capabilities| -> Vec<String> {
+            caps.tools().into_iter().map(|t| t.name).collect()
+        };
         assert!(
-            !capabilities::testing::equipped(spec)
-                .contains(&capabilities::ask_user::TOOL.to_string())
+            unattended(true).has("ask_user"),
+            "somebody must answer for it"
         );
+        assert!(!names(unattended(true)).contains(&ask));
+        assert!(names(unattended(false)).contains(&ask));
     }
 }

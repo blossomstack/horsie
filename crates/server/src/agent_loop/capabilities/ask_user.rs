@@ -385,7 +385,7 @@ mod tests {
     use super::super::testing::FakeCapability;
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::sessions::runners::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
 
     fn ask(id: &str, question: &str) -> ToolCall {
         ToolCall {
