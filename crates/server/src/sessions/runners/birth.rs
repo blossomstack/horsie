@@ -44,6 +44,7 @@ pub fn born(
             settings: *settings,
             usage: UsageTotal::default(),
             result: None,
+            reported: false,
             capabilities,
         }),
         RunnerArgs::Conversation {
@@ -83,6 +84,7 @@ pub fn born(
                 error: None,
                 usage: UsageTotal::default(),
                 step_usage: std::collections::BTreeMap::new(),
+                reported: false,
                 capabilities,
             })),
         },

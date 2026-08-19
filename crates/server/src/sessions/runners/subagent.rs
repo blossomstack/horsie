@@ -73,6 +73,16 @@ pub struct State {
     /// `Some` once it has ended, whichever way. The one field that says both
     /// "stop starting agents" and "there is a report to hand over".
     pub result: Option<Outcome>,
+    /// Whether [`Self::result`] has been handed to the agent that asked.
+    ///
+    /// A fact about this worker, so it lives in this worker's slice rather than
+    /// in the parent's — the asking agent's own `outstanding` is the *ack*, and
+    /// this is only what stops the session offering a report it has already
+    /// handed over. Without it every turn boundary re-offers every finished
+    /// worker for the life of the session, and an offer reaches its parent by
+    /// waking it: a cold conversation would be rehydrated for ever by a worker
+    /// that finished days ago.
+    pub reported: bool,
     pub capabilities: Capabilities,
 }
 
@@ -90,6 +100,7 @@ impl Default for State {
             settings: super::empty_settings(),
             usage: UsageTotal::default(),
             result: None,
+            reported: false,
             capabilities: Capabilities::default(),
         }
     }
@@ -107,6 +118,13 @@ pub enum Event {
     Failed {
         error: String,
     },
+    /// This worker's report has been offered to the agent that asked for it.
+    ///
+    /// Journaled *after* the offer, never before: a crash in that window
+    /// replays as a report still owed and offers it again, which the asking
+    /// agent recognises as a repeat and drops. The other order would lose a
+    /// report altogether.
+    Reported,
 }
 
 impl Runner for State {
@@ -134,6 +152,9 @@ impl Runner for State {
     }
 
     fn outcome(&self) -> Option<ChildOutcome> {
+        if self.reported {
+            return None;
+        }
         let result = self.result.as_ref()?;
         Some(ChildOutcome::SubAgent(match result {
             Outcome::Completed { report } => SubAgentOutcome::Completed {
@@ -242,6 +263,7 @@ impl Runner for State {
                     error: error.clone(),
                 });
             }
+            Event::Reported => self.reported = true,
         }
     }
 }

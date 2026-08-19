@@ -30,7 +30,7 @@
 use crate::runtime_manager::RuntimeError;
 use crate::sessions::UserMessageError;
 use crate::sessions::runners::action::Action;
-use crate::sessions::runners::ids::{AgentId, RunnerId};
+use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::AgentRole;
 use crate::sessions::runners::message::ChildOutcome;
 use crate::sessions::runners::state::SessionState as RunnerSessionState;
@@ -1061,7 +1061,7 @@ impl SessionActor {
         let mut events = Vec::new();
         let mut next = state.clone();
         for (child, parent, outcome) in self.owed(&next) {
-            let produced = self.offer_to_parent(child, parent, &outcome, &next).await;
+            let produced = self.offer_to_parent(child, parent, &outcome, &next, ctx).await;
             for e in &produced {
                 next.apply(e);
             }
@@ -1077,12 +1077,21 @@ impl SessionActor {
         events
     }
 
-    /// Offer a finished child's outcome to the capabilities of the agent that
-    /// created it.
+    /// Hand a finished child's outcome to the agent that created it.
     ///
-    /// Gated by the capability's own `outstanding`, not by an owner lookup this
-    /// actor performs: a child a capability did not create falls through as
-    /// `None` rather than being mishandled, which is what stops two
+    /// Tell first, record afterwards. The agent owns the acknowledgement —
+    /// its `sub_agent`/`workflow` state is the one place a child is
+    /// outstanding, and the report and the ack are journaled there together —
+    /// so a crash between the two halves here replays as a child still owed,
+    /// and the offer is repeated. What the session records is only that it has
+    /// offered, which is what stops it re-offering at every boundary for the
+    /// life of the session: an offer reaches its parent by *waking* it, so an
+    /// un-recorded hand-over would rehydrate a cold conversation for ever on
+    /// behalf of a worker that finished days ago.
+    ///
+    /// Which capability the outcome belongs to is not decided here. It is
+    /// offered to the agent, and the capability holding that child claims it —
+    /// a child nobody is holding falls through, which is what stops two
     /// capabilities plausibly claiming one report.
     async fn offer_to_parent(
         &mut self,
@@ -1090,33 +1099,45 @@ impl SessionActor {
         parent: AgentId,
         outcome: &ChildOutcome,
         state: &RunnerSessionState,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionEvent> {
-        let Some(runner) = state.runner_of(parent) else {
+        let Some(kind) = state.record(child).map(|record| record.kind) else {
             return Vec::new();
         };
-        let Some(record) = state.record(runner) else {
+        let event = match kind {
+            RunnerKind::SubAgent => {
+                RunnerEvent::SubAgent(crate::sessions::runners::subagent::Event::Reported)
+            }
+            RunnerKind::Workflow => {
+                RunnerEvent::Workflow(crate::sessions::runners::workflow::Event::Reported)
+            }
+            // Neither reports: a conversation is never over, and the runtime
+            // owns no agent. `owed` cannot reach either — both answer `None`
+            // to `Runner::outcome` — so this is the arm that keeps that fact
+            // checked by the compiler rather than asserted in a comment.
+            RunnerKind::Conversation | RunnerKind::Runtime => return Vec::new(),
+        };
+        let Some(agent) = self.reach(parent, state, ctx) else {
             return Vec::new();
         };
-        let Some(caps) = record.state.capabilities() else {
+        if agent
+            .tell(AgentCommand::ChildMoved {
+                msg: crate::sessions::runners::message::ChildMsg::Outcome {
+                    child,
+                    outcome: outcome.clone(),
+                },
+            })
+            .await
+            .is_err()
+        {
+            // Unreachable right now, so still owed. The next boundary tries
+            // again rather than recording a hand-over that never happened.
             return Vec::new();
-        };
-        let msg = crate::agent_loop::capabilities::Msg::Child(
-            &crate::sessions::runners::message::ChildMsg::Outcome {
-                child,
-                outcome: outcome.clone(),
-            },
-        );
-        let Some(decision) = caps.offer(&msg) else {
-            return Vec::new();
-        };
+        }
         self.wrap(
-            runner,
+            child,
             Emit {
-                events: decision
-                    .events
-                    .into_iter()
-                    .map(RunnerEvent::Capability)
-                    .collect(),
+                events: vec![event],
                 actions: Vec::new(),
             },
         )

@@ -146,6 +146,18 @@ pub enum AgentCommand {
     /// child cannot block this agent's queue, and the reply is ordered against
     /// everything else this agent does.
     SessionReplied { reply: capabilities::SessionReply },
+    /// A runner one of this agent's capabilities created has moved.
+    ///
+    /// Internal, sent by the session at every turn boundary for a child whose
+    /// outcome has not been handed over yet. Delivery is at-least-once: the
+    /// session tells first and records the hand-over afterwards, so a crash in
+    /// that window replays as a child still owing a report. What makes the
+    /// repeat harmless is that the capability that asked for the child is the
+    /// only one holding it — a second delivery finds nothing outstanding and
+    /// decides nothing.
+    ChildMoved {
+        msg: crate::sessions::runners::message::ChildMsg,
+    },
     // --- What a person or a model asked a capability to do -----------------
     //
     // One arm per thing that can be asked, flat, in the vocabulary the feature
@@ -344,6 +356,7 @@ impl AgentCommand {
             | Self::RunFinished(_)
             | Self::Woke { .. }
             | Self::SessionReplied { .. }
+            | Self::ChildMoved { .. }
             | Self::ReadLog { .. }
             | Self::PageLog { .. }
             | Self::RecordLifecycle { .. }
@@ -1725,6 +1738,7 @@ impl EventSourcedActor for AgentActor {
             AgentCommand::SessionReplied { reply } => {
                 self.session_replied(&reply, state, ctx).await
             }
+            AgentCommand::ChildMoved { msg } => self.child_moved(&msg, state, ctx).await,
 
             // --- What a person or a model asked a capability to do ----------
             //
@@ -2501,6 +2515,74 @@ impl AgentActor {
             call = reply.call(),
             "the session replied and no capability recognised it"
         );
+        CommandEffect::none()
+    }
+
+    /// A child this agent asked for has moved.
+    ///
+    /// The mirror of [`Self::session_replied`], and offered the same way: each
+    /// capability that can create a child is asked in turn and claims the
+    /// message only when it is holding that child. Exactly one can, because the
+    /// capability that asked minted the id and is the only one that recorded
+    /// it — which is what stops two of them plausibly claiming one report, and
+    /// what makes an at-least-once redelivery a no-op rather than a second
+    /// entry in the transcript.
+    ///
+    /// Nothing is answered here. A report is not a tool result: the call that
+    /// spawned the child was answered when the child was created, turns ago.
+    /// It goes in the queue, and the acknowledgement is journaled with it so
+    /// the two cannot land apart.
+    async fn child_moved(
+        &mut self,
+        msg: &crate::sessions::runners::message::ChildMsg,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        if state.capabilities.fork().is_some()
+            && let Some(seed) = capabilities::fork::child(&state.fork, msg)
+        {
+            let event = match seed {
+                capabilities::fork::Seed::Landed { fork } => {
+                    AgentDomainEvent::ForkSeeded { fork }
+                }
+                capabilities::fork::Seed::Failed { fork, error } => {
+                    AgentDomainEvent::ForkSeedFailed { fork, error }
+                }
+            };
+            return self.journaled(vec![event], state, ctx).await;
+        }
+        if state.capabilities.sub_agent().is_some()
+            && let Some(reported) = capabilities::sub_agent::child(&state.sub_agent, msg)
+        {
+            let events = vec![
+                AgentDomainEvent::SubAgentReported {
+                    child: reported.child,
+                },
+                AgentDomainEvent::Received {
+                    item: reported.item,
+                    at_ms: now_ms(),
+                },
+            ];
+            return self.journaled(events, state, ctx).await;
+        }
+        if state.capabilities.workflow().is_some()
+            && let Some(reported) = capabilities::workflow::child(&state.workflow, msg)
+        {
+            let events = vec![
+                AgentDomainEvent::WorkflowReported {
+                    child: reported.child,
+                },
+                AgentDomainEvent::Received {
+                    item: reported.item,
+                    at_ms: now_ms(),
+                },
+            ];
+            return self.journaled(events, state, ctx).await;
+        }
+        // Ordinary, not a bug: the session re-offers a child until it has
+        // recorded the hand-over, so the second offer arrives at an agent that
+        // has already folded the report and is holding nothing.
+        tracing::debug!(child = %msg.child(), "a child moved and nothing here is holding it");
         CommandEffect::none()
     }
 

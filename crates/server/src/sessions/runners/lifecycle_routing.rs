@@ -267,8 +267,10 @@ fn from_conversation(
 /// reads `RUNNING` for ever on its own page while its parent's says `completed`.
 fn from_subagent(runner: RunnerId, event: &subagent::Event, state: &SessionState) -> Vec<Entry> {
     let (status, outcome) = match event {
-        // The session reconciling its own tree. A viewer already sees the spawn.
-        subagent::Event::Started => return Vec::new(),
+        // The session reconciling its own tree. A viewer already sees the spawn,
+        // and a report reaching its asker shows up in that agent's transcript
+        // rather than as a second lifecycle entry about this one.
+        subagent::Event::Started | subagent::Event::Reported => return Vec::new(),
         subagent::Event::Concluded { .. } => ("completed", TurnOutcome::Ended(EmptyOutcome {})),
         subagent::Event::Failed { error } => (
             "failed",
@@ -338,6 +340,10 @@ fn from_workflow(runner: RunnerId, event: &workflow::Event, state: &SessionState
             Some(index) => (index, "run_failed"),
             None => return Vec::new(),
         },
+        // Bookkeeping about the hand-over, not about the run: the output
+        // arrives in the invoking agent's own transcript, which is where a
+        // reader sees it.
+        workflow::Event::Reported => return Vec::new(),
     };
     let Some(step) = run.steps.get(index as usize) else {
         return Vec::new();
@@ -721,6 +727,7 @@ mod tests {
                 world.sub,
                 RunnerEvent::SubAgent(subagent::Event::Failed { error: "no".into() }),
             ),
+            on(world.sub, RunnerEvent::SubAgent(subagent::Event::Reported)),
             on(world.run, step_started(0, "review", world.step)),
             on(
                 world.run,
@@ -750,6 +757,7 @@ mod tests {
                 world.run,
                 RunnerEvent::Workflow(workflow::Event::Failed { error: "no".into() }),
             ),
+            on(world.run, RunnerEvent::Workflow(workflow::Event::Reported)),
             on(
                 world.root,
                 RunnerEvent::Usage {
@@ -801,10 +809,11 @@ mod tests {
                     | conversation::Event::TurnInterrupted => false,
                 },
                 RunnerEvent::SubAgent(e) => match e {
-                    subagent::Event::Started => true,
+                    subagent::Event::Started | subagent::Event::Reported => true,
                     subagent::Event::Concluded { .. } | subagent::Event::Failed { .. } => false,
                 },
                 RunnerEvent::Workflow(e) => match e {
+                    workflow::Event::Reported => true,
                     workflow::Event::StepStarted { .. }
                     | workflow::Event::StepConcluded { .. }
                     | workflow::Event::StepFailed { .. }

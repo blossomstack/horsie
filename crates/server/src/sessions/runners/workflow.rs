@@ -108,6 +108,14 @@ pub struct State {
     /// index — an index written here would be a second copy of a mapping the
     /// log already holds.
     pub step_usage: BTreeMap<AgentId, UsageTotal>,
+    /// Whether this run's terminal output has been handed to the agent that
+    /// invoked it, for the same reason [`super::subagent::State::reported`]
+    /// exists: the invoking agent's own `outstanding` is the acknowledgement,
+    /// and this is what stops the session offering an output it has already
+    /// handed over at every boundary for ever. A root run — one nobody invoked
+    /// — never has an offer to record, so this stays false and reads as one
+    /// still owed to a parent that does not exist.
+    pub reported: bool,
     pub capabilities: Capabilities,
 }
 
@@ -173,6 +181,7 @@ impl Default for State {
             error: None,
             usage: UsageTotal::default(),
             step_usage: BTreeMap::new(),
+            reported: false,
             capabilities: Capabilities::default(),
         }
     }
@@ -218,6 +227,9 @@ pub enum Event {
     Failed {
         error: String,
     },
+    /// This run's output has been offered to the agent that invoked it.
+    /// Journaled after the offer — see [`super::subagent::Event::Reported`].
+    Reported,
 }
 
 /// One step about to begin: everything both the action that starts it and the
@@ -525,6 +537,9 @@ impl Runner for State {
     /// The **run's** ending, never a step's. A step concluding is an input to
     /// the graph; only the run owes anything to whoever invoked it.
     fn outcome(&self) -> Option<ChildOutcome> {
+        if self.reported {
+            return None;
+        }
         match self.status {
             WorkflowRunStatus::Finished => {
                 Some(ChildOutcome::Workflow(WorkflowOutcome::Finished {
@@ -764,6 +779,7 @@ impl Runner for State {
                 self.status = WorkflowRunStatus::Failed;
                 self.error = Some(error.clone());
             }
+            Event::Reported => self.reported = true,
         }
     }
 }
