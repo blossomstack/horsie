@@ -226,6 +226,58 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// A session with a turn in flight refuses to go cold.
+    ///
+    /// The refusal is the whole of how a long tool call survives the idle
+    /// sweep: answering `true` here unloads the session out from under a run
+    /// that is still writing to its journal. Restored with the hibernate the
+    /// runner swap dropped — the two are one act, and only the refusal has
+    /// somewhere to be observed without a vendor.
+    #[tokio::test]
+    async fn going_cold_is_refused_while_an_agent_is_working() {
+        let gate = BlockingProvider::new();
+        let (_f, session, _id, journal) = spawn_session_with_provider(gate.clone()).await;
+        send(&session, "go").await;
+        wait_for_state(&journal, _id, "a turn in flight", |s| {
+            crate::sessions::runners::reads::session_status(s)
+                == crate::sessions::spec::SessionStatus::Running
+        })
+        .await;
+
+        let offloaded = session
+            .ask(|reply| SessionCommand::PrepareOffload { reply })
+            .await
+            .expect("the session answers");
+        assert!(
+            !offloaded,
+            "a session with a turn in flight must not be unloaded"
+        );
+        gate.release();
+    }
+
+    /// And a worker counts too, even though the conversation that asked for it
+    /// is idle: the session is what holds the sandbox they share.
+    #[tokio::test]
+    async fn going_cold_is_refused_while_a_worker_is_working() {
+        let gate = BlockingProvider::new();
+        let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
+        let worker = spawn_sub(&session, "research", "dig into it").await;
+        wait_for_tree(&journal, id, |t| {
+            t.iter()
+                .find(|r| r.id == worker.to_string())
+                .is_some_and(|r| r.status == crate::sessions::session_actor::AgentStatus::Running)
+        })
+        .await;
+        let _ = &f;
+
+        let offloaded = session
+            .ask(|reply| SessionCommand::PrepareOffload { reply })
+            .await
+            .expect("the session answers");
+        assert!(!offloaded, "a working worker holds the session open");
+        gate.release();
+    }
+
     /// Fold a session's own journal back into state, so a test can assert on
     /// what was recorded rather than on what the actor happens to hold.
     async fn journaled_spec(
