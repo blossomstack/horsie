@@ -32,7 +32,7 @@ use crate::sessions::runners::action::Action;
 use crate::sessions::runners::ids::{AgentId, RunnerId};
 use crate::sessions::runners::loading::AgentRole;
 use crate::sessions::runners::message::ChildOutcome;
-use crate::sessions::runners::state::{SessionEvent, SessionState as RunnerSessionState};
+use crate::sessions::runners::state::SessionState as RunnerSessionState;
 use crate::sessions::runners::{Emit, Runner, RunnerEvent, SessionView};
 use horsie_actor::ReplyTo;
 pub(crate) mod context;
@@ -52,6 +52,7 @@ pub use types::*;
 pub use crate::sessions::runners::SessionState;
 pub use crate::sessions::runners::state::SessionEvent;
 
+
 use core::SessionCore;
 use hooks::{HookRouting, StopHookParent};
 use reads::Reads;
@@ -61,9 +62,7 @@ use crate::agent_loop::{
 };
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
-    orchestrator::{AgentAction, Delivery},
     spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
-    subagents::{SubAgentParent, TreeOwner},
     supervisor::{ForkRow, SessionSupervisorCommand},
     workflow::WorkflowRunState,
 };
@@ -326,24 +325,7 @@ impl SessionActor {
     /// nothing, so a sidebar that could not read this from the registry could
     /// not show forks at all without waking every session that has one.
     async fn report_forks(&mut self, state: &SessionState) {
-        if state.forks.is_empty() && self.last_reported_forks.is_empty() {
-            return;
-        }
-        let forks: Vec<ForkRow> = state
-            .forks
-            .iter()
-            .map(|(id, rec)| ForkRow {
-                id: *id,
-                parent: match rec.parent {
-                    crate::sessions::forks::ForkParent::Main => None,
-                    crate::sessions::forks::ForkParent::Fork(pid) => Some(pid),
-                },
-                title: rec.title.clone(),
-                status: rec.status,
-                created_at_ms: rec.created_at_ms,
-                last_activity_ms: rec.last_activity_ms,
-            })
-            .collect();
+        let forks = crate::sessions::runners::reads::fork_rows(state);
         if forks == self.last_reported_forks {
             return;
         }
@@ -358,15 +340,16 @@ impl SessionActor {
     }
 
     async fn report_status(&mut self, state: &SessionState) {
-        if self.last_reported.as_ref() == Some(&state.status) {
+        let status = crate::sessions::runners::reads::session_status(state);
+        if self.last_reported.as_ref() == Some(&status) {
             return;
         }
-        self.last_reported = Some(state.status.clone());
+        self.last_reported = Some(status.clone());
         let _ = self
             .supervisor
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
-                status: state.status.clone(),
+                status,
             })
             .await;
     }
@@ -426,7 +409,14 @@ impl SessionActor {
                     // acquisition below will fail on rather than silently
                     // addressing some other sandbox.
                     state
-                        .provisioned_at_ms
+                        .runners
+                        .values()
+                        .find_map(|r| match &r.state {
+                            crate::sessions::runners::RunnerState::Runtime(rt) => {
+                                rt.provisioned_at_ms
+                            }
+                            _ => None,
+                        })
                         .map(|at| at.to_string())
                         .unwrap_or_default(),
                     // A create is still outstanding. The journal is the only thing
@@ -434,7 +424,10 @@ impl SessionActor {
                     // reported the object yet is indistinguishable from one with
                     // nothing there, and the difference is between waiting for a
                     // runtime and declaring it gone.
-                    matches!(state.status, SessionStatus::Provisioning),
+                    matches!(
+                        crate::sessions::runners::reads::session_status(state),
+                        SessionStatus::Provisioning
+                    ),
                     self.spec().vendor.clone(),
                     self.spec().clone(),
                 ),
@@ -521,48 +514,6 @@ impl SessionActor {
         let root = state.record(state.root)?;
         let agent = root.state.primary_agent()?;
         self.agents.get(&agent).map(|a| a.actor.clone())
-    }
-
-    /// The settings an agent runs under, resolved from what this session is
-    /// and where the agent sits in it: the main agent and forks use the agent
-    /// session's settings, a step uses its own preset, and a subagent inherits
-    /// its tree's root. `None` when the key names no agent this session hosts.
-    pub(super) fn effective_settings(
-        &self,
-        state: &SessionState,
-        key: AgentKey,
-    ) -> Option<&AgentSettings> {
-        match key {
-            AgentKey::Main | AgentKey::Fork(_) => self.spec().agent_settings(),
-            AgentKey::Step(id) => {
-                let run = self.spec().workflow_run()?;
-                let execution = state.run.as_ref()?.index_of_agent(id)?;
-                let name = &state.run.as_ref()?.get(execution)?.step;
-                run.step(name).map(|step| &step.settings)
-            }
-            AgentKey::Sub(id) => match state.subagents.owner_of(id)? {
-                TreeOwner::Main => self.spec().agent_settings(),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
-        }
-    }
-
-    /// The settings a subagent *spawn* runs under: the caller's own, so a
-    /// step's spawns inherit the step's settings and its cap. Resolved from
-    /// the caller's tree root, exactly as [`Self::effective_settings`] reads a
-    /// cold node.
-    pub(super) fn effective_settings_for_parent(
-        &self,
-        state: &SessionState,
-        caller: SubAgentParent,
-    ) -> Option<&AgentSettings> {
-        match caller {
-            SubAgentParent::Main => match state.root_owner() {
-                TreeOwner::Main => self.effective_settings(state, AgentKey::Main),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
-            SubAgentParent::SubAgent(id) => self.effective_settings(state, AgentKey::Sub(id)),
-        }
     }
 
     /// Cancel one agent's run and wait for it to actually be over.
