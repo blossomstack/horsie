@@ -24,11 +24,11 @@
 //! as something else. Here that is not a claim worth making: an MCP call is
 //! answered by the toolbox built out of [`AgentSpec::mcp`], which runs on the
 //! agent's task, so routing it to this mailbox would only park a call that has
-//! nothing to journal and nobody to answer it. So [`Capability::handle`]
-//! returns `None` and [`Capability::layer`] claims nothing, and the tools are
+//! nothing to journal and nobody to answer it. So [`super::Capability::handle`]
+//! returns `None` and [`super::Capability::layer`] claims nothing, and the tools are
 //! advertised by the toolbox that will actually run them.
 
-use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,7 @@ pub struct McpCapability {
 }
 
 /// Uninhabited: an MCP call's effect is on the far side of the server, so there
-/// is no fact about this agent to record and no arm for [`Capability::apply`]
+/// is no fact about this agent to record and no arm for [`super::Capability::apply`]
 /// to fold.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {}
@@ -54,9 +54,12 @@ impl McpCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for McpCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl McpCapability {
+    pub fn name(&self) -> &'static str {
         "mcp"
     }
 
@@ -68,7 +71,7 @@ impl Capability for McpCapability {
     /// Never fatal. A server that will not connect costs the agent some tools,
     /// not its turn — and the ones that failed are carried in `unavailable`, so
     /// a call for one is answered with why rather than "no such tool".
-    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.servers.is_empty() {
             return Ok(());
         }
@@ -95,11 +98,11 @@ impl Capability for McpCapability {
     }
 
     /// Nothing reaches this capability through the mailbox; see the module doc.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event.
         let CapEvent::Mcp(event) = event else {
@@ -109,7 +112,7 @@ impl Capability for McpCapability {
         match *event {}
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Mcp(self.clone())
     }
 }
@@ -119,8 +122,8 @@ impl Capability for McpCapability {
 mod tests {
     use super::super::testing::{advertised_by, facts, someone_elses};
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{loading, spec};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     /// No servers named, nothing connected and nothing asked of the service.
     /// If this regresses every agent pays for a connection round it never
@@ -164,7 +167,7 @@ mod tests {
     /// a capability with nothing to journal and no way to answer it.
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
-        let c = McpCapability::new(vec!["github".into()]);
+        let c = Capability::Mcp(McpCapability::new(vec!["github".into()]));
         assert!(c.command(&someone_elses()).is_none());
         assert!(
             advertised_by(&c, &facts()).is_empty(),
@@ -177,7 +180,7 @@ mod tests {
     /// than the one the agent was equipped with.
     #[test]
     fn the_server_list_survives_a_slice_round_trip() {
-        let caps = Capabilities::new(vec![Box::new(McpCapability::new(vec![
+        let caps = Capabilities::new(vec![Capability::Mcp(McpCapability::new(vec![
             "github".into(),
             "docs".into(),
         ]))]);

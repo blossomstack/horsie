@@ -33,7 +33,7 @@
 //! mints a uuid: `fire_at_unix_ms` is computed here, in the decision, and
 //! travels on the event.
 
-use super::{Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, TurnEvent};
+use super::{Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, TurnEvent};
 use crate::agent_loop::Incoming;
 use crate::agent_loop::timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, cancel_timer_spec, list_timers_spec,
@@ -48,7 +48,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// What [`Capability::carried_state`] writes above the armed timers it lists.
+/// What [`super::Capability::carried_state`] writes above the armed timers it lists.
 ///
 /// Named because it is read as well as written: a compaction boundary carries
 /// this block into the next conversation, and it is also the one thing outside
@@ -304,13 +304,16 @@ impl TimersCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for TimersCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl TimersCapability {
+    pub fn name(&self) -> &'static str {
         "timers"
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -319,7 +322,7 @@ impl Capability for TimersCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::Timers(cmd, to) = cmd else {
             return None;
         };
@@ -330,7 +333,7 @@ impl Capability for TimersCapability {
         })
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Woke { id } => self.woke(id),
             Msg::Loaded => self.reloaded(),
@@ -361,7 +364,7 @@ impl Capability for TimersCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         let CapEvent::Timer(event) = event else {
             return;
         };
@@ -385,7 +388,7 @@ impl Capability for TimersCapability {
 
     /// An armed timer is exact and invisible: the only trace of it in the
     /// history is the `set_timer` call a compaction summarises away.
-    fn carried_state(&self) -> Option<String> {
+    pub fn carried_state(&self) -> Option<String> {
         if self.armed.is_empty() {
             return None;
         }
@@ -405,7 +408,7 @@ impl Capability for TimersCapability {
         Some(block)
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Timers(self.clone())
     }
 }
@@ -415,7 +418,7 @@ impl Capability for TimersCapability {
 mod tests {
     use super::super::testing::{advertised_by, answering, facts, someone_elses};
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     fn called(cap: &TimersCapability, cmd: Command) -> Decision {
         cap.command(&CapCommand::Timers(cmd, answering("t1")))
@@ -492,7 +495,7 @@ mod tests {
     #[test]
     fn it_advertises_the_three_timer_tools() {
         assert_eq!(
-            advertised_by(&TimersCapability::new(), &facts()),
+            advertised_by(&Capability::Timers(TimersCapability::new()), &facts()),
             vec![SET_TOOL, LIST_TOOL, CANCEL_TOOL]
         );
     }
@@ -721,7 +724,7 @@ mod tests {
     #[test]
     fn armed_timers_survive_the_journal_round_trip() {
         let cap = armed_one(recurring(60));
-        let caps = Capabilities::new(vec![Box::new(cap)]);
+        let caps = Capabilities::new(vec![Capability::Timers(cap)]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
         let CapSlice::Timers(back) = read.iter().next().expect("one").save() else {

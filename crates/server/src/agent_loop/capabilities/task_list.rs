@@ -10,7 +10,7 @@
 //! It was a capability all along, hand-rolled: a command on the actor, an arm
 //! on the domain event, a field on `AgentState` and a toolbox layer of its own.
 //! Four places to edit for one tool, and every one of them a place the next
-//! tool would have to be added too. The trait says the same thing once.
+//! tool would have to be added too. A capability says the same thing once.
 //!
 //! Nothing about the shape had to change to fit. A `task_list` call answers
 //! immediately and never parks, so it is [`Act::Answer`] on success and
@@ -22,11 +22,11 @@
 //!
 //! The list is durable, but durable is not the same as the model knowing it is
 //! durable: every trace of it in the transcript is a tool call a compaction
-//! summarises away. So this implements [`Capability::carried_state`] with the
+//! summarises away. So this implements [`super::Capability::carried_state`] with the
 //! same rendering the tool returns — ids and all, because an agent that reads a
 //! paraphrase of its own list cannot call `task_list` against it afterwards.
 
-use super::{Act, CapCommand, CapEvent, CapSlice, CapView, Capability, Decision, Mailbox, Msg};
+use super::{Act, CapCommand, CapEvent, CapSlice, CapView, Decision, Mailbox, Msg};
 use crate::agent_loop::task_list::{
     TaskListAction, TaskListState, TaskRecord, task_list_tool_spec,
 };
@@ -114,13 +114,16 @@ impl TaskListCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for TaskListCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl TaskListCapability {
+    pub fn name(&self) -> &'static str {
         "task_list"
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -129,7 +132,7 @@ impl Capability for TaskListCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::TaskList(cmd, to) = cmd else {
             return None;
         };
@@ -140,11 +143,11 @@ impl Capability for TaskListCapability {
     /// Nothing here is this one's: the list changes only when the model changes
     /// it, so a turn boundary, an answer, a child and a load all leave it
     /// exactly where it was.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         let CapEvent::TaskList(Event::Changed { snapshot }) = event else {
             return;
         };
@@ -153,7 +156,7 @@ impl Capability for TaskListCapability {
 
     /// An empty list carries nothing, so a session that never made one gets no
     /// paragraph saying it has no tasks.
-    fn carried_state(&self) -> Option<String> {
+    pub fn carried_state(&self) -> Option<String> {
         (!self.list.tasks().is_empty()).then(|| self.list.render())
     }
 
@@ -162,11 +165,11 @@ impl Capability for TaskListCapability {
     /// A copy rather than the state behind it: what a client is shown is a
     /// value computed on request, so nothing outside can hold onto a list that
     /// the next `task_list` call has already moved past.
-    fn view(&self) -> Option<CapView> {
+    pub fn view(&self) -> Option<CapView> {
         Some(CapView::TaskList(self.list.tasks().to_vec()))
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::TaskList(self.clone())
     }
 }
@@ -176,7 +179,7 @@ impl Capability for TaskListCapability {
 mod tests {
     use super::super::testing::{advertised_by, answering, facts, someone_elses};
     use super::*;
-    use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
+    use crate::agent_loop::capabilities::{Capabilities, Capability, TurnEvent};
     use crate::agent_loop::task_list::TASK_LIST_TOOL;
 
     fn called(cap: &TaskListCapability, input: serde_json::Value) -> Decision {
@@ -216,7 +219,7 @@ mod tests {
     #[test]
     fn it_advertises_the_task_list_tool() {
         assert_eq!(
-            advertised_by(&TaskListCapability::new(), &facts()),
+            advertised_by(&Capability::TaskList(TaskListCapability::new()), &facts()),
             vec![TASK_LIST_TOOL]
         );
     }
@@ -330,7 +333,7 @@ mod tests {
             serde_json::json!({"action": "create", "tasks": ["ship it"]}),
         );
         fold(&mut cap, &created);
-        let caps = Capabilities::new(vec![Box::new(cap)]);
+        let caps = Capabilities::new(vec![Capability::TaskList(cap)]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
         let CapSlice::TaskList(back) = read.iter().next().expect("one").save() else {

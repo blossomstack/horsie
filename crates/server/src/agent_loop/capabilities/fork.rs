@@ -3,8 +3,8 @@
 //! The one capability with no tool. A fork is asked for by a person typing a
 //! built-in, never by a model calling something, so its [`Command`] is the one
 //! nothing advertises — a tool for it would offer the model a button it has no
-//! business pressing, so [`Capability::layer`] is left at its default and wraps
-//! the toolbox in nothing at all.
+//! business pressing, so [`super::Capability::layer`] hands the toolbox back
+//! untouched for this arm and wraps it in nothing at all.
 //!
 //! It is also the one command with no run waiting on it, which is why
 //! [`CapCommand::Fork`] carries no
@@ -40,9 +40,7 @@
 //! [`RunnerId`] for everything after — which is also the dedupe key the session
 //! recognises a replayed [`SessionRequest::StartRunner`] by.
 
-use super::{
-    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest,
-};
+use super::{Act, CapCommand, CapEvent, CapSlice, Decision, Msg, SessionReply, SessionRequest};
 use crate::sessions::forks::ForkMode;
 use crate::sessions::runners::action::{Branch, RunnerArgs};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
@@ -289,9 +287,12 @@ impl ForkCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for ForkCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl ForkCapability {
+    pub fn name(&self) -> &'static str {
         "fork"
     }
 
@@ -308,14 +309,14 @@ impl Capability for ForkCapability {
     // means "this agent is a fork", and the one that owns the tool the
     // paragraph tells it to call.
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::Fork(cmd) = cmd else {
             return None;
         };
         Some(self.commanded(cmd))
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
@@ -333,7 +334,7 @@ impl Capability for ForkCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the others here would
         // make adding one a change to all of them.
@@ -360,7 +361,7 @@ impl Capability for ForkCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Fork(self.clone())
     }
 }
@@ -370,7 +371,7 @@ impl Capability for ForkCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{advertised_by, facts, settings, someone_elses};
-    use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
+    use crate::agent_loop::capabilities::{Capabilities, Capability, TurnEvent};
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome};
 
     fn cap() -> ForkCapability {
@@ -559,7 +560,7 @@ mod tests {
 
         // The cut: nothing past the request is folded, and what comes back is
         // read off the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Fork(c)]);
         let written = serde_json::to_string(&caps).expect("write");
         let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
 
@@ -711,7 +712,7 @@ mod tests {
     /// let a model branch the conversation it is having.
     #[test]
     fn it_advertises_no_tool() {
-        assert!(advertised_by(&cap(), &facts()).is_empty());
+        assert!(advertised_by(&Capability::Fork(cap()), &facts()).is_empty());
     }
 
     /// A seed in flight is what says a fork exists and cannot run yet, so
@@ -722,7 +723,7 @@ mod tests {
         let mut c = cap();
         let fork = forked(&mut c, ForkMode::Copy);
         let source = c.agent;
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Fork(c)]);
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");

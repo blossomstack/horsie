@@ -13,7 +13,7 @@
 //! This capability advertises no tool and claims no message. The sandbox
 //! reaches the model as a [`AgentSpec::wrap`] layer, which runs on the agent's
 //! own task — and that is the whole reason it is not claimed by
-//! [`Capability::layer`](super::Capability::layer). A name claimed there is
+//! [`super::Capability::layer`]. A name claimed there is
 //! dispatched through the actor's mailbox so it can park and journal, which is
 //! right for `ask_user` and wrong twice over here: the sandbox namespace cannot
 //! be enumerated, so there is no list to claim, and round-tripping the
@@ -37,7 +37,7 @@
 //! Steps 3–5 all depend on step 2, and step 6 on all of them, which is why this
 //! is one method rather than six capabilities.
 
-use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
 use crate::agent_loop::{
     AgentRunDef, CompositeToolbox, DefaultToolboxFactory, McpUnavailable, PluginMcpToolbox,
     SharedContext, ToolboxFactory, compaction_window, scan_workspace,
@@ -338,13 +338,16 @@ fn scoped(key: AgentKey, client: RuntimeClient) -> RuntimeClient {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for RuntimeCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl RuntimeCapability {
+    pub fn name(&self) -> &'static str {
         "runtime"
     }
 
-    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         loading.progress("acquiring_runtime", None).await;
         let client = self.acquire(loading).await?;
         // Hooks run runtime-side and report what they did on the tool response.
@@ -501,13 +504,13 @@ impl Capability for RuntimeCapability {
     /// is about to handle without asking.
     ///
     /// So there is nothing here, and nothing claimed by
-    /// [`Capability::layer`](super::Capability::layer) either — see the module
+    /// [`super::Capability::layer`] either — see the module
     /// doc for why the base toolbox must not be claimed there.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the others here would
         // make adding one a change to all of them. `Event` is uninhabited, so
@@ -515,7 +518,7 @@ impl Capability for RuntimeCapability {
         let CapEvent::Runtime(_e) = event else { return };
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Runtime(self.clone())
     }
 }
@@ -527,7 +530,7 @@ mod tests {
     use super::*;
     use crate::agent_loop::AskAnswer;
     use crate::agent_loop::capabilities::testing::{loading, spec};
-    use crate::agent_loop::capabilities::{Capabilities, SessionReply, TurnEvent};
+    use crate::agent_loop::capabilities::{Capabilities, Capability, SessionReply, TurnEvent};
     use crate::sessions::runners::message::ChildMsg;
 
     /// **The change the move made.** Its session-side twin claimed every tool
@@ -537,7 +540,7 @@ mod tests {
     /// tool calls would be answering for a toolbox it no longer stands in for.
     #[test]
     fn it_claims_nothing_at_all() {
-        let c = RuntimeCapability::default();
+        let c = Capability::Runtime(RuntimeCapability::default());
         let child = ChildMsg::Ready {
             child: crate::sessions::runners::ids::RunnerId::new_v4(),
         };
@@ -571,7 +574,9 @@ mod tests {
     /// call should go.
     #[test]
     fn the_base_toolbox_is_a_layer_and_not_an_advertised_tool() {
-        assert!(advertised_by(&RuntimeCapability::default(), &facts()).is_empty());
+        assert!(
+            advertised_by(&Capability::Runtime(RuntimeCapability::default()), &facts()).is_empty()
+        );
     }
 
     /// A sandbox that cannot be acquired stops the turn. Every other capability
@@ -626,7 +631,7 @@ mod tests {
     /// prompt and none of the definition's tool narrowing.
     #[test]
     fn the_agent_type_survives_a_slice_round_trip() {
-        let caps = Capabilities::new(vec![Box::new(RuntimeCapability::new(Some(
+        let caps = Capabilities::new(vec![Capability::Runtime(RuntimeCapability::new(Some(
             "code-reviewer".into(),
         )))]);
         let written = serde_json::to_string(&caps).expect("write");
@@ -637,7 +642,7 @@ mod tests {
         assert_eq!(back.agent_type.as_deref(), Some("code-reviewer"));
 
         // And an untyped one comes back untyped rather than as `Some("")`.
-        let caps = Capabilities::new(vec![Box::new(RuntimeCapability::default())]);
+        let caps = Capabilities::new(vec![Capability::Runtime(RuntimeCapability::default())]);
         let read: Capabilities =
             serde_json::from_str(&serde_json::to_string(&caps).expect("write")).expect("read");
         let CapSlice::Runtime(back) = read.iter().next().expect("one").save() else {

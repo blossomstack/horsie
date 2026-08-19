@@ -1212,7 +1212,9 @@ mod tests {
     /// ships.
     #[test]
     fn a_fork_that_named_itself_is_listed_under_that_name() {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, title::TitleCapability};
+        use crate::agent_loop::capabilities::{
+            CapEvent, Capabilities, Capability, title::TitleCapability,
+        };
         let (mut s, main) = session();
         let branch = AgentId::new_v4();
         let runner = put(
@@ -1220,9 +1222,9 @@ mod tests {
             RunnerKind::Conversation,
             Some(main),
             RunnerState::Conversation(conversation::State {
-                capabilities: Capabilities::new(vec![Box::new(TitleCapability::for_fork(
-                    RunnerId::new_v4(),
-                ))]),
+                capabilities: Capabilities::new(vec![Capability::Title(
+                    TitleCapability::for_fork(RunnerId::new_v4()),
+                )]),
                 // What it was created with, which the name it chooses replaces.
                 title: Some("fork of the flake".into()),
                 ..fork(branch, main, true)

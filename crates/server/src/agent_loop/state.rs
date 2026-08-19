@@ -1962,7 +1962,7 @@ mod tests {
     /// was equipped without one.
     #[test]
     fn the_state_view_reads_the_task_list_back_out_of_the_capability() {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, task_list};
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability, task_list};
         let mut state = AgentActor::initial_state();
         assert!(
             state.state_view().tasks.is_empty(),
@@ -1974,8 +1974,9 @@ mod tests {
             tasks: vec!["a".to_string(), "b".to_string()],
         })
         .unwrap();
-        state.capabilities =
-            Capabilities::new(vec![Box::new(task_list::TaskListCapability::new())]);
+        state.capabilities = Capabilities::new(vec![Capability::TaskList(
+            task_list::TaskListCapability::new(),
+        )]);
         state = AgentActor::apply_event(
             state,
             AgentDomainEvent::Capability(CapEvent::TaskList(task_list::Event::Changed {

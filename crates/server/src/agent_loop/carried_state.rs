@@ -306,13 +306,15 @@ mod tests {
     /// Built by folding the capability's own event, so the fixture cannot
     /// disagree with what a real mutation would have left behind.
     fn with_task_list_capability(state: &mut AgentState, tasks: &[&str]) {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, task_list};
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability, task_list};
         let mut list = crate::agent_loop::task_list::TaskListState::default();
         list.apply(crate::agent_loop::task_list::TaskListAction::Create {
             tasks: tasks.iter().map(|t| (*t).to_string()).collect(),
         })
         .expect("the fixture's task list is valid");
-        let mut caps = Capabilities::new(vec![Box::new(task_list::TaskListCapability::new())]);
+        let mut caps = Capabilities::new(vec![Capability::TaskList(
+            task_list::TaskListCapability::new(),
+        )]);
         caps.apply(&CapEvent::TaskList(task_list::Event::Changed {
             snapshot: list,
         }));
@@ -321,8 +323,10 @@ mod tests {
 
     /// Equip an agent with a timer already armed.
     fn with_timers_capability(state: &mut AgentState, record: TimerRecord) {
-        use crate::agent_loop::capabilities::{CapEvent, timers};
-        state.capabilities.push(timers::TimersCapability::new());
+        use crate::agent_loop::capabilities::{CapEvent, Capability, timers};
+        state
+            .capabilities
+            .push(Capability::Timers(timers::TimersCapability::new()));
         state
             .capabilities
             .apply(&CapEvent::Timer(timers::Event::Armed { record }));

@@ -13,16 +13,16 @@
 //! A control-plane call reaches the server's own tables and comes straight back
 //! with a value, so it wants none of what this actor's mailbox is for: no park,
 //! no journal entry, no request to the session. The whole capability is
-//! therefore the layer [`Capability::setup`] pushes, which runs on the agent's
-//! own task — [`Capability::layer`] claims nothing and so does
-//! [`Capability::handle`].
+//! therefore the layer [`super::Capability::setup`] pushes, which runs on the agent's
+//! own task — [`super::Capability::layer`] claims nothing and so does
+//! [`super::Capability::handle`].
 //!
 //! That is the one difference from its session-side twin, which had to claim
 //! the `horsie_` prefix to stop the open-namespace capability behind it from
 //! swallowing the call. Here the call never becomes a message at all: the layer
 //! answers it before the actor is involved.
 
-use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
 use crate::agent_loop::capabilities::or_empty;
 use crate::control::toolbox::ControlToolbox;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
@@ -41,9 +41,12 @@ pub struct ControlPlaneCapability;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {}
 
-#[async_trait::async_trait]
-impl Capability for ControlPlaneCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl ControlPlaneCapability {
+    pub fn name(&self) -> &'static str {
         "control_plane"
     }
 
@@ -53,7 +56,7 @@ impl Capability for ControlPlaneCapability {
     /// the tools an agent is told about and the tools it has are one list, read
     /// off one object, so a resource added to `crate::control` cannot appear in
     /// one and not the other.
-    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         let Some(services) = loading.services.clone() else {
             return Err(SetupError {
                 capability: self.name(),
@@ -93,11 +96,11 @@ impl Capability for ControlPlaneCapability {
 
     /// Nothing. The layer answers every `horsie_*` call on the agent's own
     /// task, so none of them reaches this mailbox — see the module doc.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `Event` is uninhabited, so there is nothing to fold — but every
         // capability is offered every event, and this says so in the shape its
         // siblings use rather than by omission.
@@ -106,7 +109,7 @@ impl Capability for ControlPlaneCapability {
         };
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::ControlPlane(self.clone())
     }
 }
@@ -115,6 +118,7 @@ impl Capability for ControlPlaneCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::Capability;
     use crate::agent_loop::capabilities::testing::{
         advertised_by, equipped, facts, loading, someone_elses, spec,
     };
@@ -176,7 +180,7 @@ mod tests {
     /// waiting on a tool call that never returns.
     #[test]
     fn it_claims_nothing_through_the_mailbox() {
-        let c = ControlPlaneCapability;
+        let c = Capability::ControlPlane(ControlPlaneCapability);
         assert!(advertised_by(&c, &facts()).is_empty());
         assert!(
             c.command(&someone_elses()).is_none(),

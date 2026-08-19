@@ -23,7 +23,7 @@ use horsie_agentcore::{
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
 use horsie_server::agent_loop::capabilities::ask_user::{AskUserCapability, Event as AskUserEvent};
-use horsie_server::agent_loop::capabilities::{CapEvent, Capabilities};
+use horsie_server::agent_loop::capabilities::{CapEvent, Capabilities, Capability};
 use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRuntimeContext, FixedContextProvider,
@@ -330,7 +330,9 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
             // it is parked. Both are folded from the journal, and the
             // capability comes back with the list the agent was equipped with.
             AgentDomainEvent::Equipped {
-                capabilities: Capabilities::new(vec![Box::new(AskUserCapability::new())]),
+                capabilities: Capabilities::new(vec![
+                    Capability::AskUser(AskUserCapability::new()),
+                ]),
                 at_ms: 0,
             },
             AgentDomainEvent::Capability(CapEvent::AskUser(AskUserEvent::Asked {

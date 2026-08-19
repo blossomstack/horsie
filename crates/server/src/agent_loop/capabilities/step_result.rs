@@ -22,7 +22,7 @@
 //! its result"; nothing here can end a run, so an outcome cannot be acted on
 //! twice by two different owners.
 
-use super::{Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SetupError};
+use super::{Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SetupError};
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
@@ -134,25 +134,28 @@ impl StepResultCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for StepResultCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl StepResultCapability {
+    pub fn name(&self) -> &'static str {
         "step_result"
     }
 
     /// The paragraph that says what a step is, and nothing else.
     ///
     /// The tool itself is claimed by this capability's own
-    /// [`Capability::layer`] rather than pushed as a layer here, which is the
+    /// [`super::Capability::layer`] rather than pushed as a layer here, which is the
     /// change the move made: a layer pushed here runs on the agent's task,
     /// where there is no mailbox to journal the submitted output on and nothing
     /// that could conclude the step.
-    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.say("step_result", STEP_PROMPT_SUFFIX);
         Ok(())
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -161,7 +164,7 @@ impl Capability for StepResultCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::StepResult(cmd, to) = cmd else {
             return None;
         };
@@ -172,15 +175,15 @@ impl Capability for StepResultCapability {
     /// Nothing here is this one's, and nothing is re-asked on a load: this
     /// capability asks the session for nothing, so it holds nothing a dead
     /// process could have failed to send.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    // `apply` keeps the trait's no-op: the submitted output belongs to the
-    // step's own record, which the workflow runner keeps. Holding a copy here
-    // would be a second answer to "what did step 3 return".
+    // No `apply`, and the enum's fold arm is a no-op: the submitted output
+    // belongs to the step's own record, which the workflow runner keeps.
+    // Holding a copy here would be a second answer to "what did step 3 return".
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::StepResult(self.clone())
     }
 }
@@ -193,7 +196,7 @@ mod tests {
         advertised, advertised_by, answering, equipped, facts, loading, settings, someone_elses,
         spec, specs_of,
     };
-    use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
+    use crate::agent_loop::capabilities::{Capabilities, Capability, TurnEvent};
     use horsie_models::workflow::StepFieldType;
     use serde_json::{Value, json};
 
@@ -233,7 +236,7 @@ mod tests {
 
     /// The advertised schema, as the model is shown it.
     fn schema(c: &StepResultCapability) -> Value {
-        specs_of(c, &facts())
+        specs_of(&Capability::StepResult(c.clone()), &facts())
             .into_iter()
             .find(|s| s.name == SUBMIT_RESULT_TOOL)
             .expect("a step is equipped to submit")
@@ -387,8 +390,8 @@ mod tests {
     #[tokio::test]
     async fn an_interactive_step_is_equipped_to_ask() {
         let caps = Capabilities::new(vec![
-            Box::new(super::super::ask_user::AskUserCapability::new()),
-            Box::new(cap(true)),
+            Capability::AskUser(super::super::ask_user::AskUserCapability::new()),
+            Capability::StepResult(cap(true)),
         ]);
         let (_spec, degraded) = caps
             .equip(&loading(), settings())
@@ -406,7 +409,7 @@ mod tests {
     /// the author wrote.
     #[test]
     fn a_steps_declaration_survives_a_slice_round_trip() {
-        let caps = Capabilities::new(vec![Box::new(cap(true))]);
+        let caps = Capabilities::new(vec![Capability::StepResult(cap(true))]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
         let CapSlice::StepResult(back) = read.iter().next().expect("one").save() else {
@@ -436,7 +439,7 @@ mod tests {
     #[test]
     fn it_advertises_its_own_result_tool() {
         assert_eq!(
-            advertised_by(&cap(false), &facts()),
+            advertised_by(&Capability::StepResult(cap(false)), &facts()),
             vec![SUBMIT_RESULT_TOOL]
         );
     }

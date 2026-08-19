@@ -13,17 +13,17 @@
 //! Its session-side twin claimed the five names [`TOOLS`] lists, so that a
 //! `memory_load` could not fall through to the open-namespace capability behind
 //! it and be journaled as something else. Here there is nothing to claim: the
-//! layer this pushes in [`Capability::setup`] answers those calls on the
+//! layer this pushes in [`super::Capability::setup`] answers those calls on the
 //! agent's task, and routing them to this mailbox would only stop a tool that
-//! already works. So [`Capability::handle`] returns `None` and
-//! [`Capability::layer`] claims nothing, and [`crate::memory::MemoryToolbox`]
+//! already works. So [`super::Capability::handle`] returns `None` and
+//! [`super::Capability::layer`] claims nothing, and [`crate::memory::MemoryToolbox`]
 //! goes on advertising the five itself.
 //!
 //! [`TOOLS`] survives the move anyway, because it is what the tests check the
 //! equipped layer against — a sixth tool the toolbox grows and this list does
 //! not is a real drift, and one that is otherwise silent.
 
-use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
 use crate::agent_loop::capabilities::or_empty;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
@@ -59,9 +59,12 @@ impl MemoryCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for MemoryCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl MemoryCapability {
+    pub fn name(&self) -> &'static str {
         "memory"
     }
 
@@ -73,7 +76,7 @@ impl Capability for MemoryCapability {
     ///
     /// No spaces, no layer: an agent that names none has nothing to read, and
     /// the tools would only ever refuse.
-    async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         if self.spaces.is_empty() {
             return Ok(());
         }
@@ -108,11 +111,11 @@ impl Capability for MemoryCapability {
     }
 
     /// Nothing reaches this capability through the mailbox; see the module doc.
-    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event.
         let CapEvent::Memory(event) = event else {
@@ -122,7 +125,7 @@ impl Capability for MemoryCapability {
         match *event {}
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Memory(self.clone())
     }
 }
@@ -132,8 +135,8 @@ impl Capability for MemoryCapability {
 mod tests {
     use super::super::testing::{advertised_by, facts, someone_elses};
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     /// No spaces named, no layer equipped. If this regresses every agent gets
     /// memory tools whose every call is refused.
@@ -196,7 +199,7 @@ mod tests {
     /// task, and claiming them at the mailbox would stop a tool that works.
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
-        let c = MemoryCapability::new(vec!["default".into()]);
+        let c = Capability::Memory(MemoryCapability::new(vec!["default".into()]));
         assert!(c.command(&someone_elses()).is_none());
         assert!(
             advertised_by(&c, &facts()).is_empty(),
@@ -209,7 +212,7 @@ mod tests {
     /// could widen or narrow an agent that was already equipped.
     #[test]
     fn the_space_list_survives_a_slice_round_trip() {
-        let caps = Capabilities::new(vec![Box::new(MemoryCapability::new(vec![
+        let caps = Capabilities::new(vec![Capability::Memory(MemoryCapability::new(vec![
             "default".into(),
             "team".into(),
         ]))]);

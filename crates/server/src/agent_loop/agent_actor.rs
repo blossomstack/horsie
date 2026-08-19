@@ -3691,7 +3691,9 @@ mod interruption_tests {
     /// only the actor can act on it.
     #[tokio::test]
     async fn a_request_the_session_never_answered_is_re_asked_when_the_agent_loads() {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, SessionRequest, sub_agent};
+        use crate::agent_loop::capabilities::{
+            CapEvent, Capabilities, Capability, SessionRequest, sub_agent,
+        };
         use crate::sessions::runners::action::RunnerArgs;
 
         let pending = sub_agent::Pending {
@@ -3703,7 +3705,7 @@ mod interruption_tests {
         };
         let mut requests = recover_asking(&[
             AgentDomainEvent::Equipped {
-                capabilities: Capabilities::new(vec![Box::new(
+                capabilities: Capabilities::new(vec![Capability::SubAgent(
                     sub_agent::SubAgentCapability::new(
                         crate::sessions::runners::empty_settings(),
                         0,
@@ -3802,13 +3804,13 @@ mod interruption_tests {
 mod capability_tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{FakeCapability, call};
-    use crate::agent_loop::capabilities::{CapEvent, Capabilities};
+    use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability};
     use horsie_actor::{ActorSystem, InMemoryJournal};
     use horsie_agentcore::{ToolCallError, ToolSpec};
 
     fn equipped(tool: &str) -> AgentState {
         AgentState {
-            capabilities: Capabilities::new(vec![Box::new(FakeCapability::new(tool))]),
+            capabilities: Capabilities::new(vec![Capability::Fake(FakeCapability::new(tool))]),
             ..AgentState::default()
         }
     }
@@ -3879,7 +3881,7 @@ mod capability_tests {
         use crate::agent_loop::capabilities::{Answering, CapCommand};
 
         let state = AgentState {
-            capabilities: Capabilities::new(vec![Box::new(TaskListCapability::new())]),
+            capabilities: Capabilities::new(vec![Capability::TaskList(TaskListCapability::new())]),
             ..AgentState::default()
         };
         let commanded = |input: serde_json::Value| {
@@ -3938,7 +3940,8 @@ mod capability_tests {
             max_retries: None,
             allowed_tools: None,
         });
-        params.capabilities = Capabilities::new(vec![Box::new(FakeCapability::new("fake_tool"))]);
+        params.capabilities =
+            Capabilities::new(vec![Capability::Fake(FakeCapability::new("fake_tool"))]);
         let agent = crate::testing::spawn_detached(
             &ActorSystem::new(journal),
             AgentActor::new(ctx, params),
@@ -4199,14 +4202,14 @@ mod ask_wiring_tests {
     //! unable to meet.
 
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::ask_user::{AskUserCapability, Command};
     use crate::agent_loop::capabilities::testing::answering;
     use crate::agent_loop::capabilities::{CapCommand, Msg};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     fn attended() -> AgentState {
         AgentState {
-            capabilities: Capabilities::new(vec![Box::new(AskUserCapability::new())]),
+            capabilities: Capabilities::new(vec![Capability::AskUser(AskUserCapability::new())]),
             ..AgentState::default()
         }
     }

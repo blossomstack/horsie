@@ -38,9 +38,9 @@ use super::ids::{AgentId, RunnerId};
 use super::message::{ChildOutcome, WorkflowOutcome};
 use super::{AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::agent_loop::capabilities::Capabilities;
 use crate::agent_loop::capabilities::ask_user::AskUserCapability;
 use crate::agent_loop::capabilities::step_result::StepResultCapability;
+use crate::agent_loop::capabilities::{Capabilities, Capability};
 use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::workflow::{
@@ -422,18 +422,18 @@ impl State {
         // never be reached, and its layer would be built inside the sandbox
         // base — which wraps nothing — and dropped on the floor.
         let mut equipment = self.capabilities.clone();
-        equipment.push_front(StepResultCapability::new(
+        equipment.push_front(Capability::StepResult(StepResultCapability::new(
             step.outcomes.clone(),
             step.fields.clone(),
             step.interactive,
-        ));
+        )));
         // Equipped either way, and the flag is the whole difference: a step
         // that may not ask still needs somebody to answer for `ask_user`, or
         // the call falls through to the sandbox and the model is never told no.
-        equipment.push_front(match step.interactive {
+        equipment.push_front(Capability::AskUser(match step.interactive {
             true => AskUserCapability::new(),
             false => AskUserCapability::not_interactive(),
-        });
+        }));
         Some(Action::StartAgent {
             agent: next.agent,
             equipment,

@@ -352,7 +352,7 @@ pub trait AgentLifecycle {
 #[must_use]
 pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use crate::agent_loop::capabilities::{
-        ask_user::AskUserCapability, budget::TokenBudgetCapability,
+        Capability, ask_user::AskUserCapability, budget::TokenBudgetCapability,
         control_plane::ControlPlaneCapability, fork::ForkCapability, mcp::McpCapability,
         memory::MemoryCapability, runtime::RuntimeCapability, sub_agent::SubAgentCapability,
         task_list::TaskListCapability, timers::TimersCapability, title::TitleCapability,
@@ -369,30 +369,33 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
 
     // Delegation: every runner that owns an agent can delegate, which is what
     // makes nesting uniform rather than a privilege of the main agent.
-    caps.push(SubAgentCapability::new(s.clone(), opts.depth));
-    caps.push(WorkflowCapability::default());
+    caps.push(Capability::SubAgent(SubAgentCapability::new(
+        s.clone(),
+        opts.depth,
+    )));
+    caps.push(Capability::Workflow(WorkflowCapability::default()));
     // Unconditional, and all three were unconditional before they were
     // capabilities: a task list, a timer and a compaction target are ways of
     // working rather than permissions, so every agent that exists has them.
     // Losing the last one is silent — no tool goes missing, an agent just
     // never compacts — which is exactly why it is equipped here rather than
     // left to a runner to remember.
-    caps.push(TaskListCapability::new());
-    caps.push(TimersCapability::new());
-    caps.push(TokenBudgetCapability::default());
+    caps.push(Capability::TaskList(TaskListCapability::new()));
+    caps.push(Capability::Timers(TimersCapability::new()));
+    caps.push(Capability::TokenBudget(TokenBudgetCapability::default()));
 
     match kind {
         // A conversation can ask, name itself, and branch.
         RunnerKind::Conversation => {
-            caps.push(match opts.unattended {
+            caps.push(Capability::AskUser(match opts.unattended {
                 true => AskUserCapability::unattended(),
                 false => AskUserCapability::default(),
-            });
-            caps.push(match opts.fork {
+            }));
+            caps.push(Capability::Title(match opts.fork {
                 Some(fork) => TitleCapability::for_fork(fork),
                 None => TitleCapability::default(),
-            });
-            caps.push(ForkCapability::new(opts.agent, s.clone()));
+            }));
+            caps.push(Capability::Fork(ForkCapability::new(opts.agent, s.clone())));
         }
         // A step's `submit_result` and its `ask_user` are declared per step, so
         // they are equipped when the step agent starts rather than held here.
@@ -403,16 +406,20 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     }
 
     if s.control_plane == Some(true) && matches!(kind, RunnerKind::Conversation) {
-        caps.push(ControlPlaneCapability);
+        caps.push(Capability::ControlPlane(ControlPlaneCapability));
     }
     if !s.memory_spaces.is_empty() {
-        caps.push(MemoryCapability::new(s.memory_spaces.clone()));
+        caps.push(Capability::Memory(MemoryCapability::new(
+            s.memory_spaces.clone(),
+        )));
     }
     // Last, and last on purpose.
     if !s.mcp_servers.is_empty() {
-        caps.push(McpCapability::new(s.mcp_servers.clone()));
+        caps.push(Capability::Mcp(McpCapability::new(s.mcp_servers.clone())));
     }
-    caps.push(RuntimeCapability::new(opts.agent_type.clone()));
+    caps.push(Capability::Runtime(RuntimeCapability::new(
+        opts.agent_type.clone(),
+    )));
     caps
 }
 

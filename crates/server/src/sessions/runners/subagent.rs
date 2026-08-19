@@ -325,6 +325,7 @@ fn render(output: &serde_json::Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::Capability;
     use crate::agent_loop::capabilities::testing::{advertised, facts};
     use crate::agent_loop::capabilities::title::TitleCapability;
 
@@ -423,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn the_agent_is_equipped_by_folding_the_capabilities() {
         let state = State {
-            capabilities: Capabilities::new(vec![Box::new(TitleCapability::default())]),
+            capabilities: Capabilities::new(vec![Capability::Title(TitleCapability::default())]),
             ..worker()
         };
         let actions = state.actions(&view());

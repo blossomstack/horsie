@@ -20,7 +20,7 @@
 //! declining hands the call to the next capability, and the last of those is the
 //! open-namespace sandbox, which claims every name: the model would be answered
 //! by the sandbox and never learn why its question went nowhere. A muted agent
-//! also claims no `ask_user` in its [`Capability::layer`], so in practice the
+//! also claims no `ask_user` in its [`super::Capability::layer`], so in practice the
 //! call only arrives from a plugin or a resumed transcript.
 //!
 //! # Abandonment stays in `queued_turn`
@@ -50,9 +50,7 @@
 //! So the queue decides *whether* a park is abandoned and *what the model is
 //! told*; this decides nothing and only stops holding what is no longer held.
 
-use super::{
-    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SetupError, TurnEvent,
-};
+use super::{Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SetupError, TurnEvent};
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
@@ -186,7 +184,7 @@ impl AskUserCapability {
 
     /// Why this answer set cannot resume the park, if it cannot.
     ///
-    /// The rule and the diagnostic in one place. [`Capability::handle`] cannot
+    /// The rule and the diagnostic in one place. [`super::Capability::handle`] cannot
     /// return an error — a refused answer is not a decision, so it journals
     /// nothing and produces nothing — but the person who typed the answer is
     /// owed better than silence, so the same check is reachable by name for
@@ -329,9 +327,12 @@ impl AskUserCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for AskUserCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl AskUserCapability {
+    pub fn name(&self) -> &'static str {
         "ask_user"
     }
 
@@ -343,10 +344,10 @@ impl Capability for AskUserCapability {
     /// working out why.
     ///
     /// An unmuted one equips nothing here either: the tool is claimed by this
-    /// capability's own [`Capability::layer`], which is what routes the call to
+    /// capability's own [`super::Capability::layer`], which is what routes the call to
     /// this actor's mailbox, where the park can be journaled. A layer pushed
     /// here in `setup` runs on the agent's task and could do neither.
-    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         match self.mute {
             Some(Mute::Unattended) => spec.say("unattended", UNATTENDED_PROMPT_SUFFIX),
             Some(Mute::NotInteractive) => {
@@ -357,7 +358,7 @@ impl Capability for AskUserCapability {
         Ok(())
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -366,7 +367,7 @@ impl Capability for AskUserCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::AskUser(cmd, to) = cmd else {
             return None;
         };
@@ -374,7 +375,7 @@ impl Capability for AskUserCapability {
         Some(self.asked(&to.call, input))
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Answer(answers) => self.answered(answers),
             // The park did not survive; see the module doc for why this is
@@ -394,7 +395,7 @@ impl Capability for AskUserCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the other nine here
         // would make adding a tenth a change to all of them.
@@ -414,7 +415,7 @@ impl Capability for AskUserCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::AskUser(self.clone())
     }
 }
@@ -424,10 +425,10 @@ impl Capability for AskUserCapability {
 mod tests {
     use super::super::testing::{FakeCapability, facts};
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{
         advertised_by, answering, equipped, loading, spec, specs_of,
     };
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     /// The command the `ask_user` layer builds for a question.
     fn ask(id: &str, question: &str) -> CapCommand {
@@ -493,7 +494,7 @@ mod tests {
         );
         assert!(spec.toolbox().is_none());
         assert!(
-            advertised_by(&c, &facts()).is_empty(),
+            advertised_by(&Capability::AskUser(c.clone()), &facts()).is_empty(),
             "a muted agent advertises no ask_user"
         );
 
@@ -522,7 +523,10 @@ mod tests {
             AskUserCapability::unattended(),
             AskUserCapability::not_interactive(),
         ] {
-            let caps = Capabilities::new(vec![Box::new(c), Box::new(FakeCapability::new(TOOL))]);
+            let caps = Capabilities::new(vec![
+                Capability::AskUser(c),
+                Capability::Fake(FakeCapability::new(TOOL)),
+            ]);
             let d = caps
                 .dispatch(&ask("t1", "which?"))
                 .expect("a muted ask that answers nobody");
@@ -554,7 +558,7 @@ mod tests {
         // Still equips nothing, exactly as unattended does — and the refusal
         // says the other reason, not this one.
         assert!(spec.toolbox().is_none());
-        assert!(advertised_by(&c, &facts()).is_empty());
+        assert!(advertised_by(&Capability::AskUser(c.clone()), &facts()).is_empty());
         let said = refusal(
             &c.command(&ask("t1", "which?"))
                 .expect("mine even when muted"),
@@ -584,7 +588,10 @@ mod tests {
             Vec::<String>::new(),
             "the tool is dispatched through the mailbox, not through a layer"
         );
-        assert_eq!(advertised_by(&c, &facts()), vec![TOOL]);
+        assert_eq!(
+            advertised_by(&Capability::AskUser(c.clone()), &facts()),
+            vec![TOOL]
+        );
     }
 
     /// The schema has to keep saying that `choices` are suggestions: a model
@@ -593,7 +600,7 @@ mod tests {
     /// a multi-select asked as a single choice loses every answer but one.
     #[test]
     fn the_advertised_schema_offers_multi_select_and_a_free_text_fallback() {
-        let spec = specs_of(&AskUserCapability::new(), &facts()).remove(0);
+        let spec = specs_of(&Capability::AskUser(AskUserCapability::new()), &facts()).remove(0);
         let props = spec
             .input_schema
             .get("properties")
@@ -756,7 +763,7 @@ mod tests {
     #[test]
     fn a_park_survives_a_slice_round_trip() {
         let c = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::AskUser(c)]);
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
@@ -773,7 +780,7 @@ mod tests {
         );
 
         // And a muted one keeps its reason, which is what the model is told.
-        let muted = Capabilities::new(vec![Box::new(AskUserCapability::unattended())]);
+        let muted = Capabilities::new(vec![Capability::AskUser(AskUserCapability::unattended())]);
         let read: Capabilities =
             serde_json::from_str(&serde_json::to_string(&muted).expect("write")).expect("read");
         let CapSlice::AskUser(back) = read.iter().next().expect("one").save() else {

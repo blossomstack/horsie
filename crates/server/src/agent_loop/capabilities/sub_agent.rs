@@ -51,8 +51,8 @@
 //! never learn it had hit a budget.
 
 use super::{
-    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SessionReply,
-    SessionRequest, TurnEvent,
+    Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SessionReply, SessionRequest,
+    TurnEvent,
 };
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AgentCatalog, Incoming};
@@ -479,14 +479,14 @@ impl SubAgentCapability {
     /// That is the change the move made: a layer pushed there runs on the
     /// agent's task, where there is no mailbox to journal an intent on and no
     /// way to park the call while the session answers. A name claimed here is
-    /// dispatched through [`Capability::handle`], which can do both.
+    /// dispatched through [`super::Capability::handle`], which can do both.
     ///
     /// A budget the model can only ever be refused by advertises nothing. A
     /// tool like that is worse than no tool: it spends prompt on a capability
     /// that does not exist and invites a retry loop against a fixed number.
     ///
     /// The facts are what carry the agent catalogue, and this is the only reason
-    /// [`Capability::layer`] takes them: the types a session can spawn are found
+    /// [`super::Capability::layer`] takes them: the types a session can spawn are found
     /// by the workspace scan, which runs in a capability that sorts *after* this
     /// one — so the layers are composed on the run's task, after `provide`, and
     /// this list is built there. A model not shown it can only guess at a name,
@@ -588,13 +588,16 @@ impl SubAgentCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for SubAgentCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl SubAgentCapability {
+    pub fn name(&self) -> &'static str {
         "sub_agent"
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         facts: &AgentFacts,
@@ -603,7 +606,7 @@ impl Capability for SubAgentCapability {
         claiming(inner, self.claims(facts), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::SubAgent(cmd, to) = cmd else {
             return None;
         };
@@ -615,7 +618,7 @@ impl Capability for SubAgentCapability {
         })
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
@@ -640,7 +643,7 @@ impl Capability for SubAgentCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the others here would
         // make adding one a change to all of them.
@@ -665,7 +668,7 @@ impl Capability for SubAgentCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::SubAgent(self.clone())
     }
 }
@@ -677,8 +680,8 @@ mod tests {
         FakeCapability, advertised_by, answering, facts, someone_elses, specs_of,
     };
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::settings;
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
     use crate::sessions::runners::message::WorkflowOutcome;
 
     fn cap() -> SubAgentCapability {
@@ -734,7 +737,7 @@ mod tests {
 
     /// What the model is shown for `spawn_agent` under these facts.
     fn spawn_spec(c: &SubAgentCapability, facts: &AgentFacts) -> ToolSpec {
-        specs_of(c, facts)
+        specs_of(&Capability::SubAgent(c.clone()), facts)
             .into_iter()
             .find(|t| t.name == SPAWN_TOOL)
             .expect("spawn_agent is advertised")
@@ -961,7 +964,7 @@ mod tests {
 
         // The cut. Nothing is folded past the request, and what comes back is
         // read off the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::SubAgent(c)]);
         let written = serde_json::to_string(&caps).expect("write");
         let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
 
@@ -1054,8 +1057,8 @@ mod tests {
     #[test]
     fn a_refused_spawn_is_claimed_rather_than_left_to_the_sandbox() {
         let caps = Capabilities::new(vec![
-            Box::new(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
-            Box::new(FakeCapability::new(SPAWN_TOOL)),
+            Capability::SubAgent(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
+            Capability::Fake(FakeCapability::new(SPAWN_TOOL)),
         ]);
         let d = caps
             .dispatch(&spawn_call())
@@ -1295,7 +1298,7 @@ mod tests {
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            advertised_by(&cap(), &facts()),
+            advertised_by(&Capability::SubAgent(cap()), &facts()),
             vec![SPAWN_TOOL, STATUS_TOOL]
         );
     }
@@ -1405,10 +1408,16 @@ mod tests {
     fn a_spent_budget_advertises_nothing() {
         let mut zero = settings();
         zero.max_concurrent_subagents = Some(0);
-        assert!(advertised_by(&SubAgentCapability::new(zero, 0), &facts()).is_empty());
         assert!(
             advertised_by(
-                &SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH),
+                &Capability::SubAgent(SubAgentCapability::new(zero, 0)),
+                &facts()
+            )
+            .is_empty()
+        );
+        assert!(
+            advertised_by(
+                &Capability::SubAgent(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
                 &facts()
             )
             .is_empty()
@@ -1422,7 +1431,7 @@ mod tests {
     fn the_outstanding_children_survive_a_slice_round_trip() {
         let mut c = cap();
         let child = spawned(&mut c);
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::SubAgent(c)]);
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");

@@ -25,13 +25,13 @@
 //! Its session-side twin equipped nothing, because `invoke_workflow` had no
 //! toolbox behind it and advertising a tool before there is one to execute is
 //! how a model learns to call something that answers "no such tool". That is
-//! no longer true: a tool this capability's [`Capability::layer`] claims is
-//! dispatched through [`Capability::handle`] on this actor, which is the half
+//! no longer true: a tool this capability's [`super::Capability::layer`] claims is
+//! dispatched through [`super::Capability::handle`] on this actor, which is the half
 //! that was missing.
 
 use super::{
-    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SessionReply,
-    SessionRequest, TurnEvent,
+    Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SessionReply, SessionRequest,
+    TurnEvent,
 };
 use crate::agent_loop::Incoming;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
@@ -387,13 +387,16 @@ impl WorkflowCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for WorkflowCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl WorkflowCapability {
+    pub fn name(&self) -> &'static str {
         "workflow"
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -402,7 +405,7 @@ impl Capability for WorkflowCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::Workflow(cmd, to) = cmd else {
             return None;
         };
@@ -414,7 +417,7 @@ impl Capability for WorkflowCapability {
         })
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
@@ -437,7 +440,7 @@ impl Capability for WorkflowCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the others here would
         // make adding one a change to all of them.
@@ -462,7 +465,7 @@ impl Capability for WorkflowCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Workflow(self.clone())
     }
 }
@@ -471,10 +474,10 @@ impl Capability for WorkflowCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{
         advertised_by, answering, facts, someone_elses,
     };
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
     use crate::sessions::runners::message::SubAgentOutcome;
 
     /// An invocation as the layer that claims `invoke_workflow` builds it.
@@ -636,7 +639,7 @@ mod tests {
 
         // The cut: nothing past the request is folded, and what comes back is
         // read off the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Workflow(c)]);
         let written = serde_json::to_string(&caps).expect("write");
         let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
 
@@ -876,7 +879,10 @@ mod tests {
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            advertised_by(&WorkflowCapability::default(), &facts()),
+            advertised_by(
+                &Capability::Workflow(WorkflowCapability::default()),
+                &facts()
+            ),
             vec![INVOKE_TOOL, STATUS_TOOL]
         );
     }
@@ -887,7 +893,7 @@ mod tests {
     fn the_runs_in_flight_survive_a_slice_round_trip() {
         let mut c = WorkflowCapability::default();
         let child = invoked(&mut c);
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Workflow(c)]);
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");

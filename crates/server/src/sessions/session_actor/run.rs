@@ -312,13 +312,13 @@ impl SessionActor {
         // Front, not back: the list ends with the capability that claims every
         // call offered to it, so an appended `submit_result` would be swallowed
         // by the sandbox.
-        equipment.push_front(
+        equipment.push_front(crate::agent_loop::capabilities::Capability::StepResult(
             crate::agent_loop::capabilities::step_result::StepResultCapability::new(
                 step.outcomes.clone(),
                 step.fields.clone(),
                 step.interactive,
             ),
-        );
+        ));
         // Equipped either way: a step that may not ask still needs somebody to
         // answer for `ask_user`, or the call falls through to the sandbox and
         // the model is never told no.
@@ -327,7 +327,7 @@ impl SessionActor {
         // not declare itself interactive is not the same fact as nobody being
         // there — usually somebody is — and telling an attended run it was
         // started by a routine is simply false.
-        equipment.push_front({
+        equipment.push_front(crate::agent_loop::capabilities::Capability::AskUser({
             use crate::agent_loop::capabilities::ask_user::AskUserCapability;
             match (step.interactive, unattended) {
                 (true, false) => AskUserCapability::new(),
@@ -336,7 +336,7 @@ impl SessionActor {
                 (true, true) => AskUserCapability::unattended(),
                 (false, _) => AskUserCapability::not_interactive(),
             }
-        });
+        }));
         self.spawn_agent(
             ctx,
             state,

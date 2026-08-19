@@ -6,7 +6,7 @@
 //! folded from run events, and it stays on [`crate::agent_loop::state::AgentState`]
 //! for exactly the reason [`super::Capability::carried_state`] and
 //! [`super::Capability::view`] exist: it is a fact every runner agrees on, and
-//! turning it into a capability would buy a trait impl and a `CapSlice` arm for
+//! turning it into a capability would buy an enum arm and a `CapSlice` arm for
 //! nothing. What varies by runner is not the fact but the *policy read against
 //! it* — the two percentages a session used to get from server constants. This
 //! capability owns exactly that policy and nothing else: no folded state, no
@@ -14,7 +14,7 @@
 //!
 //! # Why a hook and not a getter
 //!
-//! The trait's only two ways to answer a question from outside are
+//! A capability's only two ways to answer a question from outside are
 //! [`super::Capability::carried_state`] and [`super::Capability::view`], and
 //! neither is a compaction question — one is compaction's own input, the other
 //! is what a client renders. So this capability answers through the same
@@ -30,7 +30,7 @@
 //! [`crate::sessions::runners::assemble`], which is why every agent-owning
 //! runner equips one unconditionally, the same as the task list and timers.
 
-use super::{Act, CapSlice, Capability, Decision, Msg};
+use super::{Act, CapSlice, Decision, Msg};
 use serde::{Deserialize, Serialize};
 
 /// The share of a model's context window at which an agent compacts, absent a
@@ -78,13 +78,16 @@ impl Default for TokenBudgetCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for TokenBudgetCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl TokenBudgetCapability {
+    pub fn name(&self) -> &'static str {
         "token_budget"
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             Msg::TurnProposed => Some(Decision::default().then(Act::CompactionBudget {
                 trigger_at_percent: self.trigger_at_percent,
@@ -100,7 +103,7 @@ impl Capability for TokenBudgetCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Budget(self.clone())
     }
 }
@@ -109,10 +112,12 @@ impl Capability for TokenBudgetCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::{Capabilities, testing::someone_elses};
+    use crate::agent_loop::capabilities::{Capabilities, Capability, testing::someone_elses};
 
     fn budget(trigger: u32, retain: u32) -> Capabilities {
-        Capabilities::new(vec![Box::new(TokenBudgetCapability::new(trigger, retain))])
+        Capabilities::new(vec![Capability::TokenBudget(TokenBudgetCapability::new(
+            trigger, retain,
+        ))])
     }
 
     /// The one thing this capability says, and the only message it says it on:
@@ -163,7 +168,7 @@ mod tests {
     /// against.
     #[test]
     fn it_claims_no_commands_and_no_other_messages() {
-        let cap = TokenBudgetCapability::default();
+        let cap = Capability::TokenBudget(TokenBudgetCapability::default());
         assert!(cap.command(&someone_elses()).is_none());
         for msg in [
             Msg::Turn(super::super::TurnEvent::Ended),

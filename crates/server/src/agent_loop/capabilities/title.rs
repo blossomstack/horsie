@@ -14,7 +14,7 @@
 //!
 //! That is why the name in flight is journaled rather than held in a field. Two
 //! things need it after the asking turn is over: the confirmation the model
-//! reads, which quotes the name back, and [`Capability::handle`] itself — a
+//! reads, which quotes the name back, and [`super::Capability::handle`] itself — a
 //! reply is *offered* around the capabilities, so the only way this one can
 //! recognise an answer to its own request is to have recorded the call it made.
 //!
@@ -27,8 +27,8 @@
 //! fork, which is what the prompt below turns on.
 
 use super::{
-    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SessionReply,
-    SessionRequest, SetupError,
+    Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SessionReply, SessionRequest,
+    SetupError,
 };
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::ids::RunnerId;
@@ -283,16 +283,19 @@ impl TitleCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for TitleCapability {
-    fn name(&self) -> &'static str {
+/// The methods the [`Capability`](super::Capability) enum dispatches into.
+///
+/// Inherent rather than a trait impl: the set of capabilities is closed, so
+/// the enum's `match` is what reaches these and nothing else needs to.
+impl TitleCapability {
+    pub fn name(&self) -> &'static str {
         "title"
     }
 
     /// One tool, two kinds of conversation. A fork names *itself*; every other
     /// conversation names the session — and the model never has to know which
     /// it is in, so the only difference here is which paragraph it is given.
-    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+    pub async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         match self.fork {
             // What a fork is, and why naming itself matters. Its own paragraph
             // rather than the generic one below: a fork already knows it should
@@ -308,7 +311,7 @@ impl Capability for TitleCapability {
         Ok(())
     }
 
-    fn layer(
+    pub fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
@@ -317,7 +320,7 @@ impl Capability for TitleCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::Title(cmd, to) = cmd else {
             return None;
         };
@@ -325,7 +328,7 @@ impl Capability for TitleCapability {
         Some(self.asked(&to.call, input))
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
             // Replies are offered around, so this claims only the ones it can
             // account for: a call it recorded asking about.
@@ -348,7 +351,7 @@ impl Capability for TitleCapability {
         }
     }
 
-    fn apply(&mut self, event: &CapEvent) {
+    pub fn apply(&mut self, event: &CapEvent) {
         // `let ... else` rather than a match with an arm per sibling: every
         // capability is offered every event, and listing the other nine here
         // would make adding a tenth a change to all of them.
@@ -369,7 +372,7 @@ impl Capability for TitleCapability {
         }
     }
 
-    fn save(&self) -> CapSlice {
+    pub fn save(&self) -> CapSlice {
         CapSlice::Title(self.clone())
     }
 }
@@ -378,10 +381,10 @@ impl Capability for TitleCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{
         advertised_by, answering, equipped, facts, loading, someone_elses, spec, specs_of,
     };
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     /// Ask for a name, the way the layer that claims `set_session_title`
     /// would.
@@ -457,7 +460,7 @@ mod tests {
 
         // The cut: the reply is never folded, and what comes back is read off
         // the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Title(c)]);
         let written = serde_json::to_string(&caps).expect("write");
         let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
 
@@ -602,7 +605,10 @@ mod tests {
             cap.setup(&loading(), &mut spec)
                 .await
                 .expect("nothing to acquire");
-            assert_eq!(advertised_by(&cap, &facts()), vec![TOOL]);
+            assert_eq!(
+                advertised_by(&Capability::Title(cap.clone()), &facts()),
+                vec![TOOL]
+            );
             assert_eq!(
                 equipped(spec),
                 Vec::<String>::new(),
@@ -615,7 +621,7 @@ mod tests {
     /// limit the validation above actually enforces.
     #[test]
     fn the_advertised_schema_quotes_the_limit_it_enforces() {
-        let spec = specs_of(&TitleCapability::new(), &facts()).remove(0);
+        let spec = specs_of(&Capability::Title(TitleCapability::new()), &facts()).remove(0);
         assert_eq!(spec.name, TOOL);
         assert_eq!(
             spec.input_schema["properties"]["title"]["maxLength"],
@@ -697,7 +703,7 @@ mod tests {
         let d = set(&c, "call-2", "the other one");
         fold(&mut c, &d);
 
-        let caps = Capabilities::new(vec![Box::new(c)]);
+        let caps = Capabilities::new(vec![Capability::Title(c)]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
         let CapSlice::Title(back) = read.iter().next().expect("one").save() else {
@@ -712,7 +718,7 @@ mod tests {
 
         // And a fork keeps knowing it is one, which is what its prompt turns on.
         let fork = RunnerId::new_v4();
-        let forked = Capabilities::new(vec![Box::new(TitleCapability::for_fork(fork))]);
+        let forked = Capabilities::new(vec![Capability::Title(TitleCapability::for_fork(fork))]);
         let read: Capabilities =
             serde_json::from_str(&serde_json::to_string(&forked).expect("write")).expect("read");
         let CapSlice::Title(back) = read.iter().next().expect("one").save() else {

@@ -1304,7 +1304,7 @@ pub(super) fn test_equipment(
     agent_type: Option<String>,
 ) -> crate::agent_loop::capabilities::Capabilities {
     use crate::agent_loop::capabilities::{
-        ask_user::AskUserCapability, step_result::StepResultCapability,
+        Capability, ask_user::AskUserCapability, step_result::StepResultCapability,
     };
     use crate::sessions::runners::{AgentId, Assembly, RunnerId, RunnerKind, assemble};
     let opts = Assembly {
@@ -1330,8 +1330,12 @@ pub(super) fn test_equipment(
         SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
         SessionAgentKind::Step(_) => {
             let mut caps = assemble(RunnerKind::Workflow, &opts);
-            caps.push_front(StepResultCapability::new(Vec::new(), Vec::new(), false));
-            caps.push_front(AskUserCapability::not_interactive());
+            caps.push_front(Capability::StepResult(StepResultCapability::new(
+                Vec::new(),
+                Vec::new(),
+                false,
+            )));
+            caps.push_front(Capability::AskUser(AskUserCapability::not_interactive()));
             caps
         }
     }
