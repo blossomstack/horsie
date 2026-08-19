@@ -29,11 +29,9 @@
 //! dispatched through [`super::Capability::handle`] on this actor, which is the half
 //! that was missing.
 
-use super::{
-    Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SessionReply, SessionRequest,
-    TurnEvent,
-};
+use super::{Act, CapCommand, Decision, Mailbox, Msg, SessionReply, SessionRequest, TurnEvent};
 use crate::agent_loop::Incoming;
+use crate::agent_loop::state::AgentDomainEvent;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
@@ -62,18 +60,79 @@ pub enum Command {
 
 /// One agent's workflow runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowCapability {
+pub struct WorkflowCapability;
+
+/// The workflow runs this agent has in flight.
+///
+/// Fields private to this file, for the reason
+/// [`SubAgentState`](super::sub_agent::SubAgentState)'s are: whether a run is
+/// still owed is a question, not a set to read.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowState {
     /// Runs asked of the session and not yet answered, by the model's call.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
     /// an intent [`Msg::Loaded`] asks about again, naming the same run.
-    pub requested: BTreeMap<String, Pending>,
+    #[serde(default)]
+    requested: BTreeMap<String, Pending>,
     /// Runs that exist and still owe their output.
     ///
-    /// A set rather than the session-side map to an `AgentId`: the capability
-    /// belongs to the agent that invoked, so the output goes into its own queue
-    /// and there is no address to keep.
-    pub outstanding: BTreeSet<RunnerId>,
+    /// A set rather than the session-side map to an `AgentId`: this belongs to
+    /// the agent that invoked, so the output goes into its own queue and there
+    /// is no address to keep.
+    #[serde(default)]
+    outstanding: BTreeSet<RunnerId>,
+}
+
+impl WorkflowState {
+    /// Invariant 6, named: an agent may not conclude while it has outstanding
+    /// children, and a run in flight is one.
+    #[must_use]
+    pub(crate) fn holds_conclusion(&self) -> bool {
+        !self.outstanding.is_empty()
+    }
+
+    /// A run was asked of the session.
+    pub(crate) fn requested(&mut self, call: String, pending: Pending) {
+        self.requested.insert(call, pending);
+    }
+
+    /// The session created it, so an output is now owed.
+    pub(crate) fn started(&mut self, call: &str) {
+        if let Some(pending) = self.requested.remove(call) {
+            self.outstanding.insert(pending.child);
+        }
+    }
+
+    /// The session would not create it.
+    pub(crate) fn dropped(&mut self, call: &str) {
+        self.requested.remove(call);
+    }
+
+    /// This run's output reached the queue.
+    pub(crate) fn reported(&mut self, child: RunnerId) {
+        self.outstanding.remove(&child);
+    }
+}
+
+#[cfg(test)]
+/// What this state holds, for the tests that assert on it.
+///
+/// `#[cfg(test)]` because nothing in production reads it: the decisions that
+/// need it are in this file and take `&self`. An accessor kept for a caller
+/// that does not exist is how a private field stops being private.
+impl WorkflowState {
+    /// The invocations the session has not answered yet.
+    #[must_use]
+    pub(crate) fn pending(&self) -> &BTreeMap<String, Pending> {
+        &self.requested
+    }
+
+    /// The runs that still owe an output.
+    #[must_use]
+    pub(crate) fn outstanding(&self) -> &BTreeSet<RunnerId> {
+        &self.outstanding
+    }
 }
 
 /// One run asked of the session and not yet answered.
@@ -90,20 +149,6 @@ pub struct Pending {
 }
 
 /// What this capability records.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
-    /// A run was asked of the session, and this is what was asked for.
-    Requested { call: String, pending: Pending },
-    /// The session created it, so an output is now owed.
-    Started { call: String },
-    /// The session would not create it. Journaled because the
-    /// [`Event::Requested`] before it was — this retracts a fact, and is not
-    /// itself the refusal.
-    Dropped { call: String },
-    /// This run's output reached the queue.
-    Reported { child: RunnerId },
-}
-
 /// The tool's arguments: exactly what the model writes, and nothing else.
 ///
 /// The model names a workflow; it never writes a graph. Turning that name into
@@ -122,15 +167,8 @@ pub struct Request {
 impl WorkflowCapability {
     /// Whether this agent is still owed an output it cannot produce yet.
     ///
-    /// Invariant 6, named: an agent may not conclude while it has outstanding
-    /// children, and a run in flight is one.
-    #[must_use]
-    pub fn holds_conclusion(&self) -> bool {
-        !self.outstanding.is_empty()
-    }
-
     /// The model called `invoke_workflow`.
-    fn invoke(&self, call: &str, input: &Value) -> Decision {
+    fn invoke(call: &str, input: &Value) -> Decision {
         let req: Request = match serde_json::from_value(input.clone()) {
             Ok(req) => req,
             // A capability that owns a tool name owns every call to it,
@@ -154,10 +192,10 @@ impl WorkflowCapability {
             input: req.input,
         };
         let note = format!("starting workflow {}", pending.workflow);
-        Decision::record(vec![CapEvent::Workflow(Event::Requested {
+        Decision::record(vec![AgentDomainEvent::WorkflowRequested {
             call: call.to_string(),
             pending: pending.clone(),
-        })])
+        }])
         .then(Act::Ask(ask(call, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message.
@@ -174,14 +212,16 @@ impl WorkflowCapability {
     /// with the id already recorded, so the session can tell a repeat from a
     /// second invocation.
     ///
-    /// Nothing is journaled: the [`Event::Requested`] this reads is still the
-    /// only fact, and a second copy would say a second run was wanted.
-    fn reloaded(&self) -> Option<Decision> {
-        if self.requested.is_empty() {
+    /// Nothing is journaled: the [`AgentDomainEvent::WorkflowRequested`] this
+    /// reads is still the only fact, and a second copy would say a second run
+    /// was wanted.
+    fn reloaded(state: &WorkflowState) -> Option<Decision> {
+        if state.requested.is_empty() {
             return None;
         }
         Some(
-            self.requested
+            state
+                .requested
                 .iter()
                 .fold(Decision::default(), |d, (call, pending)| {
                     d.then(Act::Ask(ask(call, pending)))
@@ -190,13 +230,13 @@ impl WorkflowCapability {
     }
 
     /// The session answered a run this capability asked for.
-    fn replied(&self, reply: &SessionReply) -> Option<Decision> {
-        let child = self.requested.get(reply.call())?.child;
+    fn replied(state: &WorkflowState, reply: &SessionReply) -> Option<Decision> {
+        let child = state.requested.get(reply.call())?.child;
         Some(match reply {
             SessionReply::Done { call } => {
-                Decision::record(vec![CapEvent::Workflow(Event::Started {
+                Decision::record(vec![AgentDomainEvent::WorkflowStarted {
                     call: call.clone(),
-                })])
+                }])
                 .then(result(
                     call,
                     format!("Workflow run started: {child}"),
@@ -208,16 +248,16 @@ impl WorkflowCapability {
             // answer. A refusal the model cannot see is a tool call that never
             // returns.
             SessionReply::Refused { call, reason } => {
-                Decision::record(vec![CapEvent::Workflow(Event::Dropped {
+                Decision::record(vec![AgentDomainEvent::WorkflowDropped {
                     call: call.clone(),
-                })])
+                }])
                 .then(result(call, reason.clone(), true))
             }
         })
     }
 
     /// A run moved.
-    fn child(&self, m: &ChildMsg) -> Option<Decision> {
+    fn child(state: &WorkflowState, m: &ChildMsg) -> Option<Decision> {
         match m {
             ChildMsg::Outcome {
                 child,
@@ -225,8 +265,8 @@ impl WorkflowCapability {
             } => {
                 // Not one of mine: `None` rather than a delivery for an agent
                 // that never invoked anything.
-                self.outstanding.contains(child).then(|| {
-                    self.deliver(
+                state.outstanding.contains(child).then(|| {
+                    Self::deliver(
                         *child,
                         match o {
                             WorkflowOutcome::Finished { output } => SubAgentResultPart {
@@ -249,10 +289,10 @@ impl WorkflowCapability {
                 outcome: ChildOutcome::SubAgent(_),
                 ..
             } => None,
-            ChildMsg::Failed { child, error } => self
+            ChildMsg::Failed { child, error } => state
                 .outstanding
                 .contains(child)
-                .then(|| self.deliver(*child, failed_part(*child, error.clone()))),
+                .then(|| Self::deliver(*child, failed_part(*child, error.clone()))),
             // A run is runnable the moment it is created; only a fork has a
             // seed that can land later.
             ChildMsg::Ready { .. } => None,
@@ -260,8 +300,8 @@ impl WorkflowCapability {
     }
 
     /// Record the output and put it in this agent's own queue.
-    fn deliver(&self, child: RunnerId, part: SubAgentResultPart) -> Decision {
-        Decision::record(vec![CapEvent::Workflow(Event::Reported { child })]).then(Act::Enqueue {
+    fn deliver(child: RunnerId, part: SubAgentResultPart) -> Decision {
+        Decision::record(vec![AgentDomainEvent::WorkflowReported { child }]).then(Act::Enqueue {
             item: Incoming::SubAgent {
                 id: child.to_string(),
                 part: Box::new(part),
@@ -271,12 +311,12 @@ impl WorkflowCapability {
 
     /// Only what is still running: a run that reported has already been
     /// delivered into this agent's transcript.
-    fn render_status(&self) -> String {
-        if self.outstanding.is_empty() {
+    fn render_status(state: &WorkflowState) -> String {
+        if state.outstanding.is_empty() {
             return "No workflow runs are in flight.".to_string();
         }
-        let mut text = format!("{} workflow run(s) in flight:", self.outstanding.len());
-        for child in &self.outstanding {
+        let mut text = format!("{} workflow run(s) in flight:", state.outstanding.len());
+        for child in &state.outstanding {
             text.push_str(&format!("\n- {child}"));
         }
         text
@@ -405,31 +445,34 @@ impl WorkflowCapability {
         claiming(inner, self.claims(), mailbox)
     }
 
-    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, state: &WorkflowState, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::Workflow(cmd, to) = cmd else {
             return None;
         };
         Some(match cmd {
-            Command::Invoke { input } => self.invoke(&to.call, input),
+            Command::Invoke { input } => Self::invoke(&to.call, input),
             // A read, so it journals nothing: an event for it would grow the
             // log every time the model looked.
-            Command::Status => Decision::reply(&to.call, self.render_status()),
+            Command::Status => Decision::reply(&to.call, Self::render_status(state)),
         })
     }
 
-    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, state: &WorkflowState, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Reply(reply) => self.replied(reply),
-            Msg::Child(m) => self.child(m),
+            Msg::Reply(reply) => Self::replied(state, reply),
+            Msg::Child(m) => Self::child(state, m),
             // The crash window: a run journaled and never answered is re-asked
             // with the id the log already holds.
-            Msg::Loaded => self.reloaded(),
+            Msg::Loaded => Self::reloaded(state),
             // Invariant 6: a run in flight is an outstanding child, and its
             // output is work this agent has not seen yet. `Act::Hold` because a
             // turn boundary is broadcast and merged — see `sub_agent`.
-            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => {
+            Msg::Turn(TurnEvent::Ended) if state.holds_conclusion() => {
                 Some(Decision::default().then(Act::Hold {
-                    note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
+                    note: format!(
+                        "{} workflow run(s) still in flight",
+                        state.outstanding.len()
+                    ),
                 }))
             }
             Msg::Turn(_)
@@ -439,45 +482,17 @@ impl WorkflowCapability {
             | Msg::TurnProposed => None,
         }
     }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `let ... else` rather than a match with an arm per sibling: every
-        // capability is offered every event, and listing the others here would
-        // make adding one a change to all of them.
-        let CapEvent::Workflow(event) = event else {
-            return;
-        };
-        match event {
-            Event::Requested { call, pending } => {
-                self.requested.insert(call.clone(), pending.clone());
-            }
-            Event::Started { call } => {
-                if let Some(pending) = self.requested.remove(call) {
-                    self.outstanding.insert(pending.child);
-                }
-            }
-            Event::Dropped { call } => {
-                self.requested.remove(call);
-            }
-            Event::Reported { child } => {
-                self.outstanding.remove(child);
-            }
-        }
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::Workflow(self.clone())
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::capabilities::Capability;
+    use crate::agent_loop::capabilities::testing::Equipped;
     use crate::agent_loop::capabilities::testing::{
         advertised_by, answering, facts, someone_elses,
     };
-    use crate::agent_loop::capabilities::{Capabilities, Capability};
     use crate::sessions::runners::message::SubAgentOutcome;
 
     /// An invocation as the layer that claims `invoke_workflow` builds it.
@@ -489,17 +504,26 @@ mod tests {
         invoke(json!({"workflow": "release", "input": "cut 1.2.0"}))
     }
 
-    fn fold(c: &mut WorkflowCapability, d: &Decision) {
-        for event in &d.events {
-            c.apply(event);
-        }
+    /// An agent that may invoke a workflow, with nothing in flight.
+    fn cap() -> Equipped {
+        Equipped::with(Capability::Workflow(WorkflowCapability))
+    }
+
+    /// The runs that still owe an output.
+    fn outstanding(c: &Equipped) -> Vec<RunnerId> {
+        c.0.workflow.outstanding().iter().copied().collect()
+    }
+
+    /// The invocations the session has not answered.
+    fn requested(c: &Equipped) -> &BTreeMap<String, Pending> {
+        c.0.workflow.pending()
     }
 
     /// Invoke, and let the session say yes — the only way there is to a run in
     /// flight.
-    fn invoked(c: &mut WorkflowCapability) -> RunnerId {
+    fn invoked(c: &mut Equipped) -> RunnerId {
         let d = c.command(&invoke_call()).expect("mine");
-        fold(c, &d);
+        c.fold(&d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
             Act::Park { .. },
@@ -511,7 +535,7 @@ mod tests {
         let d = c
             .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
             .expect("mine");
-        fold(c, &d);
+        c.fold(&d);
         child
     }
 
@@ -521,10 +545,10 @@ mod tests {
     /// create, because a database read may not happen on a mailbox.
     #[test]
     fn an_invocation_journals_and_asks_for_the_same_run() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let d = c.command(&invoke_call()).expect("mine");
 
-        let [CapEvent::Workflow(Event::Requested { call, pending })] = d.events.as_slice() else {
+        let [AgentDomainEvent::WorkflowRequested { call, pending }] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
         };
         let child = &pending.child;
@@ -554,8 +578,11 @@ mod tests {
         assert_eq!(name, "release");
         assert_eq!(input, "cut 1.2.0");
 
-        fold(&mut c, &d);
-        assert!(c.outstanding.is_empty(), "the session has not said yes yet");
+        c.fold(&d);
+        assert!(
+            outstanding(&c).is_empty(),
+            "the session has not said yes yet"
+        );
     }
 
     /// Arguments this capability cannot read are still *its* call to answer.
@@ -564,7 +591,7 @@ mod tests {
     /// would be silently absorbed instead of corrected.
     #[test]
     fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
-        let d = WorkflowCapability::default()
+        let d = cap()
             .command(&invoke(json!({"workflow": "nope"})))
             .expect("the name is mine, so the mistake is mine to answer");
         assert!(
@@ -584,22 +611,19 @@ mod tests {
     /// an output owed.
     #[test]
     fn a_started_run_answers_the_parked_call_and_becomes_outstanding() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
-        assert_eq!(
-            c.outstanding.iter().copied().collect::<Vec<_>>(),
-            vec![child]
-        );
-        assert!(c.requested.is_empty(), "an answered request is over");
+        assert_eq!(outstanding(&c), vec![child]);
+        assert!(requested(&c).is_empty(), "an answered request is over");
     }
 
     /// A refusal has to reach the model against the call it parked, or the
     /// invocation never returns.
     #[test]
     fn a_refusal_from_the_session_becomes_the_parked_calls_result() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let d = c.command(&invoke_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
 
         let d = c
             .handle(&Msg::Reply(&SessionReply::Refused {
@@ -614,9 +638,9 @@ mod tests {
         assert_eq!(results[0].output, "no workflow named `release`");
         assert!(results[0].is_error);
 
-        fold(&mut c, &d);
-        assert!(c.requested.is_empty());
-        assert!(c.outstanding.is_empty());
+        c.fold(&d);
+        assert!(requested(&c).is_empty());
+        assert!(outstanding(&c).is_empty());
     }
 
     /// **The crash window.** A journal that stops between `Requested` and the
@@ -625,9 +649,9 @@ mod tests {
     /// the id and the arguments the log already holds.
     #[test]
     fn a_run_the_session_never_answered_is_asked_again_on_load() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let d = c.command(&invoke_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, .. }),
             Act::Park { .. },
@@ -639,11 +663,10 @@ mod tests {
 
         // The cut: nothing past the request is folded, and what comes back is
         // read off the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Capability::Workflow(c)]);
-        let written = serde_json::to_string(&caps).expect("write");
-        let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&c.0).expect("write");
+        let reloaded: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
 
-        let d = reloaded.broadcast(&Msg::Loaded);
+        let d = super::super::broadcast(&reloaded, &Msg::Loaded);
         assert!(d.events.is_empty(), "a re-ask is not a second invocation");
         let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
         else {
@@ -669,7 +692,7 @@ mod tests {
     /// load starts the runs of the last one.
     #[test]
     fn a_run_the_session_answered_is_not_asked_again() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let _ = invoked(&mut c);
         assert!(
             c.handle(&Msg::Loaded).is_none(),
@@ -682,7 +705,7 @@ mod tests {
     #[test]
     fn a_reply_for_a_call_i_never_made_is_not_mine() {
         assert!(
-            WorkflowCapability::default()
+            cap()
                 .handle(&Msg::Reply(&SessionReply::Done {
                     call: "someone-else".into()
                 }))
@@ -694,7 +717,7 @@ mod tests {
     /// text rather than as a quoted JSON string.
     #[test]
     fn a_finished_run_queues_its_output_for_the_invoker() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
         let d = c
             .handle(&Msg::Child(&ChildMsg::Outcome {
@@ -706,7 +729,7 @@ mod tests {
             .expect("mine");
         assert!(matches!(
             d.events.as_slice(),
-            [CapEvent::Workflow(Event::Reported { .. })]
+            [AgentDomainEvent::WorkflowReported { .. }]
         ));
         let [
             Act::Enqueue {
@@ -720,15 +743,15 @@ mod tests {
         assert_eq!(part.status, "completed");
         assert_eq!(part.text, "shipped", "the model was handed its own quotes");
 
-        fold(&mut c, &d);
-        assert!(c.outstanding.is_empty());
+        c.fold(&d);
+        assert!(outstanding(&c).is_empty());
     }
 
     /// A run that failed is still an answer. An agent blocked on one that died
     /// and was never told would wait for ever.
     #[test]
     fn a_failed_run_is_queued_as_a_failed_part() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
         let d = c
             .handle(&Msg::Child(&ChildMsg::Outcome {
@@ -753,7 +776,7 @@ mod tests {
     /// A run that never started takes the same path.
     #[test]
     fn a_run_that_never_started_is_reported_as_failed() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
         let d = c
             .handle(&Msg::Child(&ChildMsg::Failed {
@@ -778,7 +801,7 @@ mod tests {
     /// is the only way two capabilities on one agent cannot both claim it.
     #[test]
     fn a_subagent_outcome_is_never_mine_even_for_a_child_i_hold() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
         assert!(
             c.handle(&Msg::Child(&ChildMsg::Outcome {
@@ -797,7 +820,7 @@ mod tests {
     #[test]
     fn an_outcome_for_a_run_i_did_not_invoke_is_not_mine() {
         assert!(
-            WorkflowCapability::default()
+            cap()
                 .handle(&Msg::Child(&ChildMsg::Outcome {
                     child: RunnerId::new_v4(),
                     outcome: ChildOutcome::Workflow(WorkflowOutcome::Finished {
@@ -812,9 +835,9 @@ mod tests {
     /// this agent: the run's output is work it has not seen yet.
     #[test]
     fn a_turn_ending_with_a_run_in_flight_holds_the_conclusion() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
-        assert!(c.holds_conclusion());
+        assert!(c.0.workflow.holds_conclusion());
         assert!(
             c.handle(&Msg::Turn(TurnEvent::Ended)).is_some(),
             "a turn ending with an output still owed must not let the agent finish"
@@ -828,8 +851,8 @@ mod tests {
                 }),
             }))
             .expect("mine");
-        fold(&mut c, &d);
-        assert!(!c.holds_conclusion());
+        c.fold(&d);
+        assert!(!c.0.workflow.holds_conclusion());
         assert!(
             c.handle(&Msg::Turn(TurnEvent::Ended)).is_none(),
             "an agent owed nothing has no opinion about its turn ending"
@@ -839,7 +862,7 @@ mod tests {
     /// Only the *end* of a turn is the boundary invariant 6 reads.
     #[test]
     fn no_other_turn_boundary_is_this_capabilitys_business() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let _ = invoked(&mut c);
         for boundary in [TurnEvent::Began, TurnEvent::Failed, TurnEvent::Cancelled] {
             assert!(
@@ -852,7 +875,7 @@ mod tests {
     /// A status read journals nothing, and lists only what is still going.
     #[test]
     fn status_lists_the_runs_in_flight_and_journals_nothing() {
-        let mut c = WorkflowCapability::default();
+        let mut c = cap();
         let child = invoked(&mut c);
         let d = c
             .command(&CapCommand::Workflow(Command::Status, answering("t1")))
@@ -863,7 +886,9 @@ mod tests {
         };
         assert!(text.contains(&child.to_string()));
 
-        c.apply(&CapEvent::Workflow(Event::Reported { child }));
+        c.fold(&Decision::record(vec![
+            AgentDomainEvent::WorkflowReported { child },
+        ]));
         let d = c
             .command(&CapCommand::Workflow(Command::Status, answering("t1")))
             .expect("mine");
@@ -879,10 +904,7 @@ mod tests {
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            advertised_by(
-                &Capability::Workflow(WorkflowCapability::default()),
-                &facts()
-            ),
+            advertised_by(&Capability::Workflow(WorkflowCapability), &facts()),
             vec![INVOKE_TOOL, STATUS_TOOL]
         );
     }
@@ -890,27 +912,28 @@ mod tests {
     /// `outstanding` is what invariant 6 and every delivery are decided from,
     /// so losing it in the journal loses the agent.
     #[test]
-    fn the_runs_in_flight_survive_a_slice_round_trip() {
-        let mut c = WorkflowCapability::default();
+    fn the_runs_in_flight_survive_the_journal_round_trip() {
+        let mut c = cap();
         let child = invoked(&mut c);
-        let caps = Capabilities::new(vec![Capability::Workflow(c)]);
 
-        let written = serde_json::to_string(&caps).expect("write");
-        let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Workflow(back) = read.iter().next().expect("one").save() else {
-            panic!("the journal changed which capability this is");
-        };
+        let written = serde_json::to_string(&c.0).expect("write");
+        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
         assert_eq!(
-            back.outstanding.into_iter().collect::<Vec<_>>(),
+            back.workflow
+                .outstanding()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
             vec![child],
-            "the reload was rebuilt from config and lost the run in flight"
+            "a reload that lost the run in flight would let the agent conclude \
+             with an output still coming"
         );
     }
 
     /// Everything else falls through, so the offer reaches whoever does own it.
     #[test]
     fn another_message_is_not_mine() {
-        let c = WorkflowCapability::default();
+        let c = cap();
         assert!(c.command(&someone_elses()).is_none());
         assert!(c.handle(&Msg::Answer(&[])).is_none());
     }

@@ -3,22 +3,21 @@
 //! # Policy, not state
 //!
 //! `context_tokens` — the last provider call's prompt size — is a projection
-//! folded from run events, and it stays on [`crate::agent_loop::state::AgentState`]
-//! for exactly the reason [`super::Capability::carried_state`] and
-//! [`super::Capability::view`] exist: it is a fact every runner agrees on, and
-//! turning it into a capability would buy an enum arm and a `CapSlice` arm for
-//! nothing. What varies by runner is not the fact but the *policy read against
-//! it* — the two percentages a session used to get from server constants. This
-//! capability owns exactly that policy and nothing else: no folded state, no
-//! events, no commands.
+//! folded from run events, and it stays on
+//! [`crate::agent_loop::state::AgentState`] with every other projection: it is
+//! a fact every runner agrees on, and turning it into a capability would buy an
+//! enum arm and a state field for nothing. What varies by runner is not the
+//! fact but the *policy read against it* — the two percentages a session used
+//! to get from server constants. This capability owns exactly that policy and
+//! nothing else: no folded state, no events, no commands.
 //!
 //! # Why a hook and not a getter
 //!
-//! A capability's only two ways to answer a question from outside are
-//! [`super::Capability::carried_state`] and [`super::Capability::view`], and
-//! neither is a compaction question — one is compaction's own input, the other
-//! is what a client renders. So this capability answers through the same
-//! mechanism every other decision in the tree uses: [`super::Msg::TurnProposed`]
+//! The one question a capability answers from outside is
+//! [`super::Capability::carried_state`], and a compaction target is not it —
+//! that is compaction's own input rather than a decision about it. So this
+//! capability answers through the same mechanism every other decision in the
+//! tree uses: [`super::Msg::TurnProposed`]
 //! is broadcast before a turn's run starts, and this capability's answer comes
 //! back as [`super::Act::CompactionBudget`]. The actor combines it with the one
 //! thing this capability does not and should not hold — the model's own context
@@ -30,7 +29,7 @@
 //! [`crate::sessions::runners::assemble`], which is why every agent-owning
 //! runner equips one unconditionally, the same as the task list and timers.
 
-use super::{Act, CapSlice, Decision, Msg};
+use super::{Act, Decision, Msg};
 use serde::{Deserialize, Serialize};
 
 /// The share of a model's context window at which an agent compacts, absent a
@@ -102,10 +101,6 @@ impl TokenBudgetCapability {
             | Msg::Loaded => None,
         }
     }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::Budget(self.clone())
-    }
 }
 
 #[cfg(test)]
@@ -114,10 +109,13 @@ mod tests {
     use super::*;
     use crate::agent_loop::capabilities::{Capabilities, Capability, testing::someone_elses};
 
-    fn budget(trigger: u32, retain: u32) -> Capabilities {
-        Capabilities::new(vec![Capability::TokenBudget(TokenBudgetCapability::new(
-            trigger, retain,
-        ))])
+    fn budget(trigger: u32, retain: u32) -> crate::agent_loop::AgentState {
+        crate::agent_loop::AgentState {
+            capabilities: Capabilities::new(vec![Capability::TokenBudget(
+                TokenBudgetCapability::new(trigger, retain),
+            )]),
+            ..crate::agent_loop::AgentState::default()
+        }
     }
 
     /// The one thing this capability says, and the only message it says it on:
@@ -125,9 +123,8 @@ mod tests {
     /// what every session got when this was two server constants.
     #[test]
     fn a_turn_proposal_answers_with_the_configured_budget() {
-        let caps = budget(80, 20);
-        let decision = caps
-            .broadcast(&Msg::TurnProposed)
+        let state = budget(80, 20);
+        let decision = super::super::broadcast(&state, &Msg::TurnProposed)
             .acts
             .into_iter()
             .find_map(|act| match act {
@@ -168,15 +165,18 @@ mod tests {
     /// against.
     #[test]
     fn it_claims_no_commands_and_no_other_messages() {
-        let cap = Capability::TokenBudget(TokenBudgetCapability::default());
-        assert!(cap.command(&someone_elses()).is_none());
+        let state = budget(80, 20);
+        assert!(super::super::dispatch(&state, &someone_elses()).is_none());
         for msg in [
             Msg::Turn(super::super::TurnEvent::Ended),
             Msg::Answer(&[]),
             Msg::Concluded,
             Msg::Loaded,
         ] {
-            assert!(cap.handle(&msg).is_none(), "answered {msg:?} unasked");
+            assert!(
+                super::super::offer(&state, &msg).is_none(),
+                "answered {msg:?} unasked"
+            );
         }
     }
 
@@ -185,10 +185,9 @@ mod tests {
     /// the process that crashed would have.
     #[test]
     fn config_survives_the_journal_round_trip() {
-        let caps = budget(70, 30);
-        let written = serde_json::to_string(&caps).expect("write");
-        let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let decision = read.broadcast(&Msg::TurnProposed);
+        let written = serde_json::to_string(&budget(70, 30)).expect("write");
+        let read: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let decision = super::super::broadcast(&read, &Msg::TurnProposed);
         assert!(matches!(
             decision.acts.as_slice(),
             [Act::CompactionBudget {

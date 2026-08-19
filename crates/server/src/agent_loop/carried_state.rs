@@ -13,9 +13,11 @@
 //! timers, with no idea it has any.
 //!
 //! A capability answers for its own share, through
-//! [`Capability::carried_state`](crate::agent_loop::capabilities::Capability::carried_state):
-//! its state is opaque behind `CapSlice`, so nothing here could know which part
-//! of it has an id in it. What is left below is what the actor itself holds.
+//! [`Capability::carried_state`](crate::agent_loop::capabilities::Capability::carried_state).
+//! The state is on [`AgentState`] with everything else now, but *whether a fact
+//! is worth carrying* is still the feature's judgement rather than this file's:
+//! the list is durable either way, and only the feature knows which part of it
+//! has an id in it. What is left below is what the actor itself holds.
 //!
 //! Deliberately *not* here: the working directory and environment overrides.
 //! Those live in the runtime, keyed by agent id, so reading them would mean a
@@ -36,10 +38,10 @@ use std::collections::BTreeMap;
 pub fn render_carried_state(state: &AgentState) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    // Whatever each capability says it would lose. Asked of the capability
-    // rather than read off a field, because a capability's state is opaque
-    // behind `CapSlice` and nothing above it knows what has an id in it.
-    sections.extend(state.capabilities.carried_state());
+    // Whatever each capability says it would lose, in equipment order — so the
+    // sections come out the same way twice rather than in whatever order the
+    // fields happen to sit in.
+    sections.extend(state.capabilities.carried_state(state));
 
     if !state.asks.is_empty() {
         let mut block = String::from("Questions you are waiting on an answer to:");
@@ -303,33 +305,40 @@ mod tests {
 
     /// Equip an agent with a task list already holding these.
     ///
-    /// Built by folding the capability's own event, so the fixture cannot
-    /// disagree with what a real mutation would have left behind.
+    /// Built by folding the event a real mutation journals, so the fixture
+    /// cannot disagree with what one would have left behind.
     fn with_task_list_capability(state: &mut AgentState, tasks: &[&str]) {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability, task_list};
+        use crate::agent_loop::capabilities::{Capability, task_list};
         let mut list = crate::agent_loop::task_list::TaskListState::default();
         list.apply(crate::agent_loop::task_list::TaskListAction::Create {
             tasks: tasks.iter().map(|t| (*t).to_string()).collect(),
         })
         .expect("the fixture's task list is valid");
-        let mut caps = Capabilities::new(vec![Capability::TaskList(
-            task_list::TaskListCapability::new(),
-        )]);
-        caps.apply(&CapEvent::TaskList(task_list::Event::Changed {
-            snapshot: list,
-        }));
-        state.capabilities = caps;
+        state
+            .capabilities
+            .push(Capability::TaskList(task_list::TaskListCapability::new()));
+        fold(
+            state,
+            crate::agent_loop::state::AgentDomainEvent::TaskListChanged { snapshot: list },
+        );
     }
 
     /// Equip an agent with a timer already armed.
     fn with_timers_capability(state: &mut AgentState, record: TimerRecord) {
-        use crate::agent_loop::capabilities::{CapEvent, Capability, timers};
+        use crate::agent_loop::capabilities::{Capability, timers};
         state
             .capabilities
             .push(Capability::Timers(timers::TimersCapability::new()));
-        state
-            .capabilities
-            .apply(&CapEvent::Timer(timers::Event::Armed { record }));
+        fold(
+            state,
+            crate::agent_loop::state::AgentDomainEvent::TimerArmed { record },
+        );
+    }
+
+    /// Fold one event in place, so a fixture can build state the way the actor
+    /// does rather than by writing a field.
+    fn fold(state: &mut AgentState, event: crate::agent_loop::state::AgentDomainEvent) {
+        *state = std::mem::take(state).apply(event);
     }
 
     /// The armed timer every carried-state test uses.
@@ -361,10 +370,9 @@ mod tests {
         }
     }
 
-    /// A capability's state is opaque behind `CapSlice`, so a compaction can
-    /// only carry what the capability itself says is worth carrying. Without
-    /// that the task list is durable and invisible: the agent keeps its plan
-    /// and loses every idea that it has one.
+    /// A compaction carries only what a capability says is worth carrying.
+    /// Without that the task list is durable and invisible: the agent keeps its
+    /// plan and loses every idea that it has one.
     #[test]
     fn a_task_list_held_by_a_capability_is_carried() {
         let mut state = AgentState::default();

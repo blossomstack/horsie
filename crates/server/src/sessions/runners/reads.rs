@@ -1205,50 +1205,27 @@ mod tests {
         assert!(agent_entry(&s, first).is_some());
     }
 
-    /// **A fork's row shows the name it gave itself.** That name lives in the
-    /// title capability's own slice, because the capability owns the tool that
-    /// set it — read it off the conversation's `title` field instead and every
-    /// fork in the session list goes back to being nameless the moment this
-    /// ships.
+    /// **A fork's row shows the name it was branched as.**
+    ///
+    /// What an agent names *itself* with `set_session_title` is not folded on
+    /// this side at all: the tool asks the session, and the session journals
+    /// the rename against itself. This row is the fork's creation title until
+    /// then, which is the whole of what a runner knows.
     #[test]
-    fn a_fork_that_named_itself_is_listed_under_that_name() {
-        use crate::agent_loop::capabilities::{
-            CapEvent, Capabilities, Capability, title::TitleCapability,
-        };
+    fn a_fork_is_listed_under_the_name_it_was_branched_as() {
         let (mut s, main) = session();
         let branch = AgentId::new_v4();
-        let runner = put(
+        put(
             &mut s,
             RunnerKind::Conversation,
             Some(main),
             RunnerState::Conversation(conversation::State {
-                capabilities: Capabilities::new(vec![Capability::Title(
-                    TitleCapability::for_fork(RunnerId::new_v4()),
-                )]),
-                // What it was created with, which the name it chooses replaces.
                 title: Some("fork of the flake".into()),
                 ..fork(branch, main, true)
             }),
             &[branch],
         );
-        assert_eq!(
-            fork_rows(&s)[0].title.as_deref(),
-            Some("fork of the flake"),
-            "until it names itself, its row shows what it was branched as"
-        );
-
-        let rec = s.runners.get_mut(&runner).expect("the fork");
-        Runner::apply(
-            &mut rec.state,
-            &crate::sessions::runners::RunnerEvent::Capability(CapEvent::Title(
-                crate::agent_loop::capabilities::title::Event::Set {
-                    call: "t".into(),
-                    name: "the setup flake".into(),
-                },
-            )),
-            0,
-        );
-        assert_eq!(fork_rows(&s)[0].title.as_deref(), Some("the setup flake"));
+        assert_eq!(fork_rows(&s)[0].title.as_deref(), Some("fork of the flake"));
     }
 
     /// Depth inside the fork tree, which starts at 0 because its root is the

@@ -639,19 +639,15 @@ mod tests {
 
     /// Whether a folded agent still holds an armed timer.
     ///
-    /// Asked of what the capability says a compaction must carry across, which
-    /// is the only statement about an armed timer that leaves the capability at
-    /// all. It used to read the persisted slice, and that read is gone: an
-    /// agent's timers are its own, and a caller that can see them can see
-    /// everything else they hold too. There is no `CapView` arm for them
-    /// because no client draws one — a view exists to be rendered, not to give
-    /// a test a way back in.
+    /// Asked of what a compaction must carry across, which is the only
+    /// statement about an armed timer that leaves the feature at all. The
+    /// records themselves are private to `capabilities::timers`, deliberately:
+    /// a caller that can reach one can reach everything beside it, and no
+    /// client draws a timer, so there is nothing here to open the type up for.
     fn holds_an_armed_timer(state: &crate::agent_loop::AgentState) -> bool {
-        state
-            .capabilities
-            .carried_state()
-            .iter()
-            .any(|block| block.starts_with(crate::agent_loop::capabilities::timers::CARRIED_HEADER))
+        state.timers.carried_state().is_some_and(|block| {
+            block.starts_with(crate::agent_loop::capabilities::timers::CARRIED_HEADER)
+        })
     }
 
     /// A step that armed a timer and then stopped talking is *parked*, not

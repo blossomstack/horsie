@@ -29,7 +29,7 @@ use super::action::{Branch, FirstInput};
 use super::message::ChildOutcome;
 use super::{Action, AgentId, AgentLifecycle, Emit, Runner, RunnerEvent, SessionView, TurnEnd};
 use crate::agent_loop::UsageTotal;
-use crate::agent_loop::capabilities::{CapSlice, Capabilities};
+use crate::agent_loop::capabilities::Capabilities;
 use crate::sessions::session_actor::{AgentEntry, AgentStatus};
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::supervisor::ForkRow;
@@ -74,9 +74,11 @@ pub struct State {
     /// and this does.
     pub started: bool,
     pub turn: TurnStatus,
-    /// The name this conversation was created with. What an agent names itself
-    /// with `set_session_title` is the title capability's own slice, folded
-    /// through [`RunnerEvent::Capability`] and never through here.
+    /// The name this conversation was created with.
+    ///
+    /// What an agent names itself with `set_session_title` is not folded here:
+    /// the tool asks the *session*, and the session journals the rename against
+    /// itself. A second copy on this side would be a second writer of one fact.
     pub title: Option<String>,
     /// What a fork was told to do, and the first thing its agent is handed.
     /// `None` for the session's own conversation, which waits for a person.
@@ -152,26 +154,6 @@ pub enum Event {
 }
 
 impl State {
-    /// What this conversation is called: the name it gave itself with
-    /// `set_session_title`, or the one it was created with until it does.
-    ///
-    /// The self-given name lives in the title capability's own slice, because
-    /// the capability owns the tool that sets it — folding it into a second
-    /// field here would make two writers of one fact, and they would disagree
-    /// the first time a rename took one path and not the other.
-    ///
-    /// Read through [`crate::agent_loop::capabilities::Capability::save`] because a
-    /// capability is a `dyn` value: a runner composes its list at runtime, so
-    /// there is no enum to match on and nothing to downcast to.
-    fn name(&self) -> Option<String> {
-        for cap in self.capabilities.iter() {
-            if let CapSlice::Title(title) = cap.save() {
-                return title.title.or_else(|| self.title.clone());
-            }
-        }
-        self.title.clone()
-    }
-
     /// Where this conversation's agent is, as a reader sees it.
     ///
     /// A fork is listed and addressable from the moment it is created, and
@@ -250,10 +232,6 @@ impl Runner for State {
         Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
-        Some(&mut self.capabilities)
-    }
-
     /// One agent, which the read side badges with the session's own status
     /// when this conversation is the root.
     fn rows(&self) -> Vec<AgentEntry> {
@@ -302,7 +280,7 @@ impl Runner for State {
             // The read side's two: where I sit, and when I was created.
             parent: None,
             created_at_ms: 0,
-            title: self.name(),
+            title: self.title.clone(),
             status: self.agent_status(),
             last_activity_ms: self.last_activity_ms,
         })

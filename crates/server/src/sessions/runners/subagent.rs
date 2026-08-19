@@ -163,10 +163,6 @@ impl Runner for State {
         Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
-        Some(&mut self.capabilities)
-    }
-
     /// One worker, statused by the one field that also says whether a report is
     /// owed — so it cannot read `completed` to a person while its asker is
     /// still waiting.

@@ -23,7 +23,7 @@
 //! equipped layer against — a sixth tool the toolbox grows and this list does
 //! not is a real drift, and one that is otherwise silent.
 
-use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
+use super::{Decision, Msg, SetupError};
 use crate::agent_loop::capabilities::or_empty;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
@@ -46,11 +46,6 @@ pub struct MemoryCapability {
     /// The spaces this agent can reach, by name.
     pub spaces: Vec<String>,
 }
-
-/// Uninhabited: a memory write lands in the memory store, which is the record,
-/// so there is no fact about this agent to journal and no arm to fold.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {}
 
 impl MemoryCapability {
     #[must_use]
@@ -113,20 +108,6 @@ impl MemoryCapability {
     /// Nothing reaches this capability through the mailbox; see the module doc.
     pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
-    }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `let ... else` rather than a match with an arm per sibling: every
-        // capability is offered every event.
-        let CapEvent::Memory(event) = event else {
-            return;
-        };
-        // And [`Event`] is uninhabited, so there is provably nothing to fold.
-        match *event {}
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::Memory(self.clone())
     }
 }
 
@@ -200,7 +181,11 @@ mod tests {
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = Capability::Memory(MemoryCapability::new(vec!["default".into()]));
-        assert!(c.command(&someone_elses()).is_none());
+        assert!(
+            super::super::testing::Equipped::with(c.clone())
+                .command(&someone_elses())
+                .is_none()
+        );
         assert!(
             advertised_by(&c, &facts()).is_empty(),
             "the five are advertised by the toolbox that will run them"
@@ -218,7 +203,7 @@ mod tests {
         ]))]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Memory(back) = read.iter().next().expect("one").save() else {
+        let [Capability::Memory(back)] = read.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
         assert_eq!(back.spaces, vec!["default".to_string(), "team".to_string()]);

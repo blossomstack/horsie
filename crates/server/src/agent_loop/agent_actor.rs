@@ -1943,8 +1943,8 @@ impl AgentActor {
     /// table here to keep in step with the message type.
     fn consult(state: &AgentState, msg: &Msg<'_>) -> Option<Performed> {
         let decision = match msg.routing() {
-            capabilities::Routing::Offer => state.capabilities.offer(msg)?,
-            capabilities::Routing::Broadcast => state.capabilities.broadcast(msg),
+            capabilities::Routing::Offer => capabilities::offer(state, msg)?,
+            capabilities::Routing::Broadcast => capabilities::broadcast(state, msg),
         };
         // Nothing is in flight: a lifecycle message is news about something
         // that already happened, and no run is waiting on it.
@@ -1958,7 +1958,7 @@ impl AgentActor {
     /// a command names the call it came from, which is what an answer is paired
     /// against.
     fn consult_command(state: &AgentState, cmd: &capabilities::CapCommand) -> Option<Performed> {
-        let decision = state.capabilities.dispatch(cmd)?;
+        let decision = capabilities::dispatch(state, cmd)?;
         Some(Self::performed(decision, cmd.call(), cmd.owner()))
     }
 
@@ -2003,11 +2003,10 @@ impl AgentActor {
         what: &str,
     ) -> Performed {
         let mut out = Performed {
-            events: decision
-                .events
-                .into_iter()
-                .map(AgentDomainEvent::Capability)
-                .collect(),
+            // Taken as they are: a capability decides in the agent's own
+            // vocabulary now, so there is nothing to wrap on the way to the
+            // journal.
+            events: decision.events,
             ..Performed::default()
         };
         for act in decision.acts {
@@ -3692,7 +3691,7 @@ mod interruption_tests {
     #[tokio::test]
     async fn a_request_the_session_never_answered_is_re_asked_when_the_agent_loads() {
         use crate::agent_loop::capabilities::{
-            CapEvent, Capabilities, Capability, SessionRequest, sub_agent,
+            Capabilities, Capability, SessionRequest, sub_agent,
         };
         use crate::sessions::runners::action::RunnerArgs;
 
@@ -3713,10 +3712,10 @@ mod interruption_tests {
                 )]),
                 at_ms: 0,
             },
-            AgentDomainEvent::Capability(CapEvent::SubAgent(sub_agent::Event::Requested {
+            AgentDomainEvent::SubAgentRequested {
                 call: "call-1".into(),
                 pending: pending.clone(),
-            })),
+            },
             // The park the spawn made. What the dead process left behind is a
             // dangling `tool_use` and a request nobody may have heard.
             AgentDomainEvent::ParkedOn {
@@ -3804,7 +3803,7 @@ mod interruption_tests {
 mod capability_tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{FakeCapability, call};
-    use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
     use horsie_actor::{ActorSystem, InMemoryJournal};
     use horsie_agentcore::{ToolCallError, ToolSpec};
 
@@ -3815,9 +3814,9 @@ mod capability_tests {
         }
     }
 
-    /// A command comes back as its capability's events, wrapped so the agent's
-    /// journal stays a list of things the actor did with one arm for things its
-    /// capabilities did.
+    /// A command comes back as the agent's own events, flat: a reader of the
+    /// raw journal sees what happened without unwrapping a capability parcel
+    /// first.
     #[test]
     fn a_command_journals_the_capabilitys_own_events() {
         let state = equipped("fake_tool");
@@ -3826,7 +3825,7 @@ mod capability_tests {
         assert_eq!(performed.events.len(), 1);
         assert!(matches!(
             performed.events.first(),
-            Some(AgentDomainEvent::Capability(CapEvent::Fake(_)))
+            Some(AgentDomainEvent::FakeSaw { .. })
         ));
     }
 
@@ -3845,27 +3844,23 @@ mod capability_tests {
     #[test]
     fn folding_a_capability_event_reaches_it_and_replays_identically() {
         let state = equipped("fake_tool");
-        let event = AgentDomainEvent::Capability(CapEvent::Fake(
-            crate::agent_loop::capabilities::testing::FakeEvent {
-                tool: "fake_tool".into(),
-                what: "tool:fake_tool".into(),
-            },
-        ));
-
-        let seen = |s: &AgentState| {
-            serde_json::to_string(&s.capabilities).expect("capabilities serialise")
+        let event = AgentDomainEvent::FakeSaw {
+            tool: "fake_tool".into(),
+            what: "tool:fake_tool".into(),
         };
+
         let live = AgentActor::apply_event(state.clone(), event.clone());
         let recovered = AgentActor::apply_event(state, event);
 
-        assert!(
-            seen(&live).contains("tool:fake_tool"),
-            "the fold never reached the capability, so a recovered agent would \
-             come back with its capabilities blank"
+        assert_eq!(
+            live.fake.seen(),
+            ["fake_tool:tool:fake_tool"],
+            "the fold never reached the capability's state, so a recovered \
+             agent would come back having forgotten what it did"
         );
         assert_eq!(
-            seen(&live),
-            seen(&recovered),
+            live.fake.seen(),
+            recovered.fake.seen(),
             "replaying the journal must land where the live fold did"
         );
     }

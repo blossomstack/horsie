@@ -25,7 +25,7 @@
 
 use super::ids::{AgentId, RunnerId};
 use super::state::{SessionEvent, SessionState};
-use super::{RunnerEvent, RunnerState, capabilities, conversation, runtime, subagent, workflow};
+use super::{RunnerEvent, RunnerState, conversation, runtime, subagent, workflow};
 use horsie_agentcore::{
     EmptyOutcome, FailedOutcome, ForkLifecycle, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
     SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TurnEndedLifecycle, TurnOutcome,
@@ -158,7 +158,6 @@ fn from_runner(runner: RunnerId, event: &RunnerEvent, state: &SessionState) -> V
         RunnerEvent::Conversation(event) => from_conversation(runner, event, state),
         RunnerEvent::SubAgent(event) => from_subagent(runner, event, state),
         RunnerEvent::Workflow(event) => from_workflow(runner, event, state),
-        RunnerEvent::Capability(event) => from_capability(event),
         // Bookkeeping, like `SubAgentRunning` was: a token total is a number on
         // the agent document, and the session banks it against a model. Named
         // rather than left to a catch-all so that the next arm added here has to
@@ -351,35 +350,6 @@ fn from_workflow(runner: RunnerId, event: &workflow::Event, state: &SessionState
             status: status.into(),
         }),
     )]
-}
-
-/// Nothing, for every capability there is.
-///
-/// Each of these is a capability keeping its own books — which children are
-/// outstanding, which fork is awaiting its seed, what an agent named itself. The
-/// facts a reader wants out of them are journaled separately and routed above: a
-/// worker appearing is [`SessionEvent::RunnerCreated`], a fork's name is read off
-/// the session list.
-///
-/// Enumerated rather than collapsed into one arm so that a capability that does
-/// have something to show has to say so here.
-fn from_capability(event: &capabilities::CapEvent) -> Vec<Entry> {
-    match event {
-        capabilities::CapEvent::AskUser(_)
-        | capabilities::CapEvent::ControlPlane(_)
-        | capabilities::CapEvent::Fork(_)
-        | capabilities::CapEvent::Mcp(_)
-        | capabilities::CapEvent::Memory(_)
-        | capabilities::CapEvent::Runtime(_)
-        | capabilities::CapEvent::StepResult(_)
-        | capabilities::CapEvent::SubAgent(_)
-        | capabilities::CapEvent::TaskList(_)
-        | capabilities::CapEvent::Timer(_)
-        | capabilities::CapEvent::Title(_)
-        | capabilities::CapEvent::Workflow(_) => Vec::new(),
-        #[cfg(test)]
-        capabilities::CapEvent::Fake(_) => Vec::new(),
-    }
 }
 
 /// The log a person reads when they open the session: the root runner's agent,
@@ -782,41 +752,6 @@ mod tests {
             ),
             on(
                 world.root,
-                RunnerEvent::Capability(capabilities::CapEvent::Title(
-                    capabilities::title::Event::Set {
-                        call: "t".into(),
-                        name: "n".into(),
-                    },
-                )),
-            ),
-            on(
-                world.root,
-                RunnerEvent::Capability(capabilities::CapEvent::SubAgent(
-                    capabilities::sub_agent::Event::Reported { child: world.sub },
-                )),
-            ),
-            on(
-                world.root,
-                RunnerEvent::Capability(capabilities::CapEvent::Workflow(
-                    capabilities::workflow::Event::Reported { child: world.run },
-                )),
-            ),
-            on(
-                world.root,
-                RunnerEvent::Capability(capabilities::CapEvent::Fork(
-                    capabilities::fork::Event::Seeded { fork: world.fork },
-                )),
-            ),
-            on(
-                world.root,
-                RunnerEvent::Capability(capabilities::CapEvent::StepResult(
-                    capabilities::step_result::Event::Submitted {
-                        output: serde_json::Value::Null,
-                    },
-                )),
-            ),
-            on(
-                world.root,
                 RunnerEvent::Usage {
                     agent: world.main,
                     model: "sonnet".into(),
@@ -847,21 +782,6 @@ mod tests {
             },
             SessionEvent::Runner { event, .. } => match event.as_ref() {
                 RunnerEvent::Usage { .. } => true,
-                RunnerEvent::Capability(cap) => match cap {
-                    capabilities::CapEvent::AskUser(_)
-                    | capabilities::CapEvent::ControlPlane(_)
-                    | capabilities::CapEvent::Fake(_)
-                    | capabilities::CapEvent::Fork(_)
-                    | capabilities::CapEvent::Mcp(_)
-                    | capabilities::CapEvent::Memory(_)
-                    | capabilities::CapEvent::Runtime(_)
-                    | capabilities::CapEvent::StepResult(_)
-                    | capabilities::CapEvent::SubAgent(_)
-                    | capabilities::CapEvent::TaskList(_)
-                    | capabilities::CapEvent::Timer(_)
-                    | capabilities::CapEvent::Title(_)
-                    | capabilities::CapEvent::Workflow(_) => true,
-                },
                 RunnerEvent::Runtime(e) => match e {
                     runtime::Event::Released => true,
                     runtime::Event::Started

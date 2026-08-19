@@ -42,7 +42,7 @@ pub mod workflow;
 pub use ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
 pub use state::{RunnerRecord, SessionState};
 
-use crate::agent_loop::capabilities::{self, Capabilities};
+use crate::agent_loop::capabilities::Capabilities;
 use crate::sessions::session_actor::AgentEntry;
 use crate::sessions::spec::{AgentSettings, SessionStatus};
 use crate::sessions::supervisor::ForkRow;
@@ -171,13 +171,12 @@ pub trait Runner {
     /// defaulted to the same answer: the runtime runner owns nothing that could
     /// hold a capability, so "it equips nothing" is a fact about the type
     /// rather than an empty field somebody has to keep empty.
+    ///
+    /// Read-only, and there is no `_mut`. A capability list is config a runner
+    /// hands its agents when it starts them; what an agent then *does* with one
+    /// is folded into that agent's own state, in that agent's own journal, and
+    /// never mirrored here.
     fn capabilities(&self) -> Option<&Capabilities> {
-        None
-    }
-
-    /// The same, for folding a capability's own event into it. Separate from
-    /// [`Runner::capabilities`] so the read-only path stays read-only.
-    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
         None
     }
 
@@ -373,7 +372,7 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
         s.clone(),
         opts.depth,
     )));
-    caps.push(Capability::Workflow(WorkflowCapability::default()));
+    caps.push(Capability::Workflow(WorkflowCapability));
     // Unconditional, and all three were unconditional before they were
     // capabilities: a task list, a timer and a compaction target are ways of
     // working rather than permissions, so every agent that exists has them.
@@ -498,10 +497,6 @@ pub enum RunnerEvent {
     SubAgent(subagent::Event),
     Workflow(workflow::Event),
     Runtime(runtime::Event),
-    /// A capability's own event, folded into whichever capability owns that
-    /// arm. Here rather than on each runner because every runner holds
-    /// capabilities and none of them needs to know which.
-    Capability(capabilities::CapEvent),
     /// Tokens one of my agents spent, banked against me.
     ///
     /// One arm rather than one per runner, because banking is the same act for
@@ -559,10 +554,6 @@ impl Runner for RunnerState {
         dispatch!(self, capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
-        dispatch!(self, capabilities_mut)
-    }
-
     fn rows(&self) -> Vec<AgentEntry> {
         dispatch!(self, rows)
     }
@@ -600,14 +591,6 @@ impl Runner for RunnerState {
     }
 
     fn apply(&mut self, event: &RunnerEvent, at_ms: u64) {
-        // A capability's event is folded into the capability that owns it,
-        // whichever runner is holding it.
-        if let RunnerEvent::Capability(e) = event {
-            if let Some(caps) = dispatch!(self, capabilities_mut) {
-                caps.apply(e);
-            }
-            return;
-        }
         dispatch!(self, apply, event, at_ms);
     }
 }
@@ -806,7 +789,7 @@ mod tests {
                 },
             )
         };
-        let ask = capabilities::ask_user::TOOL.to_string();
+        let ask = crate::agent_loop::capabilities::ask_user::TOOL.to_string();
         let names = |caps: Capabilities| -> Vec<String> { advertised(&caps, &facts()) };
         assert!(
             unattended(true).has("ask_user"),

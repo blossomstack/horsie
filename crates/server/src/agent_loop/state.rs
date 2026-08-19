@@ -230,22 +230,157 @@ pub enum AgentDomainEvent {
     /// This agent was equipped with these capabilities.
     ///
     /// Written once, the first time the agent loads, from what its runner
-    /// supplied. After that the journal is the source: a capability's config
-    /// travels with its folded state, so a reload cannot hand the agent a set
-    /// that has forgotten what it was waiting on.
+    /// supplied. After that the journal is the source rather than assembly: a
+    /// reload equips the agent with exactly the list it started with, so a
+    /// settings change between two loads cannot silently take a tool away from
+    /// an agent that is mid-conversation.
     Equipped {
         capabilities: crate::agent_loop::capabilities::Capabilities,
         at_ms: u64,
     },
-    /// One of this agent's capabilities recorded something.
-    ///
-    /// The event is the capability's own, and the fold hands it to every
-    /// capability rather than looking one up by name: a capability that does
-    /// not own the arm ignores it, which is the same rule the journal already
-    /// uses for a runner's slice. Wrapping rather than flattening keeps
-    /// `AgentDomainEvent` a list of things the *actor* does, with one arm for
-    /// things its capabilities do.
-    Capability(crate::agent_loop::capabilities::CapEvent),
+    // --- What this agent's capabilities did --------------------------------
+    //
+    // Flat, one arm per fact, in the vocabulary the feature uses. They used to
+    // arrive wrapped — `Capability(CapEvent::Timers(Event::Armed { .. }))` —
+    // and a reader of a raw journal had to unwrap two layers before reaching
+    // what happened. Two production outages here were persisted-shape breaks
+    // diagnosed by eye, so that cost was paid every time it mattered most.
+    //
+    // Each arm's fold is below, in `apply`, and each one's *decision* is in the
+    // feature's own file.
+    /// The agent asked the person a question, and the run parked on this call.
+    AskUserAsked {
+        call: String,
+        question: String,
+    },
+    /// These questions were answered, and the answers are on their way to the
+    /// model.
+    AskUserAnswered {
+        calls: Vec<String>,
+    },
+    /// The park did not survive the turn that began without it. A record, not a
+    /// decision: [`queued_turn`](crate::agent_loop::queued_turn) decided, and it
+    /// recorded a result for every abandoned call before the turn started.
+    AskUserAbandoned,
+
+    /// The agent asked the session for this name, on this call.
+    TitleAsked {
+        call: String,
+        name: String,
+    },
+    /// The session took it. The conversation is now called this.
+    TitleSet {
+        call: String,
+        name: String,
+    },
+    /// The session would not take it, so the request is no longer in flight. A
+    /// record that the ask ended, not a record of the name: a title that never
+    /// took must not replay as one that did.
+    TitleRefused {
+        call: String,
+    },
+
+    /// A branch was asked of the session, and this is what was asked for.
+    ForkRequested {
+        call: String,
+        pending: crate::agent_loop::capabilities::fork::Pending,
+    },
+    /// The session created it, and its seed is now in flight.
+    ForkCreated {
+        call: String,
+    },
+    /// The session would not create it. Journaled because the
+    /// [`Self::ForkRequested`] before it was — this retracts a fact, and is not
+    /// itself the refusal.
+    ForkDropped {
+        call: String,
+    },
+    /// The seed landed, so the fork is a conversation like any other.
+    ForkSeeded {
+        fork: crate::sessions::runners::ids::RunnerId,
+    },
+    /// The seed never landed. Recorded rather than delivered: the failure is
+    /// that fork's own status, not a report owed to the log it was cut from.
+    ForkSeedFailed {
+        fork: crate::sessions::runners::ids::RunnerId,
+        error: String,
+    },
+
+    /// A spawn was asked of the session, and this is what was asked for.
+    SubAgentRequested {
+        call: String,
+        pending: crate::agent_loop::capabilities::sub_agent::Pending,
+    },
+    /// The session created it, so a report is now owed.
+    SubAgentStarted {
+        call: String,
+    },
+    /// The session would not create it, retracting the request before it.
+    SubAgentDropped {
+        call: String,
+    },
+    /// This child's report reached the queue.
+    SubAgentReported {
+        child: crate::sessions::runners::ids::RunnerId,
+    },
+
+    /// A workflow run was asked of the session, and this is what was asked for.
+    WorkflowRequested {
+        call: String,
+        pending: crate::agent_loop::capabilities::workflow::Pending,
+    },
+    /// The session created it, so an output is now owed.
+    WorkflowStarted {
+        call: String,
+    },
+    /// The session would not create it, retracting the request before it.
+    WorkflowDropped {
+        call: String,
+    },
+    /// This run's output reached the queue.
+    WorkflowReported {
+        child: crate::sessions::runners::ids::RunnerId,
+    },
+
+    /// The agent changed its plan. Journaled whole rather than as a delta, the
+    /// same as a message is: replay never re-derives or re-validates a past
+    /// mutation.
+    TaskListChanged {
+        snapshot: crate::agent_loop::task_list::TaskListState,
+    },
+
+    /// A timer was armed, with its fire time already computed.
+    TimerArmed {
+        record: crate::agent_loop::timers::TimerRecord,
+    },
+    /// These timers were removed.
+    TimersCancelled {
+        ids: Vec<crate::agent_loop::timers::TimerId>,
+    },
+    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for
+    /// a recurring timer, so the fold stays pure; `None` removes a one-shot.
+    TimerFired {
+        id: crate::agent_loop::timers::TimerId,
+        next_fire_at_unix_ms: Option<u64>,
+    },
+
+    /// A workflow step submitted its result. Folded into nothing here: the
+    /// output belongs to the step's own record, which the workflow runner
+    /// keeps, and a second copy would be a second answer to "what did step 3
+    /// return". Journaled anyway, because what the agent submitted is a fact
+    /// about the agent.
+    StepResultSubmitted {
+        output: serde_json::Value,
+    },
+
+    /// The fake capability saw something. Its own arm for the same reason every
+    /// other one has one: the composition rules need something to be tested
+    /// against that cannot break when a real capability changes.
+    #[cfg(test)]
+    FakeSaw {
+        tool: String,
+        what: String,
+    },
 }
 
 /// The conversation history reconstructed by folding [`AgentDomainEvent`]s,
@@ -337,17 +472,58 @@ pub struct AgentState {
     /// right now.
     #[serde(default)]
     pub context_tokens: u32,
-    /// What this agent can do, and whatever each of those has folded.
+    /// What this agent is allowed to do, chosen by its runner when it was
+    /// equipped.
     ///
-    /// Durable like the task list and the timers, and for the same reason: a
-    /// capability's state is a fact about this agent. The one that forced it
-    /// here is `ask_user` — the questions an agent is parked on are a pointer
-    /// into this transcript, so nothing outside this journal can hold them.
-    ///
-    /// Round-trips as `Vec<CapSlice>`, which keeps the journal typed while
-    /// dispatch stays open; see [`crate::agent_loop::capabilities`].
+    /// **Config, and only config.** What each capability has *done* is a field
+    /// below, folded from this agent's own events, because a fact about this
+    /// agent belongs in this agent's state and not inside the list of what it
+    /// may do. The list is durable all the same: a reload equips the agent
+    /// identically without asking assembly to reproduce the same answer twice.
     #[serde(default)]
     pub capabilities: crate::agent_loop::capabilities::Capabilities,
+
+    // --- What each capability has folded -----------------------------------
+    //
+    // One field per feature, each a type whose fields are private to its own
+    // module — which is the encapsulation `CapSlice` was bought for, and it
+    // costs nothing. Nothing outside `capabilities/timers.rs` can reach a
+    // `TimerRecord` except through an accessor that file chose to write.
+    //
+    // The one that forced these here is `ask_user`: the questions an agent is
+    // parked on are pointers into this transcript, so nothing outside this
+    // journal can hold them.
+    /// The questions this agent is parked on.
+    #[serde(default)]
+    pub ask_user: crate::agent_loop::capabilities::ask_user::AskUserState,
+    /// The name this agent gave its conversation, and any rename in flight.
+    #[serde(default)]
+    pub title: crate::agent_loop::capabilities::title::TitleState,
+    /// The branches this agent asked for, and the seeds still in flight.
+    #[serde(default)]
+    pub fork: crate::agent_loop::capabilities::fork::ForkState,
+    /// The workers this agent asked for, and the ones still owing a report.
+    #[serde(default)]
+    pub sub_agent: crate::agent_loop::capabilities::sub_agent::SubAgentState,
+    /// The workflow runs this agent asked for, and the ones still owing an
+    /// output.
+    #[serde(default)]
+    pub workflow: crate::agent_loop::capabilities::workflow::WorkflowState,
+    /// The plan this agent keeps for itself.
+    ///
+    /// The domain type itself rather than a wrapper around it: its fields were
+    /// already private to `agent_loop::task_list`, so there is nothing a
+    /// wrapper would encapsulate that the type does not encapsulate already.
+    #[serde(default)]
+    pub task_list: crate::agent_loop::task_list::TaskListState,
+    /// The timers this agent has armed.
+    #[serde(default)]
+    pub timers: crate::agent_loop::capabilities::timers::TimerState,
+    /// What the fake capability has been told, so the fold has something to be
+    /// tested against that cannot break when a real capability changes.
+    #[cfg(test)]
+    #[serde(default)]
+    pub fake: crate::agent_loop::capabilities::testing::FakeState,
 }
 
 /// Running token totals held in [`AgentState`]. Distinct from the per-turn wire
@@ -533,10 +709,15 @@ impl AgentState {
     /// number on from where the copied ones stop, so every cursor into the
     /// copied log still resolves and nothing collides.
     ///
-    /// Capabilities do not carry either, and it is the same rule rather than a
-    /// new one: a capability's folded state is what this agent has in flight —
-    /// the questions it is parked on above all — so inheriting it is inheriting
-    /// the ask. A fork is equipped when it loads, from its own runner.
+    /// Capability state does not carry either, and it is the same rule rather
+    /// than a new one: what a capability has folded is what this agent has in
+    /// flight — the questions it is parked on above all — so inheriting it is
+    /// inheriting the ask. Nor does the capability list itself: a fork is
+    /// equipped when it loads, from its own runner.
+    ///
+    /// Written out field by field rather than with `..Default::default()`, so
+    /// the next feature that folds something has to say here whether a fork
+    /// inherits it.
     ///
     /// So a fork starts with an empty task list, which is intended and not an
     /// oversight of the conversion that made the list a capability. It is only
@@ -560,6 +741,15 @@ impl AgentState {
             usage_total: UsageTotal::default(),
             last_turn_usage: None,
             capabilities: crate::agent_loop::capabilities::Capabilities::default(),
+            ask_user: Default::default(),
+            title: Default::default(),
+            fork: Default::default(),
+            sub_agent: Default::default(),
+            workflow: Default::default(),
+            task_list: Default::default(),
+            timers: Default::default(),
+            #[cfg(test)]
+            fake: Default::default(),
         }
     }
 
@@ -703,34 +893,16 @@ impl AgentState {
             .collect()
     }
 
-    /// The tasks this agent's task list holds, asked of the capability that
-    /// owns it.
-    ///
-    /// A named question rather than a read: `view()` is what a capability says a
-    /// client may see, and [`CapView`] is an enum, so the arm *is* the question.
-    /// Reading the persisted slice instead would work just as well and would
-    /// tie the agent document's shape to the journal's — an API change would
-    /// then force a journal migration.
-    ///
-    /// Empty for an agent equipped without a task list, which is a real state
-    /// now that it is a capability rather than a field every agent had whether
-    /// or not anything could reach it.
-    #[must_use]
-    fn tasks(&self) -> Vec<crate::agent_loop::task_list::TaskRecord> {
-        self.capabilities
-            .views()
-            .into_iter()
-            .map(|view| match view {
-                crate::agent_loop::capabilities::CapView::TaskList(tasks) => tasks,
-            })
-            .next()
-            .unwrap_or_default()
-    }
-
     /// This agent's current values, for the agent document.
+    ///
+    /// The tasks are copied rather than borrowed: what a client is shown is a
+    /// value computed on request, so nothing outside can hold onto a list the
+    /// next `task_list` call has already moved past. Empty for an agent that
+    /// never made one, which is also what an agent equipped without the
+    /// capability shows — it has no way to write one.
     pub fn state_view(&self) -> AgentStateView {
         AgentStateView {
-            tasks: self.tasks(),
+            tasks: self.task_list.tasks().to_vec(),
             usage_total: self.usage_total,
             last_turn_usage: self.last_turn_usage.clone(),
             context_tokens: self.context_tokens,
@@ -971,7 +1143,59 @@ impl AgentState {
                 state.turn_in_flight = false;
             }
             AgentDomainEvent::Equipped { capabilities, .. } => state.capabilities = capabilities,
-            AgentDomainEvent::Capability(event) => state.capabilities.apply(&event),
+
+            // A capability's own fold. Flat arms rather than a hand-off to a
+            // list that offered every event to every capability: which field an
+            // event moves is now settled by the arm, so an event can no longer
+            // reach a capability it does not belong to.
+            AgentDomainEvent::AskUserAsked { call, question } => {
+                state.ask_user.asked(call, question);
+            }
+            AgentDomainEvent::AskUserAnswered { calls } => state.ask_user.answered(&calls),
+            AgentDomainEvent::AskUserAbandoned => state.ask_user.abandoned(),
+
+            AgentDomainEvent::TitleAsked { call, name } => state.title.asked(call, name),
+            AgentDomainEvent::TitleSet { call, name } => state.title.set(&call, name),
+            AgentDomainEvent::TitleRefused { call } => state.title.refused(&call),
+
+            AgentDomainEvent::ForkRequested { call, pending } => {
+                state.fork.requested(call, pending);
+            }
+            AgentDomainEvent::ForkCreated { call } => state.fork.created(&call),
+            AgentDomainEvent::ForkDropped { call } => state.fork.dropped(&call),
+            // Both endings clear the seed: it records one in flight, and a seed
+            // that failed is no longer in flight either.
+            AgentDomainEvent::ForkSeeded { fork }
+            | AgentDomainEvent::ForkSeedFailed { fork, .. } => state.fork.settled(fork),
+
+            AgentDomainEvent::SubAgentRequested { call, pending } => {
+                state.sub_agent.requested(call, pending);
+            }
+            AgentDomainEvent::SubAgentStarted { call } => state.sub_agent.started(&call),
+            AgentDomainEvent::SubAgentDropped { call } => state.sub_agent.dropped(&call),
+            AgentDomainEvent::SubAgentReported { child } => state.sub_agent.reported(child),
+
+            AgentDomainEvent::WorkflowRequested { call, pending } => {
+                state.workflow.requested(call, pending);
+            }
+            AgentDomainEvent::WorkflowStarted { call } => state.workflow.started(&call),
+            AgentDomainEvent::WorkflowDropped { call } => state.workflow.dropped(&call),
+            AgentDomainEvent::WorkflowReported { child } => state.workflow.reported(child),
+
+            AgentDomainEvent::TaskListChanged { snapshot } => state.task_list = snapshot,
+
+            AgentDomainEvent::TimerArmed { record } => state.timers.arm(record),
+            AgentDomainEvent::TimersCancelled { ids } => state.timers.cancel(&ids),
+            AgentDomainEvent::TimerFired {
+                id,
+                next_fire_at_unix_ms,
+            } => state.timers.fired(&id, next_fire_at_unix_ms),
+
+            // Nothing to fold: the submitted output belongs to the step's own
+            // record, which the workflow runner keeps.
+            AgentDomainEvent::StepResultSubmitted { .. } => {}
+            #[cfg(test)]
+            AgentDomainEvent::FakeSaw { tool, what } => state.fake.saw(tool, what),
             AgentDomainEvent::Parked { .. } => {
                 state.parked = true;
                 state.turn_in_flight = false;
@@ -1955,18 +2179,15 @@ mod tests {
     }
 
     /// The agent document's task list is served over HTTP and drawn by the web
-    /// UI, and once the list belongs to a capability the only honest way to
-    /// read it is to ask that capability — `view()`, typed through `CapView`. A
-    /// shadow copy kept on `AgentState` by the fold would be the leak this
-    /// whole design removes, and it would go stale the first time a capability
-    /// was equipped without one.
+    /// UI, and it is the folded list itself rather than a shadow copy the fold
+    /// keeps beside it. Two writers of one list is how a client ends up shown a
+    /// plan the agent has already moved past.
     #[test]
-    fn the_state_view_reads_the_task_list_back_out_of_the_capability() {
-        use crate::agent_loop::capabilities::{CapEvent, Capabilities, Capability, task_list};
+    fn the_state_view_shows_the_task_list_the_fold_holds() {
         let mut state = AgentActor::initial_state();
         assert!(
             state.state_view().tasks.is_empty(),
-            "an agent with no task list capability shows none"
+            "an agent that never made a list shows none"
         );
 
         let mut list = crate::agent_loop::task_list::TaskListState::default();
@@ -1974,15 +2195,8 @@ mod tests {
             tasks: vec!["a".to_string(), "b".to_string()],
         })
         .unwrap();
-        state.capabilities = Capabilities::new(vec![Capability::TaskList(
-            task_list::TaskListCapability::new(),
-        )]);
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::Capability(CapEvent::TaskList(task_list::Event::Changed {
-                snapshot: list,
-            })),
-        );
+        state =
+            AgentActor::apply_event(state, AgentDomainEvent::TaskListChanged { snapshot: list });
 
         let view = state.state_view();
         assert_eq!(view.tasks.len(), 2);
@@ -2181,6 +2395,117 @@ mod tests {
                 input: AgentInput::user_message("m", "hi"),
             }))
             .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod journal_shape_tests {
+    use super::*;
+
+    /// One armed timer, as arming one journals it.
+    fn armed() -> crate::agent_loop::timers::TimerRecord {
+        crate::agent_loop::timers::TimerRecord {
+            id: crate::agent_loop::timers::TimerId("timer-7".into()),
+            label: "nightly".into(),
+            message: "re-run the sweep".into(),
+            kind: crate::agent_loop::timers::TimerKind::Recurring,
+            interval_secs: 86_400,
+            fire_at_unix_ms: 1_700_000_000_000,
+            fire_count: 0,
+        }
+    }
+
+    /// **A capability's event names itself at the top of the journal.**
+    ///
+    /// Two production outages on this project were persisted-shape breaks, and
+    /// both were diagnosed by reading raw events. A reader can only do that
+    /// when the fact is the event's own name — wrapping it in two more layers
+    /// put `Capability` and a capability's own enum between them and what
+    /// happened.
+    #[test]
+    fn a_capabilitys_event_names_itself_in_the_journal() {
+        let event = AgentDomainEvent::TimerArmed { record: armed() };
+        let json = serde_json::to_value(&event).expect("an event serialises");
+        let keys: Vec<&str> = json
+            .as_object()
+            .expect("an event is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["TimerArmed"],
+            "a reader has to unwrap {keys:?} to reach the fact"
+        );
+    }
+
+    /// **A reload keeps what the agent folded.**
+    ///
+    /// The other half of the property `Capabilities` used to carry on its own:
+    /// its `Clone` went through the persisted form so a clone could not diverge
+    /// from a reload. Config and state are separate now, so the config half is
+    /// derives and cannot differ — but the state half still has to survive the
+    /// snapshot, and a field that stopped serializing would lose a park, a
+    /// plan, or an armed timer in exactly the window nothing else watches.
+    #[test]
+    fn a_reload_keeps_what_the_agent_folded() {
+        let state = [
+            AgentDomainEvent::TimerArmed { record: armed() },
+            AgentDomainEvent::AskUserAsked {
+                call: "call-1".into(),
+                question: "which one?".into(),
+            },
+        ]
+        .into_iter()
+        .fold(AgentState::default(), AgentState::apply);
+
+        let written = serde_json::to_string(&state).expect("write");
+        let back: AgentState = serde_json::from_str(&written).expect("read");
+        assert_eq!(back.timers.armed().len(), 1, "the reload lost the timer");
+        assert_eq!(
+            back.ask_user.pending().get("call-1").map(String::as_str),
+            Some("which one?"),
+            "the reload lost the park, so the answer reaches nobody"
+        );
+
+        // And a clone takes the same path, so the two cannot drift.
+        assert_eq!(
+            serde_json::to_string(&state.clone()).expect("write"),
+            written
+        );
+    }
+
+    /// **A fork starts clean.** `scrub_for_fork` gives it the conversation and
+    /// nothing that was in flight — inheriting an armed timer would wake an
+    /// agent that never set one, and inheriting a park would leave it waiting
+    /// on a question nobody put to it.
+    #[test]
+    fn a_fork_inherits_no_capability_state() {
+        let state = [
+            AgentDomainEvent::TimerArmed { record: armed() },
+            AgentDomainEvent::AskUserAsked {
+                call: "call-1".into(),
+                question: "which one?".into(),
+            },
+            AgentDomainEvent::TaskListChanged {
+                snapshot: crate::agent_loop::task_list::TaskListState::default(),
+            },
+        ]
+        .into_iter()
+        .fold(AgentState::default(), AgentState::apply);
+
+        let fork = state.scrub_for_fork(state.next_seq);
+        assert!(fork.timers.armed().is_empty(), "a fork inherited a timer");
+        assert!(
+            fork.ask_user.pending().is_empty(),
+            "a fork inherited a question nobody put to it"
+        );
+        assert!(fork.task_list.tasks().is_empty());
+        assert!(
+            fork.capabilities.is_empty(),
+            "a fork is equipped when it loads, from its own runner"
         );
     }
 }

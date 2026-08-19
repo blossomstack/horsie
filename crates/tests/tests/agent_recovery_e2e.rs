@@ -22,8 +22,8 @@ use horsie_agentcore::{
 };
 use horsie_llm_providers::anthropic::AnthropicProvider;
 use horsie_models::agent::TextPart;
-use horsie_server::agent_loop::capabilities::ask_user::{AskUserCapability, Event as AskUserEvent};
-use horsie_server::agent_loop::capabilities::{CapEvent, Capabilities, Capability};
+use horsie_server::agent_loop::capabilities::ask_user::AskUserCapability;
+use horsie_server::agent_loop::capabilities::{Capabilities, Capability};
 use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRuntimeContext, FixedContextProvider,
@@ -335,10 +335,10 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
                 ]),
                 at_ms: 0,
             },
-            AgentDomainEvent::Capability(CapEvent::AskUser(AskUserEvent::Asked {
+            AgentDomainEvent::AskUserAsked {
                 call: "ask-1".into(),
                 question: "which commands?".into(),
-            })),
+            },
             AgentDomainEvent::ParkedOn {
                 call: "ask-1".into(),
                 note: "which commands?".into(),

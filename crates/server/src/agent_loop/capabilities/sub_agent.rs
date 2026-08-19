@@ -50,10 +50,8 @@
 //! answers to every name — so the model would be answered by the sandbox and
 //! never learn it had hit a budget.
 
-use super::{
-    Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SessionReply, SessionRequest,
-    TurnEvent,
-};
+use super::{Act, CapCommand, Decision, Mailbox, Msg, SessionReply, SessionRequest, TurnEvent};
+use crate::agent_loop::state::AgentDomainEvent;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AgentCatalog, Incoming};
 use crate::sessions::runners::action::RunnerArgs;
@@ -85,20 +83,84 @@ pub struct SubAgentCapability {
     /// How deep the agent holding this already sits. Also fixed at equip time,
     /// which is what lets the depth gate be answered without asking anyone.
     pub depth: u32,
+}
+
+/// The workers this agent has in flight.
+///
+/// Fields private to this file, so "is a report still owed?" is a question this
+/// capability answers rather than a set anything can read and reinterpret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubAgentState {
     /// Spawns asked for and not yet answered, by the model's call.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
     /// an intent [`Msg::Loaded`] asks about again — and the session dedupes on
     /// the worker's agent id rather than starting a second child.
-    pub requested: BTreeMap<String, Pending>,
+    #[serde(default)]
+    requested: BTreeMap<String, Pending>,
     /// Children that exist and still owe a report.
     ///
-    /// A set rather than the session-side map to an `AgentId`: the capability
-    /// belongs to the agent that asked, so the report goes into its own queue
-    /// and there is no address to keep. It is also the single fact behind both
-    /// questions anyone asks about delegated work — is a report still owed, and
-    /// may this agent finish (invariant 6).
-    pub outstanding: BTreeSet<RunnerId>,
+    /// A set rather than the session-side map to an `AgentId`: this belongs to
+    /// the agent that asked, so the report goes into its own queue and there is
+    /// no address to keep. It is also the single fact behind both questions
+    /// anyone asks about delegated work — is a report still owed, and may this
+    /// agent finish (invariant 6).
+    #[serde(default)]
+    outstanding: BTreeSet<RunnerId>,
+}
+
+impl SubAgentState {
+    /// Whether this agent still owes somebody a report it cannot produce yet.
+    ///
+    /// Invariant 6, named: an agent may not conclude while it has outstanding
+    /// children. Cheap because the state is folded from the same journal as
+    /// everything else the actor reads at a turn boundary.
+    #[must_use]
+    pub(crate) fn holds_conclusion(&self) -> bool {
+        !self.outstanding.is_empty()
+    }
+
+    /// A spawn was asked of the session.
+    pub(crate) fn requested(&mut self, call: String, pending: Pending) {
+        self.requested.insert(call, pending);
+    }
+
+    /// The session created it, so a report is now owed.
+    pub(crate) fn started(&mut self, call: &str) {
+        if let Some(pending) = self.requested.remove(call) {
+            self.outstanding.insert(pending.child);
+        }
+    }
+
+    /// The session would not create it.
+    pub(crate) fn dropped(&mut self, call: &str) {
+        self.requested.remove(call);
+    }
+
+    /// This child's report reached the queue.
+    pub(crate) fn reported(&mut self, child: RunnerId) {
+        self.outstanding.remove(&child);
+    }
+}
+
+#[cfg(test)]
+/// What this state holds, for the tests that assert on it.
+///
+/// `#[cfg(test)]` because nothing in production reads it: the decisions that
+/// need it are in this file and take `&self`. An accessor kept for a caller
+/// that does not exist is how a private field stops being private.
+impl SubAgentState {
+    /// The spawns the session has not answered yet.
+    #[must_use]
+    pub(crate) fn pending(&self) -> &BTreeMap<String, Pending> {
+        &self.requested
+    }
+
+    /// The children that still owe a report.
+    #[must_use]
+    pub(crate) fn outstanding(&self) -> &BTreeSet<RunnerId> {
+        &self.outstanding
+    }
 }
 
 /// One spawn asked of the session and not yet answered.
@@ -121,20 +183,6 @@ pub struct Pending {
 }
 
 /// What this capability records.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
-    /// A spawn was asked of the session, and this is what was asked for.
-    Requested { call: String, pending: Pending },
-    /// The session created it, so a report is now owed.
-    Started { call: String },
-    /// The session would not create it. Journaled because the
-    /// [`Event::Requested`] before it was — this retracts a fact, and is not
-    /// itself the refusal.
-    Dropped { call: String },
-    /// This child's report reached the queue.
-    Reported { child: RunnerId },
-}
-
 /// The tool's arguments. Deserialised here so the schema and this type are one
 /// declaration rather than two that can drift.
 #[derive(Debug, Clone, Deserialize)]
@@ -170,20 +218,7 @@ impl SubAgentCapability {
         Self {
             child_settings,
             depth,
-            requested: BTreeMap::new(),
-            outstanding: BTreeSet::new(),
         }
-    }
-
-    /// Whether this agent still owes somebody a report it cannot produce yet.
-    ///
-    /// Invariant 6, named: an agent may not conclude while it has outstanding
-    /// children. Cheap because the capability holding `outstanding` is the same
-    /// one offered [`TurnEvent::Ended`], in the same actor, folded from the
-    /// same journal — no coordination at all.
-    #[must_use]
-    pub fn holds_conclusion(&self) -> bool {
-        !self.outstanding.is_empty()
     }
 
     /// The model called `spawn_agent`.
@@ -238,10 +273,10 @@ impl SubAgentCapability {
             agent_type,
         };
         let note = format!("spawning subagent {}", pending.label);
-        Decision::record(vec![CapEvent::SubAgent(Event::Requested {
+        Decision::record(vec![AgentDomainEvent::SubAgentRequested {
             call: call.to_string(),
             pending: pending.clone(),
-        })])
+        }])
         .then(Act::Ask(self.ask(call, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message. The dangling
@@ -281,14 +316,16 @@ impl SubAgentCapability {
     /// the ids already recorded — the same call, the same child, the same agent
     /// — which is what lets the session tell a repeat from a new spawn.
     ///
-    /// Nothing is journaled: the [`Event::Requested`] this reads is still the
-    /// only fact, and a second copy of it would say a second spawn was wanted.
-    fn reloaded(&self) -> Option<Decision> {
-        if self.requested.is_empty() {
+    /// Nothing is journaled: the [`AgentDomainEvent::SubAgentRequested`] this
+    /// reads is still the only fact, and a second copy of it would say a second
+    /// spawn was wanted.
+    fn reloaded(&self, state: &SubAgentState) -> Option<Decision> {
+        if state.requested.is_empty() {
             return None;
         }
         Some(
-            self.requested
+            state
+                .requested
                 .iter()
                 .fold(Decision::default(), |d, (call, pending)| {
                     d.then(Act::Ask(self.ask(call, pending)))
@@ -300,13 +337,13 @@ impl SubAgentCapability {
     ///
     /// `None` for a call this capability never made, so a reply meant for
     /// another capability is not claimed by whichever sorted first.
-    fn replied(&self, reply: &SessionReply) -> Option<Decision> {
-        let child = self.requested.get(reply.call())?.child;
+    fn replied(state: &SubAgentState, reply: &SessionReply) -> Option<Decision> {
+        let child = state.requested.get(reply.call())?.child;
         Some(match reply {
             SessionReply::Done { call } => {
-                Decision::record(vec![CapEvent::SubAgent(Event::Started {
+                Decision::record(vec![AgentDomainEvent::SubAgentStarted {
                     call: call.clone(),
-                })])
+                }])
                 .then(result(call, format!("Subagent spawned: {child}"), false))
             }
             // The refusal has to reach the model, and the call is parked — so
@@ -314,16 +351,16 @@ impl SubAgentCapability {
             // answer. A refusal the model cannot see is a tool call that never
             // returns.
             SessionReply::Refused { call, reason } => {
-                Decision::record(vec![CapEvent::SubAgent(Event::Dropped {
+                Decision::record(vec![AgentDomainEvent::SubAgentDropped {
                     call: call.clone(),
-                })])
+                }])
                 .then(result(call, reason.clone(), true))
             }
         })
     }
 
     /// A child moved.
-    fn child(&self, m: &ChildMsg) -> Option<Decision> {
+    fn child(state: &SubAgentState, m: &ChildMsg) -> Option<Decision> {
         match m {
             ChildMsg::Outcome {
                 child,
@@ -332,8 +369,8 @@ impl SubAgentCapability {
                 // Not one of mine: fall through as `None` rather than deliver
                 // somebody else's report, so "addressed by owner" is enforced
                 // by the same return type as "not my tool".
-                self.outstanding.contains(child).then(|| {
-                    self.deliver(
+                state.outstanding.contains(child).then(|| {
+                    Self::deliver(
                         *child,
                         match o {
                             SubAgentOutcome::Completed { label, report } => SubAgentResultPart {
@@ -360,8 +397,8 @@ impl SubAgentCapability {
             } => None,
             // A child that died still owes its asker an answer: the agent is
             // sitting on a spawn it was told succeeded.
-            ChildMsg::Failed { child, error } => self.outstanding.contains(child).then(|| {
-                self.deliver(
+            ChildMsg::Failed { child, error } => state.outstanding.contains(child).then(|| {
+                Self::deliver(
                     *child,
                     failed_part(*child, child.to_string(), error.clone()),
                 )
@@ -377,8 +414,8 @@ impl SubAgentCapability {
     /// Journaled *and* queued in one decision, so the acknowledgement and the
     /// delivery cannot land apart: a crash before the write replays as a report
     /// still outstanding, and it is delivered again.
-    fn deliver(&self, child: RunnerId, part: SubAgentResultPart) -> Decision {
-        Decision::record(vec![CapEvent::SubAgent(Event::Reported { child })]).then(Act::Enqueue {
+    fn deliver(child: RunnerId, part: SubAgentResultPart) -> Decision {
+        Decision::record(vec![AgentDomainEvent::SubAgentReported { child }]).then(Act::Enqueue {
             item: Incoming::SubAgent {
                 id: child.to_string(),
                 part: Box::new(part),
@@ -389,12 +426,12 @@ impl SubAgentCapability {
     /// Only what is still running: a child that reported has been delivered
     /// into this agent's own transcript, so listing it again would show the
     /// model its own history back.
-    fn render_status(&self) -> String {
-        if self.outstanding.is_empty() {
+    fn render_status(state: &SubAgentState) -> String {
+        if state.outstanding.is_empty() {
             return "No subagents are running.".to_string();
         }
-        let mut text = format!("{} subagent(s) running:", self.outstanding.len());
-        for child in &self.outstanding {
+        let mut text = format!("{} subagent(s) running:", state.outstanding.len());
+        for child in &state.outstanding {
             text.push_str(&format!("\n- {child}"));
         }
         text
@@ -606,7 +643,7 @@ impl SubAgentCapability {
         claiming(inner, self.claims(facts), mailbox)
     }
 
-    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, state: &SubAgentState, cmd: &CapCommand) -> Option<Decision> {
         let CapCommand::SubAgent(cmd, to) = cmd else {
             return None;
         };
@@ -614,25 +651,25 @@ impl SubAgentCapability {
             Command::Spawn { input, catalog } => self.spawn(&to.call, input, catalog.as_deref()),
             // A read, so it journals nothing: an event for it would grow the
             // log every time the model looked.
-            Command::Status => Decision::reply(&to.call, self.render_status()),
+            Command::Status => Decision::reply(&to.call, Self::render_status(state)),
         })
     }
 
-    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, state: &SubAgentState, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Reply(reply) => self.replied(reply),
-            Msg::Child(m) => self.child(m),
+            Msg::Reply(reply) => Self::replied(state, reply),
+            Msg::Child(m) => Self::child(state, m),
             // The crash window: a spawn journaled and never answered is re-asked
             // with the ids the log already holds.
-            Msg::Loaded => self.reloaded(),
+            Msg::Loaded => self.reloaded(state),
             // Invariant 6. The turn is over and a report is still owed, so this
             // agent is not finished — it has work arriving that it has not
             // seen. `Act::Hold` rather than a claimed-but-empty decision: a
             // turn boundary is broadcast and merged, so claiming it is
             // invisible to the actor and only an act can carry the answer.
-            Msg::Turn(TurnEvent::Ended) if self.holds_conclusion() => {
+            Msg::Turn(TurnEvent::Ended) if state.holds_conclusion() => {
                 Some(Decision::default().then(Act::Hold {
-                    note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
+                    note: format!("{} subagent(s) still owe a report", state.outstanding.len()),
                 }))
             }
             Msg::Turn(_)
@@ -641,35 +678,6 @@ impl SubAgentCapability {
             | Msg::Concluded
             | Msg::TurnProposed => None,
         }
-    }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `let ... else` rather than a match with an arm per sibling: every
-        // capability is offered every event, and listing the others here would
-        // make adding one a change to all of them.
-        let CapEvent::SubAgent(event) = event else {
-            return;
-        };
-        match event {
-            Event::Requested { call, pending } => {
-                self.requested.insert(call.clone(), pending.clone());
-            }
-            Event::Started { call } => {
-                if let Some(pending) = self.requested.remove(call) {
-                    self.outstanding.insert(pending.child);
-                }
-            }
-            Event::Dropped { call } => {
-                self.requested.remove(call);
-            }
-            Event::Reported { child } => {
-                self.outstanding.remove(child);
-            }
-        }
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::SubAgent(self.clone())
     }
 }
 
@@ -680,12 +688,36 @@ mod tests {
         FakeCapability, advertised_by, answering, facts, someone_elses, specs_of,
     };
     use super::*;
-    use crate::agent_loop::capabilities::testing::settings;
+    use crate::agent_loop::capabilities::testing::{Equipped, settings};
     use crate::agent_loop::capabilities::{Capabilities, Capability};
     use crate::sessions::runners::message::WorkflowOutcome;
 
-    fn cap() -> SubAgentCapability {
-        SubAgentCapability::new(settings(), 0)
+    /// An agent that may delegate, sitting at the top of the tree.
+    fn cap() -> Equipped {
+        at_depth(0)
+    }
+
+    /// The same, `depth` levels down.
+    fn at_depth(depth: u32) -> Equipped {
+        Equipped::with(Capability::SubAgent(SubAgentCapability::new(
+            settings(),
+            depth,
+        )))
+    }
+
+    /// The capability itself, for the tests that only ask what it advertises.
+    fn delegating() -> Capability {
+        Capability::SubAgent(SubAgentCapability::new(settings(), 0))
+    }
+
+    /// The children that still owe a report.
+    fn outstanding(c: &Equipped) -> Vec<RunnerId> {
+        c.0.sub_agent.outstanding().iter().copied().collect()
+    }
+
+    /// The spawns the session has not answered.
+    fn requested(c: &Equipped) -> &BTreeMap<String, Pending> {
+        c.0.sub_agent.pending()
     }
 
     /// A spawn as the layer builds it, under a load that found no agent types.
@@ -736,19 +768,11 @@ mod tests {
     }
 
     /// What the model is shown for `spawn_agent` under these facts.
-    fn spawn_spec(c: &SubAgentCapability, facts: &AgentFacts) -> ToolSpec {
-        specs_of(&Capability::SubAgent(c.clone()), facts)
+    fn spawn_spec(facts: &AgentFacts) -> ToolSpec {
+        specs_of(&delegating(), facts)
             .into_iter()
             .find(|t| t.name == SPAWN_TOOL)
             .expect("spawn_agent is advertised")
-    }
-
-    /// Fold a decision back into the capability that made it, exactly as the
-    /// actor does — a capability that decided something has not yet changed.
-    fn fold(c: &mut SubAgentCapability, d: &Decision) {
-        for event in &d.events {
-            c.apply(event);
-        }
     }
 
     /// What the model was told, having checked that it was told rather than
@@ -767,9 +791,9 @@ mod tests {
 
     /// Ask for a worker and let the session say yes, which is the only way
     /// there is to an outstanding child.
-    fn spawned(c: &mut SubAgentCapability) -> RunnerId {
+    fn spawned(c: &mut Equipped) -> RunnerId {
         let d = c.command(&spawn_call()).expect("mine");
-        fold(c, &d);
+        c.fold(&d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
             Act::Park { .. },
@@ -781,7 +805,7 @@ mod tests {
         let d = c
             .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
             .expect("mine");
-        fold(c, &d);
+        c.fold(&d);
         child
     }
 
@@ -796,7 +820,7 @@ mod tests {
             ))
             .expect("mine");
 
-        let [CapEvent::SubAgent(Event::Requested { call, pending })] = d.events.as_slice() else {
+        let [AgentDomainEvent::SubAgentRequested { call, pending }] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
         };
         let child = &pending.child;
@@ -837,9 +861,9 @@ mod tests {
 
         // Nothing is outstanding yet: the session has not said it exists.
         let pending = pending.clone();
-        fold(&mut c, &d);
-        assert!(c.outstanding.is_empty());
-        assert_eq!(c.requested.get("t1"), Some(&pending));
+        c.fold(&d);
+        assert!(outstanding(&c).is_empty());
+        assert_eq!(requested(&c).get("t1"), Some(&pending));
     }
 
     /// The bound on nesting, and the one gate that stays agent-side: how deep
@@ -849,12 +873,12 @@ mod tests {
     #[test]
     fn a_spawn_at_the_depth_limit_is_refused_without_asking_the_session() {
         // The last depth that may still delegate, and the first that may not.
-        let ok = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH - 1)
+        let ok = at_depth(MAX_SUBAGENT_DEPTH - 1)
             .command(&spawn_call())
             .expect("mine");
         assert!(matches!(ok.acts.first(), Some(Act::Ask(_))));
 
-        let d = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)
+        let d = at_depth(MAX_SUBAGENT_DEPTH)
             .command(&spawn_call())
             .expect("mine, refused or not");
         assert_eq!(refusal(&d), "max subagent depth 4 reached");
@@ -872,7 +896,7 @@ mod tests {
     fn a_cap_refusal_from_the_session_becomes_the_parked_calls_result() {
         let mut c = cap();
         let d = c.command(&spawn_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
 
         let d = c
             .handle(&Msg::Reply(&SessionReply::Refused {
@@ -893,9 +917,9 @@ mod tests {
 
         // And the intent is retracted, so nothing re-asks for it on load and no
         // report is ever expected from a child that does not exist.
-        fold(&mut c, &d);
-        assert!(c.requested.is_empty());
-        assert!(c.outstanding.is_empty());
+        c.fold(&d);
+        assert!(requested(&c).is_empty());
+        assert!(outstanding(&c).is_empty());
     }
 
     /// The session said yes: the parked call gets the child's id, and only now
@@ -904,7 +928,7 @@ mod tests {
     fn a_started_child_answers_the_parked_call_and_becomes_outstanding() {
         let mut c = cap();
         let d = c.command(&spawn_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
             .expect("mine");
@@ -919,14 +943,13 @@ mod tests {
             results[0].output
         );
 
-        fold(&mut c, &d);
-        assert_eq!(c.outstanding.len(), 1);
-        assert!(c.requested.is_empty(), "an answered request is over");
+        c.fold(&d);
+        assert_eq!(outstanding(&c).len(), 1);
+        assert!(requested(&c).is_empty(), "an answered request is over");
         assert!(
             results[0].output.contains(
-                &c.outstanding
-                    .iter()
-                    .next()
+                &outstanding(&c)
+                    .first()
                     .expect("one outstanding")
                     .to_string()
             ),
@@ -948,7 +971,7 @@ mod tests {
     fn a_spawn_the_session_never_answered_is_asked_again_on_load() {
         let mut c = cap();
         let d = c.command(&spawn_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, args, .. }),
             Act::Park { .. },
@@ -964,11 +987,10 @@ mod tests {
 
         // The cut. Nothing is folded past the request, and what comes back is
         // read off the journal the way a new process reads it.
-        let caps = Capabilities::new(vec![Capability::SubAgent(c)]);
-        let written = serde_json::to_string(&caps).expect("write");
-        let reloaded: Capabilities = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&c.0).expect("write");
+        let reloaded: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
 
-        let d = reloaded.broadcast(&Msg::Loaded);
+        let d = super::super::broadcast(&reloaded, &Msg::Loaded);
         assert!(
             d.events.is_empty(),
             "a re-ask journals nothing: the Requested it reads is still the \
@@ -1026,14 +1048,14 @@ mod tests {
         // nothing rather than re-running into the same budget.
         let mut c = cap();
         let d = c.command(&spawn_call()).expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Refused {
                 call: "t1".into(),
                 reason: "8 subagents already active".into(),
             }))
             .expect("mine");
-        fold(&mut c, &d);
+        c.fold(&d);
         assert!(c.handle(&Msg::Loaded).is_none());
     }
 
@@ -1056,12 +1078,14 @@ mod tests {
     /// and never learn it had hit a budget.
     #[test]
     fn a_refused_spawn_is_claimed_rather_than_left_to_the_sandbox() {
-        let caps = Capabilities::new(vec![
-            Capability::SubAgent(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
-            Capability::Fake(FakeCapability::new(SPAWN_TOOL)),
-        ]);
-        let d = caps
-            .dispatch(&spawn_call())
+        let state = crate::agent_loop::AgentState {
+            capabilities: Capabilities::new(vec![
+                Capability::SubAgent(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
+                Capability::Fake(FakeCapability::new(SPAWN_TOOL)),
+            ]),
+            ..crate::agent_loop::AgentState::default()
+        };
+        let d = super::super::dispatch(&state, &spawn_call())
             .expect("a refused spawn that answers nobody");
         assert!(!refusal(&d).is_empty());
     }
@@ -1094,7 +1118,7 @@ mod tests {
             .expect("mine");
         assert!(matches!(
             d.events.as_slice(),
-            [CapEvent::SubAgent(Event::Reported { .. })]
+            [AgentDomainEvent::SubAgentReported { .. }]
         ));
         let [
             Act::Enqueue {
@@ -1110,8 +1134,8 @@ mod tests {
         assert_eq!(part.subagent_id, child.to_string());
         assert_eq!(part.label, "l");
 
-        fold(&mut c, &d);
-        assert!(c.outstanding.is_empty(), "a reported child owes nothing");
+        c.fold(&d);
+        assert!(outstanding(&c).is_empty(), "a reported child owes nothing");
     }
 
     /// A failure is a report too. An agent blocked on a worker that died and
@@ -1155,7 +1179,7 @@ mod tests {
             .expect("mine");
         assert!(matches!(
             d.events.as_slice(),
-            [CapEvent::SubAgent(Event::Reported { .. })]
+            [AgentDomainEvent::SubAgentReported { .. }]
         ));
         let [
             Act::Enqueue {
@@ -1214,7 +1238,7 @@ mod tests {
     fn a_turn_ending_with_an_outstanding_child_holds_the_conclusion() {
         let mut c = cap();
         let child = spawned(&mut c);
-        assert!(c.holds_conclusion());
+        assert!(c.0.sub_agent.holds_conclusion());
         assert!(
             c.handle(&Msg::Turn(TurnEvent::Ended)).is_some(),
             "a turn ending with a report still owed must not let the agent finish"
@@ -1230,8 +1254,8 @@ mod tests {
                 }),
             }))
             .expect("mine");
-        fold(&mut c, &d);
-        assert!(!c.holds_conclusion());
+        c.fold(&d);
+        assert!(!c.0.sub_agent.holds_conclusion());
         assert!(
             c.handle(&Msg::Turn(TurnEvent::Ended)).is_none(),
             "an agent owed nothing has no opinion about its turn ending"
@@ -1246,9 +1270,9 @@ mod tests {
     fn a_requested_child_does_not_hold_the_conclusion() {
         let mut c = cap();
         let d = c.command(&spawn_call()).expect("mine");
-        fold(&mut c, &d);
-        assert!(!c.requested.is_empty());
-        assert!(!c.holds_conclusion());
+        c.fold(&d);
+        assert!(!requested(&c).is_empty());
+        assert!(!c.0.sub_agent.holds_conclusion());
         assert!(c.handle(&Msg::Turn(TurnEvent::Ended)).is_none());
     }
 
@@ -1282,7 +1306,9 @@ mod tests {
         };
         assert!(text.contains(&child.to_string()));
 
-        c.apply(&CapEvent::SubAgent(Event::Reported { child }));
+        c.fold(&Decision::record(vec![
+            AgentDomainEvent::SubAgentReported { child },
+        ]));
         let d = c
             .command(&CapCommand::SubAgent(Command::Status, answering("t1")))
             .expect("mine");
@@ -1298,7 +1324,7 @@ mod tests {
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            advertised_by(&Capability::SubAgent(cap()), &facts()),
+            advertised_by(&delegating(), &facts()),
             vec![SPAWN_TOOL, STATUS_TOOL]
         );
     }
@@ -1318,7 +1344,7 @@ mod tests {
     #[test]
     fn the_scans_agent_types_are_advertised_with_their_descriptions() {
         let facts = facts_with(&[("code-reviewer", "reviews diffs for real bugs")]);
-        let spawn = spawn_spec(&cap(), &facts);
+        let spawn = spawn_spec(&facts);
         assert!(
             spawn
                 .description
@@ -1338,7 +1364,7 @@ mod tests {
     #[test]
     fn with_no_agent_types_found_the_parameter_is_absent() {
         for facts in [facts(), facts_with(&[])] {
-            let spawn = spawn_spec(&cap(), &facts);
+            let spawn = spawn_spec(&facts);
             assert!(spawn.input_schema["properties"]["agent_type"].is_null());
             assert!(!spawn.description.contains("agent_type"));
         }
@@ -1395,7 +1421,7 @@ mod tests {
             (json!({"label": "l", "task": "t"}), None),
         ] {
             let d = cap().command(&spawn_under(input, &facts)).expect("mine");
-            let [CapEvent::SubAgent(Event::Requested { pending, .. })] = d.events.as_slice() else {
+            let [AgentDomainEvent::SubAgentRequested { pending, .. }] = d.events.as_slice() else {
                 panic!("expected one Requested event, got {:?}", d.events);
             };
             assert_eq!(pending.agent_type.as_deref(), expected);
@@ -1428,21 +1454,25 @@ mod tests {
     /// so losing it in the journal loses the agent: the report arrives on a
     /// process that has since rehydrated the session.
     #[test]
-    fn the_outstanding_children_survive_a_slice_round_trip() {
+    fn the_outstanding_children_survive_the_journal_round_trip() {
         let mut c = cap();
         let child = spawned(&mut c);
-        let caps = Capabilities::new(vec![Capability::SubAgent(c)]);
 
-        let written = serde_json::to_string(&caps).expect("write");
-        let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::SubAgent(back) = read.iter().next().expect("one").save() else {
+        let written = serde_json::to_string(&c.0).expect("write");
+        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        assert_eq!(
+            back.sub_agent
+                .outstanding()
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![child],
+            "a reload that lost the outstanding child would let the agent conclude \
+             with a report still coming"
+        );
+        let [Capability::SubAgent(back)] = back.capabilities.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
-        assert_eq!(
-            back.outstanding.into_iter().collect::<Vec<_>>(),
-            vec![child],
-            "the reload was rebuilt from config and lost the outstanding child"
-        );
         assert_eq!(back.depth, 0, "the gate this agent carries is config too");
     }
 

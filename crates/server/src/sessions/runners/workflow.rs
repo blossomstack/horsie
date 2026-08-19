@@ -575,10 +575,6 @@ impl Runner for State {
         Some(&self.capabilities)
     }
 
-    fn capabilities_mut(&mut self) -> Option<&mut Capabilities> {
-        Some(&mut self.capabilities)
-    }
-
     /// One agent per *execution*, not one per step: a step reached twice — by a
     /// loop or by a retry — is two agents with two transcripts, and collapsing
     /// them would lose one.
@@ -1618,7 +1614,7 @@ mod tests {
         let asks: Capabilities = equipment
             .iter()
             .filter(|c| c.name() == "ask_user")
-            .map(|c| c.save().into())
+            .cloned()
             .collect();
         assert!(
             advertised(&asks, &facts()).is_empty(),

@@ -42,7 +42,7 @@
 //! A capability owns its own commands. What a person or a model asked *this*
 //! capability to do arrives as a [`CapCommand`] — one arm per capability, built
 //! by the toolbox layer that claimed the name — and reaches it through
-//! [`Capabilities::dispatch`]. Nothing downstream of that layer ever sees a tool
+//! [`dispatch`]. Nothing downstream of that layer ever sees a tool
 //! name: which capability answers is decided by which arm was constructed, so
 //! the "first claimant wins" rule is enforced by wrapping order at compose time
 //! rather than by a scan at call time.
@@ -50,12 +50,25 @@
 //! [`Msg`] is what is left, and it is lifecycle only: a turn boundary, a load,
 //! an answer, a child, a session reply, a wake, a conclusion. Those *are*
 //! routed, and [`Msg::routing`] carries which way rather than a table above it.
-//! [`Capabilities::offer`] hands a message to each capability in order until one
-//! takes it — for the four that exactly one capability can account for.
-//! [`Capabilities::broadcast`] hands it to every one of them, because a turn
-//! ending is news for all of them: the ask holds a park open across it, the step
-//! result counts its nudges by it, and the subagent list checks it for children
-//! still outstanding.
+//! [`offer`] hands a message to each capability in order until one takes it —
+//! for the four that exactly one capability can account for. [`broadcast`] hands
+//! it to every one of them, because a turn ending is news for all of them: the
+//! ask holds a park open across it, the step result counts its nudges by it, and
+//! the subagent list checks it for children still outstanding.
+//!
+//! # What an agent may do, and what it has done
+//!
+//! [`Capabilities`] is config: the list a runner equipped, and nothing else.
+//! What each capability has accumulated is a field on
+//! [`AgentState`](crate::agent_loop::AgentState) beside it, typed by a struct
+//! whose fields are private to that capability's own file — so nothing outside
+//! that file can reach a record except through an accessor the file chose to
+//! write, and the journal reads flat.
+//!
+//! The split is the difference between a *depth* and the children spawned at
+//! it, or an *attention mode* and the questions parked under it. Config is
+//! answered when the agent is equipped and never again; state is folded from
+//! this agent's own events.
 //!
 //! Order is still a written property of assembly — the open-namespace
 //! capabilities, the sandbox above all, sort last because they answer for a
@@ -75,6 +88,7 @@ pub mod timers;
 pub mod title;
 pub mod workflow;
 
+use crate::agent_loop::state::{AgentDomainEvent, AgentState};
 use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
@@ -111,17 +125,14 @@ pub struct Answering {
 
 /// One capability's command, tagged with which capability owns it.
 ///
-/// The third application of the pattern [`CapEvent`] and [`CapSlice`] already
-/// use, and for the third reason: one arm per capability, so nothing can be
-/// forgotten. What it buys over a tool call is that **routing is by
-/// construction**. The layer that claimed a name builds the arm, so a command
-/// can only ever reach the capability whose own type it carries — where a name
-/// had to be matched against a list, and the first capability to recognise it
-/// won.
+/// One arm per capability, so nothing can be forgotten. What it buys over a
+/// tool call is that **routing is by construction**. The layer that claimed a
+/// name builds the arm, so a command can only ever reach the capability whose
+/// own type it carries — where a name had to be matched against a list, and the
+/// first capability to recognise it won.
 ///
-/// Never journaled, which is why this is the one of the three with no serde
-/// bound: it carries [`Answering`], and a channel to a caller that has gone
-/// away is not a fact about the agent.
+/// Never journaled: it carries [`Answering`], and a channel to a caller that
+/// has gone away is not a fact about the agent.
 pub enum CapCommand {
     AskUser(ask_user::Command, Answering),
     /// The one command a person types rather than a model calls, so there is no
@@ -358,14 +369,20 @@ impl Msg<'_> {
 /// backwards still compiles.
 #[derive(Debug, Default)]
 pub struct Decision {
-    pub events: Vec<CapEvent>,
+    /// What to journal, in the agent's own vocabulary.
+    ///
+    /// [`AgentDomainEvent`] directly, not a capability-shaped parcel the actor
+    /// unwraps: a raw journal has to be readable without unwrapping two layers,
+    /// because the two persisted-shape outages on this project were both
+    /// diagnosed by eye.
+    pub events: Vec<AgentDomainEvent>,
     pub acts: Vec<Act>,
 }
 
 impl Decision {
     /// Journal these, do nothing else.
     #[must_use]
-    pub fn record(events: Vec<CapEvent>) -> Self {
+    pub fn record(events: Vec<AgentDomainEvent>) -> Self {
         Self {
             events,
             acts: Vec::new(),
@@ -450,7 +467,7 @@ pub enum Act {
     /// capability is holding will wake it.
     ///
     /// A verb rather than a claimed-but-empty [`Decision`], because a turn
-    /// boundary is *broadcast* and [`Capabilities::broadcast`] merges what comes
+    /// boundary is *broadcast* and [`broadcast`] merges what comes
     /// back — so "I claimed this" is invisible to the actor by construction,
     /// and only something in the merged result can carry it.
     ///
@@ -472,9 +489,10 @@ pub enum Act {
     ///
     /// A capability's own events are folded but append nothing a client can
     /// read, which is the trap this exists for: `ask_user` journaling its park
-    /// purely as a [`CapEvent`] would leave the question invisible in the UI —
-    /// green tests, and only a browser would notice. So what a person should
-    /// see is said explicitly, in the vocabulary the log already has.
+    /// purely as [`AgentDomainEvent::AskUserAsked`] would leave the question
+    /// invisible in the UI — green tests, and only a browser would notice. So
+    /// what a person should see is said explicitly, in the vocabulary the log
+    /// already has.
     Record(Box<horsie_agentcore::LifecycleEvent>),
     /// Wake this agent in `after_secs`, naming the sleep `id`.
     ///
@@ -609,7 +627,7 @@ impl std::fmt::Display for SetupError {
 /// Dispatch is the `match` in each method below. It is exhaustive, so a
 /// fourteenth capability cannot be added without answering, in one place, every
 /// question the actor asks of one.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Capability {
     AskUser(ask_user::AskUserCapability),
     Title(title::TitleCapability),
@@ -629,8 +647,7 @@ pub enum Capability {
     /// changes.
     ///
     /// An arm rather than an injected stub, because a closed set cannot take
-    /// one — the same shape [`CapEvent`], [`CapSlice`] and [`CapCommand`]
-    /// already carry for the same reason.
+    /// one — the same shape [`CapCommand`] already carries for the same reason.
     #[cfg(test)]
     Fake(testing::FakeCapability),
 }
@@ -782,16 +799,16 @@ impl Capability {
     /// naming its siblings — the same shape [`Self::apply`] uses, and for the
     /// same reason.
     #[must_use]
-    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+    pub fn command(&self, state: &AgentState, cmd: &CapCommand) -> Option<Decision> {
         match self {
-            Self::AskUser(c) => c.command(cmd),
-            Self::Title(c) => c.command(cmd),
-            Self::Fork(c) => c.command(cmd),
-            Self::SubAgent(c) => c.command(cmd),
-            Self::Workflow(c) => c.command(cmd),
+            Self::AskUser(c) => c.command(&state.ask_user, cmd),
+            Self::Title(c) => c.command(&state.title, cmd),
+            Self::Fork(c) => c.command(&state.fork, cmd),
+            Self::SubAgent(c) => c.command(&state.sub_agent, cmd),
+            Self::Workflow(c) => c.command(&state.workflow, cmd),
             Self::StepResult(c) => c.command(cmd),
-            Self::TaskList(c) => c.command(cmd),
-            Self::Timers(c) => c.command(cmd),
+            Self::TaskList(c) => c.command(&state.task_list, cmd),
+            Self::Timers(c) => c.command(&state.timers, cmd),
             Self::TokenBudget(_)
             | Self::ControlPlane(_)
             | Self::Memory(_)
@@ -808,16 +825,16 @@ impl Capability {
     /// a capability that answered yes and then could not cope, and a pair edited
     /// out of step, are states that cannot be written this way.
     #[must_use]
-    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
+    pub fn handle(&self, state: &AgentState, msg: &Msg) -> Option<Decision> {
         match self {
-            Self::AskUser(c) => c.handle(msg),
-            Self::Title(c) => c.handle(msg),
-            Self::Fork(c) => c.handle(msg),
-            Self::SubAgent(c) => c.handle(msg),
-            Self::Workflow(c) => c.handle(msg),
+            Self::AskUser(c) => c.handle(&state.ask_user, msg),
+            Self::Title(c) => c.handle(&state.title, msg),
+            Self::Fork(c) => c.handle(&state.fork, msg),
+            Self::SubAgent(c) => c.handle(&state.sub_agent, msg),
+            Self::Workflow(c) => c.handle(&state.workflow, msg),
             Self::StepResult(c) => c.handle(msg),
-            Self::TaskList(c) => c.handle(msg),
-            Self::Timers(c) => c.handle(msg),
+            Self::TaskList(c) => c.handle(&state.task_list, msg),
+            Self::Timers(c) => c.handle(&state.timers, msg),
             Self::TokenBudget(c) => c.handle(msg),
             Self::ControlPlane(c) => c.handle(msg),
             Self::Memory(c) => c.handle(msg),
@@ -825,33 +842,6 @@ impl Capability {
             Self::Runtime(c) => c.handle(msg),
             #[cfg(test)]
             Self::Fake(c) => c.handle(msg),
-        }
-    }
-
-    /// Fold one of my own events.
-    ///
-    /// Pure: no clock, no randomness, no id generation — those belong in
-    /// [`Self::handle`], which is a decision rather than a replay. Every
-    /// capability is offered every event, so an arm that is not mine is a no-op
-    /// rather than an error.
-    pub fn apply(&mut self, event: &CapEvent) {
-        match self {
-            Self::AskUser(c) => c.apply(event),
-            Self::Title(c) => c.apply(event),
-            Self::Fork(c) => c.apply(event),
-            Self::SubAgent(c) => c.apply(event),
-            Self::Workflow(c) => c.apply(event),
-            Self::TaskList(c) => c.apply(event),
-            Self::Timers(c) => c.apply(event),
-            Self::ControlPlane(c) => c.apply(event),
-            Self::Memory(c) => c.apply(event),
-            Self::Mcp(c) => c.apply(event),
-            Self::Runtime(c) => c.apply(event),
-            // Nothing folded: a submitted result is the workflow runner's own
-            // event, and a compaction target is read from config every time.
-            Self::StepResult(_) | Self::TokenBudget(_) => {}
-            #[cfg(test)]
-            Self::Fake(c) => c.apply(event),
         }
     }
 
@@ -864,11 +854,16 @@ impl Capability {
     /// prose. So whatever has an id in it says so here, and is rendered into
     /// the boundary message untouched — see
     /// [`crate::agent_loop::carried_state`].
+    ///
+    /// Asked of the capability rather than read off the state, because whether
+    /// a fact is worth carrying is a judgement about the *feature*: the state
+    /// survives either way, and this is the part the model would otherwise stop
+    /// knowing about.
     #[must_use]
-    pub fn carried_state(&self) -> Option<String> {
+    pub fn carried_state(&self, state: &AgentState) -> Option<String> {
         match self {
-            Self::TaskList(c) => c.carried_state(),
-            Self::Timers(c) => c.carried_state(),
+            Self::TaskList(_) => task_list::TaskListCapability::carried_state(&state.task_list),
+            Self::Timers(_) => state.timers.carried_state(),
             Self::AskUser(_)
             | Self::Title(_)
             | Self::Fork(_)
@@ -884,160 +879,63 @@ impl Capability {
             Self::Fake(_) => None,
         }
     }
-
-    /// What a client sees of this capability. `None` when it shows nothing.
-    ///
-    /// A *question* rather than a read: the caller says what it wants to know
-    /// and gets a computed answer, never the capability's own shape.
-    ///
-    /// [`CapView`] is deliberately not [`CapSlice`]. The journal shape is a
-    /// durability contract and the view shape is an API contract; tying them
-    /// together makes an API change force a journal migration.
-    #[must_use]
-    pub fn view(&self) -> Option<CapView> {
-        match self {
-            Self::TaskList(c) => c.view(),
-            Self::AskUser(_)
-            | Self::Title(_)
-            | Self::Fork(_)
-            | Self::SubAgent(_)
-            | Self::Workflow(_)
-            | Self::StepResult(_)
-            | Self::Timers(_)
-            | Self::TokenBudget(_)
-            | Self::ControlPlane(_)
-            | Self::Memory(_)
-            | Self::Mcp(_)
-            | Self::Runtime(_) => None,
-            #[cfg(test)]
-            Self::Fake(_) => None,
-        }
-    }
-
-    /// Me, in the form the journal stores.
-    #[must_use]
-    pub fn save(&self) -> CapSlice {
-        match self {
-            Self::AskUser(c) => c.save(),
-            Self::Title(c) => c.save(),
-            Self::Fork(c) => c.save(),
-            Self::SubAgent(c) => c.save(),
-            Self::Workflow(c) => c.save(),
-            Self::StepResult(c) => c.save(),
-            Self::TaskList(c) => c.save(),
-            Self::Timers(c) => c.save(),
-            Self::TokenBudget(c) => c.save(),
-            Self::ControlPlane(c) => c.save(),
-            Self::Memory(c) => c.save(),
-            Self::Mcp(c) => c.save(),
-            Self::Runtime(c) => c.save(),
-            #[cfg(test)]
-            Self::Fake(c) => c.save(),
-        }
-    }
 }
 
-/// One capability as it is persisted.
+/// Hand a message to each capability until one takes it.
 ///
-/// The whole capability rather than a durable-state extract, so a reload does
-/// not depend on assembly reproducing the same config it produced when the
-/// agent was first equipped. A capability's config is a fact about the agent,
-/// and facts about the agent belong in its state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CapSlice {
-    AskUser(ask_user::AskUserCapability),
-    Budget(budget::TokenBudgetCapability),
-    ControlPlane(control_plane::ControlPlaneCapability),
-    Fork(fork::ForkCapability),
-    Mcp(mcp::McpCapability),
-    Memory(memory::MemoryCapability),
-    Runtime(runtime::RuntimeCapability),
-    StepResult(step_result::StepResultCapability),
-    SubAgent(sub_agent::SubAgentCapability),
-    TaskList(task_list::TaskListCapability),
-    Timers(timers::TimersCapability),
-    Title(title::TitleCapability),
-    Workflow(workflow::WorkflowCapability),
-    /// A capability with no behaviour of its own, so the round-trip and
-    /// folded-state rules have something to be tested against that cannot break
-    /// when a real capability changes. Each migration adds its own arm beside
-    /// these; nothing deletes this one.
-    #[cfg(test)]
-    Fake(testing::FakeCapability),
+/// `None` from all of them is an error at the one place this is called, never a
+/// silent drop.
+///
+/// A free function over [`AgentState`] rather than a method on
+/// [`Capabilities`], because a capability now decides from state it does not
+/// hold: the list says what an agent may do, and the fields beside it say what
+/// it has done.
+#[must_use]
+pub fn offer(state: &AgentState, msg: &Msg) -> Option<Decision> {
+    state.capabilities.iter().find_map(|c| c.handle(state, msg))
 }
 
-impl From<CapSlice> for Capability {
-    /// Arm for arm: the two enums name the same set, and this is where that is
-    /// checked. A [`CapSlice`] arm with no [`Capability`] to become is a
-    /// journal that can be written and not read.
-    fn from(slice: CapSlice) -> Self {
-        match slice {
-            CapSlice::AskUser(c) => Self::AskUser(c),
-            CapSlice::Budget(c) => Self::TokenBudget(c),
-            CapSlice::ControlPlane(c) => Self::ControlPlane(c),
-            CapSlice::Fork(c) => Self::Fork(c),
-            CapSlice::Mcp(c) => Self::Mcp(c),
-            CapSlice::Memory(c) => Self::Memory(c),
-            CapSlice::Runtime(c) => Self::Runtime(c),
-            CapSlice::StepResult(c) => Self::StepResult(c),
-            CapSlice::SubAgent(c) => Self::SubAgent(c),
-            CapSlice::TaskList(c) => Self::TaskList(c),
-            CapSlice::Timers(c) => Self::Timers(c),
-            CapSlice::Title(c) => Self::Title(c),
-            CapSlice::Workflow(c) => Self::Workflow(c),
-            #[cfg(test)]
-            CapSlice::Fake(c) => Self::Fake(c),
-        }
-    }
+/// Hand a message to every capability and merge what they decided.
+///
+/// Order is preserved, so a broadcast that produces acts produces them in the
+/// same order the capabilities are offered tool calls in.
+#[must_use]
+pub fn broadcast(state: &AgentState, msg: &Msg) -> Decision {
+    state
+        .capabilities
+        .iter()
+        .filter_map(|c| c.handle(state, msg))
+        .fold(Decision::default(), |mut all, d| {
+            all.events.extend(d.events);
+            all.acts.extend(d.acts);
+            all
+        })
 }
 
-/// One capability's event, tagged with which capability owns it.
+/// Give a command to the capability whose command it is.
 ///
-/// Typed rather than an opaque blob: the journal stays readable, and a shape
-/// change fails to compile where it should.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CapEvent {
-    AskUser(ask_user::Event),
-    ControlPlane(control_plane::Event),
-    Fork(fork::Event),
-    Mcp(mcp::Event),
-    Memory(memory::Event),
-    Runtime(runtime::Event),
-    StepResult(step_result::Event),
-    SubAgent(sub_agent::Event),
-    TaskList(task_list::Event),
-    Timer(timers::Event),
-    Title(title::Event),
-    Workflow(workflow::Event),
-    #[cfg(test)]
-    Fake(testing::FakeEvent),
-}
-
-/// What a capability shows a client, in the client's vocabulary.
-///
-/// One arm per capability that has anything to show, and most have nothing —
-/// which is why this is much shorter than [`CapSlice`] and why it must stay a
-/// separate enum. `CapSlice` answers "what does the journal store?" and this
-/// answers "what does `GET /api/sessions/:id/agents/:id` return?"; a capability
-/// that reshapes its persisted state should not be able to change an HTTP
-/// response by accident, nor the other way round.
-///
-/// Prefer widening this over adding a method to [`Capability`] when a third
-/// thing needs to cross the boundary. A dispatch that grows a method per concern
-/// is the failure mode this design exists to avoid.
-#[derive(Debug, Clone)]
-pub enum CapView {
-    /// The plan the agent keeps for itself, in list order, as
-    /// `AgentStateView.tasks` carries it.
-    TaskList(Vec<crate::agent_loop::task_list::TaskRecord>),
+/// Not an offer, though it walks the same list: an arm can only be recognised
+/// by the capability whose own type it carries, so there is no first-claimant
+/// rule here and no name to contest. `None` means that capability is not
+/// equipped at all, which the actor turns into an error the model can see
+/// rather than a call that never returns.
+#[must_use]
+pub fn dispatch(state: &AgentState, cmd: &CapCommand) -> Option<Decision> {
+    state
+        .capabilities
+        .iter()
+        .find_map(|c| c.command(state, cmd))
 }
 
 /// What an agent is equipped with, in the order its layers wrap and its
 /// lifecycle messages are offered around.
 ///
-/// A newtype so the list round-trips through the journal as `Vec<CapSlice>`
-/// with no hydration step: what comes back is what went in, including config.
-#[derive(Debug, Default)]
+/// **Config, and only config.** What each capability has *done* is a field on
+/// [`AgentState`] beside this list. Keeping the two apart is what makes this an
+/// ordinary `Vec` again: the whole list can be cloned, serialized and compared
+/// by derive, because there is nothing in it a reload could get wrong.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Capabilities(Vec<Capability>);
 
 impl Capabilities {
@@ -1067,35 +965,6 @@ impl Capabilities {
 
     pub fn iter(&self) -> std::slice::Iter<'_, Capability> {
         self.0.iter()
-    }
-
-    /// Every capability in the form the journal stores it, in offer order.
-    ///
-    /// **Serialization only, and private for that reason.** This used to be the
-    /// way anything inside `agent_loop` read a fact out of a capability, which
-    /// made every capability's whole persisted state readable by anything that
-    /// asked — the bypass [`Capability::view`] replaces. What a client sees is
-    /// a question a capability answers; what the journal stores is nobody
-    /// else's business.
-    #[must_use]
-    fn slices(&self) -> Vec<CapSlice> {
-        self.0.iter().map(|c| c.save()).collect()
-    }
-
-    /// What every capability shows a client, in offer order.
-    ///
-    /// Skips the ones with nothing to show, so a caller matching an arm is
-    /// asking whether *anything* here answers for it rather than which position
-    /// it sits at.
-    #[must_use]
-    pub fn views(&self) -> Vec<CapView> {
-        self.0.iter().filter_map(|c| c.view()).collect()
-    }
-
-    /// Everything this agent would lose to a compaction, in offer order.
-    #[must_use]
-    pub fn carried_state(&self) -> Vec<String> {
-        self.0.iter().filter_map(|c| c.carried_state()).collect()
     }
 
     #[must_use]
@@ -1131,48 +1000,17 @@ impl Capabilities {
             .fold(inner, |inner, cap| cap.layer(inner, facts, mailbox))
     }
 
-    /// Give a command to the capability whose command it is.
+    /// Everything this agent would lose to a compaction, in offer order.
     ///
-    /// Not an offer, though it walks the same list: an arm can only be
-    /// recognised by the capability whose own type it carries, so there is no
-    /// first-claimant rule here and no name to contest. `None` means that
-    /// capability is not equipped at all, which the actor turns into an error
-    /// the model can see rather than a call that never returns.
+    /// Order is the equipment list's, so the boundary message's sections come
+    /// out the same way twice — which is what makes a compaction's rendering
+    /// reproducible rather than dependent on field order somewhere else.
     #[must_use]
-    pub fn dispatch(&self, cmd: &CapCommand) -> Option<Decision> {
-        self.0.iter().find_map(|c| c.command(cmd))
-    }
-
-    /// Hand a message to each capability until one takes it.
-    ///
-    /// `None` from all of them is an error at the one place this is called,
-    /// never a silent drop.
-    #[must_use]
-    pub fn offer(&self, msg: &Msg) -> Option<Decision> {
-        self.0.iter().find_map(|c| c.handle(msg))
-    }
-
-    /// Hand a message to every capability and merge what they decided.
-    ///
-    /// Order is preserved, so a broadcast that produces acts produces them in
-    /// the same order the capabilities are offered tool calls in.
-    #[must_use]
-    pub fn broadcast(&self, msg: &Msg) -> Decision {
+    pub fn carried_state(&self, state: &AgentState) -> Vec<String> {
         self.0
             .iter()
-            .filter_map(|c| c.handle(msg))
-            .fold(Decision::default(), |mut all, d| {
-                all.events.extend(d.events);
-                all.acts.extend(d.acts);
-                all
-            })
-    }
-
-    /// Fold a capability's event into the capability that owns it.
-    pub fn apply(&mut self, event: &CapEvent) {
-        for cap in &mut self.0 {
-            cap.apply(event);
-        }
+            .filter_map(|c| c.carried_state(state))
+            .collect()
     }
 
     /// Equip an agent by folding every capability over a fresh spec.
@@ -1210,31 +1048,6 @@ impl Capabilities {
 impl FromIterator<Capability> for Capabilities {
     fn from_iter<I: IntoIterator<Item = Capability>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
-    }
-}
-
-impl Clone for Capabilities {
-    /// Through the persisted form, so a clone cannot diverge from what a reload
-    /// would produce.
-    fn clone(&self) -> Self {
-        Self(self.slices().into_iter().map(Into::into).collect())
-    }
-}
-
-impl Serialize for Capabilities {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.slices().serialize(s)
-    }
-}
-
-impl<'de> Deserialize<'de> for Capabilities {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        Ok(Self(
-            Vec::<CapSlice>::deserialize(d)?
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-        ))
     }
 }
 
@@ -1278,6 +1091,53 @@ pub mod testing {
         }
     }
 
+    /// An agent equipped with one capability, and whatever it has folded.
+    ///
+    /// The pair the actor holds. A capability decides from state it does not
+    /// own, so a test that kept only the capability would be exercising a shape
+    /// the actor never has — and routing a call through [`dispatch`] rather
+    /// than calling the capability directly is what makes an assertion here an
+    /// assertion about what the actor would do.
+    pub struct Equipped(pub AgentState);
+
+    impl Equipped {
+        #[must_use]
+        pub fn with(cap: Capability) -> Self {
+            Self(AgentState {
+                capabilities: Capabilities::new(vec![cap]),
+                ..AgentState::default()
+            })
+        }
+
+        /// A tool call, routed the way the actor routes one.
+        #[must_use]
+        pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+            dispatch(&self.0, cmd)
+        }
+
+        /// A lifecycle message, offered the way the actor offers one.
+        #[must_use]
+        pub fn handle(&self, msg: &Msg) -> Option<Decision> {
+            offer(&self.0, msg)
+        }
+
+        /// Journal what was decided. A capability that decided something has
+        /// not yet changed anything; this is the step that makes it true.
+        pub fn fold(&mut self, d: &Decision) {
+            for event in &d.events {
+                self.0 = std::mem::take(&mut self.0).apply(event.clone());
+            }
+        }
+
+        /// Decide and journal in one go, for the many tests whose next
+        /// assertion is about what the first call left behind.
+        pub fn did(&mut self, cmd: &CapCommand) -> Decision {
+            let d = self.command(cmd).expect("this capability owns its command");
+            self.fold(&d);
+            d
+        }
+    }
+
     /// A command belonging to some other capability.
     ///
     /// What a "not mine" assertion is written against now: a capability can no
@@ -1293,11 +1153,11 @@ pub mod testing {
         )
     }
 
-    /// A capability with a name, one tool, and one piece of folded state.
+    /// A capability with a name and one tool.
     ///
     /// Enough to exercise every composition rule without a real capability
-    /// existing yet: it claims its own tool name and nothing else, records what
-    /// it was told, and answers `save()` with itself.
+    /// existing yet: it claims its own tool name and nothing else, and what it
+    /// was told is folded into [`FakeState`] like any other capability's.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct FakeCapability {
         pub tool: String,
@@ -1305,9 +1165,6 @@ pub mod testing {
         /// name are still tellable apart — which is the only way to see *which*
         /// of them the composed toolbox let through.
         pub description: String,
-        /// What broadcasts and events have done to it — the folded state a
-        /// `save()` that rebuilt from config would silently drop.
-        pub seen: Vec<String>,
         /// Whether this one claims turn boundaries.
         pub watches_turns: bool,
     }
@@ -1317,7 +1174,6 @@ pub mod testing {
             Self {
                 tool: tool.to_string(),
                 description: String::new(),
-                seen: Vec::new(),
                 watches_turns: false,
             }
         }
@@ -1338,11 +1194,28 @@ pub mod testing {
         }
     }
 
-    /// The fake's only event: it saw something.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct FakeEvent {
-        pub tool: String,
-        pub what: String,
+    /// What the fake has been told, folded from
+    /// [`AgentDomainEvent::FakeSaw`].
+    ///
+    /// Its field is private for the same reason a real capability's state is:
+    /// nothing outside this module decides what "seen" means.
+    #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+    pub struct FakeState {
+        seen: Vec<String>,
+    }
+
+    impl FakeState {
+        /// What this fake has been told, in order.
+        #[must_use]
+        pub fn seen(&self) -> &[String] {
+            &self.seen
+        }
+
+        /// Every fake shares one state, so a record names the tool it came
+        /// from — which is how a test tells two fakes apart.
+        pub(crate) fn saw(&mut self, tool: String, what: String) {
+            self.seen.push(format!("{tool}:{what}"));
+        }
     }
 
     /// The fake's only command: its tool was called.
@@ -1387,20 +1260,20 @@ pub mod testing {
                 return None;
             };
             (cmd.tool == self.tool).then(|| {
-                Decision::record(vec![CapEvent::Fake(FakeEvent {
+                Decision::record(vec![AgentDomainEvent::FakeSaw {
                     tool: self.tool.clone(),
                     what: format!("tool:{}", cmd.tool),
-                })])
+                }])
             })
         }
 
         pub fn handle(&self, msg: &Msg) -> Option<Decision> {
             match msg {
                 Msg::Turn(t) => self.watches_turns.then(|| {
-                    Decision::record(vec![CapEvent::Fake(FakeEvent {
+                    Decision::record(vec![AgentDomainEvent::FakeSaw {
                         tool: self.tool.clone(),
                         what: format!("turn:{t:?}"),
-                    })])
+                    }])
                 }),
                 Msg::Answer(_)
                 | Msg::Child(_)
@@ -1410,20 +1283,6 @@ pub mod testing {
                 | Msg::Loaded
                 | Msg::TurnProposed => None,
             }
-        }
-
-        pub fn apply(&mut self, event: &CapEvent) {
-            // Every capability is offered every event, so an arm that is not
-            // mine is a no-op rather than an error. `let ... else` rather than
-            // a match, so a tenth capability is not a change to all nine.
-            let CapEvent::Fake(e) = event else { return };
-            if e.tool == self.tool {
-                self.seen.push(e.what.clone());
-            }
-        }
-
-        pub fn save(&self) -> CapSlice {
-            CapSlice::Fake(self.clone())
         }
     }
 
@@ -1707,22 +1566,34 @@ mod tests {
         Capabilities::new(list.into_iter().map(Capability::Fake).collect())
     }
 
+    /// An agent equipped with these and nothing folded yet.
+    ///
+    /// Routing reads state now, so the question "who claims this?" is put to an
+    /// agent rather than to a list — which is also the shape the actor asks it
+    /// in.
+    fn agent(list: Vec<FakeCapability>) -> AgentState {
+        AgentState {
+            capabilities: caps(list),
+            ..AgentState::default()
+        }
+    }
+
     /// A command reaches the capability whose command it is — by construction,
     /// not by a scan that the wrong capability could win. The arm names its
     /// owner, so precedence between two capabilities is decided when their
     /// layers are wrapped and never again.
     #[test]
     fn a_command_reaches_the_capability_whose_command_it_is() {
-        let caps = caps(vec![
+        let state = agent(vec![
             FakeCapability::new("first"),
             FakeCapability::new("second"),
         ]);
-        let d = caps.dispatch(&call("second")).expect("someone takes it");
-        let Some(CapEvent::Fake(e)) = d.events.first() else {
+        let d = dispatch(&state, &call("second")).expect("someone takes it");
+        let Some(AgentDomainEvent::FakeSaw { tool, .. }) = d.events.first() else {
             panic!("expected the fake's own event, got {:?}", d.events);
         };
         assert_eq!(
-            e.tool, "second",
+            tool, "second",
             "the command was answered by a capability it does not belong to"
         );
     }
@@ -1732,8 +1603,8 @@ mod tests {
     /// dropping it and leaving the call hanging.
     #[test]
     fn a_command_nobody_owns_is_none() {
-        let caps = caps(vec![FakeCapability::new("only")]);
-        assert!(caps.dispatch(&call("nope")).is_none());
+        let state = agent(vec![FakeCapability::new("only")]);
+        assert!(dispatch(&state, &call("nope")).is_none());
         assert_eq!(
             call("nope").owner(),
             "fake",
@@ -1746,20 +1617,22 @@ mod tests {
     /// offering would give it to whichever sorted first.
     #[test]
     fn a_turn_boundary_reaches_every_capability() {
-        let caps = caps(vec![
+        let state = agent(vec![
             FakeCapability::watching_turns("a"),
             FakeCapability::watching_turns("b"),
         ]);
         let msg = Msg::Turn(TurnEvent::Ended);
         assert_eq!(msg.routing(), Routing::Broadcast);
 
-        let d = caps.broadcast(&msg);
+        let d = broadcast(&state, &msg);
         let tools: Vec<&str> = d
             .events
             .iter()
             .filter_map(|e| {
-                let CapEvent::Fake(e) = e else { return None };
-                Some(e.tool.as_str())
+                let AgentDomainEvent::FakeSaw { tool, .. } = e else {
+                    return None;
+                };
+                Some(tool.as_str())
             })
             .collect();
         assert_eq!(
@@ -1773,13 +1646,11 @@ mod tests {
     /// which is the bug the routing rule exists to prevent.
     #[test]
     fn offering_a_turn_boundary_would_reach_only_the_first() {
-        let caps = caps(vec![
+        let state = agent(vec![
             FakeCapability::watching_turns("a"),
             FakeCapability::watching_turns("b"),
         ]);
-        let d = caps
-            .offer(&Msg::Turn(TurnEvent::Ended))
-            .expect("the first one claims it");
+        let d = offer(&state, &Msg::Turn(TurnEvent::Ended)).expect("the first one claims it");
         assert_eq!(d.events.len(), 1);
     }
 
@@ -1800,34 +1671,46 @@ mod tests {
         );
     }
 
-    /// Cloning goes through `save()`, and the list is cloned every time an agent
-    /// is equipped — so a `save()` that rebuilt itself from config instead of
-    /// copying itself would silently drop what the agent had folded. Pinning
-    /// names cannot catch that; only folded state can.
+    /// **A clone cannot diverge from a reload.**
+    ///
+    /// The list is cloned every time an agent is equipped, and read back from
+    /// the journal every time one loads, so the two have to agree. They used to
+    /// agree because both went through a hand-written `save()`, and the risk
+    /// worth a test was a `save()` that rebuilt from config and dropped what
+    /// the agent had folded.
+    ///
+    /// Now the list holds no folded state at all, so the two paths are the
+    /// derives and cannot differ. What is left to pin is that the *config*
+    /// survives both — a capability whose config were rebuilt from a default
+    /// would hand a routine's agent an `ask_user` it must not have. The other
+    /// half of the old property, that what the agent folded survives a reload,
+    /// moved to `AgentState` with the state; see
+    /// `a_reload_keeps_what_the_agent_folded` there.
     #[test]
-    fn a_round_trip_carries_the_folded_state_and_not_just_the_config() {
-        let mut caps = caps(vec![FakeCapability::new("a")]);
-        caps.apply(&CapEvent::Fake(FakeEvent {
-            tool: "a".into(),
-            what: "tool:a".into(),
-        }));
+    fn a_round_trip_and_a_clone_both_carry_the_config() {
+        let caps = Capabilities::new(vec![
+            Capability::AskUser(ask_user::AskUserCapability::unattended()),
+            Capability::SubAgent(sub_agent::SubAgentCapability::new(settings(), 3)),
+        ]);
 
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Fake(fake) = read.iter().next().expect("one").save() else {
-            panic!("the journal changed which capability this is");
-        };
-        assert_eq!(
-            fake.seen,
-            vec!["tool:a"],
-            "the reload was rebuilt from config and lost what the agent folded"
-        );
-
-        // And the in-memory clone takes the same path, so the two cannot drift.
-        let CapSlice::Fake(cloned) = caps.clone().iter().next().expect("one").save() else {
-            panic!("the clone changed which capability this is");
-        };
-        assert_eq!(cloned.seen, vec!["tool:a"]);
+        for (what, list) in [("the reload", read), ("the clone", caps.clone())] {
+            let [Capability::AskUser(ask), Capability::SubAgent(sub)] =
+                list.iter().collect::<Vec<_>>()[..]
+            else {
+                panic!("{what} changed which capabilities these are");
+            };
+            assert_eq!(
+                ask.mute,
+                Some(ask_user::Mute::Unattended),
+                "{what} un-muted an agent nobody is watching"
+            );
+            assert_eq!(
+                sub.depth, 3,
+                "{what} lost the depth its gate is answered from"
+            );
+        }
     }
 
     /// A per-agent capability is added at the fixed-name end. Appended instead,
@@ -1940,10 +1823,14 @@ mod tests {
     /// prompt — so it is `None`/empty rather than an error.
     #[test]
     fn an_empty_set_claims_nothing() {
-        let caps = Capabilities::default();
-        assert!(caps.is_empty());
-        assert!(advertised(&caps, &facts()).is_empty());
-        assert!(caps.dispatch(&call("x")).is_none());
-        assert!(caps.broadcast(&Msg::Turn(TurnEvent::Ended)).acts.is_empty());
+        let state = agent(Vec::new());
+        assert!(state.capabilities.is_empty());
+        assert!(advertised(&state.capabilities, &facts()).is_empty());
+        assert!(dispatch(&state, &call("x")).is_none());
+        assert!(
+            broadcast(&state, &Msg::Turn(TurnEvent::Ended))
+                .acts
+                .is_empty()
+        );
     }
 }

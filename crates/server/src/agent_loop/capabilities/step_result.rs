@@ -22,7 +22,8 @@
 //! its result"; nothing here can end a run, so an outcome cannot be acted on
 //! twice by two different owners.
 
-use super::{Act, CapCommand, CapEvent, CapSlice, Decision, Mailbox, Msg, SetupError};
+use super::{Act, CapCommand, Decision, Mailbox, Msg, SetupError};
+use crate::agent_loop::state::AgentDomainEvent;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
@@ -75,11 +76,6 @@ pub struct StepResultCapability {
 }
 
 /// What this capability records: the step delivered its result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {
-    Submitted { output: serde_json::Value },
-}
-
 impl StepResultCapability {
     #[must_use]
     pub fn new(outcomes: Vec<StepOutcome>, fields: Vec<StepField>, interactive: bool) -> Self {
@@ -93,9 +89,9 @@ impl StepResultCapability {
     /// The model submitted this step's result.
     fn submitted(&self, call: &str, input: &Value) -> Decision {
         match validate_result(input, &self.outcomes, &self.fields) {
-            Ok(()) => Decision::record(vec![CapEvent::StepResult(Event::Submitted {
+            Ok(()) => Decision::record(vec![AgentDomainEvent::StepResultSubmitted {
                 output: input.clone(),
-            })])
+            }])
             .then(Act::Conclude {
                 output: input.clone(),
             }),
@@ -178,14 +174,6 @@ impl StepResultCapability {
     pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
-
-    // No `apply`, and the enum's fold arm is a no-op: the submitted output
-    // belongs to the step's own record, which the workflow runner keeps.
-    // Holding a copy here would be a second answer to "what did step 3 return".
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::StepResult(self.clone())
-    }
 }
 
 #[cfg(test)]
@@ -257,7 +245,7 @@ mod tests {
         });
         let d = submitted(&cap(false), "call-1", output.clone());
 
-        let [CapEvent::StepResult(Event::Submitted { output: journaled })] = d.events.as_slice()
+        let [AgentDomainEvent::StepResultSubmitted { output: journaled }] = d.events.as_slice()
         else {
             panic!("expected one Submitted, got {:?}", d.events)
         };
@@ -412,7 +400,7 @@ mod tests {
         let caps = Capabilities::new(vec![Capability::StepResult(cap(true))]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::StepResult(back) = read.iter().next().expect("one").save() else {
+        let [Capability::StepResult(back)] = read.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
         assert_eq!(

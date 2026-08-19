@@ -22,7 +22,7 @@
 //! swallowing the call. Here the call never becomes a message at all: the layer
 //! answers it before the actor is involved.
 
-use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
+use super::{Decision, Msg, SetupError};
 use crate::agent_loop::capabilities::or_empty;
 use crate::control::toolbox::ControlToolbox;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
@@ -35,11 +35,6 @@ pub const PREFIX: &str = "horsie_";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ControlPlaneCapability;
-
-/// Uninhabited: a control-plane call's effect is the row it wrote, which the
-/// server's own tables already record, so there is no arm to fold.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {}
 
 /// The methods the [`Capability`](super::Capability) enum dispatches into.
 ///
@@ -98,19 +93,6 @@ impl ControlPlaneCapability {
     /// task, so none of them reaches this mailbox — see the module doc.
     pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
-    }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `Event` is uninhabited, so there is nothing to fold — but every
-        // capability is offered every event, and this says so in the shape its
-        // siblings use rather than by omission.
-        let CapEvent::ControlPlane(_) = event else {
-            return;
-        };
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::ControlPlane(self.clone())
     }
 }
 
@@ -183,7 +165,9 @@ mod tests {
         let c = Capability::ControlPlane(ControlPlaneCapability);
         assert!(advertised_by(&c, &facts()).is_empty());
         assert!(
-            c.command(&someone_elses()).is_none(),
+            super::super::testing::Equipped::with(c.clone())
+                .command(&someone_elses())
+                .is_none(),
             "a capability with no commands claimed one"
         );
     }

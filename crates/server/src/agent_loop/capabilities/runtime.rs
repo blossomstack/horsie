@@ -37,7 +37,7 @@
 //! Steps 3–5 all depend on step 2, and step 6 on all of them, which is why this
 //! is one method rather than six capabilities.
 
-use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
+use super::{Decision, Msg, SetupError};
 use crate::agent_loop::{
     AgentRunDef, CompositeToolbox, DefaultToolboxFactory, McpUnavailable, PluginMcpToolbox,
     SharedContext, ToolboxFactory, compaction_window, scan_workspace,
@@ -62,15 +62,6 @@ none remains; do not poll subagent_status or call it repeatedly. Use subagent_st
 when the user requests a progress update or to diagnose a suspected runtime or \
 result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
 report that instead.";
-
-/// This capability records nothing.
-///
-/// A sandbox call's effect is on disk and in the agent's own transcript, and
-/// nothing this capability decides is a fact that has to survive a reload — its
-/// whole state is the config in [`RuntimeCapability`]. The arm exists so the
-/// journal's shape does not have to change the day it does record something.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeCapability {
@@ -509,18 +500,6 @@ impl RuntimeCapability {
     pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `let ... else` rather than a match with an arm per sibling: every
-        // capability is offered every event, and listing the others here would
-        // make adding one a change to all of them. `Event` is uninhabited, so
-        // there is nothing past the binding to fold.
-        let CapEvent::Runtime(_e) = event else { return };
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::Runtime(self.clone())
-    }
 }
 
 #[cfg(test)]
@@ -551,7 +530,9 @@ mod tests {
         let reply = SessionReply::Done { call: "t1".into() };
 
         assert!(
-            c.command(&someone_elses()).is_none(),
+            super::super::testing::Equipped::with(c.clone())
+                .command(&someone_elses())
+                .is_none(),
             "the runtime capability claimed a command"
         );
         for msg in [
@@ -561,7 +542,9 @@ mod tests {
             Msg::Reply(&reply),
         ] {
             assert!(
-                c.handle(&msg).is_none(),
+                super::super::testing::Equipped::with(c.clone())
+                    .handle(&msg)
+                    .is_none(),
                 "the runtime capability claimed {}",
                 msg.describe()
             );
@@ -636,7 +619,7 @@ mod tests {
         )))]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Runtime(back) = read.iter().next().expect("one").save() else {
+        let [Capability::Runtime(back)] = read.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
         assert_eq!(back.agent_type.as_deref(), Some("code-reviewer"));
@@ -645,7 +628,7 @@ mod tests {
         let caps = Capabilities::new(vec![Capability::Runtime(RuntimeCapability::default())]);
         let read: Capabilities =
             serde_json::from_str(&serde_json::to_string(&caps).expect("write")).expect("read");
-        let CapSlice::Runtime(back) = read.iter().next().expect("one").save() else {
+        let [Capability::Runtime(back)] = read.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
         assert_eq!(back.agent_type, None);

@@ -28,7 +28,7 @@
 //! returns `None` and [`super::Capability::layer`] claims nothing, and the tools are
 //! advertised by the toolbox that will actually run them.
 
-use super::{CapEvent, CapSlice, Decision, Msg, SetupError};
+use super::{Decision, Msg, SetupError};
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
 
@@ -40,12 +40,6 @@ pub struct McpCapability {
     /// The servers this agent is connected to, by name.
     pub servers: Vec<String>,
 }
-
-/// Uninhabited: an MCP call's effect is on the far side of the server, so there
-/// is no fact about this agent to record and no arm for [`super::Capability::apply`]
-/// to fold.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Event {}
 
 impl McpCapability {
     #[must_use]
@@ -101,20 +95,6 @@ impl McpCapability {
     pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
-
-    pub fn apply(&mut self, event: &CapEvent) {
-        // `let ... else` rather than a match with an arm per sibling: every
-        // capability is offered every event.
-        let CapEvent::Mcp(event) = event else {
-            return;
-        };
-        // And [`Event`] is uninhabited, so there is provably nothing to fold.
-        match *event {}
-    }
-
-    pub fn save(&self) -> CapSlice {
-        CapSlice::Mcp(self.clone())
-    }
 }
 
 #[cfg(test)]
@@ -168,7 +148,11 @@ mod tests {
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = Capability::Mcp(McpCapability::new(vec!["github".into()]));
-        assert!(c.command(&someone_elses()).is_none());
+        assert!(
+            super::super::testing::Equipped::with(c.clone())
+                .command(&someone_elses())
+                .is_none()
+        );
         assert!(
             advertised_by(&c, &facts()).is_empty(),
             "the tools are advertised by the toolbox that will run them"
@@ -186,7 +170,7 @@ mod tests {
         ]))]);
         let written = serde_json::to_string(&caps).expect("write");
         let read: Capabilities = serde_json::from_str(&written).expect("read");
-        let CapSlice::Mcp(back) = read.iter().next().expect("one").save() else {
+        let [Capability::Mcp(back)] = read.iter().collect::<Vec<_>>()[..] else {
             panic!("the journal changed which capability this is");
         };
         assert_eq!(back.servers, vec!["github".to_string(), "docs".to_string()]);
