@@ -49,7 +49,22 @@ Workspace lints are configured in `Cargo.toml`; each crate inherits via `[lints]
 Pre-PR checks:
 
 ```bash
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --check
 cargo test --workspace
 ```
+
+`-D warnings` is not optional — CI adds it, so a local clippy without it exits 0 and reddens the PR.
+
+**Never run `cargo +nightly fmt`.** `.rustfmt.toml` declares options that only exist on nightly; CI ignores them silently, and a nightly run reformats the entire tree into a diff nobody asked for. Stable `cargo fmt` only.
+
+## Build cost, and how to iterate
+
+`crates/server` is ~95k of the workspace's ~141k lines, and Rust's unit of recompilation is the crate. A one-line change to a widely-used module invalidates all of it, then relinks against 22 integration test binaries. Most of the wall clock of any change here is spent waiting for that, so the order you run things in matters more than it usually would.
+
+- **Iterate with `cargo test -p horsie-server --lib <filter>`.** Nothing wider until you are ready to commit.
+- **Do not alternate clippy and tests.** `cargo clippy --all-targets --all-features` and `cargo test -p horsie-server --lib` resolve *different* feature sets — `test-util` is off by default and on under `--all-features` — so they are two separate build graphs that share no artifacts. Every switch between them pays a full rebuild. Run the full clippy once, immediately before committing.
+- **`-p horsie-server --lib` is a false green** for anything touching HTTP routes, the session actor's public behaviour, or recovery. Those paths are only exercised by the suites in `crates/tests`. Run the relevant one before claiming a change is done.
+- **The full lib suite takes about a minute of pure execution** before any compilation. Budget for it rather than re-running it to be sure.
+
+`sccache` is configured as the rustc wrapper, and it will report a **0% hit rate during ordinary work**. That is expected, not a misconfiguration: dependencies already built into `target/` are never handed to rustc at all, so the only compilations left are the crate you are editing, which cannot hit by definition. sccache pays off on cold builds — a fresh worktree pulling dependencies it has seen before. Do not disable incremental compilation to raise the number; incremental is what makes the inner loop fast, and sccache cannot cache it.
