@@ -814,7 +814,7 @@ impl horsie_actor::Journal for CountingJournal {
 /// worker — a hook keys on it, the roster lists it, a page is read from it —
 /// and the two id spaces are separate, so handing back the runner's meant each
 /// of those looked up something that does not exist.
-pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
+pub(crate) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
     let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     let agent = crate::sessions::runners::ids::AgentId::new_v4();
     let parent = main_agent(session).await;
@@ -848,7 +848,7 @@ pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> 
 /// A real parent, not `Uuid::nil()`: a worker whose parent names nobody has
 /// nobody to report to, so the turn its asker runs when the report lands never
 /// happens — and a test waiting on that turn waits for ever.
-pub(super) async fn main_agent(session: &SessionRef) -> crate::sessions::runners::ids::AgentId {
+pub(crate) async fn main_agent(session: &SessionRef) -> crate::sessions::runners::ids::AgentId {
     let snapshot = session
         .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
         .await
@@ -1078,7 +1078,7 @@ pub(super) async fn stop_harness_with_prompts(
 /// The same harness, also handing back the journal, for a test that has to
 /// read what was *persisted*. A spurious failure is overwritten in the
 /// status by whatever lands next; the journal keeps it.
-pub(super) async fn stop_harness_with_journal(
+pub(crate) async fn stop_harness_with_journal(
     records: Vec<Vec<HookRecord>>,
 ) -> (
     ActorFixture,

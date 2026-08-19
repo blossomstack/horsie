@@ -744,3 +744,55 @@ mod tests {
         assert_eq!(error, "blocked by a hook");
     }
 }
+
+/// A worker created by a real session, rather than a slice built by hand.
+///
+/// What only a session can answer: a worker's equipment is decided at creation
+/// from the *tree* — how deep it sits, and whether anybody is watching — and
+/// neither fact exists in this file.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod actor_tests {
+    use crate::agent_loop::capabilities::Capability;
+    use crate::sessions::runners::{Runner, RunnerState};
+    use crate::sessions::session_actor::testing::{spawn_sub, stop_harness_with_journal};
+
+    /// A worker is equipped one level below the agent that asked for it.
+    ///
+    /// The depth gate is answered from this number without asking anyone, so a
+    /// worker equipped at zero is a worker that believes it is the main agent:
+    /// the gate can never refuse, and the tree nests without limit. The session
+    /// walks it from the runner that owns the asking agent, because a child's
+    /// depth is a fact about where it sits and nothing else knows.
+    #[tokio::test]
+    async fn a_worker_is_equipped_one_level_below_the_agent_that_asked() {
+        let (_f, session, id, journal) = stop_harness_with_journal(vec![]).await;
+        let worker = spawn_sub(&session, "research", "dig into it").await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let runner = state
+            .runner_of(crate::sessions::runners::ids::AgentId(worker))
+            .expect("the worker's runner");
+        let record = state.record(runner).expect("its record");
+        assert!(
+            matches!(record.state, RunnerState::SubAgent(_)),
+            "spawned a worker, got {:?}",
+            record.kind
+        );
+        let depth = record
+            .state
+            .capabilities()
+            .expect("a worker is equipped")
+            .iter()
+            .find_map(|c| match c {
+                Capability::SubAgent(s) => Some(s.depth),
+                _ => None,
+            })
+            .expect("every agent that exists may delegate");
+        assert_eq!(depth, 1, "a worker of the main agent sits one level down");
+    }
+}

@@ -856,9 +856,25 @@ impl SessionActor {
             &crate::sessions::runners::Assembly {
                 settings: &settings,
                 agent,
-                depth: 0,
-                unattended: false,
-                fork: None,
+                // The asking agent's depth plus one — the child's own, walked
+                // from the runner that owns the agent that asked. Hardcoding
+                // zero equipped every worker as if it were the main agent, so
+                // the depth gate could never refuse anything and the tree
+                // nested without limit.
+                depth: state
+                    .runner_of(parent)
+                    .map_or(0, |runner| state.depth_of(runner) + 1),
+                // A child of an unattended session is unattended too. Nobody
+                // is watching either of them, and a question that parks for
+                // ever parks just as hard one level down.
+                unattended: self.spec().is_unattended(),
+                fork: match &args {
+                    // A fork names *itself*, not the session it branched from.
+                    RunnerArgs::Conversation { seed: Some(_), .. } => Some(id),
+                    RunnerArgs::Conversation { seed: None, .. }
+                    | RunnerArgs::SubAgent { .. }
+                    | RunnerArgs::Workflow { .. } => None,
+                },
                 agent_type,
             },
         );
