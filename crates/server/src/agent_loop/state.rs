@@ -537,6 +537,10 @@ impl AgentState {
     /// new one: a capability's folded state is what this agent has in flight —
     /// the questions it is parked on above all — so inheriting it is inheriting
     /// the ask. A fork is equipped when it loads, from its own runner.
+    ///
+    /// So a fork starts with an empty task list, which is intended and not an
+    /// oversight of the conversion that made the list a capability. It is only
+    /// ever visible as an absence, which is why it is written down here.
     #[must_use]
     pub fn scrub_for_fork(&self, at_seq: u64) -> Self {
         Self {
