@@ -527,7 +527,11 @@ impl ContextProvider for SessionContextProvider {
                         agent_type: self.agent_type(),
                     })
                 }
-                _ => ServerHookEvent::SessionStart(SessionStartInput { source }),
+                crate::sessions::runners::loading::AgentRole::Root
+                | crate::sessions::runners::loading::AgentRole::Fork
+                | crate::sessions::runners::loading::AgentRole::Step => {
+                    ServerHookEvent::SessionStart(SessionStartInput { source })
+                }
             };
             records.extend(client.run_hooks(event).await.unwrap_or_default());
         }

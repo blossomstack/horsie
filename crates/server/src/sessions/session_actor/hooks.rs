@@ -315,10 +315,14 @@ impl AgentOutcomeSink for StopHookParent {
             // A step keeps `Stop`: it fires `SessionStart` and roots its own
             // subagent tree, so answering `SubagentStop` would contradict its
             // own start.
-            _ => ServerHookEvent::Stop(StopInput {
-                last_assistant_message,
-                stop_hook_active,
-            }),
+            crate::sessions::runners::loading::AgentRole::Root
+            | crate::sessions::runners::loading::AgentRole::Fork
+            | crate::sessions::runners::loading::AgentRole::Step => {
+                ServerHookEvent::Stop(StopInput {
+                    last_assistant_message,
+                    stop_hook_active,
+                })
+            }
         };
         let records = client.run_hooks(event).await.unwrap_or_default();
 

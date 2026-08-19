@@ -123,6 +123,20 @@ struct ResidentAgent {
 ///
 /// The rest — the runtime provider, the plugin library, the MCP and memory
 /// services, the session's own mailbox — is identical for all three and lives on
+/// What [`Action::StartAgent`] carries, kept together on the way to the
+/// spawner.
+///
+/// The action's own fields, moved rather than spread across a parameter list:
+/// the session *performs* what a runner decided, so re-deriving any of it here
+/// would be a second answer to a question already settled.
+struct StartAgent {
+    agent: AgentId,
+    equipment: crate::agent_loop::capabilities::Capabilities,
+    settings: crate::sessions::spec::AgentSettings,
+    agent_type: Option<String>,
+    first: crate::sessions::runners::action::FirstInput,
+}
+
 /// the actor, which is why one spawner can serve them all.
 struct AgentPlan {
     /// Who is being started. One id, in the runners' flat space.
@@ -452,7 +466,9 @@ impl SessionActor {
                             crate::sessions::runners::RunnerState::Runtime(rt) => {
                                 rt.provisioned_at_ms
                             }
-                            _ => None,
+                            crate::sessions::runners::RunnerState::Conversation(_)
+                            | crate::sessions::runners::RunnerState::SubAgent(_)
+                            | crate::sessions::runners::RunnerState::Workflow(_) => None,
                         })
                         .map(|at| at.to_string())
                         .unwrap_or_default(),
@@ -535,13 +551,6 @@ impl SessionActor {
         self.agents.insert(plan.agent, resident.clone());
         Some(resident)
     }
-
-    /// Resolve an agent selector to its actor: `None`/`"main"` for the primary
-    /// agent, else the id of a step or a subagent. A cold node — one the
-    /// persisted state knows about with no actor since this session loaded — is
-    /// spawned on demand, so reading a finished agent works exactly like
-    /// reading a live one.
-    ///
 
     /// Cancel one agent's run and wait for it to actually be over.
     ///
@@ -691,7 +700,16 @@ impl SessionActor {
                 first,
             } => match self
                 .start_agent(
-                    runner, agent, equipment, *settings, agent_type, first, state, ctx,
+                    runner,
+                    StartAgent {
+                        agent,
+                        equipment,
+                        settings: *settings,
+                        agent_type,
+                        first,
+                    },
+                    state,
+                    ctx,
                 )
                 .await
             {
@@ -728,14 +746,17 @@ impl SessionActor {
     async fn start_agent(
         &mut self,
         runner: RunnerId,
-        agent: AgentId,
-        equipment: crate::agent_loop::capabilities::Capabilities,
-        settings: crate::sessions::spec::AgentSettings,
-        agent_type: Option<String>,
-        first: crate::sessions::runners::action::FirstInput,
+        start: StartAgent,
         state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
     ) -> Option<SessionEvent> {
+        let StartAgent {
+            agent,
+            equipment,
+            settings,
+            agent_type,
+            first,
+        } = start;
         let record = state.record(runner)?;
         let role = AgentRole::of(record.kind, runner == state.root);
         let resident = self.spawn_agent(
