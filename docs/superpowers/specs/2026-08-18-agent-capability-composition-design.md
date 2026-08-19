@@ -62,10 +62,17 @@ This distinction matters because "capability = state slice" would push a state f
 `fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec>` is replaced by
 
 ```rust
-fn layer(&self, inner: Arc<dyn Toolbox>, facts: &AgentFacts) -> Arc<dyn Toolbox>;
+fn layer(
+    &self,
+    inner: Arc<dyn Toolbox>,
+    facts: &AgentFacts,
+    mailbox: &Arc<dyn Toolbox>,
+) -> Arc<dyn Toolbox>;
 ```
 
-applied in list order at run start, after `provide()` has produced the facts. `facts` remains a parameter because it is per-run data, not capability state — and because it is the reason `tools()` had to grow one: the agent catalogue `spawn_agent` advertises does not exist until the runtime's workspace scan, which is what the old compose-time toolbox layer was for. That regression is recorded as a known gap and this closes it.
+applied in list order at run start, after `provide()` has produced the facts. `facts` is a parameter because it is per-run data, not capability state — and because it is the reason `tools()` had to grow one: the agent catalogue `spawn_agent` advertises does not exist until the runtime's workspace scan, which is what the old compose-time toolbox layer was for.
+
+`mailbox` is a parameter for a related reason. A layer that claims a name must reach the agent's mailbox to journal what it did, and a capability is persisted state that cannot hold an address. It is typed as `dyn Toolbox` rather than an `ActorRef` because the dispatch shape is already exactly a toolbox's — name and input and call id in, outcome out — so this needs no new trait and no fifth noun. It also lets a test compose layers against `EmptyToolbox` with no actor and no tokio runtime.
 
 **This deletes an ordering.** Today one list satisfies two orderings that read opposite ways — first in offer order, outermost in the toolbox — which is why `push_front` exists and why a capability appended after the open-namespace one is silently swallowed. With layering, wrapping order *is* precedence. One rule instead of two.
 
@@ -124,7 +131,7 @@ This replaces `Capabilities::slices()`, which today hands every capability's who
 Each step green on its own, one commit each.
 
 1. `layer()` replaces `tools()`.
-2. `CapView` replaces the `slices()` bypass.
+2. `CapView` replaces the `slices()` bypass.  (both landed)
 3. `CapCommand`; `Msg::Tool` and `Msg::Command` removed.
 4. `TurnProposed` and the token budget capability.
 5. The hook records capability.
