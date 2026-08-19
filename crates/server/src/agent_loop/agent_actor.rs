@@ -195,6 +195,15 @@ pub enum AgentCommand {
         mode: crate::sessions::forks::ForkMode,
         /// The rest of the line: what the new conversation is for.
         message: String,
+        /// The new conversation's agent, for the person who typed it.
+        ///
+        /// Answered before the fork exists, and that is the contract: a fork is
+        /// addressable from the moment its ids are minted, which is what lets
+        /// the client open it while the copy of this agent's log is still in
+        /// flight. `Err` carries the refusal in the words the person should
+        /// read — the one built-in whose refusal has somewhere to go, because a
+        /// person is waiting on it rather than a model.
+        reply: ReplyTo<Result<String, String>>,
     },
     /// `spawn_agent`, with the catalogue the advertisement was built from.
     ///
@@ -582,6 +591,20 @@ pub struct AgentActor {
     /// not disconnect a reader and send it round the reconnect-reload loop. A
     /// standalone agent owns its own and the distinction costs nothing.
     revision: std::sync::Arc<tokio::sync::watch::Sender<crate::sessions::Revision>>,
+    /// People waiting to be told which conversation their `/fork` created,
+    /// keyed by the call the request was minted under, and carrying the agent
+    /// id to answer with.
+    ///
+    /// In-memory, because what is waiting is a person holding a request open
+    /// and a crash ends that anyway. The durable half is `ForkRequested`: a
+    /// reload re-asks the session with the same ids, and the branch still
+    /// lands — there is simply nobody left to tell.
+    ///
+    /// Held until the *session* answers rather than released when the request
+    /// is journaled, because the id is only worth having once there is a
+    /// conversation behind it: the client opens what it is handed, and the
+    /// session list it opens from is written by the same create.
+    branching: std::collections::HashMap<String, (String, ReplyTo<Result<String, String>>)>,
 }
 
 impl AgentActor {
@@ -603,6 +626,7 @@ impl AgentActor {
             cancel_acks: Vec::new(),
             deltas: Vec::new(),
             revision,
+            branching: std::collections::HashMap::new(),
         }
     }
 
@@ -1816,26 +1840,29 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
-            AgentCommand::ForkBranch { mode, message } => {
+            AgentCommand::ForkBranch {
+                mode,
+                message,
+                reply,
+            } => {
                 let Some(cap) = state.capabilities.fork() else {
-                    tracing::error!(
-                        capability = "fork",
-                        "a command reached an agent that is not equipped with its capability"
-                    );
+                    // Not an error here: a worker and a step are equipped
+                    // without it on purpose, so this is the ordinary answer to
+                    // somebody typing `/fork` at one.
+                    let _ = reply.send(Err("only a conversation can be forked".to_string()));
                     return CommandEffect::none();
                 };
                 match cap.branched(mode, &message) {
-                    capabilities::fork::Branched::Told { call, reason } => {
-                        Self::unanswerable(&call, &reason);
+                    capabilities::fork::Branched::Told { call: _, reason } => {
+                        let _ = reply.send(Err(reason));
                         CommandEffect::none()
                     }
                     capabilities::fork::Branched::Ask { call, pending } => {
                         let request = cap.request(&call, &pending);
+                        self.branching
+                            .insert(call.clone(), (pending.agent.to_string(), reply));
                         let events = vec![AgentDomainEvent::ForkRequested { call, pending }];
                         self.dispatch_asks(vec![request], ctx);
-                        // Nothing is waiting: a person typing a built-in is not
-                        // a dangling `tool_use`, so there is no answer to hold
-                        // back behind the write.
                         self.persist_maybe_snapshot(events)
                     }
                 }
@@ -2496,15 +2523,26 @@ impl AgentActor {
             let call = branch.call().to_string();
             let event = match &branch {
                 capabilities::fork::Branch::Created { .. } => {
-                    AgentDomainEvent::ForkCreated { call }
+                    AgentDomainEvent::ForkCreated { call: call.clone() }
                 }
                 // Journaled because the request before it was: this retracts a
                 // fact, and is not itself the refusal.
                 capabilities::fork::Branch::Dropped { .. } => {
-                    AgentDomainEvent::ForkDropped { call }
+                    AgentDomainEvent::ForkDropped { call: call.clone() }
                 }
             };
-            Self::unanswerable(branch.call(), &branch.told());
+            // The one reply that has somewhere to go: a person typed `/fork`
+            // and is still waiting to be told which conversation to open.
+            match (self.branching.remove(&call), &branch) {
+                (Some((fork, waiting)), capabilities::fork::Branch::Created { .. }) => {
+                    let _ = waiting.send(Ok(fork));
+                }
+                (Some((_, waiting)), capabilities::fork::Branch::Dropped { reason, .. }) => {
+                    let _ = waiting.send(Err(reason.clone()));
+                }
+                // Nobody typed it, or the process that answered them is gone.
+                (None, _) => Self::unanswerable(branch.call(), &branch.told()),
+            }
             return self.journaled(vec![event], state, ctx).await;
         }
         // Every request carries the call that prompted it, and the capability

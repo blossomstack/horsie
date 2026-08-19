@@ -75,8 +75,13 @@ pub enum SessionCommand {
     },
     /// A person removed a runner — a fork, today. Nothing removes one on its
     /// own.
+    ///
+    /// Named by its **agent**, because that is the id a client holds: a fork's
+    /// row in the session list carries the conversation's agent, and so does
+    /// the acknowledgement that answered `/fork`. A runner id never leaves the
+    /// session, so a client could not name one.
     DeleteRunner {
-        id: crate::sessions::runners::ids::RunnerId,
+        agent: crate::sessions::runners::ids::AgentId,
         reply: ReplyTo<Result<(), String>>,
     },
     /// A person asked a workflow step to run again.

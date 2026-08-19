@@ -83,6 +83,28 @@ use uuid::Uuid;
 /// by the actor that resolves them.
 pub const MAIN_AGENT_ID: &str = "main";
 
+/// What a typed branch asked for, if the line is one.
+///
+/// Pure and separate from acting on it, so the table of what counts as a fork
+/// command is testable with no actor in sight — and so classification happens
+/// before the reply changes hands.
+#[must_use]
+fn fork_command(
+    text: &str,
+) -> Option<(crate::sessions::runners::action::ForkMode, String)> {
+    use crate::sessions::runners::action::ForkMode;
+    let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/')
+        .and_then(|(name, args)| {
+            horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
+        })?;
+    let mode = match builtin.name {
+        "fork" => ForkMode::Copy,
+        "summary-n-fork" => ForkMode::Summary,
+        _ => return None,
+    };
+    Some((mode, args.trim().to_string()))
+}
+
 /// How long a cancel waits for the run to actually finish before giving up.
 /// Cancellation is prompt (milliseconds); this is a backstop so a wedged run
 /// can never hold the mailbox — and with it the Stop button — hostage.
@@ -1216,6 +1238,14 @@ impl SessionActor {
             let _ = reply.send(Err(UserMessageError::NotFound));
             return CommandEffect::none();
         };
+        // A fork command never becomes a prompt. Recognised here, because this
+        // is where every built-in is caught before the text can be treated as
+        // one; decided *there*, by the capability, because the branch point is
+        // the asking agent's own log sequence and this actor cannot see it.
+        if let Some((mode, message)) = fork_command(text.trim()) {
+            self.branch(agent, mode, message, reply);
+            return self.persist_and_advance(state, Vec::new(), ctx).await;
+        }
         // An unnamed session is titled from its first message, once. The rule is
         // `SessionCore`'s — a session's name is its own bookkeeping, not the
         // turn's — so this only says when to apply it.
@@ -1235,7 +1265,8 @@ impl SessionActor {
                 id: id.clone(),
                 instructions: (!args.trim().is_empty()).then(|| args.trim().to_string()),
             },
-            // Every other built-in, present and future. Reaching here means the
+            // Every other built-in, present and future — `/fork` and
+            // `/summary-n-fork` were answered above. Reaching here means the
             // table names something this match does not handle, which is a bug
             // rather than a message: sending it on as a prompt would show the
             // user's `/thing` to the model as if it were prose.
@@ -1282,6 +1313,48 @@ impl SessionActor {
         // runtime runner is `Failed { terminal: false }`, and its `actions()`
         // asks again. No `Provision` command, and so no second path.
         self.persist_and_advance(state, Vec::new(), ctx).await
+    }
+
+    /// Put a typed branch to the agent that would take it.
+    ///
+    /// Off the mailbox, and answered from there: the agent journals the request
+    /// before it says which conversation to open, and this actor must keep
+    /// answering everything else meanwhile.
+    ///
+    /// The message id *is* the fork's agent. One `/fork` produces one
+    /// conversation and no transcript entry, so there is no second id to hand
+    /// back, and a client that follows the acknowledgement lands on the branch.
+    fn branch(
+        &self,
+        agent: ActorRef<AgentCommand>,
+        mode: crate::sessions::runners::action::ForkMode,
+        message: String,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let answer = match agent
+                .tell(AgentCommand::ForkBranch {
+                    mode,
+                    message,
+                    reply: ReplyTo::from_sender(tx),
+                })
+                .await
+            {
+                Ok(()) => match rx.await {
+                    Ok(Ok(fork)) => Ok(MessageAccepted {
+                        message_id: fork.clone(),
+                        forked_agent: Some(fork),
+                    }),
+                    Ok(Err(why)) => Err(UserMessageError::Rejected(why)),
+                    Err(_) => Err(UserMessageError::Rejected(
+                        "the branch was never answered".to_string(),
+                    )),
+                },
+                Err(e) => Err(UserMessageError::Rejected(format!("fork: {e}"))),
+            };
+            let _ = reply.send(answer);
+        });
     }
 
     /// Cancel one agent's turn in flight.
@@ -1354,10 +1427,18 @@ impl SessionActor {
     async fn on_delete_runner(
         &mut self,
         state: &RunnerSessionState,
-        id: RunnerId,
+        agent: AgentId,
         reply: ReplyTo<Result<(), String>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionEvent> {
+        // Agent in, runner out. The two id spaces are separate and only one of
+        // them is ever handed to a client, so treating the one it holds as the
+        // other found nothing and answered "no such fork" for a fork sitting
+        // right there in the list it came from.
+        let Some(id) = state.runner_of(agent) else {
+            let _ = reply.send(Err(format!("no such agent: {agent}")));
+            return CommandEffect::none();
+        };
         let Some(record) = state.record(id) else {
             let _ = reply.send(Err(format!("no such runner: {id}")));
             return CommandEffect::none();
@@ -1597,11 +1678,27 @@ impl EventSourcedActor for SessionActor {
                     return CommandEffect::none();
                 }
                 let events = self.create_child(id, kind, *args, parent, state, ctx).await;
-                let _ = reply.send(match events.is_empty() {
-                    true => Err("the runner could not be created".to_string()),
-                    false => Ok(()),
+                if events.is_empty() {
+                    let _ = reply.send(Err("the runner could not be created".to_string()));
+                    return CommandEffect::none();
+                }
+                // Answered on the journal's own acknowledgement, not before it.
+                // Creation persists first: the capability that asked is told
+                // its child exists only once the log says so, because that
+                // reply is what a person is handed to open — and a crash
+                // before the write replays as no child at all, which is
+                // strictly better than an id nothing tracks.
+                let (tx, rx) = oneshot::channel();
+                tokio::spawn(async move {
+                    let _ = reply.send(match rx.await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(format!("persist the child: {e}")),
+                        Err(_) => Err("the child was never written".to_string()),
+                    });
                 });
-                self.persist_and_advance(state, events, ctx).await
+                self.persist_and_advance(state, events, ctx)
+                    .await
+                    .and_ack(horsie_actor::ReplyTo::from_sender(tx))
             }
             SessionCommand::UserMessage {
                 agent_id,
@@ -1622,8 +1719,8 @@ impl EventSourcedActor for SessionActor {
                 self.on_answer(state, agent_id.as_deref(), answers, reply, ctx)
                     .await
             }
-            SessionCommand::DeleteRunner { id, reply } => {
-                self.on_delete_runner(state, id, reply, ctx).await
+            SessionCommand::DeleteRunner { agent, reply } => {
+                self.on_delete_runner(state, agent, reply, ctx).await
             }
             SessionCommand::RetryStep { index, reply } => {
                 self.on_retry_step(state, index, reply, ctx).await

@@ -22,7 +22,7 @@ use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
-use crate::sessions::runners::ids::RunnerId;
+use crate::sessions::runners::ids::{RunnerId, RunnerKind};
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
@@ -73,43 +73,31 @@ impl SessionParent {
             call: call.clone(),
             reason,
         };
-        match args {
-            RunnerArgs::SubAgent {
-                agent,
-                label,
-                task,
-                agent_type,
-                settings,
-            } => match self
-                .target
-                .ask(|reply| {
-                    SessionCommand::StartRunner {
-                        id,
-                        kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
-                        args: Box::new(RunnerArgs::SubAgent {
-                            agent,
-                            label,
-                            task,
-                            agent_type,
-                            settings,
-                        }),
-                        parent: self.agent,
-                        reply,
-                    }
-                })
-                .await
-            {
-                Ok(Ok(_)) => SessionReply::Done { call: call.clone() },
-                Ok(Err(e)) => refused(e),
-                Err(e) => refused(e.to_string()),
-            },
-            // A fork is asked for by a person typing `/fork`, and a run is
-            // started through the API. Neither reaches the session this way
-            // yet, and saying so is better than a child nobody created.
-            RunnerArgs::Workflow { .. } | RunnerArgs::Conversation { .. } => {
-                let _ = id;
-                refused("this session cannot start that kind of runner yet".to_string())
-            }
+        // One ask for all three kinds: the args say which, and the session's
+        // create reads the same value, so a kind chosen here could only be a
+        // second place for it to be wrong. It used to fork here — a worker was
+        // asked for and a branch and a run were refused as "not yet" — and
+        // that refusal is what a typed `/fork` ran into once the session
+        // stopped intercepting it.
+        let kind = match &args {
+            RunnerArgs::SubAgent { .. } => RunnerKind::SubAgent,
+            RunnerArgs::Conversation { .. } => RunnerKind::Conversation,
+            RunnerArgs::Workflow { .. } => RunnerKind::Workflow,
+        };
+        match self
+            .target
+            .ask(|reply| SessionCommand::StartRunner {
+                id,
+                kind,
+                args: Box::new(args),
+                parent: self.agent,
+                reply,
+            })
+            .await
+        {
+            Ok(Ok(())) => SessionReply::Done { call: call.clone() },
+            Ok(Err(e)) => refused(e),
+            Err(e) => refused(e.to_string()),
         }
     }
 }

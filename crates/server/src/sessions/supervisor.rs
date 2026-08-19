@@ -793,7 +793,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let _ = session
                             .tell(SessionCommand::DeleteRunner {
-                                id: crate::sessions::runners::ids::RunnerId(fork),
+                                agent: crate::sessions::runners::ids::AgentId(fork),
                                 reply,
                             })
                             .await;
@@ -1923,15 +1923,32 @@ mod tests {
         // The session asked a question in an earlier incarnation. `Create` left
         // a status in the cache, so a cache read would answer with the wrong
         // thing.
+        //
+        // The event has to be one that *moves the status*, which is why it is
+        // the root conversation's own `Asked` and not a session-wide one:
+        // nothing the session journals about itself says what a turn is doing
+        // any more, so a rename here would leave the cache and the journal
+        // agreeing and prove nothing.
+        //
         // Appended where the log actually ends: this session has already run, so
         // its log is not empty and a writer claiming otherwise is exactly what
         // the fence rejects.
         let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
+        let root = root_runner(&journal, &pid).await;
         let at = journal.last_seq(&pid).await.unwrap();
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionEvent::Renamed { name: "asked".into() }).unwrap()],
+                &[
+                    serde_json::to_vec(&SessionEvent::Runner {
+                        id: root,
+                        event: Box::new(crate::sessions::runners::RunnerEvent::Conversation(
+                            crate::sessions::runners::conversation::Event::Asked,
+                        )),
+                        at_ms: 0,
+                    })
+                    .unwrap(),
+                ],
                 at,
             )
             .await
@@ -1951,6 +1968,32 @@ mod tests {
             SessionStatus::AwaitingInput,
             "a session parked on a question reports it, whatever the questions were"
         );
+    }
+
+    /// The id of the conversation this session was created around, read back
+    /// out of its journal — the one place a test can learn it without a live
+    /// actor to ask.
+    async fn root_runner(
+        journal: &Arc<dyn Journal>,
+        pid: &PersistenceId,
+    ) -> crate::sessions::runners::RunnerId {
+        use futures_util::StreamExt;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "test-only inspection: the session is cold, so nothing can be asked"
+        )]
+        let mut stream = journal.replay(pid, 0).await;
+        while let Some(Ok((_, bytes))) = stream.next().await {
+            if let Ok(SessionEvent::RunnerCreated {
+                id,
+                kind: crate::sessions::runners::RunnerKind::Conversation,
+                ..
+            }) = serde_json::from_slice::<SessionEvent>(&bytes)
+            {
+                return id;
+            }
+        }
+        panic!("a conversation session journals its root runner");
     }
 
     /// Ask whether an agent has moved, the way the SSE handler does.
