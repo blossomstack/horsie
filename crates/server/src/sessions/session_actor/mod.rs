@@ -31,6 +31,7 @@ mod hooks;
 mod lifecycle;
 mod reads;
 mod run;
+pub(crate) mod runner;
 mod subagent;
 mod turns;
 mod types;
