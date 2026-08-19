@@ -9,7 +9,7 @@
 
 use super::{
     AgentDetail, AgentEntry, AgentKey, AgentStatus, AgentUsageEntry, CommandEffect, MAIN_AGENT_ID,
-    ReadCommand, SessionActor, SessionDomainEvent, SessionSnapshot, SessionState,
+    ReadCommand, SessionActor, SessionEvent, SessionSnapshot, SessionState,
     SessionUsageStats,
 };
 use crate::agent_loop::AgentCommand;
@@ -31,7 +31,7 @@ impl Reads {
         state: &SessionState,
         cmd: ReadCommand,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd {
             ReadCommand::ReadLog {
                 agent_id,
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn usage_is_recorded_per_agent() {
-        let s = fold(vec![SessionDomainEvent::UsageRecorded {
+        let s = fold(vec![SessionEvent::UsageRecorded {
             at_ms: 0,
             agent_id: MAIN_AGENT_ID.to_string(),
             usage_total: UsageTotal {

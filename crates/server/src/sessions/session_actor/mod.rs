@@ -46,6 +46,12 @@ mod types;
 
 pub use types::*;
 
+/// The session's state and its journal, both the runner tree's now. Re-exported
+/// here because every sibling in this module reaches them through
+/// `session_actor`, and a session's state is what this actor *is*.
+pub use crate::sessions::runners::SessionState;
+pub use crate::sessions::runners::state::SessionEvent;
+
 use core::SessionCore;
 use hooks::{HookRouting, StopHookParent};
 use reads::Reads;

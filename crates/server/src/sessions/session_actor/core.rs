@@ -6,7 +6,7 @@
 //! none of them.
 
 use super::CoreCommand;
-use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
+use super::{AgentKey, CommandEffect, SessionActor, SessionEvent, SessionState};
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::title::normalize_session_title;
 use crate::sessions::addressing::SessionInbox;
@@ -39,7 +39,7 @@ impl SessionCore {
         state: &SessionState,
         cmd: CoreCommand,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd {
             CoreCommand::SetTitle { title, reply, .. } => {
                 let result = match normalize_session_title(&title) {
@@ -49,7 +49,7 @@ impl SessionCore {
                 // Journal the name this session now answers to, but only if it
                 // actually took: a rejected title must not be recorded as one.
                 let effect = match result.as_ref() {
-                    Ok(name) => CommandEffect::persist(vec![SessionDomainEvent::Renamed {
+                    Ok(name) => CommandEffect::persist(vec![SessionEvent::Renamed {
                         name: name.clone(),
                     }]),
                     Err(_) => CommandEffect::none(),
@@ -64,7 +64,7 @@ impl SessionCore {
             CoreCommand::Advance => actor.persist_and_advance(state, Vec::new(), ctx).await,
             CoreCommand::TitleSet { name } => {
                 actor.spec_mut().name = Some(name.clone());
-                CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
+                CommandEffect::persist(vec![SessionEvent::Renamed { name }])
             }
             CoreCommand::RecordSpec { spec } => {
                 // Idempotent, because a log that already says what this session
@@ -79,7 +79,7 @@ impl SessionCore {
                 // cannot — a session created a moment ago, whose log is empty
                 // and whose agents nothing else would ever start.
                 actor.adopt((*spec).clone(), state, ctx).await;
-                CommandEffect::persist(vec![SessionDomainEvent::SpecRecorded { spec }])
+                CommandEffect::persist(vec![SessionEvent::SpecRecorded { spec }])
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
@@ -163,7 +163,7 @@ impl SessionActor {
     /// rather than by where it itself sat.
     pub(super) async fn record_lifecycle(
         &mut self,
-        events: &[SessionDomainEvent],
+        events: &[SessionEvent],
         state: &SessionState,
     ) {
         for event in events {
@@ -231,7 +231,7 @@ mod tests {
         let mut state = SessionState::default();
         while let Some(raw) = events.next().await {
             let (_, payload) = raw.unwrap();
-            let event: SessionDomainEvent = serde_json::from_slice(&payload).unwrap();
+            let event: SessionEvent = serde_json::from_slice(&payload).unwrap();
             state = <SessionActor as horsie_actor::EventSourcedActor>::apply_event(state, event);
         }
         state.spec

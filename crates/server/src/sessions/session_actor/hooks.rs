@@ -13,7 +13,7 @@
 
 use super::{
     AgentKey, CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState,
+    SessionEvent, SessionState,
     context::{SessionAgentKind, SessionContextProvider},
 };
 use crate::agent_loop::AgentCommand;
@@ -548,7 +548,7 @@ impl HookRouting {
         state: &SessionState,
         cmd: HookCommand,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd {
             HookCommand::Ran { key, records } => {
                 // The agent owns its own transcript, so the records go to it
