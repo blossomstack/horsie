@@ -126,6 +126,26 @@ pub enum RunCommand {
     /// Recovery found a step the process died inside. Suspends that run, which
     /// is the state a retry can move.
     ReconcileInterrupted { run: RunnerId },
+    /// The `invoke_workflow` tool: start a run under `parent`, with a graph
+    /// the tool already resolved. The reply fires only once the run's
+    /// `Created` is durable, so the model never holds an id a crash erases.
+    CreateRun {
+        parent: AgentId,
+        graph: Box<crate::sessions::workflow::WorkflowRunSpec>,
+        reply: ReplyTo<Result<Uuid, String>>,
+    },
+    /// Internal: the run's `Created` write came back (persist-then-reply).
+    FinishCreateRun {
+        id: RunnerId,
+        reply: ReplyTo<Result<Uuid, String>>,
+        persisted: Result<(), horsie_actor::JournalError>,
+    },
+    /// The `workflow_status` tool: one run, or every run `caller` invoked.
+    Status {
+        caller: AgentId,
+        id: Option<Uuid>,
+        reply: ReplyTo<Result<String, String>>,
+    },
 }
 
 /// The tree of delegated work.

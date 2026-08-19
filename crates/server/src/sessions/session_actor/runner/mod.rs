@@ -589,3 +589,85 @@ mod tests {
         assert!(load_repairs(&state).is_empty());
     }
 }
+
+/// Whether `runner` sits somewhere below `below` in the tree — its parent
+/// chain of agents passes through that agent.
+pub(crate) fn descends_through(state: &SessionState, runner: RunnerId, below: AgentId) -> bool {
+    let mut current = runner;
+    // Bounded like `depth_of`'s walk: a cycle cannot be journaled because a
+    // child is always created after its parent's agent.
+    for _ in 0..=state.runners.len() {
+        let Some(parent) = state.runners.get(&current).and_then(|r| r.parent) else {
+            return false;
+        };
+        if parent == below {
+            return true;
+        }
+        match state.owner_of(parent) {
+            Some(owner) if owner != current => current = owner,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// What cancelling everything below `below` means: the agents whose actors to
+/// cancel, and the events that record the cancellation. Stopping an agent
+/// stops the work it delegated — a run with no caller left to hear its result
+/// and a subagent whose parent is gone would otherwise run on, unwatched.
+pub(crate) fn cascade_below(
+    state: &SessionState,
+    below: AgentId,
+    now_ms: u64,
+) -> (Vec<AgentId>, Vec<SessionEvent>) {
+    let mut cancel = Vec::new();
+    let mut events = Vec::new();
+    for (id, record) in &state.runners {
+        if !descends_through(state, *id, below) {
+            continue;
+        }
+        match &record.state {
+            state::RunnerState::Workflow(w) if !w.run.status.is_terminal() => {
+                if let Some(agent) = w.run.current_agent() {
+                    cancel.push(AgentId(agent));
+                }
+                events.push(SessionEvent::Runner {
+                    id: *id,
+                    at_ms: now_ms,
+                    event: event::RunnerEvent::Cancelled,
+                });
+            }
+            state::RunnerState::Sub(s) if matches!(s.phase, state::SubPhase::Running { .. }) => {
+                cancel.push(AgentId(id.0));
+                events.push(SessionEvent::TurnEnded {
+                    at_ms: now_ms,
+                    agent: AgentId(id.0),
+                    end: event::RecordedEnd::Failed {
+                        error: STOPPED_ERROR.to_string(),
+                    },
+                });
+            }
+            state::RunnerState::Main(_)
+            | state::RunnerState::Sub(_)
+            | state::RunnerState::Fork(_)
+            | state::RunnerState::Workflow(_) => {}
+        }
+    }
+    (cancel, events)
+}
+
+/// Live (non-terminal) runs an agent invoked — the count [`MAX_LIVE_RUNS`]
+/// bounds.
+pub(crate) fn live_invoked_runs(state: &SessionState) -> usize {
+    state
+        .runners
+        .values()
+        .filter(|record| {
+            record.parent.is_some()
+                && matches!(
+                    &record.state,
+                    state::RunnerState::Workflow(w) if !w.run.status.is_terminal()
+                )
+        })
+        .count()
+}

@@ -768,12 +768,27 @@ impl ContextProvider for SessionContextProvider {
                     .unwrap_or_default(),
             ))
         };
+        // Any agent may run a workflow, which is what makes nesting uniform
+        // rather than a privilege of the main agent — the limits are enforced
+        // where the run is created. Absent only where no services are wired,
+        // which is a test rig and never a session a person made.
+        let with_workflows: Arc<dyn Toolbox> = match &self.services {
+            Some(services) => Arc::new(
+                crate::sessions::invoke_workflow_tool::InvokeWorkflowToolbox::new(
+                    with_spawn,
+                    self.session.clone(),
+                    self.role.agent,
+                    services.clone(),
+                ),
+            ),
+            None => with_spawn,
+        };
         // The role's values, layered in a fixed order: the result contract
         // innermost (a step's `submit_result`), then `ask_user` where asking
         // is allowed, then the title tool the role names. An unattended main
         // agent simply has `may_ask` false, so the ask layer never exists to
         // offer a tool whose answer would never come.
-        let mut toolbox: Arc<dyn Toolbox> = with_spawn;
+        let mut toolbox: Arc<dyn Toolbox> = with_workflows;
         if let Some(step_result) = &self.role.step_result {
             toolbox = crate::sessions::workflow::StepResultToolbox::wrap(
                 toolbox,

@@ -16,6 +16,7 @@ pub mod builder;
 pub mod clock;
 pub mod events;
 pub mod forks;
+pub mod invoke_workflow_tool;
 pub mod lifecycle_routing;
 pub mod session_actor;
 pub mod spawn_tool;

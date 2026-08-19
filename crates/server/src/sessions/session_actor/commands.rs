@@ -89,8 +89,17 @@ impl SessionActor {
             return CommandEffect::none();
         };
         self.cancel_agent(agent).await;
+        // Everything the stopped agent delegated goes with it: a run with no
+        // caller left to hear its result, and a subagent whose parent is gone,
+        // would otherwise run on unwatched.
+        let (cancel, cascade) = super::runner::cascade_below(state, agent, now_ms());
+        for child in cancel {
+            self.cancel_agent(child).await;
+        }
+        let mut events = vec![stopped];
+        events.extend(cascade);
         let _ = reply.send(Ok(()));
-        self.persist_and_advance(state, vec![stopped], ctx).await
+        self.persist_and_advance(state, events, ctx).await
     }
 
     /// Route a set of answers to the agent that asked.
