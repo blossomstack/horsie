@@ -48,6 +48,13 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// What [`Capability::carried_state`] writes above the armed timers it lists.
+///
+/// Named because it is read as well as written: a compaction boundary carries
+/// this block into the next conversation, and it is also the one thing outside
+/// this capability that can tell whether an agent still holds a timer at all.
+pub const CARRIED_HEADER: &str = "Armed timers:";
+
 /// The tool that arms one.
 pub const SET_TOOL: &str = "set_timer";
 /// The tool that reads them back.
@@ -356,7 +363,7 @@ impl Capability for TimersCapability {
         if self.armed.is_empty() {
             return None;
         }
-        let mut block = String::from("Armed timers:");
+        let mut block = String::from(CARRIED_HEADER);
         for t in &self.armed {
             block.push_str(&format!(
                 "\n- {} ({}) fires at {}ms: {}",

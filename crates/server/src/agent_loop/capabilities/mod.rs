@@ -539,6 +539,23 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// What a client sees of this capability. `None` when it shows nothing.
+    ///
+    /// The second of the two named questions that cross the private-state
+    /// boundary, and it is a *question* rather than a read: the caller says what
+    /// it wants to know and gets a computed answer, never the capability's own
+    /// shape. [`Capabilities::slices`] used to serve this by handing every
+    /// capability's whole persisted state to anything inside `agent_loop`,
+    /// which is a general bypass of the invariant that a capability's state is
+    /// its own.
+    ///
+    /// [`CapView`] is deliberately not [`CapSlice`]. The journal shape is a
+    /// durability contract and the view shape is an API contract; tying them
+    /// together makes an API change force a journal migration.
+    fn view(&self) -> Option<CapView> {
+        None
+    }
+
     /// Me, in the form the journal stores.
     fn save(&self) -> CapSlice;
 }
@@ -614,6 +631,25 @@ pub enum CapEvent {
     Fake(testing::FakeEvent),
 }
 
+/// What a capability shows a client, in the client's vocabulary.
+///
+/// One arm per capability that has anything to show, and most have nothing —
+/// which is why this is much shorter than [`CapSlice`] and why it must stay a
+/// separate enum. `CapSlice` answers "what does the journal store?" and this
+/// answers "what does `GET /api/sessions/:id/agents/:id` return?"; a capability
+/// that reshapes its persisted state should not be able to change an HTTP
+/// response by accident, nor the other way round.
+///
+/// Prefer widening this over adding a trait method when a third thing needs to
+/// cross the boundary. A trait that grows a method per concern is the failure
+/// mode this design exists to avoid.
+#[derive(Debug, Clone)]
+pub enum CapView {
+    /// The plan the agent keeps for itself, in list order, as
+    /// `AgentStateView.tasks` carries it.
+    TaskList(Vec<crate::agent_loop::task_list::TaskRecord>),
+}
+
 /// What an agent is equipped with, in the order messages are offered around.
 ///
 /// A newtype so the list round-trips through the journal as `Vec<CapSlice>`
@@ -652,14 +688,25 @@ impl Capabilities {
 
     /// Every capability in the form the journal stores it, in offer order.
     ///
-    /// How a typed fact is read back out of a list that is otherwise opaque:
-    /// [`CapSlice`] is an enum, so a reader wanting the task list matches its
-    /// arm rather than downcasting a `dyn Capability`. The alternative — the
-    /// fold keeping a copy on `AgentState` for readers — is the leak this whole
-    /// design removes.
+    /// **Serialization only, and private for that reason.** This used to be the
+    /// way anything inside `agent_loop` read a fact out of a capability, which
+    /// made every capability's whole persisted state readable by anything that
+    /// asked — the bypass [`Capability::view`] replaces. What a client sees is
+    /// a question a capability answers; what the journal stores is nobody
+    /// else's business.
     #[must_use]
-    pub fn slices(&self) -> Vec<CapSlice> {
+    fn slices(&self) -> Vec<CapSlice> {
         self.0.iter().map(|c| c.save()).collect()
+    }
+
+    /// What every capability shows a client, in offer order.
+    ///
+    /// Skips the ones with nothing to show, so a caller matching an arm is
+    /// asking whether *anything* here answers for it rather than which position
+    /// it sits at.
+    #[must_use]
+    pub fn views(&self) -> Vec<CapView> {
+        self.0.iter().filter_map(|c| c.view()).collect()
     }
 
     /// Everything this agent would lose to a compaction, in offer order.
@@ -775,17 +822,13 @@ impl Clone for Capabilities {
     /// Through the persisted form, so a clone cannot diverge from what a reload
     /// would produce.
     fn clone(&self) -> Self {
-        Self(self.0.iter().map(|c| c.save().into()).collect())
+        Self(self.slices().into_iter().map(Into::into).collect())
     }
 }
 
 impl Serialize for Capabilities {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        self.0
-            .iter()
-            .map(|c| c.save())
-            .collect::<Vec<_>>()
-            .serialize(s)
+        self.slices().serialize(s)
     }
 }
 

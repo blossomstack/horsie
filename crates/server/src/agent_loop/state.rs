@@ -703,24 +703,27 @@ impl AgentState {
             .collect()
     }
 
-    /// The tasks this agent's task list holds, read back out of the capability
-    /// that owns it.
+    /// The tasks this agent's task list holds, asked of the capability that
+    /// owns it.
     ///
-    /// Typed rather than downcast: [`CapSlice`] is an enum, so the arm *is* the
-    /// question. Empty for an agent equipped without a task list, which is a
-    /// real state now that it is a capability rather than a field every agent
-    /// had whether or not anything could reach it.
+    /// A named question rather than a read: `view()` is what a capability says a
+    /// client may see, and [`CapView`] is an enum, so the arm *is* the question.
+    /// Reading the persisted slice instead would work just as well and would
+    /// tie the agent document's shape to the journal's — an API change would
+    /// then force a journal migration.
+    ///
+    /// Empty for an agent equipped without a task list, which is a real state
+    /// now that it is a capability rather than a field every agent had whether
+    /// or not anything could reach it.
     #[must_use]
     fn tasks(&self) -> Vec<crate::agent_loop::task_list::TaskRecord> {
         self.capabilities
-            .slices()
+            .views()
             .into_iter()
-            .find_map(|slice| {
-                let crate::agent_loop::capabilities::CapSlice::TaskList(list) = slice else {
-                    return None;
-                };
-                Some(list.tasks().to_vec())
+            .map(|view| match view {
+                crate::agent_loop::capabilities::CapView::TaskList(tasks) => tasks,
             })
+            .next()
             .unwrap_or_default()
     }
 
@@ -1953,7 +1956,7 @@ mod tests {
 
     /// The agent document's task list is served over HTTP and drawn by the web
     /// UI, and once the list belongs to a capability the only honest way to
-    /// read it is back out of that capability — typed, through `CapSlice`. A
+    /// read it is to ask that capability — `view()`, typed through `CapView`. A
     /// shadow copy kept on `AgentState` by the fold would be the leak this
     /// whole design removes, and it would go stale the first time a capability
     /// was equipped without one.

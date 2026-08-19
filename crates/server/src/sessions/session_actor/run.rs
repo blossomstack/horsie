@@ -637,23 +637,21 @@ mod tests {
         );
     }
 
-    /// How many timers a folded agent still has armed.
+    /// Whether a folded agent still holds an armed timer.
     ///
-    /// Read back out of the capability that owns them, typed through
-    /// `CapSlice`: an agent's timers are no longer a field on its state, and a
-    /// copy kept for readers is the leak that made them one.
-    fn armed_timers(state: &crate::agent_loop::AgentState) -> usize {
+    /// Asked of what the capability says a compaction must carry across, which
+    /// is the only statement about an armed timer that leaves the capability at
+    /// all. It used to read the persisted slice, and that read is gone: an
+    /// agent's timers are its own, and a caller that can see them can see
+    /// everything else they hold too. There is no `CapView` arm for them
+    /// because no client draws one — a view exists to be rendered, not to give
+    /// a test a way back in.
+    fn holds_an_armed_timer(state: &crate::agent_loop::AgentState) -> bool {
         state
             .capabilities
-            .slices()
-            .into_iter()
-            .filter_map(|slice| {
-                let crate::agent_loop::capabilities::CapSlice::Timers(timers) = slice else {
-                    return None;
-                };
-                Some(timers.armed().len())
-            })
-            .sum()
+            .carried_state()
+            .iter()
+            .any(|block| block.starts_with(crate::agent_loop::capabilities::timers::CARRIED_HEADER))
     }
 
     /// A step that armed a timer and then stopped talking is *parked*, not
@@ -700,7 +698,7 @@ mod tests {
         let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
         let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
         assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
-        assert_eq!(armed_timers(&step), 1, "and the timer is still armed");
+        assert!(holds_an_armed_timer(&step), "and the timer is still armed");
         let run = crate::sessions::events::fold_session_state(&journal, id)
             .await
             .run
@@ -767,9 +765,8 @@ mod tests {
             })
         })
         .await;
-        assert_eq!(
-            armed_timers(&woken),
-            0,
+        assert!(
+            !holds_an_armed_timer(&woken),
             "a one-shot that has fired is not still armed"
         );
     }
@@ -821,9 +818,8 @@ mod tests {
             )),
             "the step never armed a timer, so cancelling one proves nothing"
         );
-        assert_eq!(
-            armed_timers(&step),
-            0,
+        assert!(
+            !holds_an_armed_timer(&step),
             "the concluded step still holds an armed timer"
         );
     }

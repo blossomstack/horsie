@@ -26,7 +26,7 @@
 //! same rendering the tool returns — ids and all, because an agent that reads a
 //! paraphrase of its own list cannot call `task_list` against it afterwards.
 
-use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg};
+use super::{Act, CapEvent, CapSlice, CapView, Capability, Decision, Msg};
 use crate::agent_loop::task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, task_list_tool_spec,
 };
@@ -145,6 +145,15 @@ impl Capability for TaskListCapability {
     /// paragraph saying it has no tasks.
     fn carried_state(&self) -> Option<String> {
         (!self.list.tasks().is_empty()).then(|| self.list.render())
+    }
+
+    /// The list, as the agent document carries it.
+    ///
+    /// A copy rather than the state behind it: what a client is shown is a
+    /// value computed on request, so nothing outside can hold onto a list that
+    /// the next `task_list` call has already moved past.
+    fn view(&self) -> Option<CapView> {
+        Some(CapView::TaskList(self.list.tasks().to_vec()))
     }
 
     fn save(&self) -> CapSlice {

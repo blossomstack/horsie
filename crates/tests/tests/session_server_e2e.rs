@@ -2601,6 +2601,57 @@ async fn the_request_prefix_survives_a_restart() {
     server2.shutdown().await;
 }
 
+/// **The agent document's task list, all the way to the wire.**
+///
+/// The list belongs to a capability and nothing keeps a copy of it — the agent
+/// state asks the capability what a client should see, the HTTP layer maps that
+/// onto the document, and the browser draws it. Three hops, every one of which
+/// can be broken without a `-p horsie-server --lib` test noticing, which is why
+/// this one goes through the real server.
+#[tokio::test]
+async fn the_agent_document_carries_the_task_list_the_model_wrote() {
+    let mock = MockLlmServer::builder().build().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+    mock.queue_tool_call(
+        "task_list",
+        serde_json::json!({
+            "action": "create",
+            "tasks": ["read the flake", "fix it"],
+        }),
+    );
+    mock.queue_response("planned");
+    let id = create_session(&client, &server.addr, &agent, "make a plan").await;
+    wait_turns(&client, &server.addr, &id, 1).await;
+
+    let doc: serde_json::Value = client
+        .get(format!(
+            "http://{}/api/sessions/{id}/agents/main",
+            server.addr
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        doc["agent"]["tasks"],
+        serde_json::json!([
+            {"id": 1, "content": "read the flake", "status": "Pending"},
+            {"id": 2, "content": "fix it", "status": "Pending"},
+        ]),
+        "the task list never reached the wire: {doc}"
+    );
+
+    server.shutdown().await;
+}
+
 /// The shape production actually runs: turns with tool calls, so one turn makes
 /// several provider calls, each re-sending everything before it.
 #[tokio::test]
