@@ -216,58 +216,9 @@ pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> R
     }
 }
 
-/// Appended to a subagent's system prompt: its place in the tree and how its
-/// result travels. Deliberately short — the tools carry their own docs.
-const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
-You are a subagent, spawned to work on one task. Your final message is your report: \
-it is automatically delivered to the agent that spawned you — make it self-contained. You \
-may spawn your own subagents with spawn_agent. Continue with independent work, or wait if \
-none remains; do not poll subagent_status or call it repeatedly. Use subagent_status only \
-when the user requests a progress update or to diagnose a suspected runtime or \
-result-delivery problem. You cannot ask the user or rename the session; if you are blocked, \
-report that instead.";
-
-/// Appended to a workflow step's system prompt: what a step is, how it ends,
-/// and that its result is what decides where the run goes next. Deliberately
-/// short — `submit_result` carries its own schema.
-///
-/// The paragraph about ending a turn earns its length. A step ends when it
-/// calls `submit_result`, but a turn may legitimately end without one — parked
-/// on a question, on a timer, or waiting for subagents — and a model that does
-/// not know the difference either submits early to be safe or stops with
-/// nothing to wake it.
-const STEP_PROMPT_SUFFIX: &str = "\n\n# Workflow step\n\
-You are one step of a workflow, not a conversation. Your instruction and the previous \
-step's result are in the message above. You share one workspace with every other step: \
-what you change on disk is what the next step sees. You may spawn subagents with \
-spawn_agent. You cannot rename the session.\n\n\
-Finish by calling `submit_result`. What you submit is this step's result *and* what the \
-workflow reads to decide which step runs next, so make it accurate and self-contained. \
-Ending a turn without it is only safe while something will wake you — a question you \
-asked, a timer you armed, or a subagent still running. If nothing will, and the work is \
-done, submit.";
-
-/// Appended to a fork's system prompt.
-///
-/// A fork is a conversation, so almost nothing a subagent is told applies: it
-/// can ask the user, and it owes nobody a report. What it does need is to know
-/// it is one of several under one session sharing one workspace, and that its
-/// title is how a person tells them apart.
-const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked conversation\n\
-You are a fork: a conversation branched from another one in this session, carrying its \
-history up to the branch point. You share one workspace with it — what you change on disk \
-is what it sees. Name yourself with set_session_title as soon as the new direction is \
-clear; that title is how a person tells this conversation from the one it came from.";
-
-/// Appended to an unattended session's system prompt (a routine run). It has
-/// no `ask_user` tool, so the prompt says why rather than leaving the model to
-/// discover a tool it was told about is missing.
-const UNATTENDED_PROMPT_SUFFIX: &str = "\n\n# Unattended run\n\
-This session was started by a routine, not by a person, and nobody is reading it while \
-it runs. There is no ask_user tool: a question would park the run with nobody to answer \
-it. Work from the instructions you were given — where they leave a choice open, make the \
-reasonable one, say which you made and why, and carry on. Your final message is the \
-report; make it self-contained.";
+use super::runner::role::{
+    FORK_PROMPT_SUFFIX, STEP_PROMPT_SUFFIX, SUBAGENT_PROMPT_SUFFIX, UNATTENDED_PROMPT_SUFFIX,
+};
 
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
