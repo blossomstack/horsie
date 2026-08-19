@@ -18,37 +18,36 @@
 //! [`turns`] the conversation, [`run`] the workflow graph, [`subagent`] the tree
 //! of delegated work, [`reads`] the questions that wake nothing, [`hooks`] what
 //! plugins did, [`core`] the session's own bookkeeping — over the vocabulary in
-//! [`types`], to the shape in [`component`]. [`context`] is not one of them: it
-//! assembles a turn on the *agent's* task rather than on this mailbox, which is
-//! what keeps a thirty-second toolbox build from blocking a cancel.
+//! [`types`]. [`context`] is not one of them: it assembles a turn on the
+//! *agent's* task rather than on this mailbox, which is what keeps a
+//! thirty-second toolbox build from blocking a cancel.
+//!
+//! What is *not* here any more is a component per kind of agent. A session
+//! hosts runners; which runner owns an agent is `state.agents[&id]`, and the
+//! same lookup answers what used to need three registries probed in a
+//! load-bearing order.
 
+use crate::sessions::runners::action::Action;
+use crate::sessions::runners::ids::{AgentId, RunnerId};
+use crate::sessions::runners::loading::AgentRole;
+use crate::sessions::runners::message::ChildOutcome;
+use crate::sessions::runners::state::{SessionEvent, SessionState as RunnerSessionState};
+use crate::sessions::runners::{Emit, Runner, RunnerEvent, SessionView};
 use horsie_actor::ReplyTo;
-mod component;
 pub(crate) mod context;
 mod core;
-mod fork;
 /// Visible to the crate for [`hooks::SessionHookSink`] alone: the runtime
 /// capability attaches it to the client it acquires, and the sink routes into
 /// this actor's mailbox, so it cannot live anywhere else.
 pub(crate) mod hooks;
-mod lifecycle;
 mod reads;
-mod run;
-mod subagent;
-mod turns;
 mod types;
 
 pub use types::*;
 
-use component::Component;
 use core::SessionCore;
-use fork::ForkedAgents;
 use hooks::{HookRouting, StopHookParent};
-use lifecycle::RuntimeLifecycle;
 use reads::Reads;
-use run::WorkflowRun;
-use subagent::SubAgents;
-use turns::Turns;
 
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
@@ -906,38 +905,86 @@ impl SessionActor {
     /// a subagent parent strands the moment no further subagent outcome can
     /// arrive (every node terminal), since an outcome was previously the only
     /// flush trigger.
-    /// Whether any component has work in flight, so the session must not
-    /// unload. This is what keeps a forty-minute tool call from being unloaded
-    /// out from under itself.
-    fn busy(&self, state: &SessionState) -> bool {
-        RuntimeLifecycle::busy(state)
-            || Turns::busy(state)
-            || WorkflowRun::busy(state)
-            || SubAgents::busy(state)
+    /// What a runner may know about the session around it.
+    ///
+    /// Built per runner because `depth` is a walk up that runner's own parent
+    /// chain; the other two are the session's and read the same for everybody.
+    fn view(&self, state: &RunnerSessionState, runner: RunnerId) -> SessionView {
+        SessionView {
+            runtime_ready: state.runtime_ready(),
+            depth: state.depth_of(runner),
+            active_agents: state.active_agents(),
+        }
     }
 
-    /// Everything every component wants started, given the state as it now is.
+    /// Whether any runner has work in flight, so the session must not unload.
+    /// This is what keeps a forty-minute tool call from being unloaded out from
+    /// under itself.
+    fn busy(&self, state: &RunnerSessionState) -> bool {
+        state.runners.values().any(|r| r.state.busy())
+    }
+
+    /// Everything every runner wants started, given the state as it now is.
     ///
-    /// A concatenation, not a negotiation: each component returns only work it
-    /// owns, so there is nothing to reconcile. Subagent wakes go first — a
-    /// parent waiting on its children is work already in flight, and the next
-    /// turn or step can wait a boundary.
-    fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // Nothing starts before the runtime it would run on exists. One gate,
-        // checked once, for every component.
-        if !RuntimeLifecycle::ready(state) {
-            return Vec::new();
-        }
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
-        [
-            SubAgents::actions(&cx, state),
-            Turns::actions(&cx, state),
-            WorkflowRun::actions(&cx, state),
-        ]
-        .concat()
+    /// A concatenation, not a negotiation: a runner returns only work it owns,
+    /// so there is nothing to reconcile. The runtime gate that used to stand in
+    /// front of this moved into `RunnerState::actions`, where the one runner
+    /// exempt from it — the sandbox itself — says so rather than being special
+    /// cased by its caller.
+    fn next_actions(&self, state: &RunnerSessionState) -> Vec<(RunnerId, Action)> {
+        state
+            .runners
+            .iter()
+            .flat_map(|(id, rec)| {
+                let view = self.view(state, *id);
+                rec.state
+                    .actions(&view)
+                    .into_iter()
+                    .map(move |action| (*id, action))
+            })
+            .collect()
+    }
+
+    /// Every finished child whose creator has not been told yet.
+    ///
+    /// The scan the two-batch delivery rests on: a runner that is terminal and
+    /// has a parent offers its `outcome()` to that parent's capabilities, and
+    /// the capability's own `outstanding` decides whether the report is still
+    /// owed. So there is no `notified` flag to disagree with it — a crash
+    /// between telling and persisting replays as a report still outstanding,
+    /// and the next boundary finds it here again.
+    ///
+    /// `is_terminal`, not `== Done`: a worker that *failed* is owed a report
+    /// too, and a `Done`-only scan would leave its parent waiting for ever.
+    fn owed(&self, state: &RunnerSessionState) -> Vec<(RunnerId, AgentId, ChildOutcome)> {
+        state
+            .runners
+            .iter()
+            .filter(|(_, rec)| rec.status.is_terminal())
+            .filter_map(|(id, rec)| {
+                let parent = rec.parent?;
+                let outcome = rec.state.outcome()?;
+                Some((*id, parent, outcome))
+            })
+            .collect()
+    }
+
+    /// A runner's events, addressed and stamped.
+    ///
+    /// `at_ms` is read here — one of the few places it may be — because it is a
+    /// fact about the journal entry rather than about what was decided. A
+    /// decision is made once and folded any number of times, so a clock inside
+    /// a fold would give a replay different timestamps from the live run.
+    fn wrap(&self, runner: RunnerId, emit: Emit) -> Vec<SessionEvent> {
+        let at_ms = now_ms();
+        emit.events
+            .into_iter()
+            .map(|event| SessionEvent::Runner {
+                id: runner,
+                event: Box::new(event),
+                at_ms,
+            })
+            .collect()
     }
 
     async fn flush_then_drain(
@@ -1104,53 +1151,25 @@ impl SessionActor {
 #[async_trait]
 impl EventSourcedActor for SessionActor {
     type Command = SessionInbox;
-    type Event = SessionDomainEvent;
-    type State = SessionState;
+    type Event = SessionEvent;
+    type State = RunnerSessionState;
 
     fn persistence_id(&self) -> PersistenceId {
         Self::persistence_id_for(self.id)
     }
 
-    fn initial_state() -> SessionState {
-        SessionState::default()
+    fn initial_state() -> RunnerSessionState {
+        RunnerSessionState::default()
     }
 
-    fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
-        match event {
-            SessionDomainEvent::ProvisioningStarted { .. }
-            | SessionDomainEvent::ProvisioningProgress { .. }
-            | SessionDomainEvent::ProvisioningSucceeded { .. }
-            | SessionDomainEvent::ProvisioningFailed { .. } => {
-                RuntimeLifecycle::apply(&mut state, &event)
-            }
-            SessionDomainEvent::TurnBegan { .. }
-            | SessionDomainEvent::AskRecorded { .. }
-            | SessionDomainEvent::TurnEnded { .. }
-            | SessionDomainEvent::TurnFailed { .. }
-            | SessionDomainEvent::TurnStopped { .. }
-            | SessionDomainEvent::TurnInterrupted { .. }
-            | SessionDomainEvent::SessionFailed { .. } => Turns::apply(&mut state, &event),
-            SessionDomainEvent::StepStarted { .. }
-            | SessionDomainEvent::StepConcluded { .. }
-            | SessionDomainEvent::StepFailed { .. }
-            | SessionDomainEvent::StepCancelled { .. }
-            | SessionDomainEvent::RunFinished { .. }
-            | SessionDomainEvent::RunFailed { .. } => WorkflowRun::apply(&mut state, &event),
-            SessionDomainEvent::SubAgentSpawned { .. }
-            | SessionDomainEvent::SubAgentRunning { .. }
-            | SessionDomainEvent::SubAgentCompleted { .. }
-            | SessionDomainEvent::SubAgentFailed { .. }
-            | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
-            SessionDomainEvent::ForkCreated { .. }
-            | SessionDomainEvent::ForkSeeded { .. }
-            | SessionDomainEvent::ForkTitled { .. }
-            | SessionDomainEvent::ForkStatusChanged { .. }
-            | SessionDomainEvent::ForkTurnEnded { .. }
-            | SessionDomainEvent::ForkDeleted { .. } => ForkedAgents::apply(&mut state, &event),
-            SessionDomainEvent::UsageRecorded { .. }
-            | SessionDomainEvent::SpecRecorded { .. }
-            | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
-        }
+    /// One writer, and it is the state's own.
+    ///
+    /// The twenty-arm match this replaces routed each event to the component
+    /// that understood it. A runner's event is addressed to its runner, and
+    /// everything else is the session's own — so there is nothing here to keep
+    /// in step with a component list.
+    fn apply_event(mut state: RunnerSessionState, event: SessionEvent) -> RunnerSessionState {
+        state.apply(&event);
         state
     }
 
@@ -1161,7 +1180,7 @@ impl EventSourcedActor for SessionActor {
     /// And report the status the batch left behind. Here rather than at each
     /// transition because here the write is already durable: the supervisor's
     /// copy can lag the journal, never lead it.
-    async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
+    async fn on_events_persisted(&mut self, events: &[SessionEvent], state: &RunnerSessionState) {
         self.record_lifecycle(events, state).await;
         self.report_forks(state).await;
         self.report_status(state).await;
