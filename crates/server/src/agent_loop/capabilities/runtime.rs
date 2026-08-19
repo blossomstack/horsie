@@ -618,7 +618,7 @@ mod tests {
             );
         }
         assert_eq!(
-            scoped(AgentKey::Main, client()).agent_id(),
+            scoped(AgentId::new_v4(), AgentRole::Root, client()).agent_id(),
             session.to_string(),
             "the main agent is the runtime's own identity"
         );

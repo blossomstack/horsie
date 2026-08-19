@@ -15,7 +15,7 @@
 
 use super::{ReadCommand, SubAgentCommand, TurnCommand};
 use super::{
-    context::{SessionAgentKind, SessionContextProvider},
+    context::{TestKind, SessionContextProvider},
     *,
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
@@ -1257,6 +1257,48 @@ pub(super) async fn catalog_harness_with(
     (f, session, id)
 }
 
+/// The four kinds of agent a session used to have a *type* for.
+///
+/// Test-only, and deliberately not production. `TestKind` was deleted
+/// because the runner tree answers "what is this agent" by lookup — but a test
+/// still has to *build* one of each by hand, and naming the four cases here
+/// keeps that possible without putting the concept back in the actor.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TestKind {
+    Main,
+    Fork(Uuid),
+    Sub(Uuid),
+    Step(Uuid),
+}
+
+impl TestKind {
+    pub(super) fn agent(self) -> crate::sessions::runners::AgentId {
+        crate::sessions::runners::AgentId(match self {
+            Self::Main => Uuid::nil(),
+            Self::Fork(id) | Self::Sub(id) | Self::Step(id) => id,
+        })
+    }
+
+    pub(super) fn role(self) -> crate::sessions::runners::loading::AgentRole {
+        use crate::sessions::runners::loading::AgentRole;
+        match self {
+            Self::Main => AgentRole::Root,
+            Self::Fork(_) => AgentRole::Fork,
+            Self::Sub(_) => AgentRole::Sub,
+            Self::Step(_) => AgentRole::Step,
+        }
+    }
+
+    pub(super) fn runner_kind(self) -> crate::sessions::runners::RunnerKind {
+        use crate::sessions::runners::RunnerKind;
+        match self {
+            Self::Main | Self::Fork(_) => RunnerKind::Conversation,
+            Self::Sub(_) => RunnerKind::SubAgent,
+            Self::Step(_) => RunnerKind::Workflow,
+        }
+    }
+}
+
 /// The session half of a load, for a provider a test builds by hand.
 ///
 /// One helper rather than a literal per test: the three fields a kind decides —
@@ -1267,10 +1309,11 @@ pub(super) fn test_loading(
     f: &ActorFixture,
     session: &SessionRef,
     id: Uuid,
-    kind: SessionAgentKind,
+    kind: TestKind,
 ) -> crate::sessions::runners::loading::Loading {
     super::context::loading_for(
-        kind,
+        kind.agent(),
+        kind.role(),
         session.clone(),
         id,
         super::context::LoadingDeps {
@@ -1298,7 +1341,7 @@ pub(super) fn test_loading(
 /// arms in one place, and it has to stay in step with them: a step here gets
 /// the extras a step gets, with the empty result schema the tests use.
 pub(super) fn test_equipment(
-    kind: SessionAgentKind,
+    kind: TestKind,
     settings: &crate::sessions::spec::AgentSettings,
     unattended: bool,
     agent_type: Option<String>,
@@ -1309,26 +1352,19 @@ pub(super) fn test_equipment(
     use crate::sessions::runners::{AgentId, Assembly, RunnerId, RunnerKind, assemble};
     let opts = Assembly {
         settings,
-        agent: AgentId(match kind {
-            SessionAgentKind::Main => Uuid::nil(),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                id
-            }
-        }),
+        agent: kind.agent(),
         depth: 0,
         unattended,
         fork: match kind {
-            SessionAgentKind::Fork(id) => Some(RunnerId(id)),
-            SessionAgentKind::Main | SessionAgentKind::Sub(_) | SessionAgentKind::Step(_) => None,
+            TestKind::Fork(id) => Some(RunnerId(id)),
+            TestKind::Main | TestKind::Sub(_) | TestKind::Step(_) => None,
         },
         agent_type,
     };
     match kind {
-        SessionAgentKind::Main | SessionAgentKind::Fork(_) => {
-            assemble(RunnerKind::Conversation, &opts)
-        }
-        SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
-        SessionAgentKind::Step(_) => {
+        TestKind::Main | TestKind::Fork(_) => assemble(RunnerKind::Conversation, &opts),
+        TestKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
+        TestKind::Step(_) => {
             let mut caps = assemble(RunnerKind::Workflow, &opts);
             caps.push_front(StepResultCapability::new(Vec::new(), Vec::new(), false));
             caps.push_front(AskUserCapability::not_interactive());
@@ -1343,15 +1379,15 @@ pub(super) fn catalog_provider(
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
-        loading: test_loading(f, session, id, SessionAgentKind::Main),
+        loading: test_loading(f, session, id, TestKind::Main),
         equipment: test_equipment(
-            SessionAgentKind::Main,
+            TestKind::Main,
             &agent_settings_fixture(),
             false,
             None,
         ),
         settings: agent_settings_fixture(),
-        kind: SessionAgentKind::Main,
+        kind: TestKind::Main,
         agent_type: None,
         plugins: Vec::new(),
     }
@@ -1437,7 +1473,7 @@ pub(super) fn typed_provider(
 ) -> SessionContextProvider {
     let mut settings = agent_settings_fixture();
     settings.allowed_tools = allowed_tools;
-    let kind = SessionAgentKind::Sub(sub);
+    let kind = TestKind::Sub(sub);
     SessionContextProvider {
         loading: test_loading(f, session, id, kind),
         equipment: test_equipment(kind, &settings, false, Some("code-reviewer".to_string())),

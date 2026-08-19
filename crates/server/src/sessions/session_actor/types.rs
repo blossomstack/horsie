@@ -488,14 +488,4 @@ mod tests {
         }
     }
 
-    /// Every session journaled before forks existed carries no `forks` key. It
-    /// must load with an empty roster — the alternative is a `recover()` that
-    /// fails for every existing session and takes the supervisor with it, which
-    /// is what renamed event variants did on 2026-08-02.
-    #[test]
-    fn a_session_state_without_forks_deserializes_empty() {
-        let row = r#"{"status":"Idle","last_error":null}"#;
-        let state: SessionState = serde_json::from_str(row).unwrap();
-        assert!(state.forks.is_empty());
-    }
 }

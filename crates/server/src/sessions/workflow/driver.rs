@@ -24,7 +24,8 @@ pub fn next_transition(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::workflow::{OutcomeFilter, TransitionSpec};
+    use crate::sessions::workflow::TransitionSpec;
+    use horsie_models::workflow::OutcomeFilter;
 
     fn to(target: &str, values: &[&str]) -> TransitionSpec {
         TransitionSpec {

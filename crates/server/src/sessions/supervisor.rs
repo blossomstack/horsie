@@ -1251,7 +1251,7 @@ mod tests {
     use crate::sessions::addressing::SupervisorShard;
     use crate::sessions::clock::TestClock;
     use crate::sessions::session_actor::SessionActor;
-    use crate::sessions::session_actor::SessionDomainEvent;
+    use crate::sessions::session_actor::SessionEvent;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::Journal;
 
@@ -1931,7 +1931,7 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                &[serde_json::to_vec(&SessionEvent::AskRecorded { at_ms: 0 }).unwrap()],
                 at,
             )
             .await

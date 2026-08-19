@@ -12,7 +12,7 @@
 //! [`Capabilities`] are built by whoever spawns it and handed over,
 //! [`SessionContextProvider::provide`] hands them a [`Loading`] and returns
 //! what they filled in. That is the shape a runner needs — it holds its own
-//! list and equips the agents it starts — and [`SessionAgentKind`] is left
+//! list and equips the agents it starts — and [`TestKind`] is left
 //! deciding only who this agent *is*.
 
 use super::{CoreCommand, SessionCommand};
@@ -654,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn control_tools_reach_only_a_conversation_that_asked_for_them() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let build = |kind: SessionAgentKind, control_plane: Option<bool>| {
+        let build = |kind: TestKind, control_plane: Option<bool>| {
             let mut settings = agent_settings_fixture();
             settings.control_plane = control_plane;
             SessionContextProvider {
@@ -668,14 +668,14 @@ mod tests {
         };
 
         assert!(
-            !build(SessionAgentKind::Main, None)
+            !build(TestKind::Main, None)
                 .equipment
                 .has("control_plane"),
             "a preset that never asked must not get them"
         );
         for kind in [
-            SessionAgentKind::Main,
-            SessionAgentKind::Fork(Uuid::new_v4()),
+            TestKind::Main,
+            TestKind::Fork(Uuid::new_v4()),
         ] {
             assert!(
                 build(kind, Some(true)).equipment.has("control_plane"),
@@ -683,8 +683,8 @@ mod tests {
             );
         }
         for kind in [
-            SessionAgentKind::Sub(Uuid::new_v4()),
-            SessionAgentKind::Step(Uuid::new_v4()),
+            TestKind::Sub(Uuid::new_v4()),
+            TestKind::Step(Uuid::new_v4()),
         ] {
             assert!(
                 !build(kind, Some(true)).equipment.has("control_plane"),
@@ -734,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn the_scanned_agent_types_reach_the_spawn_tools_description() {
         let (f, session, id) = agent_harness().await;
-        let kind = SessionAgentKind::Main;
+        let kind = TestKind::Main;
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
@@ -760,7 +760,7 @@ mod tests {
     async fn subagent_toolbox_strips_session_metadata_tools() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
 
-        let build = |kind: SessionAgentKind| SessionContextProvider {
+        let build = |kind: TestKind| SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
@@ -769,7 +769,7 @@ mod tests {
             plugins: Vec::new(),
         };
 
-        let main_provider = build(SessionAgentKind::Main);
+        let main_provider = build(TestKind::Main);
         let main = main_provider.provide().await.unwrap();
         let main_tools = offered(&main_provider, &main);
         for t in [
@@ -782,7 +782,7 @@ mod tests {
         }
 
         let sub_id = Uuid::new_v4();
-        let sub_provider = build(SessionAgentKind::Sub(sub_id));
+        let sub_provider = build(TestKind::Sub(sub_id));
         let sub = sub_provider.provide().await.unwrap();
         let sub_tools = offered(&sub_provider, &sub);
         for t in ["spawn_agent", "subagent_status"] {
@@ -810,10 +810,10 @@ mod tests {
         let mut settings = agent_settings_fixture();
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
-            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
-            equipment: test_equipment(SessionAgentKind::Main, &settings, false, None),
+            loading: test_loading(&f, &session, id, TestKind::Main),
+            equipment: test_equipment(TestKind::Main, &settings, false, None),
             settings,
-            kind: SessionAgentKind::Main,
+            kind: TestKind::Main,
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -833,15 +833,15 @@ mod tests {
         // too -- the base prompt tells the model the tool exists.
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
-            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
+            loading: test_loading(&f, &session, id, TestKind::Main),
             equipment: test_equipment(
-                SessionAgentKind::Main,
+                TestKind::Main,
                 &agent_settings_fixture(),
                 unattended,
                 None,
             ),
             settings: agent_settings_fixture(),
-            kind: SessionAgentKind::Main,
+            kind: TestKind::Main,
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -875,11 +875,11 @@ mod tests {
             horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );
-        let main = scoped_client(&SessionAgentKind::Main, client.clone());
+        let main = scoped_client(&TestKind::Main, client.clone());
         assert_eq!(main.agent_id(), "session-id");
 
         let sub_id = Uuid::new_v4();
-        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
+        let sub = scoped_client(&TestKind::Sub(sub_id), client);
         assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
@@ -1148,7 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
         let (f, session, id) = agent_harness().await;
-        let kind = SessionAgentKind::Sub(Uuid::new_v4());
+        let kind = TestKind::Sub(Uuid::new_v4());
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(
@@ -1324,7 +1324,7 @@ mod tests {
 
     /// A context provider over a vendor that has to boot something, reporting
     /// into a session that keeps whatever it is told.
-    fn booting_provider(seen: &Reported, kind: SessionAgentKind) -> SessionContextProvider {
+    fn booting_provider(seen: &Reported, kind: TestKind) -> SessionContextProvider {
         let mut vendors = std::collections::HashMap::new();
         vendors.insert(
             "mock".to_string(),
@@ -1392,7 +1392,7 @@ mod tests {
     #[tokio::test]
     async fn a_vendors_account_of_an_acquisition_reaches_the_agents_log() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Main);
+        let provider = booting_provider(&seen, TestKind::Main);
         provider.runtime_client().await.expect("acquire");
 
         assert_eq!(
@@ -1454,7 +1454,7 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_narrates_nothing() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Sub(Uuid::new_v4()));
+        let provider = booting_provider(&seen, TestKind::Sub(Uuid::new_v4()));
         provider.runtime_client().await.expect("acquire");
         // Long enough for a line to have arrived if one were ever sent.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
