@@ -2180,6 +2180,34 @@ mod actor_tests {
         );
     }
 
+    /// **A retried step actually runs**, and the run reaches its end again.
+    ///
+    /// `State::retry` is the one decision in this design that carries an
+    /// action as well as events, and the session dropped it: the log said the
+    /// new execution was running while nothing had started its agent, so the
+    /// run sat at `Running` with a step nobody was working on.
+    #[tokio::test]
+    async fn a_retried_step_runs_and_the_run_finishes_again() {
+        let (_f, session, id, journal) = spawn_run_with_provider(triage_then_repeat()).await;
+        wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+
+        session
+            .ask(|reply| SessionCommand::RetryStep { index: 1, reply })
+            .await
+            .unwrap()
+            .unwrap();
+        let run = wait_for_run(&journal, id, |r| {
+            r.steps.len() == 3 && r.status == WorkflowRunStatus::Finished
+        })
+        .await;
+        assert_eq!(
+            run.steps[2].status,
+            StepStatus::Concluded,
+            "the retried execution never ran: {:?}",
+            run.steps[2]
+        );
+    }
+
     /// Retrying appends an attempt rather than replacing one, so the earlier
     /// attempt stays readable and the graph can stack them.
     #[tokio::test]

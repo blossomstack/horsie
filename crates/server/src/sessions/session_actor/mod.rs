@@ -1161,9 +1161,9 @@ impl SessionActor {
     /// fact about the journal entry rather than about what was decided. A
     /// decision is made once and folded any number of times, so a clock inside
     /// a fold would give a replay different timestamps from the live run.
-    fn wrap(&self, runner: RunnerId, emit: Emit) -> Vec<SessionEvent> {
+    fn wrap(&self, runner: RunnerId, events: Vec<RunnerEvent>) -> Vec<SessionEvent> {
         let at_ms = now_ms();
-        emit.events
+        events
             .into_iter()
             .map(|event| SessionEvent::Runner {
                 id: runner,
@@ -1171,6 +1171,41 @@ impl SessionActor {
                 at_ms,
             })
             .collect()
+    }
+
+    /// Journal one runner's decision, and perform what it asked for.
+    ///
+    /// The other half of [`Self::wrap`], which takes events alone. A runner
+    /// that decided to *do* something as well — [`workflow::State::retry`] is
+    /// the only one — used to hand its whole `Emit` to `wrap`, which kept the
+    /// events and dropped the actions on the floor. Nothing was started, so a
+    /// retried step was journaled as running with no agent behind it and the
+    /// run sat at `Running` for ever, on a step nobody was working on. `wrap`
+    /// cannot be handed an action at all now, which is what stops the next one
+    /// vanishing the same way.
+    ///
+    /// Each action sees the state the events before it produced, exactly as a
+    /// boundary's do.
+    async fn decided(
+        &mut self,
+        runner: RunnerId,
+        emit: Emit,
+        state: &RunnerSessionState,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> Vec<SessionEvent> {
+        let mut events = self.wrap(runner, emit.events);
+        let mut next = state.clone();
+        for e in &events {
+            next.apply(e);
+        }
+        for action in emit.actions {
+            let produced = self.perform(runner, action, &next, ctx).await;
+            for e in &produced {
+                next.apply(e);
+            }
+            events.extend(produced);
+        }
+        events
     }
 
     /// Everything startable at this boundary, performed in order, each seeing
@@ -1269,13 +1304,7 @@ impl SessionActor {
             // again rather than recording a hand-over that never happened.
             return Vec::new();
         }
-        self.wrap(
-            child,
-            Emit {
-                events: vec![event],
-                actions: Vec::new(),
-            },
-        )
+        self.wrap(child, vec![event])
     }
 
     /// Persist `events`, having first let the boundary they create start
@@ -1490,7 +1519,8 @@ impl SessionActor {
                     self.wrap(
                         *id,
                         lifecycle
-                            .on_agent_ended(agent, &crate::sessions::runners::TurnEnd::Interrupted),
+                            .on_agent_ended(agent, &crate::sessions::runners::TurnEnd::Interrupted)
+                            .events,
                     ),
                 )
             })
@@ -1531,8 +1561,7 @@ impl SessionActor {
         };
         self.cancel_agent(agent).await;
         let _ = reply.send(Ok(()));
-        let emit = lifecycle.on_agent_stopped(agent);
-        let events = self.wrap(runner, emit);
+        let events = self.wrap(runner, lifecycle.on_agent_stopped(agent).events);
         self.persist_and_advance(state, events, ctx).await
     }
 
@@ -1617,7 +1646,7 @@ impl SessionActor {
         match run.retry(u32::try_from(index).unwrap_or(u32::MAX)) {
             Ok(emit) => {
                 let _ = reply.send(Ok(()));
-                let events = self.wrap(root, emit);
+                let events = self.decided(root, emit, state, ctx).await;
                 self.persist_and_advance(state, events, ctx).await
             }
             Err(e) => {
@@ -1676,8 +1705,7 @@ impl SessionActor {
         let Some(lifecycle) = record.state.lifecycle() else {
             return CommandEffect::none();
         };
-        let emit = lifecycle.on_agent_ended(who, &end);
-        let events = self.wrap(runner, emit);
+        let events = self.wrap(runner, lifecycle.on_agent_ended(who, &end).events);
         self.persist_and_advance(state, events, ctx).await
     }
 
@@ -1702,7 +1730,7 @@ impl SessionActor {
         let Some(lifecycle) = record.state.lifecycle() else {
             return CommandEffect::none();
         };
-        let events = self.wrap(runner, lifecycle.on_agent_started(who));
+        let events = self.wrap(runner, lifecycle.on_agent_started(who).events);
         CommandEffect::persist(events)
     }
 
