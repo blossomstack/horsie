@@ -368,7 +368,7 @@ pub enum HookCommand {
     /// the agent whose transcript the records belong in. Carries no reply
     /// because nothing waits on it.
     Ran {
-        key: AgentKey,
+        key: AgentId,
         records: Vec<HookRecord>,
     },
     /// A `Stop` hook blocked, so the turn continues with `reason` as its input.
@@ -376,14 +376,14 @@ pub enum HookCommand {
     /// Routed through the session for the same reason `Ran` is: the sink is
     /// built before its `AgentActor` is spawned, so it holds a key rather than
     /// an `ActorRef`.
-    ContinueAfterStop { key: AgentKey, reason: String },
+    ContinueAfterStop { key: AgentId, reason: String },
     /// A hook set `continue: false`, so this agent stops where it is.
     ///
     /// The session is the only thing that can act on it: the runtime that ran
     /// the hook has no way to end a turn, and the agent is mid-call. What
     /// stopping *means* is per key — a turn boundary for the main agent, a
     /// failed node for a subagent, a failed step for a step.
-    Halt { key: AgentKey, reason: String },
+    Halt { key: AgentId, reason: String },
 }
 
 /// The session's own bookkeeping.

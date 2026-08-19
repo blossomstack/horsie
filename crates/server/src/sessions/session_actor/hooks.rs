@@ -273,7 +273,7 @@ impl StopHookParent {
         provider: Arc<SessionContextProvider>,
     ) -> Arc<dyn AgentOutcomeSink> {
         Arc::new(Self {
-            inner: Arc::new(SessionParent::new(session.clone(), key)),
+            inner: Arc::new(SessionParent::new(session.clone(), agent)),
             session,
             agent,
             provider,
@@ -319,22 +319,22 @@ impl AgentOutcomeSink for StopHookParent {
         // A subagent's turn ending is a `SubagentStop`, not a `Stop`. This sink
         // decorates every agent a session hosts, and until it was gated on the
         // kind a session with four subagents fired `Stop` five times.
-        let event = match self.provider.kind {
-            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
-                agent_id: id.to_string(),
-                agent_type: self.provider.agent_type(),
-                last_assistant_message,
-                stop_hook_active,
-            }),
-            // A step keeps `Stop`: it fires `SessionStart` and roots its own
-            // subagent tree, so answering `SubagentStop` would contradict its
-            // own start.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                ServerHookEvent::Stop(StopInput {
+        let event = match self.provider.role {
+            crate::sessions::runners::loading::AgentRole::Sub => {
+                ServerHookEvent::SubagentStop(SubagentStopInput {
+                    agent_id: self.provider.agent.to_string(),
+                    agent_type: self.provider.agent_type(),
                     last_assistant_message,
                     stop_hook_active,
                 })
             }
+            // A step keeps `Stop`: it fires `SessionStart` and roots its own
+            // subagent tree, so answering `SubagentStop` would contradict its
+            // own start.
+            _ => ServerHookEvent::Stop(StopInput {
+                last_assistant_message,
+                stop_hook_active,
+            }),
         };
         let records = client.run_hooks(event).await.unwrap_or_default();
 

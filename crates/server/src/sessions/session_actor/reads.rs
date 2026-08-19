@@ -124,7 +124,7 @@ impl Reads {
         let (task, output) = reads::task_and_output(state, agent);
         let mailbox = actor.reach(agent, state, ctx)?;
         let view = mailbox
-            .ask(|reply| AgentCommand::ReadState { reply })
+            .ask(|reply| AgentCommand::GetState { reply })
             .await
             .ok()?;
         Some(AgentDetail {
