@@ -19,8 +19,6 @@
 //! repairs. The session actor is the only thing that acts: it performs what
 //! runners ask for, journals what they decide, and folds what it journaled.
 
-#![allow(dead_code)]
-
 pub mod action;
 pub mod deliver;
 pub mod event;

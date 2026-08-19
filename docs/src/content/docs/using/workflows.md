@@ -165,11 +165,43 @@ Retries append. The earlier attempt stays readable, and the node shows a count.
 ## What a step can and cannot do
 
 A step can read and write the shared workspace, call its preset's MCP servers,
-use its memory spaces, arm timers, and spawn subagents of its own.
+use its memory spaces, arm timers, spawn subagents of its own, and invoke
+other workflows.
 
 A step cannot rename the session, and a run takes no messages — sending one is
 answered `409`. A workflow works from its definition; if you want to talk to
 it, you want a session.
+
+## Invoking a workflow from an agent
+
+Any agent — a session's main agent, a fork, a subagent, or a workflow step —
+holds an `invoke_workflow` tool. Calling it with a saved workflow's slug and
+an input starts a run **inside the calling agent's own session**: the run
+shares the session's sandbox and workspace, proceeds one step at a time in
+parallel with the caller's work, and when it finishes its result is delivered
+back to the caller as a report, exactly the way a subagent's is. A failed run
+is delivered as a failed report — news for the caller to act on, never a
+failure of the caller itself.
+
+The graph is snapshotted when the run starts, so editing the definition never
+changes a run already under way — the same guarantee a run started from the
+Workflows page has.
+
+The nesting rules:
+
+- **One depth budget** of 4 across subagents and runs alike: every
+  agent-to-child edge costs one level, so a workflow whose step invokes the
+  same workflow stops at the budget with an error the model can read.
+- **At most 8 live runs** per session, so a loop of `invoke_workflow` calls
+  fails fast instead of exhausting the session.
+- Each run still executes **one step at a time**; sibling runs proceed
+  concurrently, sharing the workspace the way subagents already do.
+- **Stopping an agent stops what it delegated**: its invoked runs are
+  cancelled with it, along with their subagents, so nothing runs on unwatched
+  with nobody left to hear the result.
+
+`workflow_status` lets an agent inspect the runs it invoked, scoped like
+`subagent_status`: an agent sees its own runs and never a sibling's.
 
 ## Skills across a run
 

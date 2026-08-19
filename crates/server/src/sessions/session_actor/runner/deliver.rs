@@ -4,8 +4,8 @@
 //! One rule covers the tree: **a runner with a parent, a terminal result, and
 //! an unsent flag is owed**. A subagent's report and a nested workflow run's
 //! output are the same shape to the agent waiting on them, which is why
-//! nesting workflow runs added no delivery machinery — only a second arm in
-//! [`owed_part`].
+//! nesting workflow runs added no delivery machinery — only [`run_part_for`]
+//! beside [`sub_part_for`].
 //!
 //! Unconditional: whether the recipient is idle, running or parked is not a
 //! question this answers, because the result goes into a queue rather than
@@ -14,9 +14,8 @@
 
 use horsie_models::agent::SubAgentResultPart;
 
-use super::action::RunnerAction;
 use super::ids::RunnerId;
-use super::state::{RunnerState, SessionState, SubPhase, SubState, WorkflowState};
+use super::state::{SubPhase, SubState, WorkflowState};
 
 /// Largest result (output or error) injected into a parent's context or
 /// rendered by `subagent_status` — the same bound the runtime puts on a
@@ -39,35 +38,6 @@ pub(crate) fn truncate_result(text: &str) -> String {
         &text[..end],
         text.len()
     )
-}
-
-/// Every delivery the session owes, across the whole tree.
-#[must_use]
-pub(crate) fn owed_deliveries(state: &SessionState) -> Vec<RunnerAction> {
-    state
-        .runners
-        .iter()
-        .filter_map(|(id, record)| {
-            let to = record.parent?;
-            let part = owed_part(*id, &record.state)?;
-            Some(RunnerAction::Deliver {
-                to,
-                child: *id,
-                part,
-            })
-        })
-        .collect()
-}
-
-/// The unsent terminal result of one runner, if it holds one.
-fn owed_part(id: RunnerId, state: &RunnerState) -> Option<SubAgentResultPart> {
-    match state {
-        RunnerState::Sub(sub) => sub_part_for(id, sub),
-        RunnerState::Workflow(w) => run_part_for(id, w),
-        // Conversations owe nobody a result — that is what makes them
-        // conversations.
-        RunnerState::Main(_) | RunnerState::Fork(_) => None,
-    }
 }
 
 /// A subagent's report, as a structured part. The result decides the body: a
@@ -149,10 +119,21 @@ pub(crate) fn run_part_for(id: RunnerId, w: &WorkflowState) -> Option<SubAgentRe
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
+    use super::super::action::RunnerAction;
     use super::super::event::{RecordedEnd, RunnerEvent, SessionEvent};
     use super::super::ids::RunnerId;
+    use super::super::state::SessionState;
     use super::super::testkit::*;
     use super::*;
+
+    /// The deliveries the boundary owes for `state` — the real path, filtered
+    /// to what this module decides.
+    fn owed_deliveries(state: &SessionState) -> Vec<RunnerAction> {
+        super::super::boundary_actions(state)
+            .into_iter()
+            .filter(|a| matches!(a, RunnerAction::Deliver { .. }))
+            .collect()
+    }
 
     #[test]
     fn nothing_is_owed_in_a_fresh_session() {
