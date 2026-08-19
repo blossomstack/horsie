@@ -582,7 +582,7 @@ impl SessionSupervisor {
                 continue;
             };
             match session
-                .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
+                .ask(|reply| SessionCommand::PrepareOffload { reply })
                 .await
             {
                 Ok(true) => {
@@ -770,11 +770,11 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                            .tell(SessionCommand::UserMessage {
                                 agent_id,
                                 text,
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
@@ -810,10 +810,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         if session
-                            .tell(SessionCommand::Turn(TurnCommand::Stop {
+                            .tell(SessionCommand::Stop {
                                 agent_id,
                                 reply: ReplyTo::from_sender(tx),
-                            }))
+                            })
                             .await
                             .is_err()
                         {
@@ -953,10 +953,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
-                            .tell(SessionCommand::Run(RunCommand::RetryStep {
+                            .tell(SessionCommand::RetryStep {
                                 index,
                                 reply: ReplyTo::from_sender(tx),
-                            }))
+                            })
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
@@ -980,11 +980,11 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Turn(TurnCommand::Answer {
+                            .tell(SessionCommand::Answer {
                                 agent_id,
                                 answers,
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
