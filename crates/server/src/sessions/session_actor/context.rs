@@ -15,7 +15,7 @@
 //! list and equips the agents it starts — and [`SessionAgentKind`] is left
 //! deciding only who this agent *is*.
 
-use super::{AgentKey, CoreCommand, SessionCommand};
+use super::{CoreCommand, SessionCommand};
 use crate::{
     agent_loop::{
         ContextError, ContextProvider, Contexts, StartTurn, TurnPreparation,
@@ -95,55 +95,6 @@ fn narration_pump(
 
 /// The baseline system prompt given to every session agent.
 const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
-
-/// Which of a session's agents a [`SessionContextProvider`] serves.
-///
-/// It no longer decides what the agent is equipped with — the capability list
-/// does — so what is left is addressing: the key the session registers this
-/// agent under, the id it journals under, and whether it narrates its own
-/// setup. Temporary, and deliberately so: it duplicates
-/// [`RunnerKind`](crate::sessions::runners::RunnerKind) plus an id, and the
-/// change that gives the session real runners deletes it.
-#[derive(Clone, Copy)]
-pub(super) enum SessionAgentKind {
-    Main,
-    Sub(Uuid),
-    Step(Uuid),
-    /// A fork of a conversation. Its own kind, not `Sub`: it owes nobody a
-    /// result, it can ask the user, and it names itself.
-    Fork(Uuid),
-}
-
-impl SessionAgentKind {
-    /// The key this agent is registered under on the session. One vocabulary:
-    /// what the provider knows itself as is what the session looks it up by.
-    pub(super) fn agent_key(&self) -> AgentKey {
-        match self {
-            Self::Main => AgentKey::Main,
-            Self::Sub(id) => AgentKey::Sub(*id),
-            Self::Step(id) => AgentKey::Step(*id),
-            Self::Fork(id) => AgentKey::Fork(*id),
-        }
-    }
-
-    /// Whether this agent narrates its own setup. Everything a person opens a
-    /// session to watch does; a subagent is quiet by design, and its progress
-    /// reaches the reader as the parent's `SubAgent` entry instead.
-    fn broadcasts(&self) -> bool {
-        matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
-    }
-
-    /// The same agent in the runners' vocabulary.
-    ///
-    /// The main agent journals under the session's own id — its transcript
-    /// *is* the session's — so that is the id it is known by here too.
-    fn agent_id(&self, session_id: Uuid) -> crate::sessions::runners::AgentId {
-        crate::sessions::runners::AgentId(match self {
-            Self::Main => session_id,
-            Self::Sub(id) | Self::Step(id) | Self::Fork(id) => *id,
-        })
-    }
-}
 
 /// The session's half of a load, for one of its agents.
 ///

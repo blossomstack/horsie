@@ -184,13 +184,12 @@ pub struct PromptSection {
 ///
 /// What an agent is, for the four decisions that are not identity.
 ///
-/// [`AgentKey`]'s replacement, and deliberately not the same thing. A key
+/// The replacement for the `AgentKey` this design deleted, and deliberately
+/// not the same thing. A key
 /// answered "who is this" *and* "how do I treat it", and the first question is
 /// now a lookup — `state.agents[&id]` names the owning runner. What is left is
 /// the second, and it is derived from that runner rather than stored: a stored
 /// role is a second place for it to be wrong.
-///
-/// [`AgentKey`]: crate::sessions::session_actor::AgentKey
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentRole {
     /// The session's own conversation. The one agent whose runtime client is

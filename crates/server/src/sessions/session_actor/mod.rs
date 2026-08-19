@@ -62,13 +62,12 @@ use crate::agent_loop::{
 };
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
-    spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
+    spec::{ServerDeps, SessionSpec, SessionStatus},
     supervisor::{ForkRow, SessionSupervisorCommand},
-    workflow::WorkflowRunState,
 };
 use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
-use context::{SessionAgentKind, SessionContextProvider};
+use context::SessionContextProvider;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
 use std::{
@@ -506,15 +505,6 @@ impl SessionActor {
     /// spawned on demand, so reading a finished agent works exactly like
     /// reading a live one.
     ///
-    /// The root conversation's mailbox, if this session has one resident.
-    ///
-    /// Takes the state because "the session's own agent" is a fact about the
-    /// runner tree now: it is the root runner's agent, and a run has none.
-    fn agent(&self, state: &RunnerSessionState) -> Option<ActorRef<AgentCommand>> {
-        let root = state.record(state.root)?;
-        let agent = root.state.primary_agent()?;
-        self.agents.get(&agent).map(|a| a.actor.clone())
-    }
 
     /// Cancel one agent's run and wait for it to actually be over.
     ///

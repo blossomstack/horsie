@@ -6,7 +6,7 @@
 //! none of them.
 
 use super::CoreCommand;
-use super::{AgentKey, CommandEffect, SessionActor, SessionEvent, SessionState};
+use super::{CommandEffect, SessionActor, SessionEvent, SessionState};
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::title::normalize_session_title;
 use crate::sessions::addressing::SessionInbox;

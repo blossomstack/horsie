@@ -12,9 +12,9 @@
 //! on purpose, because a server event misfiled as a tool one is halted twice.
 
 use super::{
-    AgentKey, CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
+    CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
     SessionEvent, SessionState,
-    context::{SessionAgentKind, SessionContextProvider},
+    context::SessionContextProvider,
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
@@ -23,8 +23,6 @@ use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::RunnerId;
-use crate::sessions::spec::SessionStatus;
-use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;

@@ -46,7 +46,6 @@ use crate::runtime_manager::{NARRATION_BUFFER, RuntimeError};
 use crate::sessions::runners::ids::AgentId;
 use crate::sessions::runners::loading::AgentRole;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use crate::sessions::session_actor::AgentKey;
 use crate::sessions::session_actor::hooks::SessionHookSink;
 use horsie_agentcore::Toolbox;
 use horsie_models::runtime::McpServerFailure;

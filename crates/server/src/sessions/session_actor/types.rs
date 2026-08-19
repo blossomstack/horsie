@@ -17,16 +17,12 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
-    forks::{ForkMode, ForkParent, ForkRoster},
     runners::ids::AgentId,
-    spec::{AgentSettings, SessionSpec, SessionStatus},
-    subagents::{SubAgentForest, SubAgentParent, TreeOwner},
-    workflow::WorkflowRunState,
+    spec::{AgentSettings, SessionStatus},
 };
 use horsie_actor::ReplyTo;
 use horsie_models::hooks::HookRecord;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -465,23 +461,6 @@ pub struct SessionUsageStats {
     /// step. Usage banks at turn end, so a step in flight reads zero — the same
     /// as `session_total`.
     pub agents: HashMap<String, UsageTotal>,
-}
-
-/// Which agent of a session a broadcast belongs to. `Main` is not a `Uuid`
-/// variant because the main agent's journal is keyed by the *session* id — the
-/// two namespaces are deliberately distinct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AgentKey {
-    Main,
-    Sub(Uuid),
-    /// One execution of a workflow step. Its own key, not `Sub`: a step is not
-    /// spawned by an agent, it is chosen by the definition, and it roots a
-    /// subagent tree of its own.
-    Step(Uuid),
-    /// One fork of a conversation. Its own key for the same reason a step's is:
-    /// nothing spawned it expecting a result, and it roots a subagent tree of
-    /// its own.
-    Fork(Uuid),
 }
 
 #[cfg(test)]
