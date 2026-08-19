@@ -147,6 +147,7 @@ impl Runner for State {
             // form, so the two cannot diverge from what a reload would build.
             equipment: self.capabilities.clone(),
             settings: Box::new(self.settings.clone()),
+            agent_type: self.agent_type.clone(),
             first: FirstInput::Text(self.task.clone()),
         }]
     }

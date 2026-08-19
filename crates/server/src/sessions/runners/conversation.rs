@@ -201,6 +201,8 @@ impl Runner for State {
             // form, so the two cannot diverge from what a reload would build.
             equipment: self.capabilities.clone(),
             settings: Box::new(self.settings.clone()),
+            // A conversation is nobody's typed worker.
+            agent_type: None,
             first: match &self.first_message {
                 Some(text) => FirstInput::Text(text.clone()),
                 None => FirstInput::None,

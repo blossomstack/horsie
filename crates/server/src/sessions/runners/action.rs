@@ -37,6 +37,16 @@ pub enum Action {
         agent: AgentId,
         equipment: crate::agent_loop::capabilities::Capabilities,
         settings: Box<AgentSettings>,
+        /// The plugin-declared type a typed worker runs as, or `None` for
+        /// every other kind of agent.
+        ///
+        /// Carried rather than looked up, because the session is the party
+        /// that has to say it: `SubagentStart` and `SubagentStop` carry it to
+        /// the hook matchers, and those fire from the session's own context
+        /// provider. Dropped, every typed worker matched as the generic
+        /// `subagent`, so a hook selecting one type could only select all or
+        /// none — the exact failure the type was added to fix.
+        agent_type: Option<String>,
         first: FirstInput,
     },
     /// Create a child runner.

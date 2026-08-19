@@ -684,9 +684,12 @@ impl SessionActor {
                 agent,
                 equipment,
                 settings,
+                agent_type,
                 first,
             } => match self
-                .start_agent(runner, agent, equipment, *settings, first, state, ctx)
+                .start_agent(
+                    runner, agent, equipment, *settings, agent_type, first, state, ctx,
+                )
                 .await
             {
                 Some(_) => self.start_events(runner, agent, state),
@@ -725,6 +728,7 @@ impl SessionActor {
         agent: AgentId,
         equipment: crate::agent_loop::capabilities::Capabilities,
         settings: crate::sessions::spec::AgentSettings,
+        agent_type: Option<String>,
         first: crate::sessions::runners::action::FirstInput,
         state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
@@ -739,7 +743,7 @@ impl SessionActor {
                 role,
                 settings,
                 equipment,
-                agent_type: None,
+                agent_type,
             },
         )?;
         if let crate::sessions::runners::action::FirstInput::Text(text) = first {

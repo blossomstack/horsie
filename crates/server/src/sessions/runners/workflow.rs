@@ -445,6 +445,8 @@ impl State {
             agent: next.agent,
             equipment,
             settings: Box::new(step.settings.clone()),
+            // A step runs a preset, which is not a plugin agent type.
+            agent_type: None,
             first: FirstInput::Text(next.input.clone()),
         })
     }

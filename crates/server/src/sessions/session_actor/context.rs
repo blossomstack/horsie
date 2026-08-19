@@ -1261,23 +1261,32 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_fires_subagent_start_never_session_start() {
         let (f, session) = stop_harness(vec![]).await;
-        spawn_sub(&session, "research", "dig into it").await;
-        // Waited for on the *last* of the events asserted about, not the first.
-        // `SessionStart` here belongs to the turn the main agent runs after the
-        // subagent reports back, so stopping at `SubagentStart` left the
-        // assertion reading a list the run had not finished writing — and the
-        // count it wanted was the one still to come.
+        // The main agent runs first, which is what puts the one legitimate
+        // `SessionStart` in the list. Waiting for the subagent's *report* to
+        // produce it instead no longer works and should not: a worker's report
+        // reaches the agent that asked for it, and this one was created
+        // directly rather than by anybody calling `spawn_agent`.
+        send(&session, "go").await;
         for _ in 0..200 {
             if f.agent.hook_events().contains(&"SessionStart") {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        spawn_sub(&session, "research", "dig into it").await;
+        // Waited for on the *last* of the subagent's events, not the first:
+        // stopping at `SubagentStart` left the assertion reading a list the
+        // run had not finished writing.
+        for _ in 0..200 {
+            if f.agent.hook_events().contains(&"SubagentStop") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
 
-        // The main agent runs a turn of its own once the subagent reports back,
-        // so one `SessionStart` is correct here. What must never happen is the
-        // subagent contributing a second one — which is what it did before,
-        // because the call was not gated on the agent's kind.
+        // One session start, from the session's own agent. What must never
+        // happen is the subagent contributing a second — which is what it did
+        // before, because the call was not gated on the agent's kind.
         let events = f.agent.hook_events();
         assert_eq!(
             events.iter().filter(|e| **e == "SubagentStart").count(),

@@ -588,14 +588,16 @@ pub(super) async fn wait_for_tree(
     session_id: Uuid,
     pred: impl Fn(&[crate::sessions::session_actor::AgentEntry]) -> bool,
 ) {
+    let mut last = Vec::new();
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(&crate::sessions::runners::reads::agent_roster(&state)) {
+        last = crate::sessions::runners::reads::agent_roster(&state);
+        if pred(&last) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("tree condition not met within 2s");
+    panic!("tree condition not met within 2s; the roster settled at {last:?}");
 }
 
 /// Write a history into a session's log and load it from there.
@@ -811,28 +813,55 @@ impl horsie_actor::Journal for CountingJournal {
     }
 }
 
+/// The **agent**, not the runner. Every caller here goes on to address the
+/// worker — a hook keys on it, the roster lists it, a page is read from it —
+/// and the two id spaces are separate, so handing back the runner's meant each
+/// of those looked up something that does not exist.
 pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
     let runner = crate::sessions::runners::ids::RunnerId::new_v4();
+    let agent = crate::sessions::runners::ids::AgentId::new_v4();
+    let parent = main_agent(session).await;
     session
         .ask(|reply| {
             SessionCommand::StartRunner {
                 id: runner,
                 kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
                 args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
-                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                    agent,
                     label: label.into(),
                     task: task.into(),
                     agent_type: None,
-                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                    // The fixture's model, not an empty slice: a worker
+                    // equipped with `empty_settings()` names no provider, so it
+                    // starts and fails immediately instead of running.
+                    settings: Box::new(agent_settings_fixture()),
                 }),
-                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
+                parent,
                 reply,
             }
         })
         .await
         .unwrap()
         .unwrap();
-    runner.as_uuid()
+    agent.as_uuid()
+}
+
+/// The agent this session's root conversation is.
+///
+/// A real parent, not `Uuid::nil()`: a worker whose parent names nobody has
+/// nobody to report to, so the turn its asker runs when the report lands never
+/// happens — and a test waiting on that turn waits for ever.
+pub(super) async fn main_agent(session: &SessionRef) -> crate::sessions::runners::ids::AgentId {
+    let snapshot = session
+        .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
+        .await
+        .expect("the session answers");
+    let root = snapshot
+        .agents
+        .iter()
+        .find(|a| a.parent.is_none())
+        .expect("a conversation session has a root agent");
+    crate::sessions::runners::ids::AgentId(root.id.parse().expect("an agent id is a uuid"))
 }
 
 /// How each turn in one agent's log ended, in order.
@@ -1477,7 +1506,7 @@ pub(super) async fn spawn_typed(
                     label: "review".into(),
                     task: "look at the diff".into(),
                     agent_type: agent_type.map(str::to_string),
-                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                    settings: Box::new(agent_settings_fixture()),
                 }),
                 parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
                 reply,
