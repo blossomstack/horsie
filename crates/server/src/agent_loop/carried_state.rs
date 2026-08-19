@@ -41,24 +41,6 @@ pub fn render_carried_state(state: &AgentState) -> String {
     // behind `CapSlice` and nothing above it knows what has an id in it.
     sections.extend(state.capabilities.carried_state());
 
-    if !state.timers.is_empty() {
-        let mut block = String::from("Armed timers:");
-        for t in &state.timers {
-            block.push_str(&format!(
-                "\n- {} ({}) fires at {}ms: {}",
-                t.id,
-                t.label,
-                t.fire_at_unix_ms,
-                if t.message.is_empty() {
-                    "(no message)"
-                } else {
-                    t.message.as_str()
-                }
-            ));
-        }
-        sections.push(block);
-    }
-
     if !state.asks.is_empty() {
         let mut block = String::from("Questions you are waiting on an answer to:");
         for a in &state.asks {
@@ -290,15 +272,7 @@ mod tests {
     fn carried_state_names_every_task_timer_and_ask_verbatim() {
         let mut state = AgentState::default();
         with_task_list_capability(&mut state, &["migrate the journal", "delete the importer"]);
-        state.timers.push(TimerRecord {
-            id: crate::agent_loop::timers::TimerId("timer-7".into()),
-            label: "nightly".into(),
-            message: "re-run the sweep".into(),
-            kind: TimerKind::Recurring,
-            interval_secs: 86_400,
-            fire_at_unix_ms: 1_700_000_000_000,
-            fire_count: 2,
-        });
+        with_timers_capability(&mut state, nightly());
         state.asks.push(crate::agent_loop::AskedQuestion {
             tool_call_id: Some("tc-42".into()),
             question: "Which database should this point at?".into(),
@@ -343,6 +317,44 @@ mod tests {
             snapshot: list,
         }));
         state.capabilities = caps;
+    }
+
+    /// Equip an agent with a timer already armed.
+    fn with_timers_capability(state: &mut AgentState, record: TimerRecord) {
+        use crate::agent_loop::capabilities::{CapEvent, timers};
+        state.capabilities.push(timers::TimersCapability::new());
+        state
+            .capabilities
+            .apply(&CapEvent::Timer(timers::Event::Armed { record }));
+    }
+
+    /// The armed timer every carried-state test uses.
+    fn nightly() -> TimerRecord {
+        TimerRecord {
+            id: crate::agent_loop::timers::TimerId("timer-7".into()),
+            label: "nightly".into(),
+            message: "re-run the sweep".into(),
+            kind: TimerKind::Recurring,
+            interval_secs: 86_400,
+            fire_at_unix_ms: 1_700_000_000_000,
+            fire_count: 2,
+        }
+    }
+
+    /// An armed timer is exact and invisible — the only trace of it in the
+    /// history is the `set_timer` call the summariser replaces with prose — so
+    /// the capability holding it has to say so at a compaction boundary.
+    #[test]
+    fn a_timer_armed_by_a_capability_is_carried() {
+        let mut state = AgentState::default();
+        with_timers_capability(&mut state, nightly());
+        let rendered = render_carried_state(&state);
+        for needle in ["timer-7", "nightly", "re-run the sweep", "1700000000000"] {
+            assert!(
+                rendered.contains(needle),
+                "the capability's armed timer lost {needle:?}:\n{rendered}"
+            );
+        }
     }
 
     /// A capability's state is opaque behind `CapSlice`, so a compaction can

@@ -637,6 +637,25 @@ mod tests {
         );
     }
 
+    /// How many timers a folded agent still has armed.
+    ///
+    /// Read back out of the capability that owns them, typed through
+    /// `CapSlice`: an agent's timers are no longer a field on its state, and a
+    /// copy kept for readers is the leak that made them one.
+    fn armed_timers(state: &crate::agent_loop::AgentState) -> usize {
+        state
+            .capabilities
+            .slices()
+            .into_iter()
+            .filter_map(|slice| {
+                let crate::agent_loop::capabilities::CapSlice::Timers(timers) = slice else {
+                    return None;
+                };
+                Some(timers.armed().len())
+            })
+            .sum()
+    }
+
     /// A step that armed a timer and then stopped talking is *parked*, not
     /// stuck: the timer will wake it. Nudging here would push a model that
     /// deliberately suspended itself into submitting a result it does not have
@@ -681,7 +700,7 @@ mod tests {
         let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
         let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
         assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
-        assert_eq!(step.timers.len(), 1, "and the timer is still armed");
+        assert_eq!(armed_timers(&step), 1, "and the timer is still armed");
         let run = crate::sessions::events::fold_session_state(&journal, id)
             .await
             .run
@@ -690,6 +709,68 @@ mod tests {
             run.steps[0].status,
             crate::sessions::workflow::StepStatus::Running,
             "the step is still running, waiting on its timer"
+        );
+    }
+
+    /// The whole round trip, end to end: the capability asks to be woken, the
+    /// actor lets the time pass, and the wake comes back and *starts a turn*.
+    ///
+    /// The last part is the one nothing else covers. A wake reaches the queue
+    /// as an ordinary queued item, and a queued item that nothing reconsiders
+    /// leaves a parked agent parked for ever — a timer that fires and changes
+    /// nothing, which no unit test of the capability could see.
+    #[tokio::test]
+    async fn a_timer_that_fires_wakes_the_step_and_starts_a_turn() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                        horsie_agentcore::ToolCallPart {
+                            id: "t-1".into(),
+                            name: "set_timer".into(),
+                            input: serde_json::json!({
+                                "kind": "one_shot",
+                                "after_secs": 1,
+                                "label": "check back",
+                                "message": "see whether CI went green",
+                            }),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::ToolUse,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+                // Then it stops talking and parks on the timer.
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "I'll pick this up when the timer fires.".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                }),
+            ])
+            // Only the wake can reach this, and reaching it is the point.
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"outcome": "p0"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+        let agent = started.steps[0].agent;
+        // The fire notice reaches the transcript, which only the wake writes —
+        // the `set_timer` call's own arguments are in this log too, so the
+        // agent's message is not on its own evidence that anything fired.
+        let woken = wait_for_agent(&journal, agent, |s| {
+            s.log.iter().any(|e| {
+                serde_json::to_string(&e.body)
+                    .is_ok_and(|json| json.contains("Timer 'check back' fired (fire #1)"))
+            })
+        })
+        .await;
+        assert_eq!(
+            armed_timers(&woken),
+            0,
+            "a one-shot that has fired is not still armed"
         );
     }
 
@@ -740,10 +821,10 @@ mod tests {
             )),
             "the step never armed a timer, so cancelling one proves nothing"
         );
-        assert!(
-            step.timers.is_empty(),
-            "the concluded step still holds {} armed timer(s)",
-            step.timers.len()
+        assert_eq!(
+            armed_timers(&step),
+            0,
+            "the concluded step still holds an armed timer"
         );
     }
 

@@ -294,7 +294,11 @@ impl Capability for ForkCapability {
             // A fork owes nobody a result, so it never holds a conclusion — see
             // the module doc. The agent that branched is free to finish while
             // its branch runs on.
-            Msg::Tool { .. } | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. }
+            | Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded => None,
         }
     }
 

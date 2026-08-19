@@ -497,10 +497,8 @@ pub(super) async fn wait_for_agent(
     }
     let state = crate::sessions::events::fold_agent_state(journal, agent_id).await;
     panic!(
-        "agent never satisfied the predicate: parked={} timers={} nudges={}",
-        state.parked,
-        state.timers.len(),
-        state.nudges
+        "agent never satisfied the predicate: parked={} nudges={}",
+        state.parked, state.nudges
     );
 }
 

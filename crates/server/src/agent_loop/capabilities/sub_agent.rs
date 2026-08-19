@@ -561,7 +561,12 @@ impl Capability for SubAgentCapability {
                     note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
                 }))
             }
-            Msg::Tool { .. } | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. }
+            | Msg::Command(_)
+            | Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded => None,
         }
     }
 

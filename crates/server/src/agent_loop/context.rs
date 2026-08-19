@@ -36,7 +36,8 @@ pub const INSPECT_WORKSPACE_TOOL: &str = "inspect_workspace";
 /// One question an agent parked on, and the call that asked it.
 ///
 /// Serializable because an agent folds its own pending questions into state:
-/// what it is waiting on is durable agent state, exactly like its timers.
+/// what it is waiting on is durable agent state, held by the capability that
+/// is waiting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskedQuestion {
     /// `None` only for a pre-#62 journal, where the call id was not recorded.

@@ -374,6 +374,7 @@ fn from_capability(event: &capabilities::CapEvent) -> Vec<Entry> {
         | capabilities::CapEvent::StepResult(_)
         | capabilities::CapEvent::SubAgent(_)
         | capabilities::CapEvent::TaskList(_)
+        | capabilities::CapEvent::Timer(_)
         | capabilities::CapEvent::Title(_)
         | capabilities::CapEvent::Workflow(_) => Vec::new(),
         #[cfg(test)]
@@ -857,6 +858,7 @@ mod tests {
                     | capabilities::CapEvent::StepResult(_)
                     | capabilities::CapEvent::SubAgent(_)
                     | capabilities::CapEvent::TaskList(_)
+                    | capabilities::CapEvent::Timer(_)
                     | capabilities::CapEvent::Title(_)
                     | capabilities::CapEvent::Workflow(_) => true,
                 },

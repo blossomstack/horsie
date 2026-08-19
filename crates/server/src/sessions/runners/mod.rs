@@ -354,8 +354,8 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use crate::agent_loop::capabilities::{
         ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
         mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
-        sub_agent::SubAgentCapability, task_list::TaskListCapability, title::TitleCapability,
-        workflow::WorkflowCapability,
+        sub_agent::SubAgentCapability, task_list::TaskListCapability, timers::TimersCapability,
+        title::TitleCapability, workflow::WorkflowCapability,
     };
     let s = opts.settings;
     let mut caps = Capabilities::default();
@@ -370,10 +370,11 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     // makes nesting uniform rather than a privilege of the main agent.
     caps.push(SubAgentCapability::new(s.clone(), opts.depth));
     caps.push(WorkflowCapability::default());
-    // Unconditional, and it was unconditional before it was a capability: a
-    // task list is a way of working rather than a permission, so every agent
-    // that exists has one.
+    // Unconditional, and both were unconditional before they were
+    // capabilities: a task list and a timer are ways of working rather than
+    // permissions, so every agent that exists has them.
     caps.push(TaskListCapability::new());
+    caps.push(TimersCapability::new());
 
     match kind {
         // A conversation can ask, name itself, and branch.
@@ -709,7 +710,7 @@ mod tests {
     /// Asserted on what is *advertised*, not on what is held: a tool the model
     /// is never shown may as well not exist.
     #[test]
-    fn every_agent_owning_runner_gets_a_task_list() {
+    fn every_agent_owning_runner_gets_a_task_list_and_timers() {
         let s = empty_settings();
         for kind in [
             RunnerKind::Conversation,
@@ -722,6 +723,12 @@ mod tests {
                 names.iter().any(|n| n == crate::agent_loop::TASK_LIST_TOOL),
                 "{kind:?} advertises no task_list: {names:?}"
             );
+            for timer_tool in ["set_timer", "list_timers", "cancel_timer"] {
+                assert!(
+                    names.iter().any(|n| n == timer_tool),
+                    "{kind:?} advertises no {timer_tool}: {names:?}"
+                );
+            }
             // And the open-namespace capability does not swallow the call on
             // its way past, which is what the fixed-name end of the list is for.
             let taken = caps.iter().find_map(|c| {
@@ -732,6 +739,14 @@ mod tests {
                 taken,
                 Some("task_list"),
                 "{kind:?} left task_list unclaimed or misrouted"
+            );
+            let woke = caps
+                .iter()
+                .find_map(|c| c.handle(&tool(&call("set_timer"))).map(|_| c.name()));
+            assert_eq!(
+                woke,
+                Some("timers"),
+                "{kind:?} left set_timer unclaimed or misrouted"
             );
         }
     }

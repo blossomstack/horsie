@@ -115,6 +115,8 @@ impl Capability for TaskListCapability {
             | Msg::Answer(_)
             | Msg::Child(_)
             | Msg::Reply(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded
             | Msg::Loaded => None,
         }
     }

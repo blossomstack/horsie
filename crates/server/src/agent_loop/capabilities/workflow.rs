@@ -392,7 +392,12 @@ impl Capability for WorkflowCapability {
                     note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
                 }))
             }
-            Msg::Tool { .. } | Msg::Command(_) | Msg::Turn(_) | Msg::Answer(_) => None,
+            Msg::Tool { .. }
+            | Msg::Command(_)
+            | Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded => None,
         }
     }
 

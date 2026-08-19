@@ -150,23 +150,6 @@ pub enum AgentDomainEvent {
     RunCancelled {
         at_ms: u64,
     },
-    /// A timer was armed.
-    TimerArmed {
-        record: crate::agent_loop::timers::TimerRecord,
-        at_ms: u64,
-    },
-    /// One or more timers were cancelled.
-    TimerCancelled {
-        ids: Vec<crate::agent_loop::timers::TimerId>,
-        at_ms: u64,
-    },
-    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for a
-    /// recurring timer (so the fold stays pure); `None` removes a one-shot.
-    TimerFired {
-        id: crate::agent_loop::timers::TimerId,
-        next_fire_at_unix_ms: Option<u64>,
-        at_ms: u64,
-    },
     /// The agent parked, awaiting a timer or a subagent still working.
     Parked {
         at_ms: u64,
@@ -265,8 +248,9 @@ pub enum AgentDomainEvent {
     Capability(crate::agent_loop::capabilities::CapEvent),
 }
 
-/// The conversation history reconstructed by folding [`AgentDomainEvent`]s, plus
-/// any timers the agent has armed and whether it is currently parked.
+/// The conversation history reconstructed by folding [`AgentDomainEvent`]s,
+/// plus what the actor itself holds: the queue, the park, and the capabilities
+/// this agent was equipped with.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentState {
@@ -310,9 +294,6 @@ pub struct AgentState {
     /// result.
     #[serde(default)]
     pub asks: Vec<crate::agent_loop::AskedQuestion>,
-    /// Active timers — durable so they re-arm on recovery and back `list`/`cancel`.
-    #[serde(default)]
-    pub timers: Vec<crate::agent_loop::timers::TimerRecord>,
     /// True while the agent has parked itself awaiting a timer (no run in flight).
     #[serde(default)]
     pub parked: bool,
@@ -570,7 +551,6 @@ impl AgentState {
             inbox: Vec::new(),
             asks: Vec::new(),
             nudges: 0,
-            timers: Vec::new(),
             parked: false,
             turn_in_flight: false,
             usage_total: UsageTotal::default(),
@@ -985,23 +965,6 @@ impl AgentState {
             }
             AgentDomainEvent::Equipped { capabilities, .. } => state.capabilities = capabilities,
             AgentDomainEvent::Capability(event) => state.capabilities.apply(&event),
-            AgentDomainEvent::TimerArmed { record, .. } => state.timers.push(record),
-            AgentDomainEvent::TimerCancelled { ids, .. } => {
-                state.timers.retain(|t| !ids.contains(&t.id));
-            }
-            AgentDomainEvent::TimerFired {
-                id,
-                next_fire_at_unix_ms,
-                ..
-            } => match next_fire_at_unix_ms {
-                Some(next) => {
-                    if let Some(t) = state.timers.iter_mut().find(|t| t.id == id) {
-                        t.fire_at_unix_ms = next;
-                        t.fire_count += 1;
-                    }
-                }
-                None => state.timers.retain(|t| t.id != id),
-            },
             AgentDomainEvent::Parked { .. } => {
                 state.parked = true;
                 state.turn_in_flight = false;
@@ -1984,55 +1947,6 @@ mod tests {
         assert_eq!(state.log.len(), before);
     }
 
-    #[test]
-    fn timer_events_fold_into_state() {
-        use crate::agent_loop::timers::{TimerKind, TimerRecord};
-        use std::time::Duration;
-
-        let rec = TimerRecord::arm(
-            "pr".into(),
-            String::new(),
-            TimerKind::Recurring,
-            Duration::from_secs(60),
-            0,
-        );
-        let id = rec.id.clone();
-        let mut state = AgentActor::initial_state();
-
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: rec,
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-
-        // Recurring fire re-arms in place with a carried next fire time and bumped count.
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerFired {
-                at_ms: 0,
-                id: id.clone(),
-                next_fire_at_unix_ms: Some(120_000),
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-        assert_eq!(state.timers[0].fire_count, 1);
-        assert_eq!(state.timers[0].fire_at_unix_ms, 120_000);
-
-        // One-shot fire (None) removes it.
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerFired {
-                at_ms: 0,
-                id,
-                next_fire_at_unix_ms: None,
-            },
-        );
-        assert!(state.timers.is_empty());
-    }
-
     /// The agent document's task list is served over HTTP and drawn by the web
     /// UI, and once the list belongs to a capability the only honest way to
     /// read it is back out of that capability — typed, through `CapSlice`. A
@@ -2237,51 +2151,6 @@ mod tests {
             },
         );
         assert!(!state.parked);
-    }
-
-    #[test]
-    fn cancel_event_removes_selected_timers() {
-        use crate::agent_loop::timers::{TimerKind, TimerRecord};
-        use std::time::Duration;
-        let a = TimerRecord::arm(
-            "a".into(),
-            String::new(),
-            TimerKind::OneShot,
-            Duration::from_secs(1),
-            0,
-        );
-        let b = TimerRecord::arm(
-            "b".into(),
-            String::new(),
-            TimerKind::OneShot,
-            Duration::from_secs(1),
-            0,
-        );
-        let (ia, ib) = (a.id.clone(), b.id.clone());
-        let mut state = AgentActor::initial_state();
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: a,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerArmed {
-                at_ms: 0,
-                record: b,
-            },
-        );
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TimerCancelled {
-                at_ms: 0,
-                ids: vec![ia],
-            },
-        );
-        assert_eq!(state.timers.len(), 1);
-        assert_eq!(state.timers[0].id, ib);
     }
 
     #[test]

@@ -66,11 +66,16 @@ pub(in crate::sessions) async fn fold_agent_state(
     // From the snapshot, not from zero: an agent snapshots at every park, and a
     // snapshot compacts the events behind it — so replaying from 0 answers
     // "nothing ever happened" for exactly the agents a test most wants to read.
+    // From `seq`, not `seq + 1`: a snapshot is recorded at the sequence number
+    // of the first event it does *not* include, which is what the actor's own
+    // recovery replays from. Skipping one past it silently drops exactly one
+    // event after every snapshot — which for a parked agent is the very next
+    // thing that happened to it.
     let (mut state, from) = match journal.latest_snapshot(&pid).await {
         Ok(Some((bytes, seq))) => (
             serde_json::from_slice(&bytes)
                 .unwrap_or_else(|_| crate::agent_loop::AgentActor::initial_state()),
-            seq + 1,
+            seq,
         ),
         _ => (crate::agent_loop::AgentActor::initial_state(), 0),
     };

@@ -150,6 +150,8 @@ impl Capability for StepResultCapability {
             | Msg::Answer(_)
             | Msg::Child(_)
             | Msg::Reply(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded
             | Msg::Loaded => None,
         }
     }

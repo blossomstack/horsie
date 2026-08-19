@@ -12,7 +12,7 @@ use crate::agent_loop::state::{
     AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome,
     coarse_appends_an_entry, coarse_event,
 };
-use crate::agent_loop::toolbox::{CapabilityToolbox, TimerToolbox};
+use crate::agent_loop::toolbox::CapabilityToolbox;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
@@ -133,27 +133,14 @@ pub enum AgentCommand {
     StartPrepared(Box<PreparedStart>),
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
-    /// Arm a timer; replies with the new timer id once recorded.
-    ArmTimer {
-        label: String,
-        message: String,
-        kind: crate::agent_loop::timers::TimerKind,
-        after_secs: u64,
-        reply: ReplyTo<crate::agent_loop::timers::TimerId>,
-    },
-    /// List active timers.
-    ListTimers {
-        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerView>>,
-    },
-    /// Cancel one or all timers; replies with the ids actually removed.
-    CancelTimer {
-        selector: crate::agent_loop::timers::CancelSelector,
-        reply: ReplyTo<Vec<crate::agent_loop::timers::TimerId>>,
-    },
-    /// Internal: a timer's sleep elapsed.
-    TimerFired {
-        id: crate::agent_loop::timers::TimerId,
-    },
+    /// Internal: a sleep a capability asked for with [`Act::Wake`] has elapsed.
+    ///
+    /// Not journaled anywhere, in either direction: the durable fact is
+    /// whatever the capability holds — an armed timer's `fire_at_unix_ms` — and
+    /// a sleep is only ever a consequence of it. A wake for something that has
+    /// since been cancelled is claimed by nobody and dropped, which is why an
+    /// un-cancellable sleep task is harmless.
+    Woke { id: String },
     /// The session answered something a capability asked it for.
     ///
     /// Internal, and arriving on the mailbox rather than being awaited inline:
@@ -617,6 +604,10 @@ impl AgentActor {
                 performed.answer.is_none() && performed.resume.is_empty(),
                 "a turn boundary has no tool call to answer and nothing to resume from"
             );
+            // Nothing asks for a sleep here today, but dropping one silently is
+            // the failure this design cannot afford: a capability that did
+            // would simply never be woken.
+            Self::spawn_wakes(performed.wakes, ctx);
         }
         // The owner no longer learns a turn began by being the thing that began
         // it, so it is told. Before the work, not after: this is what moves a
@@ -892,13 +883,6 @@ impl AgentActor {
                     return;
                 }
             };
-            // Every agent gets the timer control tools, like `task_list`: they
-            // are a way of working, not a permission. They execute by `ask`ing
-            // this actor and are never sent to the sandboxed runtime.
-            let toolbox: Arc<dyn Toolbox> = Arc::new(TimerToolbox {
-                inner: contexts.toolbox,
-                actor: self_ref.clone(),
-            });
             // Outermost, so a capability wins a name against the sandbox — the
             // same order the offer scan uses, read from the other end.
             //
@@ -911,7 +895,7 @@ impl AgentActor {
             // call a capability is later offered carries the list it advertised.
             let facts = Arc::new(contexts.facts);
             let toolbox: Arc<dyn Toolbox> = Arc::new(CapabilityToolbox {
-                inner: toolbox,
+                inner: contexts.toolbox,
                 specs: capabilities.tools(&facts),
                 facts,
                 actor: self_ref.clone(),
@@ -1074,20 +1058,16 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { agent, output })
                             .await;
-                        // Submitting says the work is done, which makes any
-                        // armed timer moot: nothing is left for it to wake.
-                        // Dropping them here rather than calling it a
-                        // contradiction keeps one rule — the agent decides when
-                        // it is finished — and avoids a failure mode the agent
-                        // could not have been warned about at the tool
-                        // boundary, where its own timers are invisible.
-                        let mut events = Vec::new();
-                        if !state.timers.is_empty() {
-                            events.push(AgentDomainEvent::TimerCancelled {
-                                ids: state.timers.iter().map(|t| t.id.clone()).collect(),
-                                at_ms: now_ms(),
-                            });
-                        }
+                        // The agent said its work is done, so whatever any
+                        // capability is holding to wake it later is moot — an
+                        // armed timer above all. Broadcast rather than decided
+                        // here: which of them holds such a thing is not
+                        // something the actor can know, and it is not a turn
+                        // boundary, because a turn ends many times before the
+                        // work does.
+                        let concluded = Self::consult(state, &Msg::Concluded).unwrap_or_default();
+                        Self::spawn_wakes(concluded.wakes, ctx);
+                        let mut events = concluded.events;
                         let mut folded = state.clone();
                         for e in &events {
                             folded = Self::apply_event(folded, e.clone());
@@ -1246,9 +1226,10 @@ impl AgentActor {
     /// message, then with `submit_result` forced, and only then is the step
     /// failed.
     ///
-    /// All three facts are this actor's own: the queue and the timers are in its
-    /// state, and its log carries every subagent lifecycle record the session
-    /// wrote onto it. Nothing here asks the session anything.
+    /// All three facts are this actor's own: the queue is in its state, its
+    /// capabilities answer for the timers and the children, and its log carries
+    /// every subagent lifecycle record the session wrote onto it. Nothing here
+    /// asks the session anything.
     async fn ended_without_result(
         &mut self,
         state: &AgentState,
@@ -1263,20 +1244,17 @@ impl AgentActor {
             return self.persist_maybe_snapshot(drained);
         }
         // Invariant 6: a capability holding something that will wake this agent
-        // — a subagent still owing a report, a run still going — says so here,
-        // and the turn ending is not the agent finishing. Broadcast, because
-        // more than one of them may be holding something, and merged, because
-        // any one of them is enough.
-        let held = Self::consult(state, &Msg::Turn(TurnEvent::Ended))
-            .map(|performed| performed.hold)
-            .unwrap_or_default();
+        // — a subagent still owing a report, a run still going, a timer armed —
+        // says so here, and the turn ending is not the agent finishing.
+        // Broadcast, because more than one of them may be holding something,
+        // and merged, because any one of them is enough.
+        let ended = Self::consult(state, &Msg::Turn(TurnEvent::Ended)).unwrap_or_default();
+        Self::spawn_wakes(ended.wakes, ctx);
+        let held = ended.hold;
         if !held.is_empty() {
             tracing::debug!(?held, "a turn ended with something still owed");
         }
-        if !held.is_empty()
-            || !state.timers.is_empty()
-            || crate::agent_loop::carried_state::has_running_subagents(state)
-        {
+        if !held.is_empty() || crate::agent_loop::carried_state::has_running_subagents(state) {
             parent.deliver(AgentOutcome::Parked { agent }).await;
             let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
             self.events_since_snapshot = 0;
@@ -1376,60 +1354,6 @@ impl AgentActor {
         };
         folded = Self::apply_event(folded, resume.clone());
         events.push(resume);
-        events.extend(self.try_drain(&folded, ctx).await);
-        CommandEffect::persist(events)
-    }
-
-    /// A timer's sleep elapsed. Re-arm a recurring timer, then queue the wake.
-    ///
-    /// Queued rather than run: a wake is one more thing addressed to this agent,
-    /// and it waits in the same place everything else does. That is what makes a
-    /// timer firing mid-run harmless — the run finishes, the boundary drains,
-    /// and no flag has to remember anything.
-    async fn handle_timer_fired(
-        &mut self,
-        id: crate::agent_loop::timers::TimerId,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        let Some(record) = state.timers.iter().find(|t| t.id == id).cloned() else {
-            // Cancelled or already removed — a stale sleep. Ignore.
-            return CommandEffect::none();
-        };
-        let display_count = record.fire_count + 1;
-        let now = now_ms();
-        // Re-arm recurring; remove one-shot.
-        let next_fire_at_unix_ms = match record.kind {
-            crate::agent_loop::timers::TimerKind::Recurring => {
-                let next = now.saturating_add(record.interval_secs.saturating_mul(1000));
-                spawn_timer_sleep(
-                    ctx.self_ref(),
-                    id.clone(),
-                    std::time::Duration::from_secs(record.interval_secs),
-                );
-                Some(next)
-            }
-            crate::agent_loop::timers::TimerKind::OneShot => None,
-        };
-        // Derived from the timer and its fire count, never generated: the fold
-        // must reproduce the same id on replay, which a uuid could not.
-        let received = AgentDomainEvent::Received {
-            item: crate::agent_loop::Incoming::Timer {
-                id: format!("{id}:{display_count}"),
-                message: record.wake_message(display_count),
-            },
-            at_ms: now,
-        };
-        let fired = AgentDomainEvent::TimerFired {
-            id,
-            next_fire_at_unix_ms,
-            at_ms: now,
-        };
-        let mut events = vec![fired, received];
-        let folded = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
         events.extend(self.try_drain(&folded, ctx).await);
         CommandEffect::persist(events)
     }
@@ -1600,63 +1524,16 @@ impl EventSourcedActor for AgentActor {
                 }
                 CommandEffect::none()
             }
-            AgentCommand::ArmTimer {
-                label,
-                message,
-                kind,
-                after_secs,
-                reply,
-            } => {
-                let now = now_ms();
-                let record = crate::agent_loop::timers::TimerRecord::arm(
-                    label,
-                    message,
-                    kind,
-                    std::time::Duration::from_secs(after_secs),
-                    now,
-                );
-                let id = record.id.clone();
-                spawn_timer_sleep(
-                    ctx.self_ref(),
-                    id.clone(),
-                    std::time::Duration::from_secs(after_secs),
-                );
-                let _ = reply.send(id);
-                CommandEffect::persist(vec![AgentDomainEvent::TimerArmed {
-                    record,
-                    at_ms: now_ms(),
-                }])
-            }
-            AgentCommand::ListTimers { reply } => {
-                let now = now_ms();
-                let views = state.timers.iter().map(|t| t.view(now)).collect();
-                let _ = reply.send(views);
-                CommandEffect::none()
-            }
-            AgentCommand::CancelTimer { selector, reply } => {
-                let ids: Vec<crate::agent_loop::timers::TimerId> = match selector {
-                    crate::agent_loop::timers::CancelSelector::All => {
-                        state.timers.iter().map(|t| t.id.clone()).collect()
-                    }
-                    crate::agent_loop::timers::CancelSelector::One(id) => {
-                        if state.timers.iter().any(|t| t.id == id) {
-                            vec![id]
-                        } else {
-                            vec![]
-                        }
-                    }
+            AgentCommand::Woke { id } => {
+                let Some(performed) = Self::consult(state, &Msg::Woke { id: &id }) else {
+                    // A sleep for something that has since been cancelled. The
+                    // sleep task cannot be called back, so the drop happens
+                    // here, and it is ordinary rather than a bug.
+                    tracing::debug!(id, "a wake reached nothing still holding its id");
+                    return CommandEffect::none();
                 };
-                let _ = reply.send(ids.clone());
-                if ids.is_empty() {
-                    CommandEffect::none()
-                } else {
-                    CommandEffect::persist(vec![AgentDomainEvent::TimerCancelled {
-                        ids,
-                        at_ms: now_ms(),
-                    }])
-                }
+                self.finish_consult(performed, state, ctx).await
             }
-            AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
             AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
             AgentCommand::SessionReplied { reply } => {
                 let Some(performed) = Self::consult(state, &Msg::Reply(&reply)) else {
@@ -1703,6 +1580,7 @@ impl EventSourcedActor for AgentActor {
                     );
                 }
                 self.dispatch_asks(performed.asks, ctx);
+                Self::spawn_wakes(performed.wakes, ctx);
                 let concluded = performed.conclusion.is_some();
                 if let Some(output) = performed.conclusion {
                     // Held until the run reports back, which is the moment the
@@ -1909,12 +1787,12 @@ impl EventSourcedActor for AgentActor {
             tracing::error!("a capability journaled something on a load; discarded");
         }
         self.dispatch_asks(reloaded.asks, ctx);
-        // Re-arm every surviving timer with its remaining delay (fires immediately if
-        // already due). Do this whether parked or mid-run, so timers keep firing.
-        let now = now_ms();
-        for t in &state.timers {
-            spawn_timer_sleep(ctx.self_ref(), t.id.clone(), t.remaining(now));
-        }
+        // And start the sleeps they asked for again. A sleep dies with the
+        // process that spawned it, so every armed timer is re-armed here, with
+        // its remaining delay — the same crash window an unanswered request
+        // opens, closed the same way. Whether the agent is parked or mid-run,
+        // so timers keep firing either way.
+        Self::spawn_wakes(reloaded.wakes, ctx);
         // A tool call the dead process was running has no result and never will.
         // Record the repair once, here, where it still belongs at the end of the
         // transcript — recomputing it per turn instead is what let it drift into
@@ -1987,17 +1865,17 @@ fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Spawn a one-shot sleep that tells the actor `TimerFired` after `delay`. The
-/// firing is journaled/handled in the actor; a stale fire (timer since cancelled)
-/// is ignored there, so an un-cancellable sleep task is harmless.
-fn spawn_timer_sleep(
-    self_ref: ActorRef<AgentCommand>,
-    id: crate::agent_loop::timers::TimerId,
-    delay: std::time::Duration,
-) {
+/// Spawn one sleep a capability asked for.
+///
+/// Detached and un-cancellable, which is fine because the wake it sends is
+/// claimed by whoever still holds the id: a capability that has since dropped
+/// it answers `None` and the wake reaches nothing. Nothing is journaled here in
+/// either direction — a wake is re-issued from durable state on a load, not
+/// replayed from a log.
+fn spawn_wake(self_ref: ActorRef<AgentCommand>, wake: Wake) {
     tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        let _ = self_ref.tell(AgentCommand::TimerFired { id }).await;
+        tokio::time::sleep(std::time::Duration::from_secs(wake.after_secs)).await;
+        let _ = self_ref.tell(AgentCommand::Woke { id: wake.id }).await;
     });
 }
 
@@ -2022,6 +1900,16 @@ struct Performed {
     /// Why this turn's end is not the agent finishing, from every capability
     /// holding something. Non-empty parks the agent.
     hold: Vec<String>,
+    /// Sleeps capabilities asked for. Spawned off the mailbox; each one comes
+    /// back as [`AgentCommand::Woke`] with the id its capability minted.
+    wakes: Vec<Wake>,
+}
+
+/// One sleep a capability asked for.
+#[derive(Debug, Clone)]
+struct Wake {
+    id: String,
+    after_secs: u64,
 }
 
 impl AgentActor {
@@ -2070,6 +1958,17 @@ impl AgentActor {
         }
     }
 
+    /// Start the sleeps capabilities asked for, off the mailbox.
+    ///
+    /// The one thing a capability cannot do for itself, and the whole of what
+    /// the actor adds: time passing. Nothing is journaled — the durable fact is
+    /// whatever the capability holds, and a load re-issues the wake from it.
+    fn spawn_wakes(wakes: Vec<Wake>, ctx: &ActorContext<AgentCommand>) {
+        for wake in wakes {
+            spawn_wake(ctx.self_ref(), wake);
+        }
+    }
+
     /// Journal what capabilities decided, send what they asked for, and start
     /// the turn they resumed, if any.
     ///
@@ -2088,6 +1987,7 @@ impl AgentActor {
             conclusion,
             asks,
             hold,
+            wakes,
         } = performed;
         if !hold.is_empty() {
             // Only a turn boundary can be held, and this is not one.
@@ -2103,12 +2003,19 @@ impl AgentActor {
             tracing::error!("a capability concluded outside a turn");
         }
         self.dispatch_asks(asks, ctx);
-        if !resume.is_empty() {
-            // Folded first, so the `Began` broadcast sees whatever these events
-            // closed rather than the state before them.
-            let folded = events
-                .iter()
-                .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+        Self::spawn_wakes(wakes, ctx);
+        // Folded first, so whatever comes next sees what these events closed
+        // rather than the state before them.
+        let folded = events
+            .iter()
+            .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+        if resume.is_empty() {
+            // A capability that queued something has not started anything: an
+            // agent parked on a timer stays parked until the queue is
+            // reconsidered, and nothing else was going to reconsider it. Silent
+            // when it decides against, which is the ordinary case.
+            events.extend(self.try_drain(&folded, ctx).await);
+        } else {
             let turn = crate::agent_loop::resumed_turn(&folded.inbox, resume);
             events.extend(self.begin_turn(turn, &folded, ctx).await);
         }
@@ -2146,6 +2053,9 @@ impl AgentActor {
             Act::Resume { results } => out.resume.extend(results),
             Act::Conclude { output } => out.conclusion = Some(output),
             Act::Hold { note } => out.hold.push(note),
+            // Collected rather than spawned here, for the same reason an ask
+            // is: `perform` is a pure decision, and a `tokio::spawn` is not.
+            Act::Wake { id, after_secs } => out.wakes.push(Wake { id, after_secs }),
             Act::Enqueue { item } => out.events.push(AgentDomainEvent::Received {
                 item,
                 at_ms: now_ms(),
@@ -2185,6 +2095,8 @@ impl AgentActor {
             | Msg::Answer(_)
             | Msg::Child(_)
             | Msg::Reply(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded
             | Msg::Loaded => {
                 tracing::error!(
                     call,

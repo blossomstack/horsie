@@ -64,6 +64,7 @@ pub mod runtime;
 pub mod step_result;
 pub mod sub_agent;
 pub mod task_list;
+pub mod timers;
 pub mod title;
 pub mod workflow;
 
@@ -107,6 +108,21 @@ pub enum Msg<'a> {
     Child(&'a ChildMsg),
     /// The session answered something a capability asked it for.
     Reply(&'a SessionReply),
+    /// A sleep a capability asked for with [`Act::Wake`] has elapsed.
+    ///
+    /// One capability owns each id, because the capability that asked is the
+    /// one that minted it. A capability that does not recognise the id answers
+    /// `None`, and that is how a sleep for a timer that has since been
+    /// cancelled is dropped: the sleep itself cannot be called back.
+    Woke { id: &'a str },
+    /// This agent's work is finished and its result has been delivered.
+    ///
+    /// Not a turn boundary, and the difference is the whole reason it is its
+    /// own arm: a turn ends many times before the work does, and what a
+    /// capability should do at the two is opposite. A timer is armed *so that*
+    /// a turn ending is not the end — and is moot the moment the agent says it
+    /// is done, because nothing is left for it to wake.
+    Concluded,
     /// This agent has finished folding its journal.
     ///
     /// The one message that is not news about something happening: it says the
@@ -158,6 +174,9 @@ impl Msg<'_> {
             Self::Tool { .. } | Self::Command(_) | Self::Child(_) | Self::Reply(_) => {
                 Routing::Offer
             }
+            // And so is a wake: the capability that asked for the sleep minted
+            // the id, so exactly one of them can answer for it.
+            Self::Woke { .. } => Routing::Offer,
             // An answer set is offered too: the capability holding the park is
             // the one that recorded it, and no other can claim it.
             Self::Answer(_) => Routing::Offer,
@@ -167,6 +186,9 @@ impl Msg<'_> {
             // process never got to send, so offering would stop at the first
             // and leave the rest parked for ever.
             Self::Loaded => Routing::Broadcast,
+            // The agent finishing is news for every capability holding
+            // something meant to wake it, not just the first.
+            Self::Concluded => Routing::Broadcast,
         }
     }
 
@@ -180,6 +202,8 @@ impl Msg<'_> {
             Self::Answer(a) => format!("{} answer(s)", a.len()),
             Self::Child(c) => format!("child {}", c.child()),
             Self::Reply(r) => format!("session reply for call {}", r.call()),
+            Self::Woke { id } => format!("wake for {id}"),
+            Self::Concluded => "conclusion".to_string(),
             Self::Loaded => "load".to_string(),
         }
     }
@@ -250,8 +274,10 @@ impl Decision {
 
 /// Something the agent actor should do.
 ///
-/// Five verbs, and a capability never reaches past them. Needing a sixth means
-/// this enum grows deliberately, in a commit that says why.
+/// A short list, and a capability never reaches past it. Growing it is
+/// deliberate, in a commit that says why: [`Self::Wake`] is the last one, and
+/// it was added because timers needed the one thing none of the others could
+/// say — *let this much time pass*.
 #[derive(Debug)]
 pub enum Act {
     /// Answer a tool call with this text and let the run carry on.
@@ -309,6 +335,21 @@ pub enum Act {
     /// green tests, and only a browser would notice. So what a person should
     /// see is said explicitly, in the vocabulary the log already has.
     Record(Box<horsie_agentcore::LifecycleEvent>),
+    /// Wake this agent in `after_secs`, naming the sleep `id`.
+    ///
+    /// The one thing a capability cannot do for itself: everything else here is
+    /// a decision about state it holds, and this is a request for time to pass.
+    /// The actor spawns the sleep and sends [`Msg::Woke`] back with the id.
+    ///
+    /// **Not journaled.** Like [`Self::Ask`], it is re-issued from the
+    /// capability's own durable state on [`Msg::Loaded`] — which is what
+    /// re-arms an armed timer after a restart, with its *remaining* delay. A
+    /// wake in the log would be a second record of a fact the capability
+    /// already holds, and the two could disagree.
+    ///
+    /// The id is minted by the capability, because the capability owns whatever
+    /// the wake is for and has to recognise the id when it comes back.
+    Wake { id: String, after_secs: u64 },
     /// Ask the session for something only it can do.
     ///
     /// The reply comes back as [`Msg::Reply`], which is why every request
@@ -500,6 +541,7 @@ pub enum CapSlice {
     StepResult(step_result::StepResultCapability),
     SubAgent(sub_agent::SubAgentCapability),
     TaskList(task_list::TaskListCapability),
+    Timers(timers::TimersCapability),
     Title(title::TitleCapability),
     Workflow(workflow::WorkflowCapability),
     /// A capability with no behaviour of its own, so the round-trip and
@@ -522,6 +564,7 @@ impl From<CapSlice> for Box<dyn Capability> {
             CapSlice::StepResult(c) => Box::new(c),
             CapSlice::SubAgent(c) => Box::new(c),
             CapSlice::TaskList(c) => Box::new(c),
+            CapSlice::Timers(c) => Box::new(c),
             CapSlice::Title(c) => Box::new(c),
             CapSlice::Workflow(c) => Box::new(c),
             #[cfg(test)]
@@ -545,6 +588,7 @@ pub enum CapEvent {
     StepResult(step_result::Event),
     SubAgent(sub_agent::Event),
     TaskList(task_list::Event),
+    Timer(timers::Event),
     Title(title::Event),
     Workflow(workflow::Event),
     #[cfg(test)]
@@ -817,9 +861,13 @@ pub mod testing {
                         what: format!("turn:{t:?}"),
                     })])
                 }),
-                Msg::Command(_) | Msg::Answer(_) | Msg::Child(_) | Msg::Reply(_) | Msg::Loaded => {
-                    None
-                }
+                Msg::Command(_)
+                | Msg::Answer(_)
+                | Msg::Child(_)
+                | Msg::Reply(_)
+                | Msg::Woke { .. }
+                | Msg::Concluded
+                | Msg::Loaded => None,
             }
         }
 

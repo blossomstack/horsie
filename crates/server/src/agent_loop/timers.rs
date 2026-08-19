@@ -1,9 +1,13 @@
 //! Timer domain types for self-suspending agents.
 //!
+//! The data model and the tool schemas, and nothing else. Which agent holds a
+//! timer, how arming is journaled and how a firing reaches the queue are all
+//! [`crate::agent_loop::capabilities::timers`]'s.
+//!
 //! A [`TimerRecord`] is durable agent state: arming one journals it, and it is
-//! re-armed from the journal on recovery. Time-derived fields (`fire_at_unix_ms`)
-//! are computed once in the actor's command handler and carried in events, never
-//! recomputed during the pure `apply_event` fold.
+//! re-armed from that journal on recovery. Time-derived fields
+//! (`fire_at_unix_ms`) are computed once, in the capability's decision, and
+//! carried on the event — never recomputed during the pure fold.
 
 use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
