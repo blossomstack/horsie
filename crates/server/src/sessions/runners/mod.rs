@@ -27,6 +27,7 @@
 //!    silently differ from what the log says.
 
 pub mod action;
+pub mod birth;
 pub mod conversation;
 pub mod ids;
 pub mod lifecycle_routing;

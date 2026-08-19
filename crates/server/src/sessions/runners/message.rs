@@ -23,7 +23,6 @@
 /// happened.
 pub const STOPPED_ERROR: &str = "stopped before it finished";
 
-
 use super::ids::{AgentId, RunnerId};
 use serde_json::Value;
 
