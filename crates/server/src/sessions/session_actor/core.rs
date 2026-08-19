@@ -189,7 +189,7 @@ impl SessionActor {
     /// Record one lifecycle entry on a named agent, when it is resident.
     pub(super) async fn record_on(
         &mut self,
-        key: AgentKey,
+        key: crate::sessions::runners::ids::AgentId,
         event: horsie_agentcore::LifecycleEvent,
     ) {
         let agent = self.agents.get(&key).cloned();

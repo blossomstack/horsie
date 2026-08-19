@@ -54,7 +54,7 @@ use uuid::Uuid;
 /// ordered against whatever else the session is doing.
 pub(crate) async fn emit_progress(
     session: &SessionRef,
-    key: AgentKey,
+    key: crate::sessions::runners::ids::AgentId,
     stage: &str,
     detail: Option<String>,
 ) {
@@ -78,7 +78,7 @@ pub(crate) async fn emit_progress(
 /// ends when the sink is dropped, which the acquisition does on its way out.
 fn narration_pump(
     session: &SessionRef,
-    key: AgentKey,
+    key: crate::sessions::runners::ids::AgentId,
 ) -> (
     crate::runtime_manager::NarrationSink,
     tokio::task::JoinHandle<()>,

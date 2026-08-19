@@ -957,7 +957,7 @@ impl EventSourcedActor for SessionSupervisor {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
                             .tell(SessionCommand::RetryStep {
-                                index,
+                                index: index as usize,
                                 reply: ReplyTo::from_sender(tx),
                             })
                             .await;

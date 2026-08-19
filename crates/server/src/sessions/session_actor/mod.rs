@@ -1200,7 +1200,7 @@ impl SessionActor {
             let _ = reply.send(Err("this session is not a run".to_string()));
             return CommandEffect::none();
         };
-        match run.retry(index) {
+        match run.retry(u32::try_from(index).unwrap_or(u32::MAX)) {
             Ok(emit) => {
                 let _ = reply.send(Ok(()));
                 let events = self.wrap(root, emit);

@@ -245,7 +245,7 @@ pub enum CoreCommand {
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.
     Progress {
-        key: AgentKey,
+        key: AgentId,
         stage: String,
         detail: Option<String>,
     },
@@ -268,29 +268,11 @@ pub enum CoreCommand {
 /// conversion, and its match is exhaustive, so a variant added to `AgentOutcome`
 /// fails to compile there — which is the right place to decide whether it is a
 /// way a turn ends or another thing to bank.
-pub(super) enum TurnEnd {
-    /// The agent produced its output — structured, or its final text.
-    Concluded { output: Value },
-    /// The agent parked on one or more questions for the user.
-    ///
-    /// Carries none of them: the questions belong to the agent that asked and
-    /// are answered through it, so all this tells the session is that it is now
-    /// `AwaitingInput`.
-    Asked,
-    /// `terminal` means the agent's sandbox is gone and no later message can
-    /// bring it back; anything else is a turn the user can retry.
-    Failed { error: String, terminal: bool },
-    /// The agent parked awaiting its timers, which sessions do not support.
-    Parked,
-    /// The process died inside the turn, and the agent said so at recovery.
-    ///
-    /// The one end that produces nothing — no output, no questions, no error to
-    /// show. Only the main agent's is acted on: a subagent's node and a step's
-    /// log entry are repaired from state the *session* owns, at session load,
-    /// and those agents stay cold long enough that their own report would
-    /// arrive after the repair rather than instead of it.
-    Interrupted,
-}
+/// The one conversion from the agent protocol into the vocabulary a runner
+/// speaks. Its match is exhaustive, so a variant added to `AgentOutcome` fails
+/// to compile here — the right place to decide whether it is a way a turn ends
+/// or another thing to bank.
+pub(super) struct TurnEnd;
 
 impl TurnEnd {
     /// Separate the two things an outcome can be: a turn that ended, or usage to
@@ -299,18 +281,21 @@ impl TurnEnd {
     /// A `Result` rather than an `Option` so the caller cannot reach the routing
     /// path with a non-ending outcome still in hand — the narrowing is total,
     /// and nothing below it needs a case for a variant that never arrives.
-    pub(super) fn split(outcome: AgentOutcome) -> Result<(Uuid, Self), (Uuid, NotAnEnd)> {
+    pub(super) fn split(
+        outcome: AgentOutcome,
+    ) -> Result<(Uuid, crate::sessions::runners::TurnEnd), (Uuid, NotAnEnd)> {
+        use crate::sessions::runners::TurnEnd as End;
         match outcome {
-            AgentOutcome::Concluded { agent, output } => Ok((agent, Self::Concluded { output })),
-            AgentOutcome::Asked { agent, .. } => Ok((agent, Self::Asked)),
-            AgentOutcome::Parked { agent } => Ok((agent, Self::Parked)),
-            AgentOutcome::Interrupted { agent } => Ok((agent, Self::Interrupted)),
+            AgentOutcome::Concluded { agent, output } => Ok((agent, End::Concluded { output })),
+            AgentOutcome::Asked { agent, .. } => Ok((agent, End::Asked)),
+            AgentOutcome::Parked { agent } => Ok((agent, End::Parked)),
+            AgentOutcome::Interrupted { agent } => Ok((agent, End::Interrupted)),
             AgentOutcome::Failed {
                 agent,
                 error,
                 terminal,
                 ..
-            } => Ok((agent, Self::Failed { error, terminal })),
+            } => Ok((agent, End::Failed { error, terminal })),
             AgentOutcome::UsageRecorded { agent, usage_total } => {
                 Err((agent, NotAnEnd::Usage(usage_total)))
             }

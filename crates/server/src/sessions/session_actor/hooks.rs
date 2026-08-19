@@ -568,7 +568,7 @@ impl HookRouting {
                 let live = actor
                     .agents
                     .get(&key)
-                    .filter(|_| state.status == SessionStatus::Running)
+                    .filter(|_| state.status() == crate::sessions::runners::ids::RunnerStatus::Running)
                     .cloned();
                 let Some(agent) = live else {
                     tracing::warn!(
@@ -597,10 +597,7 @@ impl HookRouting {
                     .on_agent_outcome(
                         state,
                         AgentOutcome::Failed {
-                            agent: match key {
-                                AgentKey::Main => actor.id,
-                                AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => id,
-                            },
+                            agent: key.as_uuid(),
                             error: reason,
                             // Not recoverable and not terminal: re-running the same
                             // turn would meet the same hook, but the session is
