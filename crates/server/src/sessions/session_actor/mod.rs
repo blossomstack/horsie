@@ -1061,62 +1061,86 @@ impl SessionActor {
     /// agent sent it. Answering the two non-ending reports first is what lets
     /// each of those three read the outcome as a turn that ended, rather than
     /// re-answering variants that mean the same thing to all of them.
+    /// Hand one agent's ending to the runner that owns it.
+    ///
+    /// Still routed by *identity* rather than by variant — the same `Concluded`
+    /// means "the turn is over", "this step's output picks the next step", or
+    /// "tell the parent its child is done". What has gone is the *probe*: which
+    /// of those it means used to be inferred by trying the run log, then the
+    /// fork roster, then the subagent forest, in an order the code itself
+    /// recorded as load-bearing. It is one lookup now.
     async fn on_agent_outcome(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         outcome: AgentOutcome,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
             // Usage is banked for every agent alike, and always: the tokens
-            // were spent whatever became of the turn that spent them. The main
-            // agent banks under a fixed name because its journal is keyed by
-            // the session id; every other agent banks under its own.
+            // were spent whatever became of the turn that spent them. Keyed by
+            // model rather than by agent, because the per-agent breakdown
+            // belongs to the runner that owns it.
             Err((agent, NotAnEnd::Usage(usage_total))) => {
-                let agent_id = match agent == self.id {
-                    true => MAIN_AGENT_ID.to_string(),
-                    false => agent.to_string(),
-                };
-                return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                    at_ms: now_ms(),
-                    agent_id,
-                    usage_total,
+                let model = crate::sessions::runners::reads::settings_of(state, AgentId(agent))
+                    .map_or_else(String::new, |s| s.model.clone());
+                return CommandEffect::persist(vec![SessionEvent::UsageBanked {
+                    model,
+                    spent: usage_total,
                 }]);
             }
             Err((agent, NotAnEnd::Started)) => {
-                return self.on_agent_started(state, agent).await;
+                return self.on_agent_started(state, AgentId(agent)).await;
             }
             // A summary taken for somebody else. Not this agent's turn ending —
-            // it may still be running — so it is answered here and the routing
-            // below never sees it.
-            Err((_, NotAnEnd::ForkSummary { forks, result })) => {
-                return ForkedAgents::handle(
-                    self,
-                    state,
-                    ForkCommand::Summarised { forks, result },
-                    ctx,
-                )
-                .await;
+            // it may still be running — so the fork capability answers it and
+            // the routing below never sees it.
+            Err((agent, NotAnEnd::ForkSummary { forks, result })) => {
+                return self.on_fork_summary(state, AgentId(agent), forks, result).await;
             }
         };
-        // In a run, an outcome is a step's or one of a step's subagents'.
-        if let Some(run) = state.run.as_ref() {
-            return match run.index_of_agent(who) {
-                Some(index) => self.on_step_outcome(state, index, end, ctx).await,
-                None => self.on_sub_agent_outcome(state, who, end, ctx).await,
-            };
-        }
-        if who == self.id {
-            return self.on_main_outcome(state, end, ctx).await;
-        }
-        // Before the subagent forest, because a fork is not in it: asked last,
-        // every one of a fork's turns would be dropped as an outcome from an
-        // agent nothing recognises.
-        if state.forks.contains(who) {
-            return self.on_fork_outcome(state, who, end, ctx).await;
-        }
-        self.on_sub_agent_outcome(state, who, end, ctx).await
+        let who = AgentId(who);
+        let Some(runner) = state.runner_of(who) else {
+            tracing::warn!(session = %self.id, agent = %who, "an outcome from an agent no runner owns");
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            return CommandEffect::none();
+        };
+        let emit = lifecycle.on_agent_ended(who, &end);
+        let events = self.wrap(runner, emit);
+        self.persist_and_advance(state, events, ctx).await
+    }
+
+    /// A `/summary-n-fork` summary, offered to the capabilities of the agent it
+    /// was taken from.
+    ///
+    /// The forks waiting on it are the fork capability's own business — it
+    /// recorded them when it asked — so this is a plain offer rather than a
+    /// command the session understands.
+    async fn on_fork_summary(
+        &mut self,
+        state: &RunnerSessionState,
+        agent: AgentId,
+        forks: Vec<Uuid>,
+        result: Result<String, String>,
+    ) -> CommandEffect<SessionEvent> {
+        let _ = state;
+        // Not yet routed: `Msg` has no summary arm, so there is nothing for the
+        // fork capability to claim. Loud rather than silent — a dropped summary
+        // leaves every fork that queued into this turn waiting for a seed that
+        // will never come, and a silent `none()` here would read as "handled".
+        tracing::error!(
+            session = %self.id,
+            %agent,
+            forks = forks.len(),
+            ok = result.is_ok(),
+            "a fork summary has nowhere to go: ForkCapability cannot yet be offered one"
+        );
+        CommandEffect::none()
     }
 
     /// One of this session's agents drained its queue into a turn.
