@@ -1026,7 +1026,17 @@ impl AgentState {
             } => {
                 // Wholesale, because this is the agent's first event: anything
                 // already here would be a bug rather than a history to merge.
+                //
+                // With one exception, and it is the one thing a fork must not
+                // take from the conversation it branched from. `scrub_for_fork`
+                // hands over an *empty* capability list by design — a fork is
+                // equipped from its own runner, not from the source — and this
+                // agent has already folded `Equipped` by the time a seed
+                // arrives. Adopting the empty one would leave the fork's first
+                // turn, the one the person is waiting on, with no tools at all.
+                let equipment = state.capabilities.clone();
                 state = *seeded;
+                state.capabilities = equipment;
                 let at_ms = seed.created_at_ms;
                 state.push(at_ms, AgentLogBody::Llm(*seed));
             }
