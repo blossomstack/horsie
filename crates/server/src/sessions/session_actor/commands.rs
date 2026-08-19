@@ -406,7 +406,10 @@ mod tests {
         f: &ActorFixture,
         id: Uuid,
         events: &[SessionEvent],
-    ) -> (crate::sessions::addressing::SessionRef, Arc<dyn horsie_actor::Journal>) {
+    ) -> (
+        crate::sessions::addressing::SessionRef,
+        Arc<dyn horsie_actor::Journal>,
+    ) {
         (
             seed_session(f, id, actor_spec_fixture(), events).await,
             f.journal(),
@@ -669,8 +672,7 @@ mod tests {
     /// that agent's queue and its log — never in the main agent's.
     #[tokio::test]
     async fn a_message_can_name_a_subagent() {
-        let (_f, session, id, _journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, id, "research", "dig").await;
 
         let accepted = session

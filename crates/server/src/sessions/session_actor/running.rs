@@ -233,9 +233,8 @@ mod tests {
     async fn a_completed_run_reports_finished() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
-                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let state = wait_for_state(&journal, id, "the run to finish", |s| {
@@ -256,9 +255,8 @@ mod tests {
     async fn a_run_starts_itself_and_routes_on_its_first_steps_output() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
-                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
 
@@ -492,9 +490,8 @@ mod tests {
     async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
-                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
         wait_for_run(&journal, id, |r| {
@@ -701,9 +698,8 @@ mod tests {
     async fn a_cold_steps_transcript_is_still_readable_after_a_reload() {
         use horsie_agentcore::testkit::{MockProvider, Script};
         let provider = MockProvider::scripted(
-            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
-                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
-            ),
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
         );
         let (f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let run = wait_for_run(&journal, id, |r| {

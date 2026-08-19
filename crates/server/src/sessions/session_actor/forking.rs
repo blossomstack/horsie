@@ -852,8 +852,7 @@ mod tests {
     /// A subagent's conversation is delegated work, not a branch to take.
     #[tokio::test]
     async fn only_a_conversation_can_be_forked() {
-        let (_f, session, id, _journal) =
-            spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let (_f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, id, "research", "dig").await;
 
         let err = fork_via(&session, Some(sub.to_string()), "/fork off you go")

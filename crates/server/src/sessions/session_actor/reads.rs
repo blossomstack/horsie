@@ -360,3 +360,385 @@ fn fork_entry(
         ended_at_ms: 0,
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    //! That a read answers from memory and never from the journal.
+    use super::super::testing::*;
+    use super::super::*;
+    use super::*;
+
+    use crate::sessions::addressing::SessionRef;
+    use horsie_agentcore::LlmProvider;
+
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// A conversation's main agent has no lifecycle of its own, so every one
+    /// of its session's states has to project onto one of an agent's — with no
+    /// catch-all arm. A `_ =>` here is what let a session whose runtime never
+    /// built report a `failed` status beside an `idle` agent.
+    #[test]
+    fn every_session_status_is_a_state_its_main_agent_can_be_in() {
+        for (status, expected) in [
+            (SessionStatus::Provisioning, AgentStatus::Provisioning),
+            (SessionStatus::Idle, AgentStatus::Idle),
+            (SessionStatus::Running, AgentStatus::Running),
+            (SessionStatus::AwaitingInput, AgentStatus::AwaitingInput),
+            (
+                SessionStatus::Failed {
+                    reason: "boom".into(),
+                },
+                AgentStatus::Failed,
+            ),
+            (
+                SessionStatus::ProvisioningFailed {
+                    reason: "no vendor".into(),
+                },
+                AgentStatus::Failed,
+            ),
+            (
+                SessionStatus::Unrecoverable {
+                    reason: "gone".into(),
+                },
+                AgentStatus::Failed,
+            ),
+        ] {
+            let entry = main_entry(&status);
+            assert_eq!(entry.status, expected, "{status:?}");
+            assert_eq!(entry.id, MAIN_AGENT_ID);
+            assert_eq!(
+                entry.error,
+                crate::sessions::spec::status_reason(&status),
+                "an agent and its session must give the same reason: {status:?}"
+            );
+        }
+    }
+
+    /// A conversation lists the agent nothing spawned, so that every agent is
+    /// reachable at one shape.
+    #[tokio::test]
+    async fn a_conversation_lists_its_main_agent_and_its_subagents() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let sub = spawn_sub(&session, id, "research", "dig").await;
+        wait_for_tree(&journal, id, |s| sub_of(s, sub).is_some()).await;
+
+        let agents = roster(&session).await;
+        assert_eq!(agents[0].id, MAIN_AGENT_ID);
+        assert_eq!(agents[0].label, None, "the main agent is not one of many");
+        assert!(
+            agents.iter().any(|a| a.id == sub.to_string()),
+            "a subagent is an agent of its session: {agents:?}"
+        );
+    }
+
+    /// A run has no main agent — it *is* its steps. Reporting one anyway meant
+    /// a finished run answered with an agent that does not exist, permanently
+    /// running, while the session's own status said `Idle` right beside it.
+    #[tokio::test]
+    async fn a_run_lists_its_steps_and_no_main_agent() {
+        let (_f, session, id, journal) = spawn_run_with_provider(BlockingProvider::new()).await;
+        let run = wait_for_run(&journal, id, |r| r.current().is_some()).await;
+
+        let agents = roster(&session).await;
+        assert!(
+            agents.iter().all(|a| a.id != MAIN_AGENT_ID),
+            "a run has no main agent: {agents:?}"
+        );
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].id, run.steps[0].agent.to_string());
+        assert_eq!(agents[0].label.as_deref(), Some(run.steps[0].step.as_str()));
+        assert_eq!(agents[0].status, AgentStatus::Running);
+    }
+
+    /// What became of a step is the run log's answer, and a step that
+    /// concluded says so — through reloads and cold tabs, long after the run
+    /// ended.
+    #[tokio::test]
+    async fn a_concluded_step_reports_that_it_concluded() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let provider = MockProvider::scripted(Script::of([Ok(concludes(
+            serde_json::json!({"outcome": "p0"}),
+        ))]));
+        let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| {
+            r.steps.iter().any(|s| s.status == StepStatus::Concluded)
+        })
+        .await;
+        let agent_id = run.steps[0].agent.to_string();
+
+        let detail = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: Some(agent_id.clone()),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a step is an agent of its run");
+        assert_eq!(detail.entry.id, agent_id);
+        assert_eq!(detail.entry.status, AgentStatus::Completed);
+        assert!(
+            detail.entry.ended_at_ms > 0,
+            "a step that ended is stamped with when"
+        );
+        assert!(
+            detail.output.is_some(),
+            "a concluded step reports what it concluded"
+        );
+        // And the roster agrees, because it is the same projection.
+        assert_eq!(roster(&session).await[0].status, AgentStatus::Completed);
+    }
+
+    /// Opening a workflow step used to show the *start* step's settings. Here
+    /// `plan` runs terra and `code` runs flash, and the code step's document —
+    /// and the subagents it spawns — must report flash, not terra.
+    #[tokio::test]
+    async fn a_workflow_step_and_its_subagents_carry_the_steps_own_settings() {
+        use horsie_agentcore::testkit::{MockProvider, Script};
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.kind = crate::sessions::spec::SessionKind::Workflow {
+            run: Arc::new(two_model_run_spec_fixture("build the fix")),
+        };
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &spec)
+            .await
+            .expect("create");
+        // The plan step concludes and routes to code; code stays in flight on
+        // the blocking provider so it is the current agent while we read it.
+        let plan_provider = MockProvider::scripted(Script::of([Ok(concludes(
+            serde_json::json!({"outcome": "success"}),
+        ))]));
+        let code_gate = BlockingProvider::new();
+        {
+            let mut registry = f.deps.provider_registry.write().unwrap();
+            registry.insert(
+                "gpt-5.6-terra".to_string(),
+                crate::sessions::spec::ModelEntry::provider_only(
+                    plan_provider as Arc<dyn LlmProvider>,
+                ),
+            );
+            registry.insert(
+                "deepseek-v4-flash".to_string(),
+                crate::sessions::spec::ModelEntry::provider_only(code_gate.clone()),
+            );
+        }
+        let journal = f.journal();
+        let session = f.start(id, spec).await;
+
+        let run = wait_for_run(&journal, id, |r| {
+            r.current()
+                .is_some_and(|i| r.get(i).is_some_and(|s| s.step == "code"))
+        })
+        .await;
+        let code_agent = run.current_agent().expect("the code step is in flight");
+
+        // The step's own document reports flash — never the start step's
+        // terra.
+        let detail = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: Some(code_agent.to_string()),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("the code step is an agent of its run");
+        assert_eq!(detail.settings.model, "deepseek-v4-flash");
+        assert_eq!(
+            detail.settings.thinking_effort.as_deref(),
+            Some("high"),
+            "the code step's own effort, not the planner's"
+        );
+        assert_eq!(
+            detail.settings.memory_spaces,
+            vec!["codebase".to_string()],
+            "the code step's own memory spaces"
+        );
+
+        // A subagent spawned under the code step inherits its settings — the
+        // model it runs, and the cap its spawn is counted against.
+        let sub = spawn_sub(&session, code_agent, "helper", "dig").await;
+        wait_for_tree(&journal, id, |s| sub_of(s, sub).is_some()).await;
+        let sub_detail = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: Some(sub.to_string()),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a subagent is an agent of its run");
+        assert_eq!(sub_detail.settings.model, "deepseek-v4-flash");
+        assert_eq!(sub_detail.settings.max_concurrent_subagents, Some(1));
+
+        // And the concurrency cap is the code step's cap, not a session-wide
+        // value: the step's budget of one is already spent.
+        let res = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: AgentId(code_agent),
+                    label: "second".into(),
+                    task: "more".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.unwrap_err(), "1 subagents already active");
+        code_gate.release();
+    }
+
+    /// This session's agents, read the way `GET /api/sessions/:id` reads them.
+    async fn roster(session: &SessionRef) -> Vec<AgentEntry> {
+        session
+            .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
+            .await
+            .unwrap()
+            .agents
+    }
+
+    /// Reading forward and paging backwards return the same entries, in the
+    /// same order, because there is one log and one writer.
+    #[tokio::test]
+    async fn reading_forward_and_paging_back_agree_on_the_log() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
+                    text: "go".into(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_journal_len(&journal, id, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let streamed: Vec<u64> = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::ReadLog {
+                    agent_id: None,
+                    after: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("main agent log")
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        let stored: Vec<u64> = main_history(&session)
+            .await
+            .entries
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert!(!streamed.is_empty(), "the turn must produce entries");
+        assert_eq!(streamed, stored);
+        assert_eq!(
+            streamed,
+            (0..streamed.len() as u64).collect::<Vec<_>>(),
+            "no gaps and no reordering"
+        );
+    }
+
+    /// Reads and streams are served from actor state. The journal is touched
+    /// only while an actor recovers — never to answer a query.
+    #[tokio::test]
+    async fn serving_reads_never_touches_the_journal() {
+        let counting = Arc::new(CountingJournal::new());
+        let journal: Arc<dyn horsie_actor::Journal> = counting.clone();
+        let agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let f = fixture_on(journal.clone(), agent, None).await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
+        );
+        let session = f.start(id, actor_spec_fixture()).await;
+
+        // Drive one turn so both actors are loaded and have history.
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::UserMessage {
+                    agent_id: None,
+                    text: "go".into(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_journal_len(&journal, id, 2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Recovery is allowed to replay; everything after it is not.
+        let after_recovery = counting.replays();
+        assert!(
+            after_recovery > 0,
+            "the counter must actually observe recovery, or this test proves nothing"
+        );
+
+        let _ = main_history(&session).await;
+        let _ = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::ReadLog {
+                    agent_id: None,
+                    after: Some(crate::agent_loop::Cursor {
+                        entry_seq: 0,
+                        delta_seq: 0,
+                    }),
+                    reply,
+                })
+            })
+            .await
+            .unwrap();
+        let _ = session
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::Agent {
+                    agent_id: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap();
+        let _ = session
+            .ask(|reply| SessionCommand::Read(ReadCommand::Snapshot { reply }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting.replays(),
+            after_recovery,
+            "the session document and an agent's must both be served from memory"
+        );
+    }
+}

@@ -490,14 +490,23 @@ mod tests {
 
         // Turn ends: every owner kind renders a boundary; an ask is a park the
         // agent already journaled itself.
-        assert!(renders(ended(main, RecordedEnd::Concluded {
-            output: serde_json::Value::Null
-        })));
+        assert!(renders(ended(
+            main,
+            RecordedEnd::Concluded {
+                output: serde_json::Value::Null
+            }
+        )));
         assert!(renders(ended(fork, RecordedEnd::Stopped)));
-        assert!(renders(ended(sub, RecordedEnd::Failed { error: "e".into() })));
-        assert!(renders(ended(step_agent, RecordedEnd::Concluded {
-            output: serde_json::Value::Null
-        })));
+        assert!(renders(ended(
+            sub,
+            RecordedEnd::Failed { error: "e".into() }
+        )));
+        assert!(renders(ended(
+            step_agent,
+            RecordedEnd::Concluded {
+                output: serde_json::Value::Null
+            }
+        )));
         assert!(!renders(ended(main, RecordedEnd::Asked)));
 
         // Runner facts. Every creation is news to the agent that asked; the
@@ -515,18 +524,31 @@ mod tests {
             RunnerArgs::Workflow { graph: graph() }
         )));
         assert!(renders(step_started(run, step_agent)));
-        assert!(renders(on_runner(run, RunnerEvent::StepCancelled { index: 0 })));
-        assert!(renders(on_runner(run, RunnerEvent::RunFinished {
-            output: serde_json::Value::Null
-        })));
-        assert!(renders(on_runner(run, RunnerEvent::RunFailed { error: "e".into() })));
+        assert!(renders(on_runner(
+            run,
+            RunnerEvent::StepCancelled { index: 0 }
+        )));
+        assert!(renders(on_runner(
+            run,
+            RunnerEvent::RunFinished {
+                output: serde_json::Value::Null
+            }
+        )));
+        assert!(renders(on_runner(
+            run,
+            RunnerEvent::RunFailed { error: "e".into() }
+        )));
         assert!(renders(on_runner(run, RunnerEvent::Cancelled)));
         assert!(!renders(on_runner(sub, RunnerEvent::Reported)));
         assert!(!renders(on_runner(fork, RunnerEvent::ForkSeeded)));
-        assert!(!renders(on_runner(fork, RunnerEvent::ForkSeedFailed {
-            error: "e".into()
-        })));
-        assert!(!renders(on_runner(fork, RunnerEvent::ForkTitled { name: "n".into() })));
+        assert!(!renders(on_runner(
+            fork,
+            RunnerEvent::ForkSeedFailed { error: "e".into() }
+        )));
+        assert!(!renders(on_runner(
+            fork,
+            RunnerEvent::ForkTitled { name: "n".into() }
+        )));
         assert!(!renders(on_runner(fork, RunnerEvent::ForkDeleted)));
     }
 
@@ -588,9 +610,11 @@ mod tests {
     #[test]
     fn a_run_with_no_step_yet_has_nowhere_to_record() {
         let run = Uuid::new_v4();
-        let state = fold(vec![created(run, None, RunnerArgs::Workflow {
-            graph: graph(),
-        })]);
+        let state = fold(vec![created(
+            run,
+            None,
+            RunnerArgs::Workflow { graph: graph() },
+        )]);
         assert!(route(&SessionEvent::ProvisioningStarted { at_ms: 1 }, &state).is_empty());
     }
 
@@ -603,9 +627,12 @@ mod tests {
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
         let spawn = created(child, Some(parent), sub_args("child"));
-        let done = ended(child, RecordedEnd::Concluded {
-            output: "done".into(),
-        });
+        let done = ended(
+            child,
+            RecordedEnd::Concluded {
+                output: "done".into(),
+            },
+        );
         let state = fold(vec![
             created(main, None, RunnerArgs::Main),
             created(parent, Some(main), sub_args("lead")),
@@ -631,9 +658,12 @@ mod tests {
         let run = Uuid::new_v4();
         let agent = Uuid::new_v4();
         let started = step_started(run, agent);
-        let concluded = ended(agent, RecordedEnd::Concluded {
-            output: serde_json::Value::Null,
-        });
+        let concluded = ended(
+            agent,
+            RecordedEnd::Concluded {
+                output: serde_json::Value::Null,
+            },
+        );
         let state = fold(vec![
             created(run, None, RunnerArgs::Workflow { graph: graph() }),
             started.clone(),
@@ -739,9 +769,12 @@ mod tests {
             created(fork, Some(main), fork_args()),
         ]);
         let entries = route(
-            &ended(fork, RecordedEnd::Failed {
-                error: "the provider said no".into(),
-            }),
+            &ended(
+                fork,
+                RecordedEnd::Failed {
+                    error: "the provider said no".into(),
+                },
+            ),
             &state,
         );
         assert_eq!(entries.len(), 1);
@@ -790,9 +823,12 @@ mod tests {
     fn a_finished_subagent_is_recorded_on_its_parent_and_on_itself() {
         let main = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let done = ended(child, RecordedEnd::Concluded {
-            output: "done".into(),
-        });
+        let done = ended(
+            child,
+            RecordedEnd::Concluded {
+                output: "done".into(),
+            },
+        );
         let state = fold(vec![
             created(main, None, RunnerArgs::Main),
             created(child, Some(main), sub_args("helper")),

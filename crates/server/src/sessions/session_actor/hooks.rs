@@ -502,9 +502,9 @@ mod tests {
     //! What a `Stop` hook can do to a turn, and what a halt means.
     use super::super::testing::*;
     use super::super::*;
+    use super::*;
     use crate::sessions::addressing::SessionRef;
     use crate::sessions::spec::SessionStatus;
-    use super::*;
 
     /// A blocking `Stop` means *blocked from stopping*: the turn does not
     /// conclude, and the reason becomes the input to another run. The opposite
