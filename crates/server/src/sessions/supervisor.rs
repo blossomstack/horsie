@@ -1931,7 +1931,7 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                &[serde_json::to_vec(&SessionEvent::Renamed { name: "asked".into() }).unwrap()],
                 at,
             )
             .await

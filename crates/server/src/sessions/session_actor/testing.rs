@@ -1401,7 +1401,8 @@ pub(super) fn catalog_provider(
             None,
         ),
         settings: agent_settings_fixture(),
-        kind: TestKind::Main,
+        role: TestKind::Main.role(),
+        agent: TestKind::Main.agent(),
         agent_type: None,
         plugins: Vec::new(),
     }
@@ -1461,10 +1462,11 @@ pub(super) async fn spawn_typed(
     session: &SessionRef,
     agent_type: Option<&str>,
 ) -> Result<Uuid, String> {
+    let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     session
         .ask(|reply| {
             SessionCommand::StartRunner {
-                id: crate::sessions::runners::ids::RunnerId::new_v4(),
+                id: runner,
                 kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
                 args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
                     agent: crate::sessions::runners::ids::AgentId::new_v4(),
@@ -1479,6 +1481,7 @@ pub(super) async fn spawn_typed(
         })
         .await
         .unwrap()
+        .map(|()| runner.as_uuid())
 }
 
 /// A provider for one subagent of `agent_harness`'s session, optionally

@@ -673,7 +673,7 @@ mod tests {
             matches!(first, SessionReply::Done { .. }),
             "the first ask must create the child: {first:?}"
         );
-        wait_for_tree(&journal, id, |t| t.node(worker.as_uuid()).is_some()).await;
+        wait_for_tree(&journal, id, |rows| rows.iter().any(|r| r.id == worker.to_string())).await;
 
         let second = parent.request(request).await;
         assert!(
@@ -697,7 +697,12 @@ mod tests {
             "the repeat spawned a second worker, so a crash doubles the work"
         );
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert_eq!(state.subagents.ids(), vec![worker.as_uuid()]);
+        let workers: Vec<String> = crate::sessions::runners::reads::agent_roster(&state)
+            .into_iter()
+            .filter(|r| r.label.is_some())
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(workers, vec![worker.to_string()]);
     }
 
     /// A blocking `Stop` means *blocked from stopping*: the turn does not
@@ -907,8 +912,8 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.iter().find(|r| r.id == sub.to_string())
+                .is_some_and(|r| r.status == crate::sessions::session_actor::AgentStatus::Running)
         })
         .await;
 

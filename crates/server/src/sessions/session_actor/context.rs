@@ -880,11 +880,12 @@ mod tests {
             horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );
-        let main = scoped_client(&TestKind::Main, client.clone());
+        let main = scoped_client(TestKind::Main.agent(), TestKind::Main.role(), client.clone());
         assert_eq!(main.agent_id(), "session-id");
 
         let sub_id = Uuid::new_v4();
-        let sub = scoped_client(&TestKind::Sub(sub_id), client);
+        let kind = TestKind::Sub(sub_id);
+        let sub = scoped_client(kind.agent(), kind.role(), client);
         assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
