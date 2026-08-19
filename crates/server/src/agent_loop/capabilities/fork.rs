@@ -1,16 +1,16 @@
 //! `/fork` and `/summary-n-fork`: branching a conversation.
 //!
 //! The one capability with no tool. A fork is asked for by a person typing a
-//! built-in, never by a model calling something, so its [`Command`] is the one
-//! nothing advertises — a tool for it would offer the model a button it has no
+//! built-in, never by a model calling something, so nothing here is
+//! advertised — a tool for it would offer the model a button it has no
 //! business pressing, so [`super::Capability::layer`] hands the toolbox back
 //! untouched for this arm and wraps it in nothing at all.
 //!
-//! It is also the one command with no run waiting on it, which is why
-//! [`CapCommand::Fork`] carries no
-//! [`Answering`](super::Answering). A person typing a built-in is not a
-//! dangling `tool_use`, and the two answers below are keyed by the only stable
-//! names there are rather than by a `tool_use` id.
+//! It is also the one command with no run waiting on it, which is why the
+//! agent's own `Fork` command carries no [`Answering`](super::Answering). A
+//! person typing a built-in is not a dangling `tool_use`, and the two sentences
+//! below are keyed by the only stable names there are rather than by a
+//! `tool_use` id.
 //!
 //! What it creates is a [`RunnerKind::Conversation`], not a kind of its own: a
 //! fork *is* a conversation, one that carries a branch point. That collapses
@@ -18,12 +18,13 @@
 //! titled, status-changed, turn-ended — into the conversation vocabulary every
 //! runner already speaks.
 //!
-//! And it takes no [`ChildOutcome`] at all. A fork owes nobody a result, so it
-//! reaches its creator through `Ready`/`Failed` only; there is no `Fork` arm to
-//! match, which makes "a fork reports a result" unwritable rather than
-//! something a reviewer has to notice. [`ForkCapability::seeding`] is therefore
-//! only ever a seed in flight — the copy or the summary that has to land before
-//! the new conversation can run — and empties when it lands.
+//! And it takes no child outcome at all. A fork owes nobody a result, so it
+//! reaches its creator through `Ready`/`Failed` only; there is no `Fork` arm of
+//! [`ChildOutcome`](crate::sessions::runners::message::ChildOutcome) to match,
+//! which makes "a fork reports a result" unwritable rather than something a
+//! reviewer has to notice. A [`Seed`] is therefore only ever a seed in
+//! flight — the copy or the summary that has to land before the new
+//! conversation can run — and [`ForkState`] empties when it lands.
 //!
 //! For the same reason **a fork never holds this agent's conclusion**. Invariant
 //! 6 is about children a report is owed by, and a fork owes none: the agent that
@@ -31,19 +32,35 @@
 //! whole difference between this capability and [`super::sub_agent`], which
 //! otherwise has the identical shape.
 //!
+//! # What this file decides, and what the actor does with it
+//!
+//! Nothing here returns an event. Each function answers one narrow
+//! question — [`Branched`] for a built-in somebody typed, [`Branch`] for what
+//! the session said about one, [`Seed`] for a fork's seed settling — and the
+//! actor's arm is what turns the answer into an
+//! [`AgentDomainEvent`](crate::agent_loop::state::AgentDomainEvent), journals
+//! it, and only then sends the request. So "the request was recorded before it
+//! went out" is a property of one place rather than of every capability, and a
+//! capability cannot make a fact durable by deciding it.
+//!
 //! # Answering a person who typed a slash command
 //!
-//! [`Act::Answer`] carries a `call`, because everything else that produces text
-//! is a tool result. A built-in has no `tool_use` id, so the two answers this
-//! capability makes use the only stable keys there are: the command's own name
-//! for a refusal made before anything was minted, and the new conversation's
-//! [`RunnerId`] for everything after — which is also the dedupe key the session
-//! recognises a replayed [`SessionRequest::StartRunner`] by.
+//! [`Branched::Told`] and [`Branch::told`] carry a `call`, because everything
+//! else that produces text is a tool result. A built-in has no `tool_use` id, so
+//! the two sentences this capability makes use the only stable keys there are:
+//! the built-in's own name for a refusal made before anything was minted, and
+//! the new conversation's [`RunnerId`] for everything after — which is also the
+//! dedupe key the session recognises a replayed
+//! [`StartRunner`](super::SessionRequest::StartRunner) by.
+//!
+//! Neither sentence reaches anybody today. A typed built-in has no run waiting
+//! on it, so the actor records that it had nothing to answer and drops the
+//! text. The words are said here all the same: what a person is told is this
+//! capability's to decide, and only the delivery is missing.
 
-use super::{Act, CapCommand, Decision, Msg, SessionReply, SessionRequest};
-use crate::agent_loop::state::AgentDomainEvent;
+use super::{SessionReply, SessionRequest};
 use crate::sessions::forks::ForkMode;
-use crate::sessions::runners::action::{Branch, RunnerArgs};
+use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::message::ChildMsg;
 use crate::sessions::spec::AgentSettings;
@@ -55,27 +72,19 @@ pub const FORK_COMMAND: &str = "fork";
 /// The built-in that summarises it first.
 pub const SUMMARY_COMMAND: &str = "summary-n-fork";
 
-/// What a person asked this capability to do.
+/// Which built-in asks for this mode.
 ///
-/// The mode is decided by whoever parsed the built-in, so the two names are one
-/// arm here rather than two: what differs between `/fork` and
+/// The mode is decided by whoever parsed the line, so the two names are one
+/// path through this file rather than two: what differs between `/fork` and
 /// `/summary-n-fork` is only how the new conversation is seeded.
-pub struct Command {
-    pub mode: ForkMode,
-    /// The rest of the line: what the new conversation is for.
-    pub message: String,
-}
-
-impl Command {
-    /// Which built-in this is, for the answer to a `/fork` with nothing to do —
-    /// which is made before anything is minted, so the name is the only key
-    /// there is.
-    #[must_use]
-    fn name(&self) -> &'static str {
-        match self.mode {
-            ForkMode::Copy => FORK_COMMAND,
-            ForkMode::Summary => SUMMARY_COMMAND,
-        }
+///
+/// The name is the only stable key a refusal made before anything is minted can
+/// be answered by.
+#[must_use]
+pub(crate) fn built_in(mode: ForkMode) -> &'static str {
+    match mode {
+        ForkMode::Copy => FORK_COMMAND,
+        ForkMode::Summary => SUMMARY_COMMAND,
     }
 }
 
@@ -84,9 +93,9 @@ impl Command {
 pub struct ForkCapability {
     /// The agent this belongs to, and so the log a branch is cut from.
     ///
-    /// Held rather than derived because [`Branch`] names it and a capability is
-    /// handed no caller: the message that reaches `handle` says what was typed,
-    /// never who by.
+    /// Held rather than derived because the branch point names it and a
+    /// capability is handed no caller: what reaches [`Self::branched`] says what
+    /// was typed, never who by.
     pub agent: AgentId,
     /// What a fork inherits. Fixed when this agent was equipped, so two forks
     /// of one conversation cannot end up equipped differently.
@@ -104,7 +113,7 @@ pub struct ForkState {
     /// carries.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
-    /// an intent [`Msg::Loaded`] asks about again, naming the same
+    /// an intent [`ForkCapability::reloaded`] asks about again, naming the same
     /// conversation.
     #[serde(default)]
     requested: BTreeMap<String, Pending>,
@@ -145,8 +154,8 @@ impl ForkState {
 /// What this state holds, for the tests that assert on it.
 ///
 /// `#[cfg(test)]` because nothing in production reads it: the decisions that
-/// need it are in this file and take `&self`. An accessor kept for a caller
-/// that does not exist is how a private field stops being private.
+/// need it are in this file and take it by reference. An accessor kept for a
+/// caller that does not exist is how a private field stops being private.
 impl ForkState {
     /// The branches the session has not answered yet.
     #[must_use]
@@ -178,7 +187,17 @@ pub struct Pending {
     pub mode: ForkMode,
 }
 
-/// What this capability records.
+/// What a typed `/fork` came to.
+#[derive(Debug)]
+pub(crate) enum Branched {
+    /// A fork with nothing to do. Keyed by the built-in's own name, because
+    /// nothing is minted yet.
+    Told { call: String, reason: String },
+    /// Journal the request and put it to the session.
+    Ask { call: String, pending: Pending },
+}
+
+/// What this capability decides.
 impl ForkCapability {
     #[must_use]
     pub fn new(agent: AgentId, settings: AgentSettings) -> Self {
@@ -186,20 +205,21 @@ impl ForkCapability {
     }
 
     /// Somebody typed a built-in.
-    fn commanded(&self, c: &Command) -> Decision {
-        let message = c.message.trim();
+    #[must_use]
+    pub(crate) fn branched(&self, mode: ForkMode, message: &str) -> Branched {
+        let message = message.trim();
         // A fork with nothing to do is the one refusal this capability makes on
         // its own: it would branch a whole conversation and then sit idle, and
         // the person would have to notice that themselves. Nothing is minted
         // yet, so the built-in's own name is what the answer is keyed by.
         if message.is_empty() {
-            return Decision::reply(
-                &format!("/{}", c.name()),
-                format!(
+            return Branched::Told {
+                call: format!("/{}", built_in(mode)),
+                reason: format!(
                     "/{} needs a message saying what the new conversation should do",
-                    c.name()
+                    built_in(mode)
                 ),
-            );
+            };
         }
         // The fork's agent is minted here, beside the runner id, because a fork
         // has to be addressable before its agent exists: the answer to `/fork`
@@ -211,14 +231,12 @@ impl ForkCapability {
             fork: RunnerId::new_v4(),
             agent: AgentId::new_v4(),
             message: message.to_string(),
-            mode: c.mode,
+            mode,
         };
-        let call = pending.fork.to_string();
-        Decision::record(vec![AgentDomainEvent::ForkRequested {
-            call: call.clone(),
-            pending: pending.clone(),
-        }])
-        .then(Act::Ask(self.ask(&call, &pending)))
+        Branched::Ask {
+            call: pending.fork.to_string(),
+            pending,
+        }
     }
 
     /// The request a [`Pending`] names.
@@ -227,14 +245,15 @@ impl ForkCapability {
     /// because the second has to send exactly what the first sent. Built from
     /// the journaled request plus this capability's own config, so nothing in
     /// it is minted twice.
-    fn ask(&self, call: &str, pending: &Pending) -> SessionRequest {
+    #[must_use]
+    pub(crate) fn request(&self, call: &str, pending: &Pending) -> SessionRequest {
         SessionRequest::StartRunner {
             call: call.to_string(),
             id: pending.fork,
             kind: RunnerKind::Conversation,
             args: Box::new(RunnerArgs::Conversation {
                 agent: pending.agent,
-                seed: Some(Branch {
+                seed: Some(crate::sessions::runners::action::Branch {
                     source: self.agent,
                     // Zero, not a guess: the branch point is wherever this
                     // agent's log actually ends when the session cuts it, and
@@ -249,78 +268,113 @@ impl ForkCapability {
         }
     }
 
-    /// Everything asked for and never answered, asked again.
+    /// Everything asked for and never answered, asked again. Empty when there
+    /// is nothing outstanding.
     ///
-    /// A `Requested` still in the fold is a request the dead process may never
-    /// have sent, and the person who typed `/fork` was never told anything.
-    /// Re-asked with the ids already recorded, so the session can tell a repeat
-    /// from a second branch.
+    /// A request still in the fold is one the dead process may never have sent,
+    /// and the person who typed `/fork` was never told anything. Re-asked with
+    /// the ids already recorded, so the session can tell a repeat from a second
+    /// branch.
     ///
-    /// Nothing is journaled: the [`AgentDomainEvent::ForkRequested`] this reads
-    /// is still the only fact, and a second copy would say a second fork was
-    /// wanted.
-    fn reloaded(&self, state: &ForkState) -> Option<Decision> {
-        if state.requested.is_empty() {
-            return None;
+    /// Requests and nothing else, so there is nothing to journal here: the
+    /// `ForkRequested` this reads is still the only fact, and a second copy
+    /// would say a second fork was wanted.
+    #[must_use]
+    pub(crate) fn reloaded(&self, state: &ForkState) -> Vec<SessionRequest> {
+        state
+            .requested
+            .iter()
+            .map(|(call, pending)| self.request(call, pending))
+            .collect()
+    }
+}
+
+/// What the session said about a branch this agent asked for.
+#[derive(Debug)]
+pub(crate) enum Branch {
+    Created { call: String, fork: RunnerId },
+    Dropped { call: String, reason: String },
+}
+
+impl Branch {
+    #[must_use]
+    pub(crate) fn call(&self) -> &str {
+        match self {
+            Self::Created { call, .. } | Self::Dropped { call, .. } => call,
         }
-        Some(
-            state
-                .requested
-                .iter()
-                .fold(Decision::default(), |d, (call, pending)| {
-                    d.then(Act::Ask(self.ask(call, pending)))
-                }),
-        )
     }
 
-    /// The session answered a branch this capability asked for.
-    fn replied(state: &ForkState, reply: &SessionReply) -> Option<Decision> {
-        let fork = state.requested.get(reply.call())?.fork;
-        Some(match reply {
-            SessionReply::Done { call } => {
-                Decision::record(vec![AgentDomainEvent::ForkCreated { call: call.clone() }]).then(
-                    Act::Answer {
-                        call: call.clone(),
-                        text: format!("Forked: {fork}"),
-                    },
-                )
-            }
+    /// What the person who typed the built-in would be told.
+    ///
+    /// "Would": a built-in has no run waiting on it, so the actor has nowhere
+    /// to send this and says so instead. The sentence is this capability's all
+    /// the same — what a branch means to the person who asked for it is not
+    /// something the actor should be inventing when the delivery arrives.
+    #[must_use]
+    pub(crate) fn told(&self) -> String {
+        match self {
+            Self::Created { fork, .. } => format!("Forked: {fork}"),
             // A refusal the person cannot see is a command that never answered,
             // which is the same failure a tool call that never returns is.
-            SessionReply::Refused { call, reason } => {
-                Decision::record(vec![AgentDomainEvent::ForkDropped { call: call.clone() }]).then(
-                    Act::Answer {
-                        call: call.clone(),
-                        text: reason.clone(),
-                    },
-                )
-            }
-        })
-    }
-
-    /// A fork moved.
-    fn child(state: &ForkState, m: &ChildMsg) -> Option<Decision> {
-        match m {
-            // The seed landed; the fork is a conversation like any other, and
-            // its own runner starts its agent.
-            ChildMsg::Ready { child } => state
-                .seeding
-                .contains(child)
-                .then(|| Decision::record(vec![AgentDomainEvent::ForkSeeded { fork: *child }])),
-            // Nothing is delivered: a fork owes nobody a result, so a failed
-            // one is recorded and shown as that fork's own status rather than
-            // sent back to the conversation it branched from.
-            ChildMsg::Failed { child, error } => state.seeding.contains(child).then(|| {
-                Decision::record(vec![AgentDomainEvent::ForkSeedFailed {
-                    fork: *child,
-                    error: error.clone(),
-                }])
-            }),
-            // There is no `ChildOutcome::Fork`, so an outcome addressed here —
-            // even for a fork this capability holds — belongs to whichever
-            // capability created a child that does report.
-            ChildMsg::Outcome { .. } => None,
+            Self::Dropped { reason, .. } => reason.clone(),
         }
+    }
+}
+
+/// The session answered a branch this capability asked for.
+///
+/// `None` when this reply answers something that is not a branch of ours.
+#[must_use]
+pub(crate) fn replied(state: &ForkState, reply: &SessionReply) -> Option<Branch> {
+    let fork = state.requested.get(reply.call())?.fork;
+    Some(match reply {
+        SessionReply::Done { call } => Branch::Created {
+            call: call.clone(),
+            fork,
+        },
+        SessionReply::Refused { call, reason } => Branch::Dropped {
+            call: call.clone(),
+            reason: reason.clone(),
+        },
+    })
+}
+
+/// A fork's seed settled.
+#[derive(Debug)]
+pub enum Seed {
+    Landed { fork: RunnerId },
+    Failed { fork: RunnerId, error: String },
+}
+
+/// A fork moved.
+///
+/// `None` for anything this capability is not holding a seed for.
+#[must_use]
+///
+/// **No production sender reaches this yet.** The runners redesign routes a
+/// child's movement through `sessions::runners::message`, which nothing
+/// forwards to an agent so far, so only tests call this. Kept and kept public
+/// rather than deleted: the behaviour is the settled answer for when that
+/// forwarding lands, and deleting it would have to be re-derived.
+pub fn child(state: &ForkState, m: &ChildMsg) -> Option<Seed> {
+    match m {
+        // The seed landed; the fork is a conversation like any other, and its
+        // own runner starts its agent.
+        ChildMsg::Ready { child } => state
+            .seeding
+            .contains(child)
+            .then_some(Seed::Landed { fork: *child }),
+        // Nothing is delivered: a fork owes nobody a result, so a failed one is
+        // recorded and shown as that fork's own status rather than sent back to
+        // the conversation it branched from.
+        ChildMsg::Failed { child, error } => state.seeding.contains(child).then(|| Seed::Failed {
+            fork: *child,
+            error: error.clone(),
+        }),
+        // There is no `ChildOutcome::Fork`, so an outcome addressed here — even
+        // for a fork this capability holds — belongs to whichever capability
+        // created a child that does report.
+        ChildMsg::Outcome { .. } => None,
     }
 }
 
@@ -345,94 +399,85 @@ impl ForkCapability {
     // [`super::title::TitleCapability`] — the only capability whose presence
     // means "this agent is a fork", and the one that owns the tool the
     // paragraph tells it to call.
-
-    pub fn command(&self, _state: &ForkState, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::Fork(cmd) = cmd else {
-            return None;
-        };
-        Some(self.commanded(cmd))
-    }
-
-    pub fn handle(&self, state: &ForkState, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Reply(reply) => Self::replied(state, reply),
-            Msg::Child(m) => Self::child(state, m),
-            // The crash window: a branch journaled and never answered is
-            // re-asked with the ids the log already holds.
-            Msg::Loaded => self.reloaded(state),
-            // A fork owes nobody a result, so it never holds a conclusion — see
-            // the module doc. The agent that branched is free to finish while
-            // its branch runs on.
-            Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::TurnProposed => None,
-        }
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{
-        Equipped, advertised_by, facts, settings, someone_elses,
-    };
-    use crate::agent_loop::capabilities::{Capability, TurnEvent};
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts, settings};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
+    use crate::agent_loop::state::AgentDomainEvent;
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome};
 
-    /// A conversation that can branch, with nothing in flight.
-    fn cap() -> Equipped {
-        Equipped::with(Capability::Fork(ForkCapability::new(
-            AgentId::new_v4(),
-            settings(),
-        )))
+    /// A conversation that can branch.
+    fn cap() -> ForkCapability {
+        ForkCapability::new(AgentId::new_v4(), settings())
     }
 
-    /// The agent this conversation's branches are cut from.
-    fn source(c: &Equipped) -> AgentId {
-        let [Capability::Fork(f)] = c.0.capabilities.iter().collect::<Vec<_>>()[..] else {
-            panic!("one fork capability");
+    /// Journal one event, the way the actor's arm does once it is durable.
+    fn folded(fork: ForkState, event: AgentDomainEvent) -> ForkState {
+        crate::agent_loop::AgentState {
+            fork,
+            ..Default::default()
+        }
+        .apply(event)
+        .fork
+    }
+
+    /// The pair the actor holds: what this agent may do, and what it has
+    /// folded. A capability decides from state it does not own, so the journal
+    /// tests have to round-trip both halves together.
+    fn holding(c: ForkCapability, fork: ForkState) -> crate::agent_loop::AgentState {
+        crate::agent_loop::AgentState {
+            capabilities: Capabilities::new(vec![Capability::Fork(c)]),
+            fork,
+            ..Default::default()
+        }
+    }
+
+    /// The same, read back the way a new process reads it off the journal.
+    fn reload(state: &crate::agent_loop::AgentState) -> (ForkCapability, ForkState) {
+        let written = serde_json::to_string(state).expect("write");
+        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let c = {
+            let [Capability::Fork(c)] = back.capabilities.iter().collect::<Vec<_>>()[..] else {
+                panic!("the journal changed which capability this is");
+            };
+            c.clone()
         };
-        f.agent
-    }
-
-    /// The forks whose seed has not landed.
-    fn seeding(c: &Equipped) -> Vec<RunnerId> {
-        c.0.fork.seeding().iter().copied().collect()
-    }
-
-    /// The branches the session has not answered.
-    fn requested(c: &Equipped) -> &BTreeMap<String, Pending> {
-        c.0.fork.pending()
-    }
-
-    /// Type the built-in, the way whoever parsed the line would hand it over.
-    fn typed(c: &Equipped, mode: ForkMode, message: &str) -> Decision {
-        c.command(&CapCommand::Fork(Command {
-            mode,
-            message: message.into(),
-        }))
-        .expect("mine")
+        (c, back.fork)
     }
 
     /// Branch, and let the session say yes — the only way there is to a seed in
     /// flight.
-    fn forked(c: &mut Equipped, mode: ForkMode) -> RunnerId {
-        let d = typed(c, mode, "look into it");
-        c.fold(&d);
-        let [Act::Ask(SessionRequest::StartRunner { id, .. })] = d.acts.as_slice() else {
-            panic!("expected an ask, got {:?}", d.acts);
+    fn forked(c: &ForkCapability, mode: ForkMode) -> (ForkState, RunnerId) {
+        let Branched::Ask { call, pending } = c.branched(mode, "look into it") else {
+            panic!("expected an ask");
         };
-        let fork = *id;
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done {
-                call: fork.to_string(),
-            }))
-            .expect("mine");
-        c.fold(&d);
-        fork
+        let fork = pending.fork;
+        let state = folded(
+            ForkState::default(),
+            AgentDomainEvent::ForkRequested {
+                call: call.clone(),
+                pending,
+            },
+        );
+        let branch = replied(&state, &SessionReply::Done { call }).expect("mine");
+        assert_eq!(
+            branch.told(),
+            format!("Forked: {fork}"),
+            "the person who typed the built-in is told which conversation it became"
+        );
+        (
+            folded(
+                state,
+                AgentDomainEvent::ForkCreated {
+                    call: branch.call().to_string(),
+                },
+            ),
+            fork,
+        )
     }
 
     /// A fork is a conversation with a branch point, and the branch names the
@@ -440,32 +485,32 @@ mod tests {
     /// fork used to read as a fork of something else entirely.
     #[test]
     fn forking_asks_for_a_conversation_branched_from_this_agent() {
-        let mut c = cap();
-        let d = typed(&c, ForkMode::Copy, "  look into the flake  ");
-
-        let [AgentDomainEvent::ForkRequested { call, pending }] = d.events.as_slice() else {
-            panic!("expected one Requested event, got {:?}", d.events);
-        };
-        let fork = &pending.fork;
-        let [
-            Act::Ask(SessionRequest::StartRunner {
-                call: asked,
-                id,
-                kind,
-                args,
-            }),
-        ] = d.acts.as_slice()
+        let c = cap();
+        let Branched::Ask { call, pending } = c.branched(ForkMode::Copy, "  look into the flake  ")
         else {
-            panic!("expected an ask, got {:?}", d.acts);
+            panic!("expected a branch to be asked for");
         };
-        assert_eq!(id, fork, "the log records a fork nothing was asked for");
-        assert_eq!(asked, call);
         assert_eq!(
-            *asked,
-            fork.to_string(),
+            call,
+            pending.fork.to_string(),
             "the dedupe key has to name the fork a replay would re-ask for"
         );
-        assert_eq!(*kind, RunnerKind::Conversation);
+
+        let SessionRequest::StartRunner {
+            call: asked,
+            id,
+            kind,
+            args,
+        } = c.request(&call, &pending)
+        else {
+            panic!("expected a runner to be asked for");
+        };
+        assert_eq!(
+            id, pending.fork,
+            "the log records a fork nothing was asked for"
+        );
+        assert_eq!(asked, call);
+        assert_eq!(kind, RunnerKind::Conversation);
         let RunnerArgs::Conversation {
             agent,
             seed,
@@ -479,7 +524,7 @@ mod tests {
         // to `/fork` names it — and it is its *own* id, not the runner's. Two
         // spaces on purpose: a workflow runner owns many agents, so an equality
         // that held for a fork would be false for a run.
-        assert_ne!(agent.as_uuid(), fork.as_uuid());
+        assert_ne!(agent.as_uuid(), pending.fork.as_uuid());
         assert_eq!(
             *agent, pending.agent,
             "the agent asked for is not the one journaled, so a replay would \
@@ -487,23 +532,35 @@ mod tests {
         );
         assert_eq!(message, "look into the flake");
         let seed = seed.as_ref().expect("a fork has a branch point");
-        assert_eq!(seed.source, source(&c), "the branch names the wrong log");
+        assert_eq!(seed.source, c.agent, "the branch names the wrong log");
         assert_eq!(seed.mode, ForkMode::Copy);
 
         // Nothing is seeding yet: the session has not said the fork exists.
-        let pending = pending.clone();
-        c.fold(&d);
-        assert!(seeding(&c).is_empty());
-        assert_eq!(requested(&c).get(&pending.fork.to_string()), Some(&pending));
+        let state = folded(
+            ForkState::default(),
+            AgentDomainEvent::ForkRequested {
+                call,
+                pending: pending.clone(),
+            },
+        );
+        assert!(state.seeding().is_empty());
+        assert_eq!(
+            state.pending().get(&pending.fork.to_string()),
+            Some(&pending)
+        );
     }
 
     /// The two built-ins differ only in how the new conversation is seeded, so
-    /// one handler serves both and the mode is the whole difference.
+    /// one path serves both and the mode is the whole difference.
     #[test]
     fn summary_n_fork_seeds_with_a_summary() {
-        let d = typed(&cap(), ForkMode::Summary, "carry on elsewhere");
-        let [Act::Ask(SessionRequest::StartRunner { args, .. })] = d.acts.as_slice() else {
-            panic!("expected an ask, got {:?}", d.acts);
+        let c = cap();
+        let Branched::Ask { call, pending } = c.branched(ForkMode::Summary, "carry on elsewhere")
+        else {
+            panic!("expected a branch to be asked for");
+        };
+        let SessionRequest::StartRunner { args, .. } = c.request(&call, &pending) else {
+            panic!("expected a runner to be asked for");
         };
         let RunnerArgs::Conversation { seed, .. } = args.as_ref() else {
             panic!("expected conversation args, got {args:?}");
@@ -515,22 +572,16 @@ mod tests {
     /// nothing to do would branch a conversation and then sit there.
     #[test]
     fn an_empty_message_is_refused_and_journals_nothing() {
-        let d = typed(&cap(), ForkMode::Copy, "   ");
-        assert!(
-            d.events.is_empty(),
-            "a refusal is not a fact about the agent"
-        );
-        let [Act::Answer { call, text }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
+        // `Told` carries no `Pending`, so there is nothing for the actor to
+        // journal and nothing to put to the session: a refusal is not a fact
+        // about the agent, and a refused fork must not reach the session.
+        let Branched::Told { call, reason } = cap().branched(ForkMode::Copy, "   ") else {
+            panic!("expected a refusal, not a branch");
         };
-        assert!(text.contains("/fork"));
+        assert!(reason.contains("/fork"));
         assert_eq!(
             call, "/fork",
             "a built-in has no tool_use id, so its own name is the key"
-        );
-        assert!(
-            !d.acts.iter().any(|a| matches!(a, Act::Ask(_))),
-            "a refused fork must not reach the session"
         );
     }
 
@@ -538,60 +589,67 @@ mod tests {
     /// person who typed the command — otherwise `/fork` answered nothing.
     #[test]
     fn a_refusal_from_the_session_reaches_the_person_and_retracts_the_intent() {
-        let mut c = cap();
-        let d = typed(&c, ForkMode::Copy, "look into it");
-        c.fold(&d);
-        let [Act::Ask(SessionRequest::StartRunner { call, .. })] = d.acts.as_slice() else {
-            panic!("expected an ask, got {:?}", d.acts);
+        let c = cap();
+        let Branched::Ask { call, pending } = c.branched(ForkMode::Copy, "look into it") else {
+            panic!("expected a branch to be asked for");
         };
-        let call = call.clone();
-
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Refused {
+        let state = folded(
+            ForkState::default(),
+            AgentDomainEvent::ForkRequested {
                 call: call.clone(),
-                reason: "this session cannot be forked".into(),
-            }))
-            .expect("the reply answers a request I made");
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
-        };
-        assert_eq!(text, "this session cannot be forked");
+                pending,
+            },
+        );
 
-        c.fold(&d);
-        assert!(requested(&c).is_empty(), "the intent was not retracted");
-        assert!(seeding(&c).is_empty(), "a refused fork is not in flight");
+        let branch = replied(
+            &state,
+            &SessionReply::Refused {
+                call,
+                reason: "this session cannot be forked".into(),
+            },
+        )
+        .expect("the reply answers a request I made");
+        assert_eq!(branch.told(), "this session cannot be forked");
+
+        let state = folded(
+            state,
+            AgentDomainEvent::ForkDropped {
+                call: branch.call().to_string(),
+            },
+        );
+        assert!(state.pending().is_empty(), "the intent was not retracted");
+        assert!(
+            state.seeding().is_empty(),
+            "a refused fork is not in flight"
+        );
     }
 
-    /// **The crash window.** A journal that stops between `Requested` and the
-    /// session's answer is a branch the session may never have heard of, and
-    /// the person who typed `/fork` was told nothing at all. The load asks
+    /// **The crash window.** A journal that stops between `ForkRequested` and
+    /// the session's answer is a branch the session may never have heard of,
+    /// and the person who typed `/fork` was told nothing at all. The load asks
     /// again, with the ids and the message the log already holds.
     #[test]
     fn a_branch_the_session_never_answered_is_asked_again_on_load() {
-        let mut c = cap();
-        let source = source(&c);
-        let d = typed(&c, ForkMode::Copy, "look into it");
-        c.fold(&d);
-        let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
-        else {
-            panic!("expected an ask, got {:?}", d.acts);
+        let c = cap();
+        let source = c.agent;
+        let Branched::Ask { call, pending } = c.branched(ForkMode::Copy, "look into it") else {
+            panic!("expected a branch to be asked for");
         };
-        let (first_call, fork) = (call.clone(), *id);
-        let RunnerArgs::Conversation { agent, .. } = args.as_ref() else {
-            panic!("expected conversation args, got {args:?}");
-        };
-        let branch_agent = *agent;
+        let (first_call, fork, branch_agent) = (call.clone(), pending.fork, pending.agent);
+        let state = folded(
+            ForkState::default(),
+            AgentDomainEvent::ForkRequested { call, pending },
+        );
 
         // The cut: nothing past the request is folded, and what comes back is
         // read off the journal the way a new process reads it.
-        let written = serde_json::to_string(&c.0).expect("write");
-        let reloaded: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let (c, state) = reload(&holding(c, state));
 
-        let d = super::super::broadcast(&reloaded, &Msg::Loaded);
-        assert!(d.events.is_empty(), "a re-ask is not a second branch");
-        let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
-        else {
-            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        // Requests and nothing else: a re-ask is not a second branch, and there
+        // is no event here for one to be recorded as.
+        let asks = c.reloaded(&state);
+        let [SessionRequest::StartRunner { call, id, args, .. }] = asks.as_slice() else {
+            panic!("expected exactly one re-ask, got {asks:?}");
         };
         assert_eq!(*call, first_call, "the answer would reach nobody");
         assert_eq!(*id, fork, "the re-ask names a fork the log never recorded");
@@ -619,10 +677,10 @@ mod tests {
     /// fork whose seed is in flight is not a fork nobody has heard of.
     #[test]
     fn a_branch_the_session_answered_is_not_asked_again() {
-        let mut c = cap();
-        let _ = forked(&mut c, ForkMode::Copy);
+        let c = cap();
+        let (state, _) = forked(&c, ForkMode::Copy);
         assert!(
-            c.handle(&Msg::Loaded).is_none(),
+            c.reloaded(&state).is_empty(),
             "the session already created this fork; asking again duplicates it"
         );
     }
@@ -631,12 +689,15 @@ mod tests {
     /// capability did make it.
     #[test]
     fn a_reply_for_a_request_i_never_made_is_not_mine() {
+        let (state, _) = forked(&cap(), ForkMode::Copy);
         assert!(
-            cap()
-                .handle(&Msg::Reply(&SessionReply::Done {
+            replied(
+                &state,
+                &SessionReply::Done {
                     call: "someone-else".into()
-                }))
-                .is_none()
+                }
+            )
+            .is_none()
         );
     }
 
@@ -645,48 +706,64 @@ mod tests {
     /// would be started twice by anything that re-drives them.
     #[test]
     fn a_seed_that_lands_clears_the_pending_entry() {
-        let mut c = cap();
-        let fork = forked(&mut c, ForkMode::Copy);
-        assert!(seeding(&c).contains(&fork));
+        let c = cap();
+        let (state, fork) = forked(&c, ForkMode::Copy);
+        assert!(state.seeding().contains(&fork));
 
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Ready { child: fork }))
-            .expect("mine");
-        assert!(d.acts.is_empty());
-        c.fold(&d);
-        assert!(seeding(&c).is_empty());
+        let Some(Seed::Landed { fork: landed }) = child(&state, &ChildMsg::Ready { child: fork })
+        else {
+            panic!("expected the seed to have landed");
+        };
+        assert_eq!(landed, fork);
+        let state = folded(state, AgentDomainEvent::ForkSeeded { fork: landed });
+        assert!(state.seeding().is_empty());
     }
 
     /// A seed that never landed is recorded, and nothing is delivered: the
     /// failure is that fork's own status, not a report owed to its source.
     #[test]
     fn a_seed_that_fails_is_recorded_and_delivers_nothing() {
-        let mut c = cap();
-        let fork = forked(&mut c, ForkMode::Copy);
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Failed {
+        let c = cap();
+        let (state, fork) = forked(&c, ForkMode::Copy);
+        let seed = child(
+            &state,
+            &ChildMsg::Failed {
                 child: fork,
                 error: "the copy failed".into(),
-            }))
-            .expect("mine");
-        assert!(d.acts.is_empty());
-        let [AgentDomainEvent::ForkSeedFailed { error, .. }] = d.events.as_slice() else {
-            panic!("expected a seed failure, got {:?}", d.events);
+            },
+        );
+        // Nothing to deliver: a seed says it landed or it failed, and there is
+        // no arm here for a result owed to anybody.
+        let Some(Seed::Failed {
+            fork: failed,
+            error,
+        }) = &seed
+        else {
+            panic!("expected a seed failure, got {seed:?}");
         };
         assert_eq!(error, "the copy failed");
-        c.fold(&d);
-        assert!(seeding(&c).is_empty());
+        let state = folded(
+            state,
+            AgentDomainEvent::ForkSeedFailed {
+                fork: *failed,
+                error: error.clone(),
+            },
+        );
+        assert!(state.seeding().is_empty());
     }
 
     /// A fork this capability did not create is not its business.
     #[test]
     fn a_child_i_did_not_create_is_not_mine() {
+        let (state, _) = forked(&cap(), ForkMode::Copy);
         assert!(
-            cap()
-                .handle(&Msg::Child(&ChildMsg::Ready {
+            child(
+                &state,
+                &ChildMsg::Ready {
                     child: RunnerId::new_v4()
-                }))
-                .is_none()
+                }
+            )
+            .is_none()
         );
     }
 
@@ -695,53 +772,27 @@ mod tests {
     /// belongs to whichever capability created a child that does report.
     #[test]
     fn an_outcome_is_never_a_forks_business() {
-        let mut c = cap();
-        let fork = forked(&mut c, ForkMode::Copy);
+        let (state, fork) = forked(&cap(), ForkMode::Copy);
         assert!(
-            c.handle(&Msg::Child(&ChildMsg::Outcome {
-                child: fork,
-                outcome: ChildOutcome::SubAgent(SubAgentOutcome::Completed {
-                    label: "l".into(),
-                    report: "r".into(),
-                }),
-            }))
+            child(
+                &state,
+                &ChildMsg::Outcome {
+                    child: fork,
+                    outcome: ChildOutcome::SubAgent(SubAgentOutcome::Completed {
+                        label: "l".into(),
+                        report: "r".into(),
+                    }),
+                }
+            )
             .is_none()
         );
-    }
-
-    /// **A fork never holds this agent's conclusion.** Invariant 6 is about
-    /// children a report is owed by, and a fork owes none — so an agent that
-    /// branched is free to finish while its branch runs on. This is the one
-    /// place this capability and `sub_agent` deliberately differ.
-    #[test]
-    fn a_fork_in_flight_does_not_hold_the_conclusion() {
-        let mut c = cap();
-        let _ = forked(&mut c, ForkMode::Copy);
-        assert!(!seeding(&c).is_empty());
-        for boundary in [
-            TurnEvent::Began,
-            TurnEvent::Ended,
-            TurnEvent::Failed,
-            TurnEvent::Cancelled,
-        ] {
-            assert!(
-                c.handle(&Msg::Turn(boundary)).is_none(),
-                "{boundary:?} was claimed by a capability nobody is waiting on"
-            );
-        }
     }
 
     /// It advertises nothing at all: `/fork` is typed, and a tool for it would
     /// let a model branch the conversation it is having.
     #[test]
     fn it_advertises_no_tool() {
-        assert!(
-            advertised_by(
-                &Capability::Fork(ForkCapability::new(AgentId::new_v4(), settings())),
-                &facts()
-            )
-            .is_empty()
-        );
+        assert!(advertised_by(&Capability::Fork(cap()), &facts()).is_empty());
     }
 
     /// A seed in flight is what says a fork exists and cannot run yet, so
@@ -749,32 +800,19 @@ mod tests {
     /// with nobody left to finish it.
     #[test]
     fn a_seed_in_flight_survives_the_journal_round_trip() {
-        let mut c = cap();
-        let fork = forked(&mut c, ForkMode::Copy);
-        let source = source(&c);
+        let c = cap();
+        let source = c.agent;
+        let (state, fork) = forked(&c, ForkMode::Copy);
 
-        let written = serde_json::to_string(&c.0).expect("write");
-        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let (back, state) = reload(&holding(c, state));
         assert_eq!(
-            back.fork.seeding().iter().copied().collect::<Vec<_>>(),
+            state.seeding().iter().copied().collect::<Vec<_>>(),
             vec![fork],
             "a reload that lost the seed in flight leaves the fork provisioning for ever"
         );
-        let [Capability::Fork(back)] = back.capabilities.iter().collect::<Vec<_>>()[..] else {
-            panic!("the journal changed which capability this is");
-        };
         assert_eq!(
             back.agent, source,
             "a reload that forgot whose log this is would branch from nowhere"
         );
-    }
-
-    /// Another capability's command is not this one's, and neither is an
-    /// answer: a fork's park is the session's to end, and there is none.
-    #[test]
-    fn another_message_is_not_mine() {
-        let c = cap();
-        assert!(c.command(&someone_elses()).is_none());
-        assert!(c.handle(&Msg::Answer(&[])).is_none());
     }
 }

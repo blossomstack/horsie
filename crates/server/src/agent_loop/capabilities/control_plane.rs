@@ -22,7 +22,7 @@
 //! swallowing the call. Here the call never becomes a message at all: the layer
 //! answers it before the actor is involved.
 
-use super::{Decision, Msg, SetupError};
+use super::SetupError;
 use crate::agent_loop::capabilities::or_empty;
 use crate::control::toolbox::ControlToolbox;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
@@ -88,12 +88,6 @@ impl ControlPlaneCapability {
         });
         Ok(())
     }
-
-    /// Nothing. The layer answers every `horsie_*` call on the agent's own
-    /// task, so none of them reaches this mailbox — see the module doc.
-    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -101,9 +95,7 @@ impl ControlPlaneCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capability;
-    use crate::agent_loop::capabilities::testing::{
-        advertised_by, equipped, facts, loading, someone_elses, spec,
-    };
+    use crate::agent_loop::capabilities::testing::{advertised_by, equipped, facts, loading, spec};
 
     /// Holding the capability is what equips the tools and the prompt that
     /// tells the agent they exist — a tool nobody was told about is not used.
@@ -157,18 +149,12 @@ mod tests {
     }
 
     /// The whole capability is its layer: it advertises nothing through the
-    /// mailbox and claims nothing. A `horsie_*` name advertised here would be
-    /// dispatched to `handle`, which answers nothing — the model would be left
-    /// waiting on a tool call that never returns.
+    /// mailbox. A `horsie_*` name claimed here would reach the actor as a
+    /// command, and this capability has none — the model would be left waiting
+    /// on a tool call that never returns.
     #[test]
     fn it_claims_nothing_through_the_mailbox() {
         let c = Capability::ControlPlane(ControlPlaneCapability);
         assert!(advertised_by(&c, &facts()).is_empty());
-        assert!(
-            super::super::testing::Equipped::with(c.clone())
-                .command(&someone_elses())
-                .is_none(),
-            "a capability with no commands claimed one"
-        );
     }
 }

@@ -54,9 +54,10 @@ use std::sync::Arc;
 
 /// What a runner decided: events for its own slice, actions for the session.
 ///
-/// The same shape a capability's [`capabilities::Decision`] has, one level up —
-/// deliberately, because "decide, never perform" is one idea and two shapes for
-/// it would read as two.
+/// "Decide, never perform": what to journal and what to ask of somebody else,
+/// with the performing left to the actor that holds the mailbox. A capability
+/// says the same thing one level down, in a type of its own per decision — see
+/// [`crate::agent_loop::capabilities`].
 #[derive(Debug, Default)]
 pub struct Emit {
     pub events: Vec<RunnerEvent>,

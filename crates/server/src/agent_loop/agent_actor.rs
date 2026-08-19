@@ -1,4 +1,4 @@
-use crate::agent_loop::capabilities::{self, Act, Msg, TurnEvent};
+use crate::agent_loop::capabilities::{self, Answering, SessionReply, SessionRequest};
 use crate::agent_loop::context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext,
 };
@@ -18,10 +18,10 @@ use async_trait::async_trait;
 use horsie_actor::{
     ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo,
 };
-use horsie_agentcore::ToolOutcome;
 use horsie_agentcore::{
     AgentEvent, AgentInput, EventSink, EventSinkError, LifecycleEvent, Message, StoppedCall,
 };
+use horsie_agentcore::{ToolCallError, ToolOutcome};
 use horsie_models::now_ms;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -132,13 +132,13 @@ pub enum AgentCommand {
     StartPrepared(Box<PreparedStart>),
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
-    /// Internal: a sleep a capability asked for with [`Act::Wake`] has elapsed.
+    /// Internal: a sleep the timers capability asked for has elapsed.
     ///
     /// Not journaled anywhere, in either direction: the durable fact is
     /// whatever the capability holds — an armed timer's `fire_at_unix_ms` — and
-    /// a sleep is only ever a consequence of it. A wake for something that has
-    /// since been cancelled is claimed by nobody and dropped, which is why an
-    /// un-cancellable sleep task is harmless.
+    /// a sleep is only ever a consequence of it. A wake for a timer that has
+    /// since been cancelled is recognised by nobody and dropped, which is why
+    /// an un-cancellable sleep task is harmless.
     Woke { id: String },
     /// The session answered something a capability asked it for.
     ///
@@ -147,19 +147,85 @@ pub enum AgentCommand {
     /// child cannot block this agent's queue, and the reply is ordered against
     /// everything else this agent does.
     SessionReplied { reply: capabilities::SessionReply },
-    /// Something one of this agent's capabilities was asked to do.
+    // --- What a person or a model asked a capability to do -----------------
+    //
+    // One arm per thing that can be asked, flat, in the vocabulary the feature
+    // uses. They used to arrive wrapped — `Capability(CapCommand::Timers(..))`,
+    // — behind a dispatch mechanism whose whole job was to let a closed set of
+    // capabilities pretend to be open.
+    //
+    // Each is built by the toolbox layer that claimed the name, on the run's
+    // own task, so the decision happens on the mailbox — where the state is —
+    // while the run waits. That is what lets a tool journal something and
+    // *then* answer the model, which no toolbox layer can do on its own.
+    //
+    // **The actor sees no tool names.** Which capability answers is decided by
+    // which arm the layer constructed, so there is nothing to match here and
+    // nothing two capabilities could both claim. Only names a capability
+    // advertised become a command at all; everything else the layer passes
+    // straight to the sandbox without touching the mailbox.
+    //
+    // Never journaled, any of them: each carries an [`Answering`], and a
+    // channel to a caller that has gone away is not a fact about the agent.
+    /// `ask_user`, with the question still in the arguments it arrived in: a
+    /// muted agent refuses without reading them, and reading them is the
+    /// decision rather than the routing.
+    AskUserAsk { input: Value, answering: Answering },
+    /// `set_session_title`, with the name still unread: a name the session
+    /// would refuse is a refusal the model has to see.
+    TitleRename { input: Value, answering: Answering },
+    /// `/fork` or `/summary-n-fork`. The one command a person types rather than
+    /// a model calls, so there is no run waiting and nothing to answer.
     ///
-    /// Built by the toolbox layer that claimed the name, on the run's own task,
-    /// so the capability decides on the mailbox — where its state is — while
-    /// the run waits. That is what lets a tool journal something and *then*
-    /// answer the model, which no toolbox layer can do on its own.
+    /// Which of the two built-ins it was is decided by whoever parsed the line,
+    /// so the mode travels rather than the name: what differs between them is
+    /// only how the new conversation is seeded.
+    ForkBranch {
+        mode: crate::sessions::forks::ForkMode,
+        /// The rest of the line: what the new conversation is for.
+        message: String,
+    },
+    /// `spawn_agent`, with the catalogue the advertisement was built from.
     ///
-    /// **The actor sees no tool names.** Which capability answers is decided by
-    /// which arm the layer constructed, so there is nothing to match here and
-    /// nothing that two capabilities could both claim. Only names a capability
-    /// advertised become a command at all; everything else the layer passes
-    /// straight to the sandbox without touching the mailbox.
-    Capability(capabilities::CapCommand),
+    /// The catalogue rides on the command rather than being held, because it is
+    /// what the *current* library declares and the capability is folded from a
+    /// journal that may be older than the plugins installed since. Captured
+    /// when the layer is composed, so a refusal names exactly the list the
+    /// model was shown.
+    SubAgentSpawn {
+        input: Value,
+        catalog: Option<Arc<crate::agent_loop::AgentCatalog>>,
+        answering: Answering,
+    },
+    /// `subagent_status`. No input: reading back what is running takes no
+    /// arguments.
+    SubAgentStatus { answering: Answering },
+    /// `invoke_workflow`.
+    WorkflowInvoke { input: Value, answering: Answering },
+    /// `workflow_status`. No input: reading back what is in flight takes no
+    /// arguments.
+    WorkflowStatus { answering: Answering },
+    /// `submit_result`, with the result still unvalidated: an undeclared
+    /// outcome is a refusal the step has to see.
+    StepResultSubmit { input: Value, answering: Answering },
+    /// `task_list`, with its action still unparsed: a malformed one is a
+    /// refusal the model has to see.
+    TaskListChange { input: Value, answering: Answering },
+    /// `set_timer`.
+    TimerArm { input: Value, answering: Answering },
+    /// `list_timers`. No input: reading them back takes no arguments.
+    TimerList { answering: Answering },
+    /// `cancel_timer`.
+    TimerCancel { input: Value, answering: Answering },
+    /// The fake capability's tool was called. Its own arm for the same reason
+    /// every other one has one: the composition rules need something to be
+    /// tested against that cannot break when a real capability changes.
+    ///
+    /// It carries the tool's name — which a real capability's command never
+    /// does — because two fakes claiming one name are only tellable apart by
+    /// what they were built with.
+    #[cfg(test)]
+    FakeCall { tool: String, answering: Answering },
     /// Read forward from a cursor: durable entries plus, when the caller has
     /// caught up to the tail, the deltas of the message still being written.
     ///
@@ -241,6 +307,57 @@ pub enum AgentCommand {
     /// preserve may have been changed by a tool call earlier in that same turn.
     /// Reading a copy taken at run start would carry a stale one.
     CarriedState { reply: ReplyTo<String> },
+}
+
+impl AgentCommand {
+    /// Which capability answers this command, when it is a capability's.
+    ///
+    /// The diagnostic when that capability is not equipped: a command that
+    /// could not name its owner would reach the model as a call that never
+    /// returns rather than as an error naming what is missing. Exhaustive, so a
+    /// fourteenth capability cannot be added without saying what its commands
+    /// are called.
+    #[must_use]
+    pub fn capability(&self) -> Option<&'static str> {
+        match self {
+            Self::AskUserAsk { .. } => Some("ask_user"),
+            Self::TitleRename { .. } => Some("title"),
+            Self::ForkBranch { .. } => Some("fork"),
+            Self::SubAgentSpawn { .. } | Self::SubAgentStatus { .. } => Some("sub_agent"),
+            Self::WorkflowInvoke { .. } | Self::WorkflowStatus { .. } => Some("workflow"),
+            Self::StepResultSubmit { .. } => Some("step_result"),
+            Self::TaskListChange { .. } => Some("task_list"),
+            Self::TimerArm { .. } | Self::TimerList { .. } | Self::TimerCancel { .. } => {
+                Some("timers")
+            }
+            #[cfg(test)]
+            Self::FakeCall { .. } => Some("fake"),
+            // Everything the actor asks of itself, or that its owner asks of
+            // it. None of these is a tool call, so none of them has a
+            // capability to name.
+            Self::Enqueue { .. }
+            | Self::Answer { .. }
+            | Self::Drain
+            | Self::Cancel { .. }
+            | Self::PersistProgress { .. }
+            | Self::HooksRan { .. }
+            | Self::StartPrepared(_)
+            | Self::RunFinished(_)
+            | Self::Woke { .. }
+            | Self::SessionReplied { .. }
+            | Self::ReadLog { .. }
+            | Self::PageLog { .. }
+            | Self::RecordLifecycle { .. }
+            | Self::RecordDelta { .. }
+            | Self::LogHead { .. }
+            | Self::ForkSeed { .. }
+            | Self::SeedFrom { .. }
+            | Self::Shutdown
+            | Self::GetUsage { .. }
+            | Self::GetState { .. }
+            | Self::CarriedState { .. } => None,
+        }
+    }
 }
 
 /// Everything a run starts from, gathered on the mailbox.
@@ -595,20 +712,17 @@ impl AgentActor {
             answered: turn.answered.clone(),
             at_ms: now_ms(),
         }];
-        // Every capability hears the boundary, against the state as it stands —
-        // so one holding a park sees it still open and can record that this
-        // turn is what ended it. Whether the park was answered or abandoned was
-        // decided before this, by whoever built the turn.
-        if let Some(performed) = Self::consult(state, &Msg::Turn(TurnEvent::Began)) {
-            events.extend(performed.events);
-            debug_assert!(
-                performed.answer.is_none() && performed.resume.is_empty(),
-                "a turn boundary has no tool call to answer and nothing to resume from"
-            );
-            // Nothing asks for a sleep here today, but dropping one silently is
-            // the failure this design cannot afford: a capability that did
-            // would simply never be woken.
-            Self::spawn_wakes(performed.wakes, ctx);
+        // A park does not survive a turn that begins without it. Asked against
+        // the state as it stands — so a park this turn's own answer already
+        // closed is not recorded as abandoned — and asked at the *beginning*
+        // rather than the end, because a park ends its own turn and clearing it
+        // there would throw away the park it had just made. Whether the park
+        // was answered or abandoned was decided before this, by whoever built
+        // the turn; this only stops holding what is no longer held.
+        if state.capabilities.ask_user().is_some()
+            && capabilities::ask_user::abandons(&state.ask_user)
+        {
+            events.push(AgentDomainEvent::AskUserAbandoned);
         }
         // The owner no longer learns a turn began by being the thing that began
         // it, so it is told. Before the work, not after: this is what moves a
@@ -791,7 +905,7 @@ impl AgentActor {
         // budget capability answers "should this turn compact, and to what
         // target?" on, and the answer has to be in hand by the time the run's
         // task builds its `CompactionBudget`.
-        let compaction_target = Self::propose_turn(&folded, ctx);
+        let compaction_target = Self::propose_turn(&folded);
         self.start_run(
             RunStart {
                 input: agent_input,
@@ -1071,16 +1185,18 @@ impl AgentActor {
                         parent
                             .deliver(AgentOutcome::Concluded { agent, output })
                             .await;
-                        // The agent said its work is done, so whatever any
-                        // capability is holding to wake it later is moot — an
-                        // armed timer above all. Broadcast rather than decided
-                        // here: which of them holds such a thing is not
-                        // something the actor can know, and it is not a turn
-                        // boundary, because a turn ends many times before the
-                        // work does.
-                        let concluded = Self::consult(state, &Msg::Concluded).unwrap_or_default();
-                        Self::spawn_wakes(concluded.wakes, ctx);
-                        let mut events = concluded.events;
+                        // The agent said its work is done, so an armed timer is
+                        // moot: nothing is left for it to wake, and a reload
+                        // would otherwise re-arm it and drop a wake into a
+                        // finished agent's queue. Not a turn boundary — a turn
+                        // ends many times before the work does — which is why
+                        // this is asked here and not where a turn ends.
+                        let mut events: Vec<AgentDomainEvent> = state
+                            .capabilities
+                            .timers()
+                            .and_then(|_| capabilities::timers::concluded(&state.timers))
+                            .map(|ids| vec![AgentDomainEvent::TimersCancelled { ids }])
+                            .unwrap_or_default();
                         let mut folded = state.clone();
                         for e in &events {
                             folded = Self::apply_event(folded, e.clone());
@@ -1258,12 +1374,12 @@ impl AgentActor {
         }
         // Invariant 6: a capability holding something that will wake this agent
         // — a subagent still owing a report, a run still going, a timer armed —
-        // says so here, and the turn ending is not the agent finishing.
-        // Broadcast, because more than one of them may be holding something,
-        // and merged, because any one of them is enough.
-        let ended = Self::consult(state, &Msg::Turn(TurnEvent::Ended)).unwrap_or_default();
-        Self::spawn_wakes(ended.wakes, ctx);
-        let held = ended.hold;
+        // says so here, and the turn ending is not the agent finishing. Each is
+        // asked in turn, because any one of them is enough; asked directly,
+        // because a capability that answered a broadcast with an empty decision
+        // was invisible to this code by construction, and only a verb of its
+        // own could carry the answer back.
+        let held = Self::holding(state);
         if !held.is_empty() {
             tracing::debug!(?held, "a turn ended with something still owed");
         }
@@ -1465,23 +1581,27 @@ impl EventSourcedActor for AgentActor {
                 }
                 // The capability holding the park answers for it, because the
                 // park is its state. It claims the set only when it covers the
-                // questions exactly, so `None` here means either no capability
-                // holds a park or this set cannot resume one — and the old path
-                // below still owns the diagnostic that says which.
-                if let Some(performed) = Self::consult(state, &Msg::Answer(&answers)) {
+                // questions exactly, so `None` here means either no such
+                // capability is equipped or this set cannot resume its park —
+                // and the path below still owns the diagnostic that says which.
+                let answered = state
+                    .capabilities
+                    .ask_user()
+                    .and_then(|_| capabilities::ask_user::answered(&state.ask_user, &answers));
+                if let Some(capabilities::ask_user::Answered { calls, results }) = answered {
                     let _ = reply.send(Ok(()));
-                    // Folded first, so the `Began` broadcast inside `begin_turn`
+                    let events = vec![AgentDomainEvent::AskUserAnswered { calls }];
+                    // Folded first, so the abandonment check inside `begin_turn`
                     // sees a park this answer has already closed and does not
                     // record it as abandoned. Both events clear the park, so
                     // this does not change what the agent *is* — it keeps the
                     // journal from claiming the person's answer was ignored on
                     // the very turn it was acted on.
-                    let folded = performed
-                        .events
+                    let folded = events
                         .iter()
                         .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
-                    let turn = crate::agent_loop::resumed_turn(&folded.inbox, performed.resume);
-                    let mut events = performed.events;
+                    let turn = crate::agent_loop::resumed_turn(&folded.inbox, results);
+                    let mut events = events;
                     events.extend(self.begin_turn(turn, &folded, ctx).await);
                     return CommandEffect::persist(events);
                 }
@@ -1538,90 +1658,312 @@ impl EventSourcedActor for AgentActor {
                 CommandEffect::none()
             }
             AgentCommand::Woke { id } => {
-                let Some(performed) = Self::consult(state, &Msg::Woke { id: &id }) else {
-                    // A sleep for something that has since been cancelled. The
+                let fired = state
+                    .capabilities
+                    .timers()
+                    .and_then(|_| capabilities::timers::woke(&state.timers, &id));
+                let Some(capabilities::timers::Fired {
+                    id: timer,
+                    next_fire_at_unix_ms,
+                    item,
+                    wake,
+                }) = fired
+                else {
+                    // A sleep for a timer that has since been cancelled. The
                     // sleep task cannot be called back, so the drop happens
                     // here, and it is ordinary rather than a bug.
                     tracing::debug!(id, "a wake reached nothing still holding its id");
                     return CommandEffect::none();
                 };
-                self.finish_consult(performed, state, ctx).await
+                // A recurring timer's next sleep, started before the write: the
+                // journal records that it fired, never that it is sleeping.
+                if let Some(wake) = wake {
+                    spawn_wake(ctx.self_ref(), wake);
+                }
+                let events = vec![
+                    AgentDomainEvent::TimerFired {
+                        id: timer,
+                        next_fire_at_unix_ms,
+                    },
+                    // In the queue rather than starting a turn: a firing is one
+                    // more thing addressed to this agent, and it waits where
+                    // everything else does.
+                    AgentDomainEvent::Received {
+                        item,
+                        at_ms: now_ms(),
+                    },
+                ];
+                self.journaled(events, state, ctx).await
             }
             AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
             AgentCommand::SessionReplied { reply } => {
-                let Some(performed) = Self::consult(state, &Msg::Reply(&reply)) else {
-                    // Every request carries the call that prompted it, and the
-                    // capability that asked is the one that recognises it. So
-                    // nothing claiming a reply means the capability is gone —
-                    // an agent re-equipped without it, say — and the model is
-                    // still parked on a call nobody will answer.
-                    tracing::error!(
-                        call = reply.call(),
-                        "the session replied and no capability recognised it"
-                    );
-                    return CommandEffect::none();
-                };
-                self.finish_consult(performed, state, ctx).await
+                self.session_replied(&reply, state, ctx).await
             }
-            AgentCommand::Capability(cmd) => {
-                let owner = cmd.owner();
-                let Some(performed) = Self::consult_command(state, &cmd) else {
-                    // A layer builds its own capability's arm, so nothing
-                    // recognising one means that capability is not equipped at
-                    // all — a bug, and the model is told rather than left
-                    // waiting.
+
+            // --- What a person or a model asked a capability to do ----------
+            //
+            // Every one of these arms has the same shape, and it is the shape
+            // of the guarantee: ask the capability what the call came to,
+            // journal what it means to journal, and answer the model only once
+            // that write is durable. A capability never sends on the channel
+            // itself, which is what makes the order unskippable.
+            AgentCommand::AskUserAsk { input, answering } => {
+                let Some(cap) = state.capabilities.ask_user() else {
+                    return Self::not_equipped("ask_user", answering);
+                };
+                match cap.asked(&answering.call, &input) {
+                    // A muted agent is told why, in words. Journals nothing: a
+                    // refusal is not a fact about the agent.
+                    capabilities::ask_user::Asked::Told(text) => {
+                        self.answered(Vec::new(), answering, Ok(text_result(text)))
+                    }
+                    capabilities::ask_user::Asked::Ask { question, record } => {
+                        let at_ms = now_ms();
+                        let events = vec![
+                            AgentDomainEvent::AskUserAsked {
+                                call: answering.call.clone(),
+                                question: question.clone(),
+                            },
+                            // The question has to reach the agent's log or it
+                            // never reaches the person: a client reads an ask as
+                            // a lifecycle record, and a capability's own events
+                            // append nothing readable.
+                            AgentDomainEvent::LifecycleRecorded {
+                                event: record,
+                                at_ms,
+                            },
+                            // Journaled by the actor, because *being* parked
+                            // governs things no capability can see: whether the
+                            // queue may start a turn, and which dangling calls
+                            // recovery must leave alone.
+                            AgentDomainEvent::ParkedOn {
+                                call: answering.call.clone(),
+                                note: question,
+                                at_ms,
+                            },
+                        ];
+                        // No result, and the turn ends: the dangling `tool_use`
+                        // *is* the parked agent, and the answer arrives against
+                        // it, possibly days later.
+                        self.answered(events, answering, Ok(ToolOutcome::StopRun))
+                    }
+                }
+            }
+            AgentCommand::TitleRename { input, answering } => {
+                let Some(cap) = state.capabilities.title() else {
+                    return Self::not_equipped("title", answering);
+                };
+                match cap.renamed(&input) {
+                    capabilities::title::Renamed::Told(text) => {
+                        self.answered(Vec::new(), answering, Ok(text_result(text)))
+                    }
+                    capabilities::title::Renamed::Ask { name } => {
+                        let events = vec![AgentDomainEvent::TitleAsked {
+                            call: answering.call.clone(),
+                            name: name.clone(),
+                        }];
+                        // Journaled before the request goes out, so a crash in
+                        // the window replays as an intent a load asks about
+                        // again, naming the same title.
+                        self.dispatch_asks(
+                            vec![capabilities::title::request(&answering.call, &name)],
+                            ctx,
+                        );
+                        // Answered now rather than when the session replies: the
+                        // rename is in flight and the run has no reason to wait
+                        // on it.
+                        self.answered(events, answering, Ok(ToolOutcome::Result(Value::Null)))
+                    }
+                }
+            }
+            AgentCommand::ForkBranch { mode, message } => {
+                let Some(cap) = state.capabilities.fork() else {
                     tracing::error!(
-                        capability = owner,
+                        capability = "fork",
                         "a command reached an agent that is not equipped with its capability"
                     );
-                    if let Some(reply) = cmd.into_reply() {
-                        let _ = reply.send(Err(horsie_agentcore::ToolCallError::ExecutionFailed(
-                            format!("`{owner}` is advertised but nothing answers it"),
-                        )));
-                    }
                     return CommandEffect::none();
                 };
-                if !performed.resume.is_empty() {
-                    // Resuming supplies results for calls left dangling by an
-                    // earlier park. A call still in flight is not one of those,
-                    // so this would pair a result with a `tool_use` that is
-                    // about to get one anyway.
-                    tracing::error!(
-                        capability = owner,
-                        "a capability asked to resume from a tool call still in flight"
-                    );
-                }
-                self.dispatch_asks(performed.asks, ctx);
-                Self::spawn_wakes(performed.wakes, ctx);
-                let concluded = performed.conclusion.is_some();
-                if let Some(output) = performed.conclusion {
-                    // Held until the run reports back, which is the moment the
-                    // owner can be told. Answering `StopRun` below is what ends
-                    // the run that produces that report.
-                    self.pending_conclusion = Some(output);
-                }
-                let answer = performed.answer.unwrap_or({
-                    match concluded {
-                        // A conclusion is the agent's work finishing, so the
-                        // run has to stop for `interpret` to read it back. A
-                        // result here instead would answer the call and carry
-                        // on, and the model — having nothing left to do —
-                        // submits the same result again until the loop
-                        // detector ends the step.
-                        true => Ok(ToolOutcome::StopRun),
-                        // Claimed, but asked for nothing: the honest reply is
-                        // an empty result rather than a hung call.
-                        false => Ok(ToolOutcome::Result(Value::Null)),
+                match cap.branched(mode, &message) {
+                    capabilities::fork::Branched::Told { call, reason } => {
+                        Self::unanswerable(&call, &reason);
+                        CommandEffect::none()
                     }
-                });
-                let effect = self.persist_maybe_snapshot(performed.events);
-                match cmd.into_reply() {
-                    Some(reply) => answer_when_durable(effect, reply, answer),
-                    // A person typing a built-in: nothing is waiting, so there
-                    // is nothing to hold back.
-                    None => effect,
+                    capabilities::fork::Branched::Ask { call, pending } => {
+                        let request = cap.request(&call, &pending);
+                        let events = vec![AgentDomainEvent::ForkRequested { call, pending }];
+                        self.dispatch_asks(vec![request], ctx);
+                        // Nothing is waiting: a person typing a built-in is not
+                        // a dangling `tool_use`, so there is no answer to hold
+                        // back behind the write.
+                        self.persist_maybe_snapshot(events)
+                    }
                 }
             }
+            AgentCommand::SubAgentSpawn {
+                input,
+                catalog,
+                answering,
+            } => {
+                let Some(cap) = state.capabilities.sub_agent() else {
+                    return Self::not_equipped("sub_agent", answering);
+                };
+                match cap.spawned(&input, catalog.as_deref()) {
+                    capabilities::sub_agent::Spawned::Told(text) => {
+                        self.answered(Vec::new(), answering, Ok(text_result(text)))
+                    }
+                    capabilities::sub_agent::Spawned::Ask { pending, note } => {
+                        let request = cap.request(&answering.call, &pending);
+                        let events = vec![
+                            AgentDomainEvent::SubAgentRequested {
+                                call: answering.call.clone(),
+                                pending,
+                            },
+                            AgentDomainEvent::ParkedOn {
+                                call: answering.call.clone(),
+                                note,
+                                at_ms: now_ms(),
+                            },
+                        ];
+                        self.dispatch_asks(vec![request], ctx);
+                        // Parked, not answered: the session's answer is what
+                        // this call's result is made of, and it arrives on
+                        // another message.
+                        self.answered(events, answering, Ok(ToolOutcome::StopRun))
+                    }
+                }
+            }
+            AgentCommand::SubAgentStatus { answering } => {
+                let Some(_) = state.capabilities.sub_agent() else {
+                    return Self::not_equipped("sub_agent", answering);
+                };
+                // A read, so it journals nothing: an event for it would grow the
+                // log every time the model looked.
+                let text = capabilities::sub_agent::render_status(&state.sub_agent);
+                self.answered(Vec::new(), answering, Ok(text_result(text)))
+            }
+            AgentCommand::WorkflowInvoke { input, answering } => {
+                let Some(_) = state.capabilities.workflow() else {
+                    return Self::not_equipped("workflow", answering);
+                };
+                match capabilities::workflow::invoked(&input) {
+                    capabilities::workflow::Invoked::Told(text) => {
+                        self.answered(Vec::new(), answering, Ok(text_result(text)))
+                    }
+                    capabilities::workflow::Invoked::Ask { pending, note } => {
+                        let request = capabilities::workflow::request(&answering.call, &pending);
+                        let events = vec![
+                            AgentDomainEvent::WorkflowRequested {
+                                call: answering.call.clone(),
+                                pending,
+                            },
+                            AgentDomainEvent::ParkedOn {
+                                call: answering.call.clone(),
+                                note,
+                                at_ms: now_ms(),
+                            },
+                        ];
+                        self.dispatch_asks(vec![request], ctx);
+                        self.answered(events, answering, Ok(ToolOutcome::StopRun))
+                    }
+                }
+            }
+            AgentCommand::WorkflowStatus { answering } => {
+                let Some(_) = state.capabilities.workflow() else {
+                    return Self::not_equipped("workflow", answering);
+                };
+                let text = capabilities::workflow::render_status(&state.workflow);
+                self.answered(Vec::new(), answering, Ok(text_result(text)))
+            }
+            AgentCommand::StepResultSubmit { input, answering } => {
+                let Some(cap) = state.capabilities.step_result() else {
+                    return Self::not_equipped("step_result", answering);
+                };
+                match cap.submitted(&input) {
+                    capabilities::step_result::Submitted::Refused(reason) => {
+                        self.answered(Vec::new(), answering, Err(refusal(reason)))
+                    }
+                    capabilities::step_result::Submitted::Concluded { output } => {
+                        let events = vec![AgentDomainEvent::StepResultSubmitted {
+                            output: output.clone(),
+                        }];
+                        // Held until the run reports back, which is the moment
+                        // the owner can be told. Answering `StopRun` is what
+                        // ends the run that produces that report — a result
+                        // instead would answer the call and carry on, and the
+                        // model, having nothing left to do, submits the same
+                        // result again until the loop detector ends the step.
+                        self.pending_conclusion = Some(output);
+                        self.answered(events, answering, Ok(ToolOutcome::StopRun))
+                    }
+                }
+            }
+            AgentCommand::TaskListChange { input, answering } => {
+                let Some(_) = state.capabilities.task_list() else {
+                    return Self::not_equipped("task_list", answering);
+                };
+                match capabilities::task_list::TaskListCapability::changed(&state.task_list, &input)
+                {
+                    capabilities::task_list::Changed::Refused(reason) => {
+                        self.answered(Vec::new(), answering, Err(refusal(reason)))
+                    }
+                    capabilities::task_list::Changed::Changed { snapshot, told } => {
+                        let events = vec![AgentDomainEvent::TaskListChanged { snapshot }];
+                        self.answered(events, answering, Ok(text_result(told)))
+                    }
+                }
+            }
+            AgentCommand::TimerArm { input, answering } => {
+                let Some(_) = state.capabilities.timers() else {
+                    return Self::not_equipped("timers", answering);
+                };
+                match capabilities::timers::arm(&input) {
+                    capabilities::timers::Armed::Refused(reason) => {
+                        self.answered(Vec::new(), answering, Err(refusal(reason)))
+                    }
+                    capabilities::timers::Armed::Armed { record, wake, told } => {
+                        let events = vec![AgentDomainEvent::TimerArmed { record }];
+                        spawn_wake(ctx.self_ref(), wake);
+                        self.answered(events, answering, Ok(text_result(told)))
+                    }
+                }
+            }
+            AgentCommand::TimerList { answering } => {
+                let Some(_) = state.capabilities.timers() else {
+                    return Self::not_equipped("timers", answering);
+                };
+                let told = capabilities::timers::list(&state.timers);
+                self.answered(Vec::new(), answering, Ok(text_result(told)))
+            }
+            AgentCommand::TimerCancel { input, answering } => {
+                let Some(_) = state.capabilities.timers() else {
+                    return Self::not_equipped("timers", answering);
+                };
+                match capabilities::timers::cancel(&state.timers, &input) {
+                    capabilities::timers::Cancelled::Refused(reason) => {
+                        self.answered(Vec::new(), answering, Err(refusal(reason)))
+                    }
+                    // Cancelling nothing journals nothing and is still an
+                    // answer: a model that names a timer which has already
+                    // fired has made no mistake worth flagging.
+                    capabilities::timers::Cancelled::Cancelled { ids, told } => {
+                        let events = match ids.is_empty() {
+                            true => Vec::new(),
+                            false => vec![AgentDomainEvent::TimersCancelled { ids }],
+                        };
+                        self.answered(events, answering, Ok(text_result(told)))
+                    }
+                }
+            }
+            #[cfg(test)]
+            AgentCommand::FakeCall { tool, answering } => {
+                let Some(cap) = state.capabilities.fake(&tool) else {
+                    return Self::not_equipped("fake", answering);
+                };
+                let events = vec![cap.saw()];
+                self.answered(events, answering, Ok(ToolOutcome::Result(Value::Null)))
+            }
+
             AgentCommand::RecordLifecycle { event, at_ms } => {
                 // Almost every one of these is something a reader sees and this
                 // agent does nothing about. The runtime arriving is the one
@@ -1784,28 +2126,44 @@ impl EventSourcedActor for AgentActor {
                 })
                 .await;
         }
-        // Now tell them the fold is over, which closes the crash window a
-        // request opens. A capability journals what it wants *before* asking
-        // for it, so a `Requested` that survived to here may never have reached
-        // the session at all — and the model is parked on a tool call nobody
-        // will ever answer. Whoever is holding one asks again, with the ids it
-        // already recorded, and the session recognises the repeat.
+        // Now the fold is over, which closes the crash window a request opens.
+        // A capability journals what it wants *before* asking for it, so a
+        // `Requested` that survived to here may never have reached the session
+        // at all — and the model is parked on a tool call nobody will ever
+        // answer. Every capability that could be holding one is asked, not just
+        // the first: they hold different things, and stopping at one would
+        // leave the rest parked for ever. Each re-asks with the ids it already
+        // recorded, and the session recognises the repeat.
         //
-        // After the `Equipped` above, and it only ever fires for a *recovered*
-        // agent: a fresh one has nothing folded, so its capabilities are empty
-        // here and the broadcast reaches nobody. Nothing is journaled either —
-        // the `Requested` being re-asked is still the only record of it.
-        let reloaded = Self::consult(state, &Msg::Loaded).unwrap_or_default();
-        if !reloaded.events.is_empty() {
-            tracing::error!("a capability journaled something on a load; discarded");
+        // After the `Equipped` above, and it only ever matters for a
+        // *recovered* agent: a fresh one has nothing folded, so every list here
+        // is empty. Nothing is journaled either — the `Requested` being
+        // re-asked is still the only record of it, and a second copy would say
+        // a second thing was wanted.
+        let mut asks: Vec<SessionRequest> = Vec::new();
+        if state.capabilities.title().is_some() {
+            asks.extend(capabilities::title::reloaded(&state.title));
         }
-        self.dispatch_asks(reloaded.asks, ctx);
-        // And start the sleeps they asked for again. A sleep dies with the
-        // process that spawned it, so every armed timer is re-armed here, with
-        // its remaining delay — the same crash window an unanswered request
-        // opens, closed the same way. Whether the agent is parked or mid-run,
-        // so timers keep firing either way.
-        Self::spawn_wakes(reloaded.wakes, ctx);
+        if let Some(cap) = state.capabilities.fork() {
+            asks.extend(cap.reloaded(&state.fork));
+        }
+        if let Some(cap) = state.capabilities.sub_agent() {
+            asks.extend(cap.reloaded(&state.sub_agent));
+        }
+        if state.capabilities.workflow().is_some() {
+            asks.extend(capabilities::workflow::reloaded(&state.workflow));
+        }
+        self.dispatch_asks(asks, ctx);
+        // And start the sleeps again. A sleep dies with the process that
+        // spawned it, so every armed timer is re-armed here, with its
+        // remaining delay — the same crash window an unanswered request opens,
+        // closed the same way. Whether the agent is parked or mid-run, so
+        // timers keep firing either way.
+        if state.capabilities.timers().is_some() {
+            for wake in capabilities::timers::reloaded(&state.timers) {
+                spawn_wake(ctx.self_ref(), wake);
+            }
+        }
         // A tool call the dead process was running has no result and never will.
         // Record the repair once, here, where it still belongs at the end of the
         // transcript — recomputing it per turn instead is what let it drift into
@@ -1860,7 +2218,7 @@ impl EventSourcedActor for AgentActor {
             return;
         }
         let history = repair_unanswered_tool_calls(state.prompt_messages());
-        let compaction_target = Self::propose_turn(state, ctx);
+        let compaction_target = Self::propose_turn(state);
         self.start_run(
             RunStart {
                 input: AgentInput::user_message(new_message_id(), "continue the interrupted task"),
@@ -1880,139 +2238,244 @@ fn new_message_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Spawn one sleep a capability asked for.
+/// Spawn one sleep the timers capability asked for.
 ///
 /// Detached and un-cancellable, which is fine because the wake it sends is
-/// claimed by whoever still holds the id: a capability that has since dropped
-/// it answers `None` and the wake reaches nothing. Nothing is journaled here in
-/// either direction — a wake is re-issued from durable state on a load, not
-/// replayed from a log.
-fn spawn_wake(self_ref: ActorRef<AgentCommand>, wake: Wake) {
+/// recognised only by a timer that is still armed: one that has since been
+/// cancelled answers `None` and the wake reaches nothing. Nothing is journaled
+/// here in either direction — a wake is re-issued from durable state on a load,
+/// not replayed from a log.
+fn spawn_wake(self_ref: ActorRef<AgentCommand>, wake: capabilities::timers::Wake) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(wake.after_secs)).await;
         let _ = self_ref.tell(AgentCommand::Woke { id: wake.id }).await;
     });
 }
 
-/// What a capability's acts came to: events to journal, and — when the message
-/// was a tool call — the answer to give the model.
-///
-/// A struct rather than a tuple because both halves are optional in different
-/// ways, and a caller that swapped them would still compile.
-#[derive(Default)]
-struct Performed {
-    events: Vec<AgentDomainEvent>,
-    /// `Some` once some capability answered or parked the call in flight —
-    /// which only a command has, so this is always `None` for a lifecycle
-    /// message.
-    answer: Option<Result<ToolOutcome, horsie_agentcore::ToolCallError>>,
-    /// Tool results a capability supplied for calls it had parked, which start
-    /// the next turn.
-    resume: Vec<horsie_models::agent::ToolResultInput>,
-    /// A capability said this agent's work is finished, and this is its result.
-    conclusion: Option<Value>,
-    /// Things a capability wants from the session. Sent off the mailbox, and
-    /// their replies come back as [`Msg::Reply`].
-    asks: Vec<capabilities::SessionRequest>,
-    /// Why this turn's end is not the agent finishing, from every capability
-    /// holding something. Non-empty parks the agent.
-    hold: Vec<String>,
-    /// Sleeps capabilities asked for. Spawned off the mailbox; each one comes
-    /// back as [`AgentCommand::Woke`] with the id its capability minted.
-    wakes: Vec<Wake>,
-    /// What the token budget capability said on [`Msg::TurnProposed`], if one
-    /// is equipped. `None` either way — no such capability, or one that had
-    /// nothing to say — is indistinguishable, and both mean the same thing:
-    /// this run gets no [`Act::CompactionBudget`] and does not compact.
-    compaction: Option<(u32, u32)>,
-}
-
-/// One sleep a capability asked for.
-#[derive(Debug, Clone)]
-struct Wake {
-    id: String,
-    after_secs: u64,
-}
-
 impl AgentActor {
-    /// Route a message to this agent's capabilities and work out what they
-    /// asked for.
-    ///
-    /// Pure apart from the logging: it decides, and the caller journals and
-    /// starts turns. [`Msg::routing`] picks offer or broadcast, so there is no
-    /// table here to keep in step with the message type.
-    fn consult(state: &AgentState, msg: &Msg<'_>) -> Option<Performed> {
-        let decision = match msg.routing() {
-            capabilities::Routing::Offer => capabilities::offer(state, msg)?,
-            capabilities::Routing::Broadcast => capabilities::broadcast(state, msg),
-        };
-        // Nothing is in flight: a lifecycle message is news about something
-        // that already happened, and no run is waiting on it.
-        Some(Self::performed(decision, None, &msg.describe()))
-    }
-
-    /// Give a command to the capability that owns it, and work out what it
-    /// asked for.
-    ///
-    /// Separate from [`Self::consult`] because only this one has a run waiting:
-    /// a command names the call it came from, which is what an answer is paired
-    /// against.
-    fn consult_command(state: &AgentState, cmd: &capabilities::CapCommand) -> Option<Performed> {
-        let decision = capabilities::dispatch(state, cmd)?;
-        Some(Self::performed(decision, cmd.call(), cmd.owner()))
-    }
-
-    /// Ask what this turn's compaction budget should be, before its run
+    /// What this turn should compact at, and to what — asked before its run
     /// exists to read one.
     ///
-    /// [`Msg::TurnProposed`] is broadcast rather than offered — same as a turn
-    /// boundary — because nothing is being answered to; the actor merely
-    /// collects an opinion. Only the token budget capability has one today, and
-    /// its whole answer is config it was equipped with, never anything read off
-    /// `state`, which is why `state` here is only ever the capability list. A
-    /// runner that equipped none gets `None` back, and its runs never compact —
-    /// see [`Act::CompactionBudget`].
-    ///
-    /// Events are discarded rather than journaled, the same as a load's: a
-    /// policy-only capability owns no state, so one producing an event here
-    /// would be a bug worth seeing rather than a fact worth keeping.
-    fn propose_turn(state: &AgentState, ctx: &ActorContext<AgentCommand>) -> Option<(u32, u32)> {
-        let performed = Self::consult(state, &Msg::TurnProposed)?;
-        if !performed.events.is_empty() {
-            tracing::error!("a capability journaled something on a turn proposal; discarded");
-        }
-        debug_assert!(
-            performed.answer.is_none()
-                && performed.resume.is_empty()
-                && performed.hold.is_empty()
-                && performed.conclusion.is_none()
-                && performed.asks.is_empty(),
-            "a turn proposal is not a tool call and holds nothing open"
-        );
-        Self::spawn_wakes(performed.wakes, ctx);
-        performed.compaction
+    /// The whole answer is config the token budget capability was equipped
+    /// with, never anything read off folded state, which is why this reads the
+    /// list and nothing else. A runner that equipped none gets `None` back, and
+    /// its runs never compact.
+    fn propose_turn(state: &AgentState) -> Option<(u32, u32)> {
+        state
+            .capabilities
+            .token_budget()
+            .map(capabilities::budget::TokenBudgetCapability::target)
     }
 
-    /// Turn a decision into what the actor has to do about it.
+    /// Everything this agent is holding that will wake it again, in words.
     ///
-    /// `in_flight` is the call a run is waiting on, when one is. `what` names
-    /// what was being handled, for the diagnostics.
-    fn performed(
-        decision: capabilities::Decision,
-        in_flight: Option<&str>,
-        what: &str,
-    ) -> Performed {
-        let mut out = Performed {
-            // Taken as they are: a capability decides in the agent's own
-            // vocabulary now, so there is nothing to wrap on the way to the
-            // journal.
-            events: decision.events,
-            ..Performed::default()
-        };
-        for act in decision.acts {
-            Self::perform(&mut out, act, in_flight, what);
+    /// Invariant 6, and the whole of what a turn's end has to ask. Empty means
+    /// nothing would start another turn, so a step that owes a result and did
+    /// not submit one is nudged rather than left running for ever.
+    ///
+    /// Each capability is asked separately, and every one of them is asked:
+    /// they hold different things — a subagent still owing a report, a run
+    /// still going, a timer armed — and any one of them is enough. A capability
+    /// that is not equipped is not asked, and cannot be holding anything.
+    fn holding(state: &AgentState) -> Vec<String> {
+        [
+            state
+                .capabilities
+                .sub_agent()
+                .and_then(|_| capabilities::sub_agent::holds(&state.sub_agent)),
+            state
+                .capabilities
+                .workflow()
+                .and_then(|_| capabilities::workflow::holds(&state.workflow)),
+            state
+                .capabilities
+                .timers()
+                .and_then(|_| capabilities::timers::holds(&state.timers)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// A command reached an agent that is not equipped with its capability.
+    ///
+    /// A layer builds only its own capability's arm, so this is a bug rather
+    /// than an ordinary case — and the model is told rather than left waiting
+    /// on a call that never returns.
+    fn not_equipped(
+        capability: &'static str,
+        answering: Answering,
+    ) -> CommandEffect<AgentDomainEvent> {
+        tracing::error!(
+            capability,
+            "a command reached an agent that is not equipped with its capability"
+        );
+        let _ = answering
+            .reply
+            .send(Err(ToolCallError::ExecutionFailed(format!(
+                "`{capability}` is advertised but nothing answers it"
+            ))));
+        CommandEffect::none()
+    }
+
+    /// Journal what this call did, then tell the model — in that order, always.
+    ///
+    /// The blanket rule, in the one place every command arm goes through: an
+    /// arm that answered first would report success for work a crash loses.
+    /// `events` may be empty, which is what a refusal is: nothing happened, and
+    /// the answer still waits for the write that says so.
+    fn answered(
+        &mut self,
+        events: Vec<AgentDomainEvent>,
+        answering: Answering,
+        answer: Result<ToolOutcome, ToolCallError>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let effect = self.persist_maybe_snapshot(events);
+        answer_when_durable(effect, answering.reply, answer)
+    }
+
+    /// Something was decided for a call nothing is waiting on.
+    ///
+    /// A person typing a built-in has no `tool_use` to answer, and a session
+    /// reply arrives turns after the call that asked was answered. Neither has
+    /// anywhere to put words today, so they are said here rather than dropped
+    /// silently — a bug worth hearing about, and the sentence a later step
+    /// will deliver.
+    fn unanswerable(call: &str, text: &str) {
+        tracing::error!(call, text, "nothing is waiting on this answer");
+    }
+
+    /// Journal what a capability decided, then reconsider the queue.
+    ///
+    /// The tail a lifecycle point shares with every other: something arriving
+    /// may have made a turn startable, and nothing else was going to
+    /// reconsider it. Silent when it decides against, which is the ordinary
+    /// case.
+    async fn journaled(
+        &mut self,
+        mut events: Vec<AgentDomainEvent>,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        // Folded first, so the drain decision sees what these events closed
+        // rather than the state before them.
+        let folded = events
+            .iter()
+            .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+        events.extend(self.try_drain(&folded, ctx).await);
+        self.persist_maybe_snapshot(events)
+    }
+
+    /// The same, but these results resume a call an earlier park left dangling,
+    /// so they start a turn rather than waiting for one.
+    async fn resumed(
+        &mut self,
+        mut events: Vec<AgentDomainEvent>,
+        results: Vec<horsie_models::agent::ToolResultInput>,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        let folded = events
+            .iter()
+            .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
+        let turn = crate::agent_loop::resumed_turn(&folded.inbox, results);
+        events.extend(self.begin_turn(turn, &folded, ctx).await);
+        self.persist_maybe_snapshot(events)
+    }
+
+    /// The session answered something a capability asked it for.
+    ///
+    /// Each capability that asks the session anything is offered the reply in
+    /// turn, and claims it only when it recognises the call — which exactly one
+    /// of them can, because the capability that asked is the one that minted
+    /// the id. So the order here decides nothing; what it replaces is a scan
+    /// that read the equipment list, and the reason for the change is that a
+    /// scan could not tell "nobody recognised it" from "somebody claimed it and
+    /// had nothing to say".
+    async fn session_replied(
+        &mut self,
+        reply: &SessionReply,
+        state: &AgentState,
+        ctx: &ActorContext<AgentCommand>,
+    ) -> CommandEffect<AgentDomainEvent> {
+        if state.capabilities.title().is_some()
+            && let Some(titled) = capabilities::title::titled(&state.title, reply)
+        {
+            let call = reply.call().to_string();
+            let event = match &titled {
+                capabilities::title::Titled::Set { name } => AgentDomainEvent::TitleSet {
+                    call,
+                    name: name.clone(),
+                },
+                // A record that the ask ended, not a record of the name: a
+                // title that never took must not replay as one that did.
+                capabilities::title::Titled::Refused { .. } => {
+                    AgentDomainEvent::TitleRefused { call }
+                }
+            };
+            Self::unanswerable(reply.call(), &titled.told());
+            return self.journaled(vec![event], state, ctx).await;
         }
-        out
+        if state.capabilities.sub_agent().is_some()
+            && let Some(child) = capabilities::sub_agent::replied(&state.sub_agent, reply)
+        {
+            let call = child.call().to_string();
+            let event = match &child {
+                capabilities::sub_agent::Child::Started { .. } => {
+                    AgentDomainEvent::SubAgentStarted { call }
+                }
+                // Retracts the request before it: the spawn never happened.
+                capabilities::sub_agent::Child::Dropped { .. } => {
+                    AgentDomainEvent::SubAgentDropped { call }
+                }
+            };
+            // Supplied as the parked call's result rather than as a fresh
+            // answer: the session's answer is what that call returns, and a
+            // refusal the model cannot see is a tool call that never returns.
+            let results = vec![child.result()];
+            return self.resumed(vec![event], results, state, ctx).await;
+        }
+        if state.capabilities.workflow().is_some()
+            && let Some(run) = capabilities::workflow::replied(&state.workflow, reply)
+        {
+            let call = run.call().to_string();
+            let event = match &run {
+                capabilities::workflow::Run::Started { .. } => {
+                    AgentDomainEvent::WorkflowStarted { call }
+                }
+                capabilities::workflow::Run::Dropped { .. } => {
+                    AgentDomainEvent::WorkflowDropped { call }
+                }
+            };
+            let results = vec![run.result()];
+            return self.resumed(vec![event], results, state, ctx).await;
+        }
+        if state.capabilities.fork().is_some()
+            && let Some(branch) = capabilities::fork::replied(&state.fork, reply)
+        {
+            let call = branch.call().to_string();
+            let event = match &branch {
+                capabilities::fork::Branch::Created { .. } => {
+                    AgentDomainEvent::ForkCreated { call }
+                }
+                // Journaled because the request before it was: this retracts a
+                // fact, and is not itself the refusal.
+                capabilities::fork::Branch::Dropped { .. } => {
+                    AgentDomainEvent::ForkDropped { call }
+                }
+            };
+            Self::unanswerable(branch.call(), &branch.told());
+            return self.journaled(vec![event], state, ctx).await;
+        }
+        // Every request carries the call that prompted it, and the capability
+        // that asked is the one that recognises it. So nothing claiming a reply
+        // means that capability is gone — an agent re-equipped without it, say
+        // — and whoever asked is still waiting on an answer nobody will give.
+        tracing::error!(
+            call = reply.call(),
+            "the session replied and no capability recognised it"
+        );
+        CommandEffect::none()
     }
 
     /// Send what capabilities asked the session for, off the mailbox.
@@ -2020,11 +2483,7 @@ impl AgentActor {
     /// One detached task per request: a session busy starting the child must
     /// not block this agent's queue, and a capability that asked for two things
     /// gets two answers rather than one that waited for the other.
-    fn dispatch_asks(
-        &self,
-        asks: Vec<capabilities::SessionRequest>,
-        ctx: &ActorContext<AgentCommand>,
-    ) {
+    fn dispatch_asks(&self, asks: Vec<SessionRequest>, ctx: &ActorContext<AgentCommand>) {
         for request in asks {
             let parent = Arc::clone(&self.ctx.parent);
             let me = ctx.self_ref();
@@ -2034,161 +2493,21 @@ impl AgentActor {
             });
         }
     }
+}
 
-    /// Start the sleeps capabilities asked for, off the mailbox.
-    ///
-    /// The one thing a capability cannot do for itself, and the whole of what
-    /// the actor adds: time passing. Nothing is journaled — the durable fact is
-    /// whatever the capability holds, and a load re-issues the wake from it.
-    fn spawn_wakes(wakes: Vec<Wake>, ctx: &ActorContext<AgentCommand>) {
-        for wake in wakes {
-            spawn_wake(ctx.self_ref(), wake);
-        }
-    }
+/// A tool result carrying text, which is how every capability that answers in
+/// words answers.
+fn text_result(text: impl Into<String>) -> ToolOutcome {
+    ToolOutcome::Result(Value::String(text.into()))
+}
 
-    /// Journal what capabilities decided, send what they asked for, and start
-    /// the turn they resumed, if any.
-    ///
-    /// The tail every consultation shares except a tool call's, which has a
-    /// reply channel to answer as well.
-    async fn finish_consult(
-        &mut self,
-        performed: Performed,
-        state: &AgentState,
-        ctx: &ActorContext<AgentCommand>,
-    ) -> CommandEffect<AgentDomainEvent> {
-        let Performed {
-            mut events,
-            // Never set here: an answer is only kept when it names the call in
-            // flight, and a lifecycle message has none. A capability answering
-            // one anyway is reported by `answer_call`, where the mismatch is.
-            answer: _,
-            resume,
-            conclusion,
-            asks,
-            hold,
-            wakes,
-            compaction,
-        } = performed;
-        if !hold.is_empty() {
-            // Only a turn boundary can be held, and this is not one.
-            tracing::error!(
-                ?hold,
-                "a capability held a boundary that is not a turn ending"
-            );
-        }
-        if conclusion.is_some() {
-            tracing::error!("a capability concluded outside a turn");
-        }
-        if compaction.is_some() {
-            // Only `Msg::TurnProposed` is answered with one, and `AgentActor`
-            // reads that answer itself through `propose_turn` rather than
-            // through this general tail — so a value here means some
-            // capability answered a message that was not a turn proposal.
-            tracing::error!("a capability proposed a compaction budget outside a turn proposal");
-        }
-        self.dispatch_asks(asks, ctx);
-        Self::spawn_wakes(wakes, ctx);
-        // Folded first, so whatever comes next sees what these events closed
-        // rather than the state before them.
-        let folded = events
-            .iter()
-            .fold(state.clone(), |s, e| Self::apply_event(s, e.clone()));
-        if resume.is_empty() {
-            // A capability that queued something has not started anything: an
-            // agent parked on a timer stays parked until the queue is
-            // reconsidered, and nothing else was going to reconsider it. Silent
-            // when it decides against, which is the ordinary case.
-            events.extend(self.try_drain(&folded, ctx).await);
-        } else {
-            let turn = crate::agent_loop::resumed_turn(&folded.inbox, resume);
-            events.extend(self.begin_turn(turn, &folded, ctx).await);
-        }
-        self.persist_maybe_snapshot(events)
-    }
-
-    /// Turn one act into events, an answer, or queued work.
-    fn perform(out: &mut Performed, act: Act, in_flight: Option<&str>, what: &str) {
-        match act {
-            Act::Answer { call, text } => {
-                Self::answer_call(
-                    out,
-                    in_flight,
-                    what,
-                    &call,
-                    Ok(ToolOutcome::Result(Value::String(text))),
-                );
-            }
-            Act::Park { call, note } => {
-                // Journaled by the actor, because *being* parked governs things
-                // no capability can see: whether the queue may start a turn,
-                // and which dangling calls recovery must leave alone.
-                out.events.push(AgentDomainEvent::ParkedOn {
-                    call: call.clone(),
-                    note,
-                    at_ms: now_ms(),
-                });
-                Self::answer_call(out, in_flight, what, &call, Ok(ToolOutcome::StopRun));
-            }
-            // `InvalidInput`, not a plain result: `is_error` is read by
-            // agentcore's loop detector and the nudge budget, and a step
-            // submitting the same invalid outcome five times is exactly where
-            // the difference shows.
-            Act::Refuse { call, reason } => Self::answer_call(
-                out,
-                in_flight,
-                what,
-                &call,
-                Err(horsie_agentcore::ToolCallError::InvalidInput(reason)),
-            ),
-            Act::Resume { results } => out.resume.extend(results),
-            Act::Conclude { output } => out.conclusion = Some(output),
-            Act::Hold { note } => out.hold.push(note),
-            // Collected rather than spawned here, for the same reason an ask
-            // is: `perform` is a pure decision, and a `tokio::spawn` is not.
-            Act::Wake { id, after_secs } => out.wakes.push(Wake { id, after_secs }),
-            Act::Enqueue { item } => out.events.push(AgentDomainEvent::Received {
-                item,
-                at_ms: now_ms(),
-            }),
-            Act::Record(event) => out.events.push(AgentDomainEvent::LifecycleRecorded {
-                event: *event,
-                at_ms: now_ms(),
-            }),
-            // Collected rather than sent here: `perform` is a pure decision,
-            // and asking the session is I/O that must not happen on the
-            // mailbox. The caller sends them once it has journaled.
-            Act::Ask(request) => out.asks.push(request),
-            Act::CompactionBudget {
-                trigger_at_percent,
-                retain_percent,
-            } => out.compaction = Some((trigger_at_percent, retain_percent)),
-        }
-    }
-
-    /// Deliver an answer to the call in flight, or complain.
-    ///
-    /// A capability may answer a call from something that is not that call — a
-    /// session reply arriving turns later, say — and there is no run waiting on
-    /// it then. Task 5 gives that case a path; here it is a bug worth hearing
-    /// about rather than a silent drop.
-    fn answer_call(
-        out: &mut Performed,
-        in_flight: Option<&str>,
-        what: &str,
-        call: &str,
-        answer: Result<ToolOutcome, horsie_agentcore::ToolCallError>,
-    ) {
-        if in_flight == Some(call) {
-            out.answer = Some(answer);
-            return;
-        }
-        tracing::error!(
-            call,
-            handling = what,
-            "a capability answered a tool call that nothing is waiting on"
-        );
-    }
+/// A refusal, as the model sees it.
+///
+/// `InvalidInput`, not a plain result: `is_error` is read by agentcore's loop
+/// detector and the nudge budget, and a step submitting the same invalid
+/// outcome five times is exactly where the difference shows.
+fn refusal(reason: String) -> ToolCallError {
+    ToolCallError::InvalidInput(reason)
 }
 
 /// Answer the run once the events behind the answer are durable.
@@ -3684,10 +4003,10 @@ mod interruption_tests {
     /// **The re-ask is wired, or none of the capability work matters.**
     ///
     /// A journal cut between `Requested` and the session's answer, loaded from
-    /// scratch: the actor has to broadcast the load and send what comes back.
-    /// Without this test the whole mechanism could be unreachable and every
-    /// capability's own test would still pass — the capability decides, and
-    /// only the actor can act on it.
+    /// scratch: the actor has to ask every capability that could be holding one
+    /// and send what comes back. Without this test the whole mechanism could be
+    /// unreachable and every capability's own test would still pass — the
+    /// capability decides, and only the actor can act on it.
     #[tokio::test]
     async fn a_request_the_session_never_answered_is_re_asked_when_the_agent_loads() {
         use crate::agent_loop::capabilities::{
@@ -3802,7 +4121,7 @@ mod interruption_tests {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod capability_tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{FakeCapability, call};
+    use crate::agent_loop::capabilities::testing::FakeCapability;
     use crate::agent_loop::capabilities::{Capabilities, Capability};
     use horsie_actor::{ActorSystem, InMemoryJournal};
     use horsie_agentcore::{ToolCallError, ToolSpec};
@@ -3814,28 +4133,96 @@ mod capability_tests {
         }
     }
 
+    /// A running agent equipped with these, on this journal.
+    ///
+    /// A real actor rather than a call into a decision function, because what
+    /// these tests are about is the *arm*: which events it journals, what it
+    /// answers, and in which order. None of that exists until a command travels
+    /// the mailbox.
+    async fn spawn_equipped(
+        journal: Arc<dyn horsie_actor::Journal>,
+        caps: Vec<Capability>,
+    ) -> ActorRef<AgentCommand> {
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(NoContext),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(NoParent),
+            journal_id: uuid::Uuid::new_v4(),
+            ready: true,
+        };
+        let mut params = AgentParams::from_def(&super::tests::def_fixture());
+        params.capabilities = Capabilities::new(caps);
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+        // The equipment is journaled on recovery, so wait for it: a call that
+        // arrives first reaches an agent with no capabilities at all.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        agent
+    }
+
     /// A command comes back as the agent's own events, flat: a reader of the
     /// raw journal sees what happened without unwrapping a capability parcel
     /// first.
-    #[test]
-    fn a_command_journals_the_capabilitys_own_events() {
-        let state = equipped("fake_tool");
-        let performed = AgentActor::consult_command(&state, &call("fake_tool"))
-            .expect("the capability owns its own command");
-        assert_eq!(performed.events.len(), 1);
-        assert!(matches!(
-            performed.events.first(),
-            Some(AgentDomainEvent::FakeSaw { .. })
-        ));
+    #[tokio::test]
+    async fn a_command_journals_the_capabilitys_own_events() {
+        let journal = Arc::new(SlowJournal::new());
+        let written = Arc::clone(&journal.written);
+        let agent = spawn_equipped(
+            journal,
+            vec![Capability::Fake(FakeCapability::new("fake_tool"))],
+        )
+        .await;
+        let outcome = agent
+            .ask(|reply| AgentCommand::FakeCall {
+                tool: "fake_tool".to_string(),
+                answering: capabilities::Answering {
+                    call: "t1".to_string(),
+                    reply,
+                },
+            })
+            .await
+            .expect("the mailbox answers");
+        assert!(outcome.is_ok(), "the call was refused: {outcome:?}");
+        let written = written.lock().unwrap();
+        assert!(
+            written.iter().any(|e| e.contains("FakeSaw")),
+            "the capability's own event never reached the journal: {written:?}"
+        );
+        assert!(
+            !written.iter().any(|e| e.contains("Capability")),
+            "the event was journaled wrapped in a capability parcel: {written:?}"
+        );
     }
 
-    /// A command whose capability is not equipped is `None`, which the command
-    /// handler turns into an error the model can see. A silent drop would hang
-    /// the call for ever.
-    #[test]
-    fn a_command_nobody_owns_is_none() {
-        let state = equipped("fake_tool");
-        assert!(AgentActor::consult_command(&state, &call("bash")).is_none());
+    /// A command whose capability is not equipped reaches the model as an
+    /// error naming what is missing. A silent drop would hang the call for
+    /// ever.
+    #[tokio::test]
+    async fn a_command_nobody_owns_is_answered_with_an_error() {
+        let agent = spawn_equipped(
+            Arc::new(InMemoryJournal::new()),
+            vec![Capability::Fake(FakeCapability::new("fake_tool"))],
+        )
+        .await;
+        let outcome = agent
+            .ask(|reply| AgentCommand::FakeCall {
+                tool: "bash".to_string(),
+                answering: capabilities::Answering {
+                    call: "t1".to_string(),
+                    reply,
+                },
+            })
+            .await
+            .expect("the mailbox answers");
+        let Err(ToolCallError::ExecutionFailed(reason)) = outcome else {
+            panic!("a command nobody owns was answered as though it worked: {outcome:?}")
+        };
+        assert!(
+            reason.contains("fake"),
+            "the diagnostic has to name the capability: {reason}"
+        );
     }
 
     /// The fold reaches the capability, and replaying lands exactly where the
@@ -3868,94 +4255,105 @@ mod capability_tests {
     /// **A refusal reaches the model as an error, not as a result.** `is_error`
     /// is read by agentcore's loop detector and the nudge budget, and a model
     /// repeating one bad call is exactly the case they exist for — so the
-    /// distinction has to survive the whole path from `Act::Refuse` to the
-    /// answer the run gets.
-    #[test]
-    fn a_refusal_answers_the_call_with_an_error_and_an_answer_with_a_result() {
-        use crate::agent_loop::capabilities::task_list::{Command, TaskListCapability};
-        use crate::agent_loop::capabilities::{Answering, CapCommand};
+    /// distinction has to survive the whole path from the capability's own
+    /// `Refused` to the answer the run gets.
+    #[tokio::test]
+    async fn a_refusal_answers_the_call_with_an_error_and_an_answer_with_a_result() {
+        use crate::agent_loop::capabilities::task_list::TaskListCapability;
 
-        let state = AgentState {
-            capabilities: Capabilities::new(vec![Capability::TaskList(TaskListCapability::new())]),
-            ..AgentState::default()
-        };
-        let commanded = |input: serde_json::Value| {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            drop(rx);
-            AgentActor::consult_command(
-                &state,
-                &CapCommand::TaskList(
-                    Command::Change { input },
-                    Answering {
+        let agent = spawn_equipped(
+            Arc::new(InMemoryJournal::new()),
+            vec![Capability::TaskList(TaskListCapability::new())],
+        )
+        .await;
+        let commanded = async |input: Value| {
+            agent
+                .ask(|reply| AgentCommand::TaskListChange {
+                    input,
+                    answering: capabilities::Answering {
                         call: "t1".to_string(),
-                        reply: ReplyTo::from_sender(tx),
+                        reply,
                     },
-                ),
-            )
-            .expect("the task list owns its command")
-            .answer
+                })
+                .await
+                .expect("the mailbox answers")
         };
 
-        let refused = commanded(serde_json::json!({"action": "delete_everything"}));
+        let refused = commanded(serde_json::json!({"action": "delete_everything"})).await;
         assert!(
-            matches!(
-                refused,
-                Some(Err(horsie_agentcore::ToolCallError::InvalidInput(_)))
-            ),
+            matches!(refused, Err(ToolCallError::InvalidInput(_))),
             "a refusal reached the model as an ordinary result: {refused:?}"
         );
-        let answered = commanded(serde_json::json!({"action": "create", "tasks": ["a"]}));
+        let answered = commanded(serde_json::json!({"action": "create", "tasks": ["a"]})).await;
         assert!(
-            matches!(answered, Some(Ok(ToolOutcome::Result(_)))),
+            matches!(answered, Ok(ToolOutcome::Result(_))),
             "a successful call did not answer with a result: {answered:?}"
         );
+    }
+
+    /// **An ask stops the run and journals the park before it answers.** The
+    /// dangling `tool_use` *is* the parked agent, so a result here instead
+    /// would let the run carry on with nothing waiting for the person; and the
+    /// question has to reach the log as a lifecycle record, or a client never
+    /// shows it.
+    #[tokio::test]
+    async fn an_ask_stops_the_run_and_journals_the_park() {
+        use crate::agent_loop::capabilities::ask_user::AskUserCapability;
+
+        let journal = Arc::new(SlowJournal::new());
+        let written = Arc::clone(&journal.written);
+        let agent =
+            spawn_equipped(journal, vec![Capability::AskUser(AskUserCapability::new())]).await;
+        let outcome = agent
+            .ask(|reply| AgentCommand::AskUserAsk {
+                input: serde_json::json!({ "question": "which one?" }),
+                answering: capabilities::Answering {
+                    call: "call-1".to_string(),
+                    reply,
+                },
+            })
+            .await
+            .expect("the mailbox answers");
+        assert_eq!(
+            outcome.expect("the ask was refused"),
+            ToolOutcome::StopRun,
+            "the run has to stop, or the tool_use never dangles"
+        );
+        let written = written.lock().unwrap();
+        for expected in ["AskUserAsked", "AskRecorded", "ParkedOn"] {
+            assert!(
+                written.iter().any(|e| e.contains(expected)),
+                "the park is missing its {expected}: {written:?}"
+            );
+        }
     }
 
     /// **The answer waits for the write.** A tool a capability answers for
     /// journals what it did, and the model is told only once that is durable —
     /// otherwise a crash in the window leaves a run that was told a thing
     /// happened and a log that never recorded it.
+    ///
+    /// The rule is blanket: every command arm goes through
+    /// [`AgentActor::answered`], which hangs the answer off the write's own
+    /// acknowledgement. This pins it on the one capability that exists to be
+    /// pinned on.
     #[tokio::test]
     async fn a_claimed_call_is_answered_only_after_its_events_are_durable() {
-        let order: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
-        let journal = Arc::new(SlowJournal {
-            inner: InMemoryJournal::new(),
-            order: Arc::clone(&order),
-        });
-        let ctx = AgentRuntimeContext {
-            context_provider: Arc::new(NoContext),
-            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
-            parent: Arc::new(NoParent),
-            journal_id: uuid::Uuid::new_v4(),
-            ready: true,
-        };
-        let mut params = AgentParams::from_def(&AgentRunDef {
-            system_prompt: None,
-            max_iterations: None,
-            max_retries: None,
-            allowed_tools: None,
-        });
-        params.capabilities =
-            Capabilities::new(vec![Capability::Fake(FakeCapability::new("fake_tool"))]);
-        let agent = crate::testing::spawn_detached(
-            &ActorSystem::new(journal),
-            AgentActor::new(ctx, params),
-        );
-        // The equipment is journaled on recovery, so wait for it: a call that
-        // arrives first reaches an agent with no capabilities at all.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let journal = Arc::new(SlowJournal::new());
+        let order = Arc::clone(&journal.order);
+        let agent = spawn_equipped(
+            journal,
+            vec![Capability::Fake(FakeCapability::new("fake_tool"))],
+        )
+        .await;
 
         let outcome = agent
-            .ask(|reply| {
-                AgentCommand::Capability(capabilities::CapCommand::Fake(
-                    capabilities::testing::FakeCommand {
-                        tool: "fake_tool".to_string(),
-                    },
-                    capabilities::Answering {
-                        call: "t1".to_string(),
-                        reply,
-                    },
-                ))
+            .ask(|reply| AgentCommand::FakeCall {
+                tool: "fake_tool".to_string(),
+                answering: capabilities::Answering {
+                    call: "t1".to_string(),
+                    reply,
+                },
             })
             .await
             .expect("the mailbox answers");
@@ -3968,14 +4366,108 @@ mod capability_tests {
         );
     }
 
+    /// **Every capability that could be holding this agent open is asked, not
+    /// just the first.** This is what replaced the merged broadcast, and the
+    /// merge is why the old code needed a verb of its own: a capability that
+    /// claimed a turn boundary with an empty decision was invisible to the
+    /// actor by construction, so "I am holding something" could only travel as
+    /// an act inside the merged result. Asked one at a time, there is nothing
+    /// to be invisible to — but only if all three are asked.
+    #[test]
+    fn everything_holding_the_agent_open_is_asked_at_a_turns_end() {
+        use crate::agent_loop::capabilities::sub_agent::SubAgentCapability;
+        use crate::agent_loop::capabilities::timers::TimersCapability;
+        use crate::agent_loop::capabilities::workflow::WorkflowCapability;
+        use crate::agent_loop::capabilities::{sub_agent, workflow};
+        use crate::sessions::runners::ids::{AgentId, RunnerId};
+
+        let child = RunnerId::new_v4();
+        let state = AgentState {
+            capabilities: Capabilities::new(vec![
+                Capability::SubAgent(SubAgentCapability::new(
+                    crate::sessions::runners::empty_settings(),
+                    0,
+                )),
+                Capability::Workflow(WorkflowCapability),
+                Capability::Timers(TimersCapability::new()),
+            ]),
+            ..AgentState::default()
+        };
+        // One of each: a worker that owes a report, a run that owes an output,
+        // and an armed timer.
+        let state = [
+            AgentDomainEvent::SubAgentRequested {
+                call: "t1".into(),
+                pending: sub_agent::Pending {
+                    child,
+                    agent: AgentId::new_v4(),
+                    label: "worker".into(),
+                    task: "do it".into(),
+                    agent_type: None,
+                },
+            },
+            AgentDomainEvent::SubAgentStarted { call: "t1".into() },
+            AgentDomainEvent::WorkflowRequested {
+                call: "t2".into(),
+                pending: workflow::Pending {
+                    child: RunnerId::new_v4(),
+                    workflow: "nightly".into(),
+                    input: String::new(),
+                },
+            },
+            AgentDomainEvent::WorkflowStarted { call: "t2".into() },
+            AgentDomainEvent::TimerArmed {
+                record: crate::agent_loop::TimerRecord::arm(
+                    "later".into(),
+                    "wake up".into(),
+                    crate::agent_loop::TimerKind::OneShot,
+                    std::time::Duration::from_secs(60),
+                    now_ms(),
+                ),
+            },
+        ]
+        .into_iter()
+        .fold(state, AgentActor::apply_event);
+
+        let held = AgentActor::holding(&state);
+        assert_eq!(
+            held,
+            vec![
+                "1 subagent(s) still owe a report".to_string(),
+                "1 workflow run(s) still in flight".to_string(),
+                "1 timer(s) still armed".to_string(),
+            ],
+            "a capability holding this agent open was never asked, so a turn \
+             ending would have looked like the work finishing"
+        );
+    }
+
+    /// And an agent holding nothing says so, which is what lets a step that
+    /// owes a result be nudged rather than left running for ever.
+    #[test]
+    fn an_agent_holding_nothing_holds_nothing() {
+        assert!(AgentActor::holding(&AgentState::default()).is_empty());
+    }
+
     /// A journal that takes its time, so "before the write" and "after the
     /// write" are tellable apart rather than a race.
     struct SlowJournal {
         inner: InMemoryJournal,
         order: Arc<Mutex<Vec<&'static str>>>,
+        /// Every event it was told to write, as it was written — which is what
+        /// makes "a reader of the raw journal" a thing a test can be.
+        written: Arc<Mutex<Vec<String>>>,
     }
 
     impl SlowJournal {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryJournal::new(),
+                order: Arc::new(Mutex::new(Vec::new())),
+                written: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
         /// Whether this batch is the capability's own event, rather than the
         /// `Equipped` record that precedes it.
         fn is_the_capabilitys(events: &[Vec<u8>]) -> bool {
@@ -3993,6 +4485,13 @@ mod capability_tests {
             events: &[Vec<u8>],
             expected_last_seq: u64,
         ) -> horsie_actor::JournalResult<()> {
+            if let Ok(mut guard) = self.written.lock() {
+                guard.extend(
+                    events
+                        .iter()
+                        .map(|e| String::from_utf8_lossy(e).to_string()),
+                );
+            }
             let mine = Self::is_the_capabilitys(events);
             if mine {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -4142,10 +4641,10 @@ mod capability_tests {
             .map(|spec| {
                 let tool = spec.name.clone();
                 crate::agent_loop::toolbox::ClaimedTool::new(spec, move |_input, to| {
-                    capabilities::CapCommand::Fake(
-                        capabilities::testing::FakeCommand { tool: tool.clone() },
-                        to,
-                    )
+                    AgentCommand::FakeCall {
+                        tool: tool.clone(),
+                        answering: to,
+                    }
                 })
             })
             .collect();
@@ -4192,14 +4691,12 @@ mod capability_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod ask_wiring_tests {
-    //! The park, driven through the actor's own routing rather than the
-    //! capability's `handle` directly — which is where the two used to be
-    //! unable to meet.
+    //! The park, driven through the arms the actor answers it in rather than
+    //! through the capability alone — which is where the two used to be unable
+    //! to meet.
 
     use super::*;
-    use crate::agent_loop::capabilities::ask_user::{AskUserCapability, Command};
-    use crate::agent_loop::capabilities::testing::answering;
-    use crate::agent_loop::capabilities::{CapCommand, Msg};
+    use crate::agent_loop::capabilities::ask_user::{self, AskUserCapability};
     use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     fn attended() -> AgentState {
@@ -4209,14 +4706,40 @@ mod ask_wiring_tests {
         }
     }
 
-    /// The command `ask_user`'s own layer builds for a question.
-    fn ask(id: &str, question: &str) -> CapCommand {
-        CapCommand::AskUser(
-            Command::Ask {
-                input: serde_json::json!({ "question": question }),
+    /// The events the `ask_user` arm journals for a question, in the order it
+    /// journals them.
+    fn ask(state: &AgentState, call: &str, question: &str) -> Vec<AgentDomainEvent> {
+        let cap = state
+            .capabilities
+            .ask_user()
+            .expect("an agent that can ask");
+        let ask_user::Asked::Ask { question, record } =
+            cap.asked(call, &serde_json::json!({ "question": question }))
+        else {
+            panic!("an attended agent refused to ask")
+        };
+        let at_ms = now_ms();
+        vec![
+            AgentDomainEvent::AskUserAsked {
+                call: call.to_string(),
+                question: question.clone(),
             },
-            answering(id),
-        )
+            AgentDomainEvent::LifecycleRecorded {
+                event: record,
+                at_ms,
+            },
+            AgentDomainEvent::ParkedOn {
+                call: call.to_string(),
+                note: question,
+                at_ms,
+            },
+        ]
+    }
+
+    /// Whether a turn beginning now would record the park as abandoned, which
+    /// is exactly what the `begin_turn` arm asks.
+    fn abandons(state: &AgentState) -> bool {
+        state.capabilities.ask_user().is_some() && ask_user::abandons(&state.ask_user)
     }
 
     fn fold(state: &AgentState, events: &[AgentDomainEvent]) -> AgentState {
@@ -4227,30 +4750,23 @@ mod ask_wiring_tests {
 
     /// The whole loop: a call parks the run, the park survives as folded state,
     /// and an answer resumes it with a result paired to the dangling call.
+    ///
+    /// That the run *stops* is the arm's half of it, and is pinned by
+    /// `an_ask_stops_the_run_and_journals_the_park` over a real actor.
     #[test]
     fn an_ask_parks_and_its_answer_resumes_the_dangling_call() {
         let state = attended();
-        let parked = AgentActor::consult_command(&state, &ask("call-1", "which?"))
-            .expect("ask_user owns its own command");
-        assert_eq!(
-            parked
-                .answer
-                .as_ref()
-                .map(|a| a.as_ref().expect("no error")),
-            Some(&ToolOutcome::StopRun),
-            "the run has to stop, or the tool_use never dangles"
-        );
+        let state = fold(&state, &ask(&state, "call-1", "which?"));
 
-        let state = fold(&state, &parked.events);
         let answers = vec![crate::agent_loop::AskAnswer {
             tool_call_id: "call-1".into(),
             text: "the second one".into(),
         }];
-        let resumed = AgentActor::consult(&state, &Msg::Answer(&answers))
+        let resumed = ask_user::answered(&state.ask_user, &answers)
             .expect("the capability holding the park claims the answer");
         assert_eq!(
             resumed
-                .resume
+                .results
                 .iter()
                 .map(|r| (r.tool_call_id.as_str(), r.output.as_str(), r.is_error))
                 .collect::<Vec<_>>(),
@@ -4265,75 +4781,73 @@ mod ask_wiring_tests {
     #[test]
     fn a_turn_beginning_on_an_open_park_abandons_it() {
         let state = attended();
-        let parked = AgentActor::consult_command(&state, &ask("call-1", "which?")).expect("mine");
-        let state = fold(&state, &parked.events);
+        let state = fold(&state, &ask(&state, "call-1", "which?"));
 
-        let began = AgentActor::consult(&state, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
-        assert_eq!(began.events.len(), 1, "the park should be given up");
-        let after = fold(&state, &began.events);
+        assert!(abandons(&state), "the park should be given up");
+        let after = fold(&state, &[AgentDomainEvent::AskUserAbandoned]);
         assert!(
-            !serde_json::to_string(&after.capabilities)
-                .expect("serialise")
-                .contains("which?"),
+            !abandons(&after),
             "the park outlived the turn that abandoned it"
         );
     }
 
     /// And an answered park is *not* abandoned by the turn its own answer
     /// starts — the ordering the command handler exists to get right.
-    /// The same broadcast against the state the answer has *not* been folded
-    /// into records the park as abandoned — which is why the command handler
-    /// folds first.
+    /// Asking against the state the answer has *not* been folded into records
+    /// the park as abandoned, which is why the handler folds first.
     ///
     /// Worth being exact about what this protects: both events clear `pending`,
     /// so the state is the same either way. What the ordering keeps honest is
     /// the *record* — an `Abandoned` here would tell every later reader that the
     /// person's answer was ignored, on the very turn it was acted on.
+    ///
+    /// Named for asking rather than broadcasting because that is what the
+    /// handler does now; the mistake it guards against is unchanged.
     #[test]
-    fn broadcasting_before_folding_the_answer_would_record_a_false_abandonment() {
+    fn asking_before_folding_the_answer_would_record_a_false_abandonment() {
         let state = attended();
-        let parked = AgentActor::consult_command(&state, &ask("call-1", "which?")).expect("mine");
-        let stale = fold(&state, &parked.events);
+        let stale = fold(&state, &ask(&state, "call-1", "which?"));
 
         let answers = vec![crate::agent_loop::AskAnswer {
             tool_call_id: "call-1".into(),
             text: "this one".into(),
         }];
-        let resumed = AgentActor::consult(&stale, &Msg::Answer(&answers)).expect("mine");
+        let resumed = ask_user::answered(&stale.ask_user, &answers).expect("mine");
 
         // Deliberately *not* folded — the mistake the handler must not make.
-        let began = AgentActor::consult(&stale, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
-        assert_eq!(
-            began.events.len(),
-            1,
+        assert!(
+            abandons(&stale),
             "against stale state the park still looks open, so it is given up"
         );
-        // And folded, as the handler does it, the same broadcast records nothing.
-        let folded = fold(&stale, &resumed.events);
-        assert!(
-            AgentActor::consult(&folded, &Msg::Turn(TurnEvent::Began))
-                .expect("broadcast")
-                .events
-                .is_empty()
+        // And folded, as the handler does it, the same question answers no.
+        let folded = fold(
+            &stale,
+            &[AgentDomainEvent::AskUserAnswered {
+                calls: resumed.calls,
+            }],
         );
+        assert!(!abandons(&folded));
     }
 
     #[test]
     fn the_turn_an_answer_starts_does_not_abandon_the_park_it_just_closed() {
         let state = attended();
-        let parked = AgentActor::consult_command(&state, &ask("call-1", "which?")).expect("mine");
-        let state = fold(&state, &parked.events);
+        let state = fold(&state, &ask(&state, "call-1", "which?"));
 
         let answers = vec![crate::agent_loop::AskAnswer {
             tool_call_id: "call-1".into(),
             text: "this one".into(),
         }];
-        let resumed = AgentActor::consult(&state, &Msg::Answer(&answers)).expect("mine");
-        let state = fold(&state, &resumed.events);
+        let resumed = ask_user::answered(&state.ask_user, &answers).expect("mine");
+        let state = fold(
+            &state,
+            &[AgentDomainEvent::AskUserAnswered {
+                calls: resumed.calls,
+            }],
+        );
 
-        let began = AgentActor::consult(&state, &Msg::Turn(TurnEvent::Began)).expect("broadcast");
         assert!(
-            began.events.is_empty(),
+            !abandons(&state),
             "the answer already closed the park; recording it abandoned would \
              tell a reader the person was ignored"
         );

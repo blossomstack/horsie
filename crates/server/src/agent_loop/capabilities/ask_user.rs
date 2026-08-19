@@ -5,23 +5,33 @@
 //! parked on — is a pointer into a transcript the session does not hold and
 //! cannot write. So the park lived in the agent as `AgentState::asks` while the
 //! capability that owned the tool lived on the session, and the two could never
-//! be joined. Here they are the same object: [`AskUserCapability::pending`] is
-//! the park, folded from this capability's own events, in this agent's journal.
+//! be joined. Here they are the same object: [`AskUserState`] is the park,
+//! folded from this agent's own events, in this agent's journal.
+//!
+//! # Who decides and who acts
+//!
+//! Everything in this file only decides. [`AskUserCapability::asked`],
+//! [`answered`] and [`abandons`] return a narrow value each and none of them
+//! builds a journal event: the agent actor's arm is what journals, in what
+//! order, against which clock, and what the tool call is finally answered with.
+//! Keeping the two apart is what stops this file needing the actor's whole
+//! world to say something as small as "these are the questions, in this order".
 //!
 //! # What it does with a call
 //!
-//! An unmuted ask journals the question and answers [`Act::Park`]: no tool
-//! result, the turn ends, and the dangling `tool_use` *is* the parked agent. The
-//! answer arrives against it, possibly days later, on a process that has since
+//! An unmuted ask comes to [`Asked::Ask`]: the question is journaled, recorded
+//! where a client can read it, and the run parks on the call. No tool result,
+//! the turn ends, and the dangling `tool_use` *is* the parked agent. The answer
+//! arrives against it, possibly days later, on a process that has since
 //! rehydrated the session.
 //!
-//! A muted agent is told why, in words, and nothing is journaled — a refusal is
-//! not a fact about the agent. It is refused rather than declined because
-//! declining hands the call to the next capability, and the last of those is the
-//! open-namespace sandbox, which claims every name: the model would be answered
-//! by the sandbox and never learn why its question went nowhere. A muted agent
-//! also claims no `ask_user` in its [`super::Capability::layer`], so in practice the
-//! call only arrives from a plugin or a resumed transcript.
+//! A muted agent is [`Asked::Told`] why, in words, and nothing is journaled — a
+//! refusal is not a fact about the agent. It is answered here rather than left
+//! to the toolbox beneath, whose last layer is the open-namespace sandbox that
+//! claims every name: the model would be answered by the sandbox and never
+//! learn why its question went nowhere. A muted agent also claims no `ask_user`
+//! in its [`super::Capability::layer`], so in practice the call only arrives
+//! from a plugin or a resumed transcript.
 //!
 //! # Abandonment stays in `queued_turn`
 //!
@@ -34,24 +44,27 @@
 //! item is entitled to override a park, and which merely waits — and this
 //! capability has no queue and should not be given one.
 //!
-//! What this capability does own is its own bookkeeping, and it hangs it on
-//! [`TurnEvent::Began`] rather than [`TurnEvent::Ended`]:
+//! What this capability does own is its own bookkeeping, and the one question
+//! it answers about a turn is [`abandons`], which is asked when a turn *begins*
+//! and never when one ends:
 //!
-//! - `Ended` is the wrong hook, and not by a little. A park *ends its own turn*
-//!   — that is what [`Act::Park`] means — so every ask is followed immediately
-//!   by `Ended`. Clearing there would throw away the park it had just made.
-//! - `Began` is exactly right, and it is the rule the actor already writes for
-//!   `AgentState::asks`: a turn beginning ends the park either way, because the
-//!   questions were answered or they were abandoned, and a result for every call
-//!   was recorded before the turn started. An answered park has already cleared
-//!   itself here (see [`Act::Resume`]), so a turn that begins with `pending`
+//! - A turn ending is the wrong moment, and not by a little. A park *ends its
+//!   own turn* — that is what parking on the call means — so every ask is
+//!   followed immediately by its turn ending. Clearing there would throw away
+//!   the park it had just made.
+//! - A turn beginning is exactly right, and it is the rule the actor already
+//!   writes for its own record of what it is parked on: a turn beginning ends
+//!   the park either way, because the questions were answered or they were
+//!   abandoned, and a result for every call was recorded before the turn
+//!   started. An answered park has already cleared itself — that is what the
+//!   actor journals for [`answered`] — so a turn that begins with the park
 //!   still full is one the queue abandoned.
 //!
 //! So the queue decides *whether* a park is abandoned and *what the model is
-//! told*; this decides nothing and only stops holding what is no longer held.
+//! told*; this decides nothing and only says whether anything is still held.
 
-use super::{Act, CapCommand, Decision, Mailbox, Msg, SetupError, TurnEvent};
-use crate::agent_loop::state::AgentDomainEvent;
+use super::{Mailbox, SetupError};
+use crate::agent_loop::AgentCommand;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
@@ -83,12 +96,35 @@ result is what the rest of the run sees; make it self-contained.";
 /// The tool this capability answers for.
 pub const TOOL: &str = "ask_user";
 
-/// What the model asked this capability to do.
-pub enum Command {
-    /// `ask_user`, with the question still in the arguments it arrived in: a
-    /// muted agent refuses without reading them, and reading them is the
-    /// decision rather than the routing.
-    Ask { input: Value },
+/// What a call to `ask_user` came to.
+///
+/// Deliberately not a journal event: the two arms differ in what *happens*, and
+/// which events say so is the actor's to write.
+pub(crate) enum Asked {
+    /// A muted agent is told why, in words, and the run carries on. Journals
+    /// nothing: a refusal is not a fact about the agent.
+    ///
+    /// A plain tool result rather than a tool error, because the model is not
+    /// being told it called the tool wrongly — it is being told the answer it
+    /// wanted is not coming and what to do instead.
+    Told(&'static str),
+    /// Journal the question, record it where a reader sees it, and park the
+    /// run on the call.
+    Ask {
+        question: String,
+        /// What a client reads an ask as. Built here, because the shape of
+        /// what a person sees is this capability's business; journaled by the
+        /// actor, because a capability's own events append nothing readable.
+        record: LifecycleEvent,
+    },
+}
+
+/// The park an answer set closes, and what resumes it.
+pub(crate) struct Answered {
+    /// The calls this closes, in the order the park holds them.
+    pub calls: Vec<String>,
+    /// The results that pair with those calls, which start the next turn.
+    pub results: Vec<ToolResultInput>,
 }
 
 /// Why this agent may not ask, when it may not.
@@ -141,8 +177,8 @@ pub struct AskUserCapability {
 /// The park this agent is holding.
 ///
 /// Fields private to this file, which is what makes the park unreachable except
-/// through the two questions below: nothing else can add a question, and
-/// nothing else can decide an answer resumes one.
+/// through the functions below: nothing else can add a question, and nothing
+/// else can decide an answer resumes one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AskUserState {
     /// The questions this agent is parked on: `tool_call_id` -> question.
@@ -176,11 +212,11 @@ impl AskUserState {
 
     /// Why this answer set cannot resume the park, if it cannot.
     ///
-    /// The rule and the diagnostic in one place. [`super::Capability::handle`] cannot
-    /// return an error — a refused answer is not a decision, so it journals
-    /// nothing and produces nothing — but the person who typed the answer is
-    /// owed better than silence, so the same check is reachable by name for
-    /// whoever replies to them.
+    /// The rule and the diagnostic in one place. [`answered`] cannot return an
+    /// error — a refused answer is not a decision, so it journals nothing and
+    /// produces nothing — but the person who typed the answer is owed better
+    /// than silence, so the same check is reachable by name for whoever replies
+    /// to them.
     ///
     /// All or nothing: a half-answered park could not resume anyway, because
     /// the next provider call would carry a `tool_use` with no result.
@@ -212,15 +248,56 @@ impl AskUserState {
 #[cfg(test)]
 /// What this state holds, for the tests that assert on it.
 ///
-/// `#[cfg(test)]` because nothing in production reads it: the decisions that
-/// need it are in this file and take `&self`. An accessor kept for a caller
-/// that does not exist is how a private field stops being private.
+/// `#[cfg(test)]` because nothing in production reads it: everything that needs
+/// the park is in this file. An accessor kept for a caller that does not exist
+/// is how a private field stops being private.
 impl AskUserState {
     /// The questions still waiting, in the order their results are produced.
     #[must_use]
     pub(crate) fn pending(&self) -> &BTreeMap<String, String> {
         &self.pending
     }
+}
+
+/// Somebody answered.
+///
+/// `None` — "not mine" — for anything this park cannot be resumed by, which
+/// covers both arms of [`AnswerError`]: an agent parked on nothing has no claim
+/// on an answer, and one whose questions these are not cannot start a turn from
+/// them.
+///
+/// A free function because it reads the park and nothing else — there is no
+/// config here to consult, so there is no `self` to take.
+pub(crate) fn answered(state: &AskUserState, answers: &[AskAnswer]) -> Option<Answered> {
+    if state.answer_error(answers).is_some() {
+        return None;
+    }
+    let by_call: BTreeMap<&str, &str> = answers
+        .iter()
+        .map(|a| (a.tool_call_id.as_str(), a.text.as_str()))
+        .collect();
+    // Driven by `pending` rather than by the answers, so the results come out
+    // in the order the park holds them and a call cannot be answered twice.
+    let results: Vec<ToolResultInput> = state
+        .pending
+        .keys()
+        .map(|call| ToolResultInput {
+            tool_call_id: call.clone(),
+            output: by_call.get(call.as_str()).unwrap_or(&"").to_string(),
+            is_error: false,
+        })
+        .collect();
+    Some(Answered {
+        calls: state.pending.keys().cloned().collect(),
+        results,
+    })
+}
+
+/// Whether a turn beginning now abandons a park this agent is still holding.
+///
+/// See the module doc for why this is a turn *beginning* and not one ending.
+pub(crate) fn abandons(state: &AskUserState) -> bool {
+    !state.pending.is_empty()
 }
 
 impl AskUserCapability {
@@ -246,67 +323,23 @@ impl AskUserCapability {
     }
 
     /// The model called `ask_user`.
-    fn asked(&self, call: &str, input: &Value) -> Decision {
+    ///
+    /// Reading the question is the decision, not the routing: a muted agent
+    /// refuses without looking at the arguments at all.
+    pub(crate) fn asked(&self, call: &str, input: &Value) -> Asked {
         if let Some(mute) = self.mute {
-            // Journals nothing: a refusal is not a fact about the agent.
-            return Decision::reply(call, mute.refusal());
+            return Asked::Told(mute.refusal());
         }
         let question = input
             .get("question")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        Decision::record(vec![AgentDomainEvent::AskUserAsked {
-            call: call.to_string(),
+        let record = LifecycleEvent::AskRecorded(AskLifecycle {
+            tool_call_id: Some(call.to_string()),
             question: question.clone(),
-        }])
-        // The question has to reach the agent's log or it never reaches the
-        // person: a client reads an ask as `AskRecorded`, and a capability's
-        // own events append nothing readable.
-        .then(Act::Record(Box::new(LifecycleEvent::AskRecorded(
-            AskLifecycle {
-                tool_call_id: Some(call.to_string()),
-                question: question.clone(),
-            },
-        ))))
-        .then(Act::Park {
-            call: call.to_string(),
-            note: question,
-        })
-    }
-
-    /// Somebody answered.
-    ///
-    /// `None` — "not mine" — for anything this park cannot be resumed by, which
-    /// covers both arms of [`AnswerError`]: an agent parked on nothing has no
-    /// claim on an answer, and one whose questions these are not cannot start a
-    /// turn from them.
-    fn answered(state: &AskUserState, answers: &[AskAnswer]) -> Option<Decision> {
-        if state.answer_error(answers).is_some() {
-            return None;
-        }
-        let by_call: BTreeMap<&str, &str> = answers
-            .iter()
-            .map(|a| (a.tool_call_id.as_str(), a.text.as_str()))
-            .collect();
-        // Driven by `pending` rather than by the answers, so the results come
-        // out in the order the park holds them and a call cannot be answered
-        // twice.
-        let results: Vec<ToolResultInput> = state
-            .pending
-            .keys()
-            .map(|call| ToolResultInput {
-                tool_call_id: call.clone(),
-                output: by_call.get(call.as_str()).unwrap_or(&"").to_string(),
-                is_error: false,
-            })
-            .collect();
-        Some(
-            Decision::record(vec![AgentDomainEvent::AskUserAnswered {
-                calls: state.pending.keys().cloned().collect(),
-            }])
-            .then(Act::Resume { results }),
-        )
+        });
+        Asked::Ask { question, record }
     }
 }
 
@@ -351,7 +384,10 @@ impl AskUserCapability {
                 }
                 }),
             },
-            |input, to| CapCommand::AskUser(Command::Ask { input }, to),
+            |input, to| AgentCommand::AskUserAsk {
+                input,
+                answering: to,
+            },
         )]
     }
 }
@@ -395,54 +431,20 @@ impl AskUserCapability {
     ) -> Arc<dyn Toolbox> {
         claiming(inner, self.claims(), mailbox)
     }
-
-    pub fn command(&self, _state: &AskUserState, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::AskUser(cmd, to) = cmd else {
-            return None;
-        };
-        let Command::Ask { input } = cmd;
-        Some(self.asked(&to.call, input))
-    }
-
-    pub fn handle(&self, state: &AskUserState, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Answer(answers) => Self::answered(state, answers),
-            // The park did not survive; see the module doc for why this is
-            // `Began` and not `Ended`.
-            Msg::Turn(TurnEvent::Began) if !state.pending.is_empty() => {
-                Some(Decision::record(vec![AgentDomainEvent::AskUserAbandoned]))
-            }
-            // Nothing to re-ask: this capability's park is answered by a person,
-            // not by the session, so a load leaves it exactly where it was.
-            Msg::Turn(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::Loaded
-            | Msg::TurnProposed => None,
-        }
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{FakeCapability, facts};
     use super::*;
-    use crate::agent_loop::capabilities::testing::{
-        Equipped, advertised_by, answering, equipped, loading, spec, specs_of,
-    };
+    use crate::agent_loop::AgentState;
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts, loading, spec, specs_of};
     use crate::agent_loop::capabilities::{Capabilities, Capability};
+    use crate::agent_loop::state::AgentDomainEvent;
 
-    /// The command the `ask_user` layer builds for a question.
-    fn ask(id: &str, question: &str) -> CapCommand {
-        CapCommand::AskUser(
-            Command::Ask {
-                input: json!({ "question": question }),
-            },
-            answering(id),
-        )
+    /// The arguments the `ask_user` layer hands over for a question.
+    fn asking(question: &str) -> Value {
+        json!({ "question": question })
     }
 
     fn answer(id: &str, text: &str) -> AskAnswer {
@@ -452,29 +454,29 @@ mod tests {
         }
     }
 
-    /// An agent that may ask, with nothing asked yet.
-    fn attended() -> Equipped {
-        Equipped::with(Capability::AskUser(AskUserCapability::new()))
-    }
-
-    /// Park on these questions, the only way there is to get there.
-    fn parked(questions: &[(&str, &str)]) -> Equipped {
-        let mut c = attended();
+    /// Park on these questions, the only way there is to get there: the real
+    /// decision, folded by the event the actor journals for it.
+    fn parked(questions: &[(&str, &str)]) -> AskUserState {
+        let c = AskUserCapability::new();
+        let mut state = AgentState::default();
         for (id, q) in questions {
-            c.did(&ask(id, q));
+            let Asked::Ask { question, .. } = c.asked(id, &asking(q)) else {
+                panic!("an attended agent that would not ask");
+            };
+            state = state.apply(AgentDomainEvent::AskUserAsked {
+                call: (*id).to_string(),
+                question,
+            });
         }
-        c
+        state.ask_user
     }
 
-    fn refusal(d: &Decision) -> String {
-        assert!(
-            d.events.is_empty(),
-            "a refusal is not a fact about the agent"
-        );
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
+    /// What a muted agent was told — and that being told is *all* that happened.
+    fn refusal(asked: &Asked) -> &'static str {
+        let Asked::Told(text) = asked else {
+            panic!("a refused ask parks nothing, and this one asked");
         };
-        text.clone()
+        text
     }
 
     /// The one that matters for routines: an unattended run is offered no
@@ -499,47 +501,10 @@ mod tests {
             "a muted agent advertises no ask_user"
         );
 
-        // And a call that arrives anyway is refused in words rather than
-        // declined — see the test below for what declining would cost.
-        let mut muted = Equipped::with(Capability::AskUser(c));
-        let d = muted
-            .command(&ask("t1", "which?"))
-            .expect("mine even when muted");
-        let said = refusal(&d);
+        // And a call that arrives anyway is answered in words rather than left
+        // to the toolbox beneath — see the module doc for what that would cost.
+        let said = refusal(&c.asked("t1", &asking("which?")));
         assert!(said.contains("routine"), "{said}");
-        muted.fold(&d);
-        assert!(
-            muted.0.ask_user.pending().is_empty(),
-            "a refused ask parks nothing"
-        );
-    }
-
-    /// **A muted agent that asks anyway must be told no.** Declining its own
-    /// command leaves nothing to answer it — the actor fails the call with a
-    /// bug's diagnostic instead of the sentence saying why the question went
-    /// nowhere.
-    ///
-    /// The fake beside it is the open-namespace capability that used to be able
-    /// to swallow this. It cannot any more: a command names its capability, so
-    /// which one answers is no longer a race the last claimant can win. What is
-    /// still this capability's to get right is claiming its own.
-    #[test]
-    fn a_muted_ask_is_claimed_rather_than_declined() {
-        for c in [
-            AskUserCapability::unattended(),
-            AskUserCapability::not_interactive(),
-        ] {
-            let state = crate::agent_loop::AgentState {
-                capabilities: Capabilities::new(vec![
-                    Capability::AskUser(c),
-                    Capability::Fake(FakeCapability::new(TOOL)),
-                ]),
-                ..crate::agent_loop::AgentState::default()
-            };
-            let d = super::super::dispatch(&state, &ask("t1", "which?"))
-                .expect("a muted ask that answers nobody");
-            assert!(!refusal(&d).is_empty());
-        }
     }
 
     /// A step that did not declare itself interactive is muted for a different
@@ -567,11 +532,7 @@ mod tests {
         // says the other reason, not this one.
         assert!(spec.toolbox().is_none());
         assert!(advertised_by(&Capability::AskUser(c.clone()), &facts()).is_empty());
-        let said = refusal(
-            &Equipped::with(Capability::AskUser(c))
-                .command(&ask("t1", "which?"))
-                .expect("mine even when muted"),
-        );
+        let said = refusal(&c.asked("t1", &asking("which?")));
         assert!(
             said.contains("step") && !said.contains("routine"),
             "a muted step was refused as though it were a routine: {said}"
@@ -592,9 +553,8 @@ mod tests {
             .await
             .expect("nothing to acquire");
         assert!(spec.prompt.is_empty());
-        assert_eq!(
-            equipped(spec),
-            Vec::<String>::new(),
+        assert!(
+            spec.toolbox().is_none(),
             "the tool is dispatched through the mailbox, not through a layer"
         );
         assert_eq!(
@@ -638,28 +598,28 @@ mod tests {
     /// on are journaled here, against the transcript that holds the call.
     #[test]
     fn an_ask_journals_the_question_and_parks() {
-        let mut c = attended();
-        let d = c.command(&ask("call-1", "which database?")).expect("mine");
-
-        let [AgentDomainEvent::AskUserAsked { call, question }] = d.events.as_slice() else {
-            panic!("expected one Asked event, got {:?}", d.events);
+        let asked = AskUserCapability::new().asked("call-1", &asking("which database?"));
+        let Asked::Ask { question, record } = &asked else {
+            panic!("an attended agent that would not ask");
         };
-        assert_eq!(call, "call-1");
-        assert_eq!(question, "which database?");
-        // The record comes before the park: a question the person never sees is
-        // a park nobody can end.
-        let [Act::Record(_), Act::Park { call, note }] = d.acts.as_slice() else {
-            panic!("an ask that did not record and park: {:?}", d.acts);
-        };
-        assert_eq!(call, "call-1");
         assert_eq!(
-            note, "which database?",
+            question, "which database?",
             "the actor's own park record has to say what is being waited for"
         );
+        // The record is part of the ask rather than an afterthought: a question
+        // the person never sees is a park nobody can end.
+        let LifecycleEvent::AskRecorded(recorded) = record else {
+            panic!("an ask nobody can read: {record:?}");
+        };
+        assert_eq!(recorded.tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(recorded.question, "which database?");
 
-        c.fold(&d);
+        // And folding what the actor journals for it is what makes the park.
         assert_eq!(
-            c.0.ask_user.pending().get("call-1").map(String::as_str),
+            parked(&[("call-1", "which database?")])
+                .pending()
+                .get("call-1")
+                .map(String::as_str),
             Some("which database?")
         );
     }
@@ -668,110 +628,104 @@ mod tests {
     /// order the park holds them, and none of them an error.
     #[test]
     fn a_complete_answer_set_resumes_with_one_result_per_question() {
-        let mut c = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
-        let d = c
-            .handle(&Msg::Answer(&[
-                answer("call-2", "opus"),
-                answer("call-1", "main"),
-            ]))
-            .expect("mine");
+        let state = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
+        let resumed = answered(
+            &state,
+            &[answer("call-2", "opus"), answer("call-1", "main")],
+        )
+        .expect("mine");
 
-        let [Act::Resume { results }] = d.acts.as_slice() else {
-            panic!("a complete answer set that did not resume: {:?}", d.acts);
-        };
         assert_eq!(
-            results
+            resumed
+                .results
                 .iter()
                 .map(|r| (r.tool_call_id.as_str(), r.output.as_str(), r.is_error))
                 .collect::<Vec<_>>(),
             vec![("call-1", "main", false), ("call-2", "opus", false)],
             "results must follow the park's order, not the answers'"
         );
-
-        c.fold(&d);
-        assert!(
-            c.0.ask_user.pending().is_empty(),
-            "an answered park is over"
+        assert_eq!(
+            resumed.calls,
+            vec!["call-1".to_string(), "call-2".to_string()],
+            "the calls this closes are the park's own, in the same order"
         );
+
+        let after = AgentState {
+            ask_user: state,
+            ..AgentState::default()
+        }
+        .apply(AgentDomainEvent::AskUserAnswered {
+            calls: resumed.calls,
+        })
+        .ask_user;
+        assert!(after.pending().is_empty(), "an answered park is over");
     }
 
     /// Resuming on half the answers would send the provider a `tool_use` with
     /// no result, which is the 400 the all-or-nothing rule exists to stop.
     #[test]
     fn an_incomplete_answer_set_is_refused_and_journals_nothing() {
-        let c = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
+        let state = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
         assert!(
-            c.handle(&Msg::Answer(&[answer("call-1", "main")]))
-                .is_none(),
+            answered(&state, &[answer("call-1", "main")]).is_none(),
             "half a park cannot resume"
         );
         assert_eq!(
-            c.0.ask_user.answer_error(&[answer("call-1", "main")]),
+            state.answer_error(&[answer("call-1", "main")]),
             Some(AnswerError::Incomplete {
                 missing: vec!["call-2".to_string()],
                 unexpected: vec![],
             }),
             "the person who answered is owed the diagnostic"
         );
-        assert_eq!(
-            c.0.ask_user.pending().len(),
-            2,
-            "a refused answer changes nothing"
-        );
+        assert_eq!(state.pending().len(), 2, "a refused answer changes nothing");
     }
 
     /// An answer for a call this agent is not parked on, and the park it does
     /// hold is left exactly where it was.
     #[test]
     fn an_answer_naming_a_call_that_is_not_pending_is_refused() {
-        let c = parked(&[("call-1", "which?")]);
+        let state = parked(&[("call-1", "which?")]);
         let answers = [answer("call-1", "main"), answer("call-9", "who asked?")];
-        assert!(c.handle(&Msg::Answer(&answers)).is_none());
+        assert!(answered(&state, &answers).is_none());
         assert_eq!(
-            c.0.ask_user.answer_error(&answers),
+            state.answer_error(&answers),
             Some(AnswerError::Incomplete {
                 missing: vec![],
                 unexpected: vec!["call-9".to_string()],
             })
         );
         // And an agent parked on nothing has no claim on an answer at all.
-        let fresh = attended();
-        assert!(
-            fresh
-                .handle(&Msg::Answer(&[answer("call-1", "main")]))
-                .is_none()
-        );
+        let fresh = AskUserState::default();
+        assert!(answered(&fresh, &[answer("call-1", "main")]).is_none());
         assert_eq!(
-            fresh.0.ask_user.answer_error(&[answer("call-1", "main")]),
+            fresh.answer_error(&[answer("call-1", "main")]),
             Some(AnswerError::NothingPending)
         );
     }
 
     /// A park outlives the turn that made it — that is what parking *is* — so
-    /// the turn ending must not clear it. Hung on `Ended`, this capability
-    /// would throw away every question the instant it asked it.
+    /// only a turn *beginning* may end it. Asked at the end of a turn instead,
+    /// this capability would throw away every question the instant it asked it.
     #[test]
-    fn the_turn_that_parked_does_not_end_the_park() {
-        let mut c = parked(&[("call-1", "which?")]);
-        for ended in [TurnEvent::Ended, TurnEvent::Failed, TurnEvent::Cancelled] {
-            let d = c.handle(&Msg::Turn(ended));
-            assert!(d.is_none(), "{ended:?} touched the park");
+    fn a_turn_beginning_on_a_held_park_abandons_it() {
+        let state = parked(&[("call-1", "which?")]);
+        // The questions were answered or the queue abandoned them, and a result
+        // for every call was recorded before the turn started.
+        assert!(
+            abandons(&state),
+            "a turn began and the park was left holding"
+        );
+
+        let after = AgentState {
+            ask_user: state,
+            ..AgentState::default()
         }
-        // A turn *beginning* is the other story: the questions were answered or
-        // the queue abandoned them, and a result for every call was recorded
-        // before it started.
-        let d = c
-            .handle(&Msg::Turn(TurnEvent::Began))
-            .expect("the park is over");
-        assert!(matches!(
-            d.events.as_slice(),
-            [AgentDomainEvent::AskUserAbandoned]
-        ));
-        assert!(d.acts.is_empty(), "abandoning is `queued_turn`'s to act on");
-        c.fold(&d);
-        assert!(c.0.ask_user.pending().is_empty());
+        .apply(AgentDomainEvent::AskUserAbandoned)
+        .ask_user;
+        assert!(after.pending().is_empty());
         // And with nothing parked it has no opinion about a turn at all.
-        assert!(c.handle(&Msg::Turn(TurnEvent::Began)).is_none());
+        assert!(!abandons(&after));
     }
 
     /// The park is the state that made this capability move, so losing it in
@@ -779,10 +733,13 @@ mod tests {
     /// that has since rehydrated the session.
     #[test]
     fn a_park_survives_the_journal_round_trip() {
-        let c = parked(&[("call-1", "which?"), ("call-2", "which model?")]);
+        let state = AgentState {
+            ask_user: parked(&[("call-1", "which?"), ("call-2", "which model?")]),
+            ..AgentState::default()
+        };
 
-        let written = serde_json::to_string(&c.0).expect("write");
-        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&state).expect("write");
+        let back: AgentState = serde_json::from_str(&written).expect("read");
         assert_eq!(
             back.ask_user
                 .pending()

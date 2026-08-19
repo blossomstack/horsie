@@ -13,8 +13,8 @@
 //! in the actor. They are not alike. A park owes a result later — the dangling
 //! `tool_use` *is* the parked agent, and an answer arrives against it. A
 //! conclusion owes nothing ever, and carries an output a park has nowhere to
-//! put. So this capability answers [`Act::Conclude`], and the difference lives
-//! in the act rather than in a name match downstream of it.
+//! put. So this capability answers [`Submitted::Concluded`], and the difference
+//! lives in what it returns rather than in a name match downstream of it.
 //!
 //! Concluding is still not *routing*. Which step runs next, what its input is,
 //! and whether the run is over are the workflow runner's decisions, made from
@@ -22,8 +22,8 @@
 //! its result"; nothing here can end a run, so an outcome cannot be acted on
 //! twice by two different owners.
 
-use super::{Act, CapCommand, Decision, Mailbox, Msg, SetupError};
-use crate::agent_loop::state::AgentDomainEvent;
+use super::{Mailbox, SetupError};
+use crate::agent_loop::AgentCommand;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
@@ -32,13 +32,6 @@ use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
-
-/// What the model asked this capability to do.
-pub enum Command {
-    /// `submit_result`, with the result still unvalidated: an undeclared
-    /// outcome is a refusal the step has to see.
-    Submit { input: Value },
-}
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
 /// and that its result is what decides where the run goes next. Deliberately
@@ -87,21 +80,31 @@ impl StepResultCapability {
     }
 
     /// The model submitted this step's result.
-    fn submitted(&self, call: &str, input: &Value) -> Decision {
+    #[must_use]
+    pub(crate) fn submitted(&self, input: &Value) -> Submitted {
         match validate_result(input, &self.outcomes, &self.fields) {
-            Ok(()) => Decision::record(vec![AgentDomainEvent::StepResultSubmitted {
+            Ok(()) => Submitted::Concluded {
                 output: input.clone(),
-            }])
-            .then(Act::Conclude {
-                output: input.clone(),
-            }),
+            },
             // Journals nothing: an undeclared outcome in the log is one the
             // workflow runner would try to route on. The validator's own words
             // go back, against the call the model actually made, so it can
             // correct the field it got wrong.
-            Err(reason) => Decision::refuse(call, format!("submit_result was rejected: {reason}")),
+            Err(reason) => Submitted::Refused(format!("submit_result was rejected: {reason}")),
         }
     }
+}
+
+/// What a call to `submit_result` came to.
+pub(crate) enum Submitted {
+    /// The model gets a tool *error*, which is what `is_error` on an
+    /// undeclared outcome means: agentcore's loop detector and the nudge
+    /// budget both read it, and a step resubmitting the same bad outcome is
+    /// exactly where the difference shows.
+    Refused(String),
+    /// The step is finished, and this is its result — journaled verbatim,
+    /// because the workflow runner routes on what the log says.
+    Concluded { output: Value },
 }
 
 impl StepResultCapability {
@@ -125,7 +128,10 @@ impl StepResultCapability {
                 description: TOOL_DESCRIPTION.to_string(),
                 input_schema: result_schema(&self.outcomes, &self.fields),
             },
-            |input, to| CapCommand::StepResult(Command::Submit { input }, to),
+            |input, to| AgentCommand::StepResultSubmit {
+                input,
+                answering: to,
+            },
         )]
     }
 }
@@ -159,21 +165,6 @@ impl StepResultCapability {
     ) -> Arc<dyn Toolbox> {
         claiming(inner, self.claims(), mailbox)
     }
-
-    pub fn command(&self, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::StepResult(cmd, to) = cmd else {
-            return None;
-        };
-        let Command::Submit { input } = cmd;
-        Some(self.submitted(&to.call, input))
-    }
-
-    /// Nothing here is this one's, and nothing is re-asked on a load: this
-    /// capability asks the session for nothing, so it holds nothing a dead
-    /// process could have failed to send.
-    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -181,10 +172,9 @@ impl StepResultCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{
-        advertised, advertised_by, answering, equipped, facts, loading, settings, someone_elses,
-        spec, specs_of,
+        advertised, advertised_by, equipped, facts, loading, settings, spec, specs_of,
     };
-    use crate::agent_loop::capabilities::{Capabilities, Capability, TurnEvent};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
     use horsie_models::workflow::StepFieldType;
     use serde_json::{Value, json};
 
@@ -214,12 +204,8 @@ mod tests {
         StepResultCapability::new(outcomes(), fields(), interactive)
     }
 
-    fn submitted(c: &StepResultCapability, id: &str, input: Value) -> Decision {
-        c.command(&CapCommand::StepResult(
-            Command::Submit { input },
-            answering(id),
-        ))
-        .expect("mine")
+    fn submitted(c: &StepResultCapability, input: Value) -> Submitted {
+        c.submitted(&input)
     }
 
     /// The advertised schema, as the model is shown it.
@@ -234,8 +220,8 @@ mod tests {
     /// **A valid submission concludes, carrying the submitted JSON verbatim.**
     /// Not a park: a park owes a result later and has nowhere to put an output,
     /// and a step parked on its own result would wait for an answer nobody is
-    /// ever going to send. The same JSON is journaled, because the workflow
-    /// runner routes on what the log says rather than on what the act carried.
+    /// ever going to send. The actor journals the same JSON it concludes with,
+    /// because the workflow runner routes on what the log says.
     #[test]
     fn a_valid_submission_concludes_with_the_submitted_output() {
         let output = json!({
@@ -243,18 +229,11 @@ mod tests {
             "description": "found the flake",
             "owner": "shawn",
         });
-        let d = submitted(&cap(false), "call-1", output.clone());
-
-        let [AgentDomainEvent::StepResultSubmitted { output: journaled }] = d.events.as_slice()
+        let Submitted::Concluded { output: concluded } = submitted(&cap(false), output.clone())
         else {
-            panic!("expected one Submitted, got {:?}", d.events)
+            panic!("a submission that did not conclude")
         };
-        assert_eq!(journaled, &output, "the journal must carry it verbatim");
-
-        let [Act::Conclude { output: concluded }] = d.acts.as_slice() else {
-            panic!("a submission that did not conclude: {:?}", d.acts)
-        };
-        assert_eq!(concluded, &output, "the act must carry it verbatim");
+        assert_eq!(concluded, output, "the conclusion must carry it verbatim");
     }
 
     /// **An undeclared outcome is refused and journals nothing.** Journaling it
@@ -263,24 +242,16 @@ mod tests {
     /// on it would end the step as though the graph were finished.
     #[test]
     fn an_undeclared_outcome_is_refused_and_journals_nothing() {
-        let d = submitted(
+        // `Refused`, not `Concluded`: this reaches the model as a tool *error*,
+        // and nothing is journaled. `is_error` is read by agentcore's loop
+        // detector and the nudge budget, and a step resubmitting the same bad
+        // outcome is exactly where it shows.
+        let Submitted::Refused(text) = submitted(
             &cap(false),
-            "call-1",
             json!({"outcome": "p9", "description": "x", "owner": "shawn"}),
-        );
-
-        assert!(d.events.is_empty(), "nothing undeclared reaches the log");
-        // `Refuse`, not `Answer`: this reaches the model as a tool *error*.
-        // `is_error` is read by agentcore's loop detector and the nudge budget,
-        // and a step resubmitting the same bad outcome is exactly where it
-        // shows.
-        let [Act::Refuse { call, reason: text }] = d.acts.as_slice() else {
-            panic!("expected one Refuse, got {:?}", d.acts)
+        ) else {
+            panic!("an undeclared outcome reached the log")
         };
-        // Against the model's own call id. A literal here would answer the wrong
-        // call: a turn runs its tool calls concurrently, and the id is what an
-        // answer correlates by.
-        assert_eq!(call, "call-1");
         assert!(
             text.contains("p9") && text.contains("p0"),
             "the validator's own words go back so the model can correct itself: {text}"
@@ -292,14 +263,11 @@ mod tests {
     /// the refusal can name.
     #[test]
     fn a_missing_required_field_is_refused() {
-        let d = submitted(
+        let Submitted::Refused(text) = submitted(
             &cap(false),
-            "call-1",
             json!({"outcome": "p0", "description": "did it"}),
-        );
-        assert!(d.events.is_empty());
-        let [Act::Refuse { reason: text, .. }] = d.acts.as_slice() else {
-            panic!("expected one Refuse, got {:?}", d.acts)
+        ) else {
+            panic!("a submission missing a required field was accepted")
         };
         assert!(text.contains("'owner' is required"), "{text}");
     }
@@ -412,14 +380,6 @@ mod tests {
         );
         assert_eq!(back.fields.len(), 1);
         assert!(back.interactive);
-    }
-
-    #[test]
-    fn another_capabilitys_command_is_not_mine() {
-        let c = cap(false);
-        assert!(c.command(&someone_elses()).is_none());
-        // And with no park to hold, a turn boundary is nothing to it either.
-        assert!(c.handle(&Msg::Turn(TurnEvent::Ended)).is_none());
     }
 
     /// It claims the one tool it answers for, so a step's result is reached by

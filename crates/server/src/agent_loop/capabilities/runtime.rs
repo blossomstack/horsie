@@ -37,7 +37,7 @@
 //! Steps 3–5 all depend on step 2, and step 6 on all of them, which is why this
 //! is one method rather than six capabilities.
 
-use super::{Decision, Msg, SetupError};
+use super::SetupError;
 use crate::agent_loop::{
     AgentRunDef, CompositeToolbox, DefaultToolboxFactory, McpUnavailable, PluginMcpToolbox,
     SharedContext, ToolboxFactory, compaction_window, scan_workspace,
@@ -481,80 +481,23 @@ impl RuntimeCapability {
         });
         Ok(())
     }
-
-    /// Claims nothing, and that is the change the move made.
-    ///
-    /// Its session-side twin claimed *every* tool call — it was the fallback
-    /// the whole offer order was arranged around, and a call reaching it meant
-    /// "let the sandbox try". Here the sandbox is a `setup` layer instead, so
-    /// the toolbox answers those calls on the agent's own task and none of them
-    /// becomes a command at all. A capability that went on claiming them would
-    /// be claiming calls it no longer answers, and worse: it sorts last, so
-    /// every name another capability claims has already been resolved by that
-    /// capability's layer, and the only calls left for it are the ones the toolbox
-    /// is about to handle without asking.
-    ///
-    /// So there is nothing here, and nothing claimed by
-    /// [`super::Capability::layer`] either — see the module
-    /// doc for why the base toolbox must not be claimed there.
-    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
-        None
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, facts, someone_elses};
+    use super::super::testing::{advertised_by, facts};
     use super::*;
-    use crate::agent_loop::AskAnswer;
     use crate::agent_loop::capabilities::testing::{loading, spec};
-    use crate::agent_loop::capabilities::{Capabilities, Capability, SessionReply, TurnEvent};
-    use crate::sessions::runners::message::ChildMsg;
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     /// **The change the move made.** Its session-side twin claimed every tool
     /// call, because the sandbox was dispatched through the offer order. Here
     /// the sandbox is a `setup` layer that answers on the agent's own task, so
-    /// this capability claims nothing at all — a fallback that still swallowed
-    /// tool calls would be answering for a toolbox it no longer stands in for.
-    #[test]
-    fn it_claims_nothing_at_all() {
-        let c = Capability::Runtime(RuntimeCapability::default());
-        let child = ChildMsg::Ready {
-            child: crate::sessions::runners::ids::RunnerId::new_v4(),
-        };
-        let answers = [AskAnswer {
-            tool_call_id: "t1".into(),
-            text: "yes".into(),
-        }];
-        let reply = SessionReply::Done { call: "t1".into() };
-
-        assert!(
-            super::super::testing::Equipped::with(c.clone())
-                .command(&someone_elses())
-                .is_none(),
-            "the runtime capability claimed a command"
-        );
-        for msg in [
-            Msg::Turn(TurnEvent::Ended),
-            Msg::Answer(&answers),
-            Msg::Child(&child),
-            Msg::Reply(&reply),
-        ] {
-            assert!(
-                super::super::testing::Equipped::with(c.clone())
-                    .handle(&msg)
-                    .is_none(),
-                "the runtime capability claimed {}",
-                msg.describe()
-            );
-        }
-    }
-
-    /// And it advertises no tool either. The sandbox namespace cannot be
-    /// enumerated, so there is no list to put here — and a name listed here is
-    /// dispatched through the actor's mailbox, which is the last place a `bash`
-    /// call should go.
+    /// this capability advertises nothing at all: the sandbox namespace cannot
+    /// be enumerated, so there is no list to put here — and a name listed here
+    /// would be dispatched through the actor's mailbox, which is the last place
+    /// a `bash` call should go.
     #[test]
     fn the_base_toolbox_is_a_layer_and_not_an_advertised_tool() {
         assert!(

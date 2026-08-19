@@ -8,30 +8,39 @@
 //! inference with no answer once two runs are live.
 //!
 //! Shaped exactly like [`super::sub_agent`], and for the same reason: a run
-//! that reports owes its output to the agent that invoked it,
-//! [`WorkflowCapability::outstanding`] is the one fact saying whether it has
-//! been told, and the record and the delivery are one decision, so a crash
-//! before the write replays as an output still owed.
+//! that reports owes its output to the agent that invoked it, the outstanding
+//! set on [`WorkflowState`] is the one fact saying whether it has been told,
+//! and the record and the delivery arrive here as one [`Reported`] the actor's
+//! arm cannot split — so a crash before the write replays as an output still
+//! owed rather than as one silently dropped.
 //!
 //! Invariant 6 applies here too: a run in flight is an outstanding child, and
-//! an agent may not conclude while it has one.
+//! an agent may not conclude while it has one. [`holds`] is where that is
+//! asked.
 //!
 //! The two capabilities do not overlap. A [`ChildOutcome::SubAgent`] is
 //! declined here even for a child id this capability holds: the outcome's kind
 //! and the owning capability have to agree, and `None` is how they say so.
+//!
+//! # What this file decides, and what it does not
+//!
+//! Every function below returns a narrow value — a request, a run, an output —
+//! and never an event. The agent actor's arm is what journals, sends and
+//! answers, so a decision here cannot half-happen: there is no way to write a
+//! fact from this file without the arm that also acts on it.
 //!
 //! # Why it advertises a tool now
 //!
 //! Its session-side twin equipped nothing, because `invoke_workflow` had no
 //! toolbox behind it and advertising a tool before there is one to execute is
 //! how a model learns to call something that answers "no such tool". That is
-//! no longer true: a tool this capability's [`super::Capability::layer`] claims is
-//! dispatched through [`super::Capability::handle`] on this actor, which is the half
-//! that was missing.
+//! no longer true: a name this capability's [`super::Capability::layer`] claims
+//! becomes an [`AgentCommand`] on the agent's own mailbox, and the arm that
+//! takes it calls straight into this file — which is the half that was missing.
 
-use super::{Act, CapCommand, Decision, Mailbox, Msg, SessionReply, SessionRequest, TurnEvent};
+use super::{Mailbox, SessionReply, SessionRequest};
+use crate::agent_loop::AgentCommand;
 use crate::agent_loop::Incoming;
-use crate::agent_loop::state::AgentDomainEvent;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
@@ -49,15 +58,6 @@ pub const INVOKE_TOOL: &str = "invoke_workflow";
 /// The tool that reads back what is still running.
 pub const STATUS_TOOL: &str = "workflow_status";
 
-/// What the model asked this capability to do.
-pub enum Command {
-    /// `invoke_workflow`.
-    Invoke { input: Value },
-    /// `workflow_status`. No input: reading back what is in flight takes no
-    /// arguments.
-    Status,
-}
-
 /// One agent's workflow runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkflowCapability;
@@ -72,7 +72,7 @@ pub struct WorkflowState {
     /// Runs asked of the session and not yet answered, by the model's call.
     ///
     /// Journaled *before* the ask goes out, so a crash in the window replays as
-    /// an intent [`Msg::Loaded`] asks about again, naming the same run.
+    /// an intent [`reloaded`] asks about again, naming the same run.
     #[serde(default)]
     requested: BTreeMap<String, Pending>,
     /// Runs that exist and still owe their output.
@@ -119,8 +119,8 @@ impl WorkflowState {
 /// What this state holds, for the tests that assert on it.
 ///
 /// `#[cfg(test)]` because nothing in production reads it: the decisions that
-/// need it are in this file and take `&self`. An accessor kept for a caller
-/// that does not exist is how a private field stops being private.
+/// need it are in this file and take `&WorkflowState`. An accessor kept for a
+/// caller that does not exist is how a private field stops being private.
 impl WorkflowState {
     /// The invocations the session has not answered yet.
     #[must_use]
@@ -148,7 +148,6 @@ pub struct Pending {
     pub input: String,
 }
 
-/// What this capability records.
 /// The tool's arguments: exactly what the model writes, and nothing else.
 ///
 /// The model names a workflow; it never writes a graph. Turning that name into
@@ -164,163 +163,228 @@ pub struct Request {
     pub input: String,
 }
 
-impl WorkflowCapability {
-    /// Whether this agent is still owed an output it cannot produce yet.
-    ///
-    /// The model called `invoke_workflow`.
-    fn invoke(call: &str, input: &Value) -> Decision {
-        let req: Request = match serde_json::from_value(input.clone()) {
-            Ok(req) => req,
-            // A capability that owns a tool name owns every call to it,
-            // including the malformed ones. Declining would hand a mistyped
-            // `invoke_workflow` to the open-namespace sandbox, which claims
-            // anything — so the model's mistake would be silently absorbed
-            // instead of corrected.
-            Err(e) => {
-                return Decision::reply(
-                    call,
-                    format!("`{INVOKE_TOOL}` was called with arguments it cannot read: {e}"),
-                );
-            }
-        };
-        // Minted here, not in `apply`: a decision may be non-deterministic, a
-        // fold may not. The event and the request then name the same run, and
-        // replay lands the id the log has.
-        let pending = Pending {
-            child: RunnerId::new_v4(),
-            workflow: req.workflow,
-            input: req.input,
-        };
-        let note = format!("starting workflow {}", pending.workflow);
-        Decision::record(vec![AgentDomainEvent::WorkflowRequested {
-            call: call.to_string(),
-            pending: pending.clone(),
-        }])
-        .then(Act::Ask(ask(call, &pending)))
-        // Parked, not answered: the session's answer is what this call's result
-        // is made of, and it arrives on another message.
-        .then(Act::Park {
-            call: call.to_string(),
-            note,
-        })
-    }
+/// What a call to `invoke_workflow` came to.
+pub(crate) enum Invoked {
+    /// Told why, in words, and the run carries on. Journals nothing.
+    Told(String),
+    /// Journal the request, put it to the session, and park the call on it:
+    /// the session's answer is what this call's result is made of.
+    Ask { pending: Pending, note: String },
+}
 
-    /// Everything asked for and never answered, asked again.
-    ///
-    /// A `Requested` still in the fold is a request the dead process may never
-    /// have sent, and the model is parked on the call that made it. Re-asked
-    /// with the id already recorded, so the session can tell a repeat from a
-    /// second invocation.
-    ///
-    /// Nothing is journaled: the [`AgentDomainEvent::WorkflowRequested`] this
-    /// reads is still the only fact, and a second copy would say a second run
-    /// was wanted.
-    fn reloaded(state: &WorkflowState) -> Option<Decision> {
-        if state.requested.is_empty() {
-            return None;
+/// The model called `invoke_workflow`.
+///
+/// The run's id is minted here rather than in the fold: a decision may be
+/// non-deterministic, a fold may not. The event and the request then name the
+/// same run, and replay lands the id the log has.
+#[must_use]
+pub(crate) fn invoked(input: &Value) -> Invoked {
+    let req: Request = match serde_json::from_value(input.clone()) {
+        Ok(req) => req,
+        // A capability that owns a tool name owns every call to it, including
+        // the malformed ones. Declining would hand a mistyped `invoke_workflow`
+        // to the open-namespace sandbox, which claims anything — so the model's
+        // mistake would be silently absorbed instead of corrected.
+        Err(e) => {
+            return Invoked::Told(format!(
+                "`{INVOKE_TOOL}` was called with arguments it cannot read: {e}"
+            ));
         }
-        Some(
-            state
-                .requested
-                .iter()
-                .fold(Decision::default(), |d, (call, pending)| {
-                    d.then(Act::Ask(ask(call, pending)))
-                }),
-        )
+    };
+    let pending = Pending {
+        child: RunnerId::new_v4(),
+        workflow: req.workflow,
+        input: req.input,
+    };
+    let note = format!("starting workflow {}", pending.workflow);
+    Invoked::Ask { pending, note }
+}
+
+/// The request a [`Pending`] names.
+///
+/// One function and two callers — the invocation, and the re-ask on load —
+/// because the second has to send exactly what the first sent. A free function
+/// rather than a method: nothing about the capability's own state belongs in a
+/// request, and this is where that shows.
+#[must_use]
+pub(crate) fn request(call: &str, pending: &Pending) -> SessionRequest {
+    SessionRequest::StartRunner {
+        call: call.to_string(),
+        id: pending.child,
+        kind: RunnerKind::Workflow,
+        args: Box::new(RunnerArgs::Workflow {
+            source: WorkflowSource::Named(pending.workflow.clone()),
+            input: pending.input.clone(),
+        }),
+    }
+}
+
+/// Everything asked for and never answered, asked again. Empty when there is
+/// nothing outstanding.
+///
+/// A request still in the fold is one the dead process may never have sent, and
+/// the model is parked on the call that made it. Re-asked with the id already
+/// recorded, so the session can tell a repeat from a second invocation.
+///
+/// Nothing is journaled, and there is nothing here that could be: the
+/// `WorkflowRequested` this reads is still the only fact, and a second copy
+/// would say a second run was wanted.
+#[must_use]
+pub(crate) fn reloaded(state: &WorkflowState) -> Vec<SessionRequest> {
+    state
+        .requested
+        .iter()
+        .map(|(call, pending)| request(call, pending))
+        .collect()
+}
+
+/// What the session said about a run this agent asked for.
+pub(crate) enum Run {
+    Started { call: String, child: RunnerId },
+    Dropped { call: String, reason: String },
+}
+
+impl Run {
+    /// The call that is parked on this run.
+    #[must_use]
+    pub(crate) fn call(&self) -> &str {
+        match self {
+            Self::Started { call, .. } | Self::Dropped { call, .. } => call,
+        }
     }
 
-    /// The session answered a run this capability asked for.
-    fn replied(state: &WorkflowState, reply: &SessionReply) -> Option<Decision> {
-        let child = state.requested.get(reply.call())?.child;
-        Some(match reply {
-            SessionReply::Done { call } => {
-                Decision::record(vec![AgentDomainEvent::WorkflowStarted {
-                    call: call.clone(),
-                }])
-                .then(result(
-                    call,
-                    format!("Workflow run started: {child}"),
-                    false,
-                ))
-            }
-            // The refusal has to reach the model, and the call is parked — so
-            // it is supplied as that call's result rather than as a fresh
-            // answer. A refusal the model cannot see is a tool call that never
-            // returns.
-            SessionReply::Refused { call, reason } => {
-                Decision::record(vec![AgentDomainEvent::WorkflowDropped {
-                    call: call.clone(),
-                }])
-                .then(result(call, reason.clone(), true))
-            }
-        })
+    /// The parked call's result. A refusal the model cannot see is a tool call
+    /// that never returns, so it comes back as that call's result with
+    /// `is_error` set rather than as a fresh answer.
+    #[must_use]
+    pub(crate) fn result(&self) -> ToolResultInput {
+        let (output, is_error) = match self {
+            Self::Started { child, .. } => (format!("Workflow run started: {child}"), false),
+            Self::Dropped { reason, .. } => (reason.clone(), true),
+        };
+        ToolResultInput {
+            tool_call_id: self.call().to_string(),
+            output,
+            is_error,
+        }
     }
+}
 
-    /// A run moved.
-    fn child(state: &WorkflowState, m: &ChildMsg) -> Option<Decision> {
-        match m {
-            ChildMsg::Outcome {
-                child,
-                outcome: ChildOutcome::Workflow(o),
-            } => {
-                // Not one of mine: `None` rather than a delivery for an agent
-                // that never invoked anything.
-                state.outstanding.contains(child).then(|| {
-                    Self::deliver(
-                        *child,
-                        match o {
-                            WorkflowOutcome::Finished { output } => SubAgentResultPart {
-                                subagent_id: child.to_string(),
-                                label: "workflow".to_string(),
-                                status: "completed".to_string(),
-                                text: render(output),
-                                spawned_at_ms: 0,
-                                ended_at_ms: 0,
-                            },
-                            WorkflowOutcome::Failed { error } => failed_part(*child, error.clone()),
+/// `None` when this reply answers something that is not a run of ours.
+#[must_use]
+pub(crate) fn replied(state: &WorkflowState, reply: &SessionReply) -> Option<Run> {
+    let child = state.requested.get(reply.call())?.child;
+    Some(match reply {
+        SessionReply::Done { call } => Run::Started {
+            call: call.clone(),
+            child,
+        },
+        SessionReply::Refused { call, reason } => Run::Dropped {
+            call: call.clone(),
+            reason: reason.clone(),
+        },
+    })
+}
+
+/// A run reported, and this is what its output becomes in the queue.
+pub struct Reported {
+    pub child: RunnerId,
+    pub item: Incoming,
+}
+
+/// `None` for anything this capability is not owed an output by.
+#[must_use]
+///
+/// **No production sender reaches this yet.** The runners redesign routes a
+/// child's movement through `sessions::runners::message`, which nothing
+/// forwards to an agent so far, so only tests call this. Kept and kept public
+/// rather than deleted: the behaviour is the settled answer for when that
+/// forwarding lands, and deleting it would have to be re-derived.
+pub fn child(state: &WorkflowState, m: &ChildMsg) -> Option<Reported> {
+    match m {
+        ChildMsg::Outcome {
+            child,
+            outcome: ChildOutcome::Workflow(o),
+        } => {
+            // Not one of mine: `None` rather than a delivery for an agent that
+            // never invoked anything.
+            state.outstanding.contains(child).then(|| {
+                deliver(
+                    *child,
+                    match o {
+                        WorkflowOutcome::Finished { output } => SubAgentResultPart {
+                            subagent_id: child.to_string(),
+                            label: "workflow".to_string(),
+                            status: "completed".to_string(),
+                            text: render(output),
+                            spawned_at_ms: 0,
+                            ended_at_ms: 0,
                         },
-                    )
-                })
-            }
-            // A worker's report is the subagent capability's, even when this
-            // capability holds that child id. Two capabilities must never both
-            // plausibly claim one outcome.
-            ChildMsg::Outcome {
-                outcome: ChildOutcome::SubAgent(_),
-                ..
-            } => None,
-            ChildMsg::Failed { child, error } => state
-                .outstanding
-                .contains(child)
-                .then(|| Self::deliver(*child, failed_part(*child, error.clone()))),
-            // A run is runnable the moment it is created; only a fork has a
-            // seed that can land later.
-            ChildMsg::Ready { .. } => None,
+                        WorkflowOutcome::Failed { error } => failed_part(*child, error.clone()),
+                    },
+                )
+            })
         }
+        // A worker's report is the subagent capability's, even when this
+        // capability holds that child id. Two capabilities must never both
+        // plausibly claim one outcome.
+        ChildMsg::Outcome {
+            outcome: ChildOutcome::SubAgent(_),
+            ..
+        } => None,
+        ChildMsg::Failed { child, error } => state
+            .outstanding
+            .contains(child)
+            .then(|| deliver(*child, failed_part(*child, error.clone()))),
+        // A run is runnable the moment it is created; only a fork has a seed
+        // that can land later.
+        ChildMsg::Ready { .. } => None,
     }
+}
 
-    /// Record the output and put it in this agent's own queue.
-    fn deliver(child: RunnerId, part: SubAgentResultPart) -> Decision {
-        Decision::record(vec![AgentDomainEvent::WorkflowReported { child }]).then(Act::Enqueue {
-            item: Incoming::SubAgent {
-                id: child.to_string(),
-                part: Box::new(part),
-            },
-        })
+/// The output, in the shape this agent's own queue takes it.
+fn deliver(child: RunnerId, part: SubAgentResultPart) -> Reported {
+    Reported {
+        child,
+        item: Incoming::SubAgent {
+            id: child.to_string(),
+            part: Box::new(part),
+        },
     }
+}
 
-    /// Only what is still running: a run that reported has already been
-    /// delivered into this agent's transcript.
-    fn render_status(state: &WorkflowState) -> String {
-        if state.outstanding.is_empty() {
-            return "No workflow runs are in flight.".to_string();
-        }
-        let mut text = format!("{} workflow run(s) in flight:", state.outstanding.len());
-        for child in &state.outstanding {
-            text.push_str(&format!("\n- {child}"));
-        }
-        text
+/// What `workflow_status` shows the model.
+///
+/// Only what is still running: a run that reported has already been delivered
+/// into this agent's transcript. A read, and it returns text rather than
+/// anything to write — an event for it would grow the log every time the model
+/// looked.
+#[must_use]
+pub(crate) fn render_status(state: &WorkflowState) -> String {
+    if state.outstanding.is_empty() {
+        return "No workflow runs are in flight.".to_string();
     }
+    let mut text = format!("{} workflow run(s) in flight:", state.outstanding.len());
+    for child in &state.outstanding {
+        text.push_str(&format!("\n- {child}"));
+    }
+    text
+}
+
+/// Why this turn's end is not the agent finishing, when a run is still in
+/// flight.
+///
+/// Invariant 6, asked directly rather than merged out of a broadcast: an agent
+/// whose run still owes it an output must not conclude, and must not be nudged
+/// either, because a nudge is for a turn that ended with *nothing* coming.
+#[must_use]
+pub(crate) fn holds(state: &WorkflowState) -> Option<String> {
+    state.holds_conclusion().then(|| {
+        format!(
+            "{} workflow run(s) still in flight",
+            state.outstanding.len()
+        )
+    })
 }
 
 /// A failed run, in the shape the invoking agent's inbox takes — the same part
@@ -348,35 +412,6 @@ fn render(output: &Value) -> String {
         return s.clone();
     }
     serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string())
-}
-
-/// The request a [`Pending`] names.
-///
-/// One function and two callers — the invocation, and the re-ask on load —
-/// because the second has to send exactly what the first sent. A free function
-/// rather than a method: nothing about the capability's own state belongs in a
-/// request, and this is where that shows.
-fn ask(call: &str, pending: &Pending) -> SessionRequest {
-    SessionRequest::StartRunner {
-        call: call.to_string(),
-        id: pending.child,
-        kind: RunnerKind::Workflow,
-        args: Box::new(RunnerArgs::Workflow {
-            source: WorkflowSource::Named(pending.workflow.clone()),
-            input: pending.input.clone(),
-        }),
-    }
-}
-
-/// Supply a parked call's result, and start the turn that carries it.
-fn result(call: &str, output: String, is_error: bool) -> Act {
-    Act::Resume {
-        results: vec![ToolResultInput {
-            tool_call_id: call.to_string(),
-            output,
-            is_error,
-        }],
-    }
 }
 
 impl WorkflowCapability {
@@ -410,7 +445,10 @@ impl WorkflowCapability {
                         }
                     }),
                 },
-                |input, to| CapCommand::Workflow(Command::Invoke { input }, to),
+                |input, to| AgentCommand::WorkflowInvoke {
+                    input,
+                    answering: to,
+                },
             ),
             ClaimedTool::new(
                 ToolSpec {
@@ -421,7 +459,7 @@ impl WorkflowCapability {
                         .to_string(),
                     input_schema: json!({ "type": "object", "properties": {} }),
                 },
-                |_input, to| CapCommand::Workflow(Command::Status, to),
+                |_input, to| AgentCommand::WorkflowStatus { answering: to },
             ),
         ]
     }
@@ -444,99 +482,62 @@ impl WorkflowCapability {
     ) -> Arc<dyn Toolbox> {
         claiming(inner, self.claims(), mailbox)
     }
-
-    pub fn command(&self, state: &WorkflowState, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::Workflow(cmd, to) = cmd else {
-            return None;
-        };
-        Some(match cmd {
-            Command::Invoke { input } => Self::invoke(&to.call, input),
-            // A read, so it journals nothing: an event for it would grow the
-            // log every time the model looked.
-            Command::Status => Decision::reply(&to.call, Self::render_status(state)),
-        })
-    }
-
-    pub fn handle(&self, state: &WorkflowState, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Reply(reply) => Self::replied(state, reply),
-            Msg::Child(m) => Self::child(state, m),
-            // The crash window: a run journaled and never answered is re-asked
-            // with the id the log already holds.
-            Msg::Loaded => Self::reloaded(state),
-            // Invariant 6: a run in flight is an outstanding child, and its
-            // output is work this agent has not seen yet. `Act::Hold` because a
-            // turn boundary is broadcast and merged — see `sub_agent`.
-            Msg::Turn(TurnEvent::Ended) if state.holds_conclusion() => {
-                Some(Decision::default().then(Act::Hold {
-                    note: format!(
-                        "{} workflow run(s) still in flight",
-                        state.outstanding.len()
-                    ),
-                }))
-            }
-            Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::TurnProposed => None,
-        }
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::AgentState;
     use crate::agent_loop::capabilities::Capability;
-    use crate::agent_loop::capabilities::testing::Equipped;
-    use crate::agent_loop::capabilities::testing::{
-        advertised_by, answering, facts, someone_elses,
-    };
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts};
+    use crate::agent_loop::state::AgentDomainEvent;
     use crate::sessions::runners::message::SubAgentOutcome;
 
-    /// An invocation as the layer that claims `invoke_workflow` builds it.
-    fn invoke(input: Value) -> CapCommand {
-        CapCommand::Workflow(Command::Invoke { input }, answering("t1"))
+    /// The arguments a well-formed invocation carries.
+    fn invoke_input() -> Value {
+        json!({"workflow": "release", "input": "cut 1.2.0"})
     }
 
-    fn invoke_call() -> CapCommand {
-        invoke(json!({"workflow": "release", "input": "cut 1.2.0"}))
-    }
-
-    /// An agent that may invoke a workflow, with nothing in flight.
-    fn cap() -> Equipped {
-        Equipped::with(Capability::Workflow(WorkflowCapability))
+    /// One event, folded the way the actor's journal folds it. The state a
+    /// capability decides from is only ever what its own events left behind.
+    fn fold(state: WorkflowState, event: AgentDomainEvent) -> WorkflowState {
+        AgentState {
+            workflow: state,
+            ..AgentState::default()
+        }
+        .apply(event)
+        .workflow
     }
 
     /// The runs that still owe an output.
-    fn outstanding(c: &Equipped) -> Vec<RunnerId> {
-        c.0.workflow.outstanding().iter().copied().collect()
-    }
-
-    /// The invocations the session has not answered.
-    fn requested(c: &Equipped) -> &BTreeMap<String, Pending> {
-        c.0.workflow.pending()
+    fn outstanding(state: &WorkflowState) -> Vec<RunnerId> {
+        state.outstanding().iter().copied().collect()
     }
 
     /// Invoke, and let the session say yes — the only way there is to a run in
     /// flight.
-    fn invoked(c: &mut Equipped) -> RunnerId {
-        let d = c.command(&invoke_call()).expect("mine");
-        c.fold(&d);
-        let [
-            Act::Ask(SessionRequest::StartRunner { id, .. }),
-            Act::Park { .. },
-        ] = d.acts.as_slice()
-        else {
-            panic!("expected an ask and a park, got {:?}", d.acts);
+    fn started(state: WorkflowState) -> (WorkflowState, RunnerId) {
+        let Invoked::Ask { pending, .. } = invoked(&invoke_input()) else {
+            panic!("a well-formed invocation asks the session for a run");
         };
-        let child = *id;
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
-            .expect("mine");
-        c.fold(&d);
-        child
+        let child = pending.child;
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowRequested {
+                call: "t1".to_string(),
+                pending,
+            },
+        );
+        let run = replied(&state, &SessionReply::Done { call: "t1".into() })
+            .expect("the reply answers a call I made");
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowStarted {
+                call: run.call().to_string(),
+            },
+        );
+        (state, child)
     }
 
     /// The event and the request must name the same run, or the log records a
@@ -545,30 +546,29 @@ mod tests {
     /// create, because a database read may not happen on a mailbox.
     #[test]
     fn an_invocation_journals_and_asks_for_the_same_run() {
-        let mut c = cap();
-        let d = c.command(&invoke_call()).expect("mine");
-
-        let [AgentDomainEvent::WorkflowRequested { call, pending }] = d.events.as_slice() else {
-            panic!("expected one Requested event, got {:?}", d.events);
+        let Invoked::Ask { pending, note } = invoked(&invoke_input()) else {
+            panic!("a well-formed invocation asks the session for a run");
         };
-        let child = &pending.child;
-        assert_eq!(call, "t1");
-        let [
-            Act::Ask(SessionRequest::StartRunner {
-                call,
-                id,
-                kind,
-                args,
-            }),
-            Act::Park { call: parked, .. },
-        ] = d.acts.as_slice()
+        assert!(
+            note.contains("release"),
+            "the park says what it is waiting for: {note}"
+        );
+
+        // What the actor journals and what it sends are built from this one
+        // `Pending`, which is what makes them the same run.
+        let child = pending.child;
+        let SessionRequest::StartRunner {
+            call,
+            id,
+            kind,
+            args,
+        } = request("t1", &pending)
         else {
-            panic!("expected an ask and a park, got {:?}", d.acts);
+            panic!("an invocation asks the session to start a runner");
         };
         assert_eq!(id, child, "the log records a run nothing was asked for");
         assert_eq!(call, "t1");
-        assert_eq!(parked, "t1");
-        assert_eq!(*kind, RunnerKind::Workflow);
+        assert_eq!(kind, RunnerKind::Workflow);
         let RunnerArgs::Workflow { source, input } = args.as_ref() else {
             panic!("expected workflow args, got {args:?}");
         };
@@ -578,9 +578,15 @@ mod tests {
         assert_eq!(name, "release");
         assert_eq!(input, "cut 1.2.0");
 
-        c.fold(&d);
+        let state = fold(
+            WorkflowState::default(),
+            AgentDomainEvent::WorkflowRequested {
+                call: "t1".to_string(),
+                pending,
+            },
+        );
         assert!(
-            outstanding(&c).is_empty(),
+            outstanding(&state).is_empty(),
             "the session has not said yes yet"
         );
     }
@@ -589,17 +595,13 @@ mod tests {
     /// Falling through would hand a mistyped `invoke_workflow` to the
     /// open-namespace sandbox, which claims anything — so the model's mistake
     /// would be silently absorbed instead of corrected.
+    ///
+    /// `Told` is the whole "journals nothing" half: it carries words and no
+    /// request, so there is nothing for the actor's arm to write.
     #[test]
     fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
-        let d = cap()
-            .command(&invoke(json!({"workflow": "nope"})))
-            .expect("the name is mine, so the mistake is mine to answer");
-        assert!(
-            d.events.is_empty(),
-            "a refusal is not a fact about the agent"
-        );
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
+        let Invoked::Told(text) = invoked(&json!({"workflow": "nope"})) else {
+            panic!("the name is mine, so the mistake is mine to answer");
         };
         assert!(
             text.contains(INVOKE_TOOL),
@@ -611,36 +613,76 @@ mod tests {
     /// an output owed.
     #[test]
     fn a_started_run_answers_the_parked_call_and_becomes_outstanding() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        assert_eq!(outstanding(&c), vec![child]);
-        assert!(requested(&c).is_empty(), "an answered request is over");
+        let Invoked::Ask { pending, .. } = invoked(&invoke_input()) else {
+            panic!("a well-formed invocation asks the session for a run");
+        };
+        let child = pending.child;
+        let state = fold(
+            WorkflowState::default(),
+            AgentDomainEvent::WorkflowRequested {
+                call: "t1".to_string(),
+                pending,
+            },
+        );
+
+        let run = replied(&state, &SessionReply::Done { call: "t1".into() })
+            .expect("the reply answers a call I made");
+        assert_eq!(run.call(), "t1");
+        let result = run.result();
+        assert_eq!(result.tool_call_id, "t1");
+        assert!(
+            result.output.contains(&child.to_string()),
+            "the parked call is where the model learns the run's id: {}",
+            result.output
+        );
+        assert!(!result.is_error);
+
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowStarted {
+                call: "t1".to_string(),
+            },
+        );
+        assert_eq!(outstanding(&state), vec![child]);
+        assert!(state.pending().is_empty(), "an answered request is over");
     }
 
     /// A refusal has to reach the model against the call it parked, or the
     /// invocation never returns.
     #[test]
     fn a_refusal_from_the_session_becomes_the_parked_calls_result() {
-        let mut c = cap();
-        let d = c.command(&invoke_call()).expect("mine");
-        c.fold(&d);
+        let Invoked::Ask { pending, .. } = invoked(&invoke_input()) else {
+            panic!("a well-formed invocation asks the session for a run");
+        };
+        let state = fold(
+            WorkflowState::default(),
+            AgentDomainEvent::WorkflowRequested {
+                call: "t1".to_string(),
+                pending,
+            },
+        );
 
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Refused {
+        let run = replied(
+            &state,
+            &SessionReply::Refused {
                 call: "t1".into(),
                 reason: "no workflow named `release`".into(),
-            }))
-            .expect("the reply answers a call I made");
-        let [Act::Resume { results }] = d.acts.as_slice() else {
-            panic!("expected the parked call to be answered, got {:?}", d.acts);
-        };
-        assert_eq!(results[0].tool_call_id, "t1");
-        assert_eq!(results[0].output, "no workflow named `release`");
-        assert!(results[0].is_error);
+            },
+        )
+        .expect("the reply answers a call I made");
+        let result = run.result();
+        assert_eq!(result.tool_call_id, "t1");
+        assert_eq!(result.output, "no workflow named `release`");
+        assert!(result.is_error);
 
-        c.fold(&d);
-        assert!(requested(&c).is_empty());
-        assert!(outstanding(&c).is_empty());
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowDropped {
+                call: "t1".to_string(),
+            },
+        );
+        assert!(state.pending().is_empty());
+        assert!(outstanding(&state).is_empty());
     }
 
     /// **The crash window.** A journal that stops between `Requested` and the
@@ -649,28 +691,33 @@ mod tests {
     /// the id and the arguments the log already holds.
     #[test]
     fn a_run_the_session_never_answered_is_asked_again_on_load() {
-        let mut c = cap();
-        let d = c.command(&invoke_call()).expect("mine");
-        c.fold(&d);
-        let [
-            Act::Ask(SessionRequest::StartRunner { call, id, .. }),
-            Act::Park { .. },
-        ] = d.acts.as_slice()
-        else {
-            panic!("expected an ask and a park, got {:?}", d.acts);
+        let Invoked::Ask { pending, .. } = invoked(&invoke_input()) else {
+            panic!("a well-formed invocation asks the session for a run");
         };
-        let (first_call, child) = (call.clone(), *id);
+        let child = pending.child;
+        let first_call = "t1".to_string();
+        let state = fold(
+            WorkflowState::default(),
+            AgentDomainEvent::WorkflowRequested {
+                call: first_call.clone(),
+                pending,
+            },
+        );
 
         // The cut: nothing past the request is folded, and what comes back is
         // read off the journal the way a new process reads it.
-        let written = serde_json::to_string(&c.0).expect("write");
-        let reloaded: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&AgentState {
+            workflow: state,
+            ..AgentState::default()
+        })
+        .expect("write");
+        let reloaded_state: AgentState = serde_json::from_str(&written).expect("read");
 
-        let d = super::super::broadcast(&reloaded, &Msg::Loaded);
-        assert!(d.events.is_empty(), "a re-ask is not a second invocation");
-        let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
-        else {
-            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        // Requests and nothing else: a re-ask cannot be a second invocation,
+        // because there is no event in what this returns.
+        let asks = reloaded(&reloaded_state.workflow);
+        let [SessionRequest::StartRunner { call, id, args, .. }] = asks.as_slice() else {
+            panic!("expected exactly one re-ask, got {} of them", asks.len());
         };
         assert_eq!(
             *call, first_call,
@@ -692,10 +739,9 @@ mod tests {
     /// load starts the runs of the last one.
     #[test]
     fn a_run_the_session_answered_is_not_asked_again() {
-        let mut c = cap();
-        let _ = invoked(&mut c);
+        let (state, _child) = started(WorkflowState::default());
         assert!(
-            c.handle(&Msg::Loaded).is_none(),
+            reloaded(&state).is_empty(),
             "the session already started this run; asking again duplicates it"
         );
     }
@@ -705,11 +751,13 @@ mod tests {
     #[test]
     fn a_reply_for_a_call_i_never_made_is_not_mine() {
         assert!(
-            cap()
-                .handle(&Msg::Reply(&SessionReply::Done {
+            replied(
+                &WorkflowState::default(),
+                &SessionReply::Done {
                     call: "someone-else".into()
-                }))
-                .is_none()
+                }
+            )
+            .is_none()
         );
     }
 
@@ -717,57 +765,51 @@ mod tests {
     /// text rather than as a quoted JSON string.
     #[test]
     fn a_finished_run_queues_its_output_for_the_invoker() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Outcome {
+        let (state, child) = started(WorkflowState::default());
+        let reported = super::child(
+            &state,
+            &ChildMsg::Outcome {
                 child,
                 outcome: ChildOutcome::Workflow(WorkflowOutcome::Finished {
                     output: json!("shipped"),
                 }),
-            }))
-            .expect("mine");
-        assert!(matches!(
-            d.events.as_slice(),
-            [AgentDomainEvent::WorkflowReported { .. }]
-        ));
-        let [
-            Act::Enqueue {
-                item: Incoming::SubAgent { id, part },
             },
-        ] = d.acts.as_slice()
-        else {
-            panic!("expected a queued output, got {:?}", d.acts);
+        )
+        .expect("mine");
+        assert_eq!(reported.child, child);
+        let Incoming::SubAgent { id, part } = &reported.item else {
+            panic!("expected a queued output, got {:?}", reported.item);
         };
         assert_eq!(*id, child.to_string());
         assert_eq!(part.status, "completed");
         assert_eq!(part.text, "shipped", "the model was handed its own quotes");
 
-        c.fold(&d);
-        assert!(outstanding(&c).is_empty());
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowReported {
+                child: reported.child,
+            },
+        );
+        assert!(outstanding(&state).is_empty());
     }
 
     /// A run that failed is still an answer. An agent blocked on one that died
     /// and was never told would wait for ever.
     #[test]
     fn a_failed_run_is_queued_as_a_failed_part() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Outcome {
+        let (state, child) = started(WorkflowState::default());
+        let reported = super::child(
+            &state,
+            &ChildMsg::Outcome {
                 child,
                 outcome: ChildOutcome::Workflow(WorkflowOutcome::Failed {
                     error: "step 2 failed".into(),
                 }),
-            }))
-            .expect("mine");
-        let [
-            Act::Enqueue {
-                item: Incoming::SubAgent { part, .. },
             },
-        ] = d.acts.as_slice()
-        else {
-            panic!("expected a queued output, got {:?}", d.acts);
+        )
+        .expect("mine");
+        let Incoming::SubAgent { part, .. } = &reported.item else {
+            panic!("expected a queued output, got {:?}", reported.item);
         };
         assert_eq!(part.status, "failed");
         assert_eq!(part.text, "step 2 failed");
@@ -776,21 +818,17 @@ mod tests {
     /// A run that never started takes the same path.
     #[test]
     fn a_run_that_never_started_is_reported_as_failed() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Failed {
+        let (state, child) = started(WorkflowState::default());
+        let reported = super::child(
+            &state,
+            &ChildMsg::Failed {
                 child,
                 error: "the create failed".into(),
-            }))
-            .expect("mine");
-        let [
-            Act::Enqueue {
-                item: Incoming::SubAgent { part, .. },
             },
-        ] = d.acts.as_slice()
-        else {
-            panic!("expected a queued output, got {:?}", d.acts);
+        )
+        .expect("mine");
+        let Incoming::SubAgent { part, .. } = &reported.item else {
+            panic!("expected a queued output, got {:?}", reported.item);
         };
         assert_eq!(part.status, "failed");
         assert_eq!(part.text, "the create failed");
@@ -801,101 +839,84 @@ mod tests {
     /// is the only way two capabilities on one agent cannot both claim it.
     #[test]
     fn a_subagent_outcome_is_never_mine_even_for_a_child_i_hold() {
-        let mut c = cap();
-        let child = invoked(&mut c);
+        let (state, child) = started(WorkflowState::default());
         assert!(
-            c.handle(&Msg::Child(&ChildMsg::Outcome {
-                child,
-                outcome: ChildOutcome::SubAgent(SubAgentOutcome::Completed {
-                    label: "l".into(),
-                    report: "r".into(),
-                }),
-            }))
+            super::child(
+                &state,
+                &ChildMsg::Outcome {
+                    child,
+                    outcome: ChildOutcome::SubAgent(SubAgentOutcome::Completed {
+                        label: "l".into(),
+                        report: "r".into(),
+                    }),
+                }
+            )
             .is_none()
         );
-        assert!(c.handle(&Msg::Child(&ChildMsg::Ready { child })).is_none());
+        assert!(super::child(&state, &ChildMsg::Ready { child }).is_none());
     }
 
     /// A run this capability did not invoke is not its business.
     #[test]
     fn an_outcome_for_a_run_i_did_not_invoke_is_not_mine() {
         assert!(
-            cap()
-                .handle(&Msg::Child(&ChildMsg::Outcome {
+            super::child(
+                &WorkflowState::default(),
+                &ChildMsg::Outcome {
                     child: RunnerId::new_v4(),
                     outcome: ChildOutcome::Workflow(WorkflowOutcome::Finished {
                         output: json!("done"),
                     }),
-                }))
-                .is_none()
+                }
+            )
+            .is_none()
         );
     }
 
     /// **Invariant 6.** A turn ending while a run is in flight does not finish
-    /// this agent: the run's output is work it has not seen yet.
+    /// this agent: the run's output is work it has not seen yet. Asked of this
+    /// capability directly, so an agent that is holding something says so
+    /// rather than being invisible in a merge.
     #[test]
     fn a_turn_ending_with_a_run_in_flight_holds_the_conclusion() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        assert!(c.0.workflow.holds_conclusion());
-        assert!(
-            c.handle(&Msg::Turn(TurnEvent::Ended)).is_some(),
-            "a turn ending with an output still owed must not let the agent finish"
-        );
+        let (state, child) = started(WorkflowState::default());
+        assert!(state.holds_conclusion());
+        let note = holds(&state)
+            .expect("a turn ending with an output still owed must not let the agent finish");
+        assert_eq!(note, "1 workflow run(s) still in flight");
 
-        let d = c
-            .handle(&Msg::Child(&ChildMsg::Outcome {
+        let reported = super::child(
+            &state,
+            &ChildMsg::Outcome {
                 child,
                 outcome: ChildOutcome::Workflow(WorkflowOutcome::Finished {
                     output: json!("done"),
                 }),
-            }))
-            .expect("mine");
-        c.fold(&d);
-        assert!(!c.0.workflow.holds_conclusion());
+            },
+        )
+        .expect("mine");
+        let state = fold(
+            state,
+            AgentDomainEvent::WorkflowReported {
+                child: reported.child,
+            },
+        );
+        assert!(!state.holds_conclusion());
         assert!(
-            c.handle(&Msg::Turn(TurnEvent::Ended)).is_none(),
+            holds(&state).is_none(),
             "an agent owed nothing has no opinion about its turn ending"
         );
     }
 
-    /// Only the *end* of a turn is the boundary invariant 6 reads.
-    #[test]
-    fn no_other_turn_boundary_is_this_capabilitys_business() {
-        let mut c = cap();
-        let _ = invoked(&mut c);
-        for boundary in [TurnEvent::Began, TurnEvent::Failed, TurnEvent::Cancelled] {
-            assert!(
-                c.handle(&Msg::Turn(boundary)).is_none(),
-                "{boundary:?} was claimed"
-            );
-        }
-    }
-
-    /// A status read journals nothing, and lists only what is still going.
+    /// A status read journals nothing — it returns text and nothing else — and
+    /// lists only what is still going.
     #[test]
     fn status_lists_the_runs_in_flight_and_journals_nothing() {
-        let mut c = cap();
-        let child = invoked(&mut c);
-        let d = c
-            .command(&CapCommand::Workflow(Command::Status, answering("t1")))
-            .expect("mine");
-        assert!(d.events.is_empty());
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
-        };
-        assert!(text.contains(&child.to_string()));
+        let (state, child) = started(WorkflowState::default());
+        assert!(render_status(&state).contains(&child.to_string()));
 
-        c.fold(&Decision::record(vec![
-            AgentDomainEvent::WorkflowReported { child },
-        ]));
-        let d = c
-            .command(&CapCommand::Workflow(Command::Status, answering("t1")))
-            .expect("mine");
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
-        };
-        assert!(!text.contains(&child.to_string()));
+        let state = fold(state, AgentDomainEvent::WorkflowReported { child });
+        assert!(!render_status(&state).contains(&child.to_string()));
     }
 
     /// Both tools, claimed by this capability's own layer — which is what
@@ -913,28 +934,19 @@ mod tests {
     /// so losing it in the journal loses the agent.
     #[test]
     fn the_runs_in_flight_survive_the_journal_round_trip() {
-        let mut c = cap();
-        let child = invoked(&mut c);
+        let (state, child) = started(WorkflowState::default());
 
-        let written = serde_json::to_string(&c.0).expect("write");
-        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&AgentState {
+            workflow: state,
+            ..AgentState::default()
+        })
+        .expect("write");
+        let back: AgentState = serde_json::from_str(&written).expect("read");
         assert_eq!(
-            back.workflow
-                .outstanding()
-                .iter()
-                .copied()
-                .collect::<Vec<_>>(),
+            outstanding(&back.workflow),
             vec![child],
             "a reload that lost the run in flight would let the agent conclude \
              with an output still coming"
         );
-    }
-
-    /// Everything else falls through, so the offer reaches whoever does own it.
-    #[test]
-    fn another_message_is_not_mine() {
-        let c = cap();
-        assert!(c.command(&someone_elses()).is_none());
-        assert!(c.handle(&Msg::Answer(&[])).is_none());
     }
 }

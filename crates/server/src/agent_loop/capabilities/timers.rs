@@ -2,28 +2,27 @@
 //!
 //! An armed timer is the one thing an agent holds that is neither a question
 //! nor a child: nothing is owed to it and nobody will answer it, and yet a turn
-//! ending is not the agent finishing while one is armed — see
-//! [`Act::Hold`]. So the same capability that owns the records answers the turn
-//! boundary, which is how that fact stopped being a field the actor read.
+//! ending is not the agent finishing while one is armed. [`holds`] is that
+//! fact, and the actor asks the capability that owns the records for it rather
+//! than reading a field of its own.
 //!
-//! # The verb the trait did not have
+//! # The one thing this file cannot do for itself
 //!
-//! Every other capability decides from something that happened. This one has to
-//! ask for something to happen: *wake me in N seconds*. That is [`Act::Wake`],
-//! and [`Msg::Woke`] is what comes back.
+//! Every other answer here is a decision about state this file holds. Arming is
+//! a request for *time to pass*: wake me in N seconds. That is [`Wake`] — the
+//! actor spawns the sleep and sends the id back when it elapses.
 //!
 //! A wake is **not journaled**, and that is deliberate. The durable fact is the
 //! [`TimerRecord`] — its `fire_at_unix_ms` is stamped once, when the timer is
 //! armed, and carried on the event — so a sleep is only ever a consequence of
 //! it. Journaling both would be two records of one fact that could disagree
-//! after a restart. Instead [`Msg::Loaded`] re-issues a wake for every timer
-//! still armed, with its *remaining* delay, which is exactly what recovery did
-//! before any of this was a capability.
+//! after a restart. Instead [`reloaded`] re-issues a wake for every timer still
+//! armed, with its *remaining* delay, which is exactly what recovery did before
+//! any of this was a capability.
 //!
 //! A sleep cannot be cancelled once spawned, so a cancelled timer's sleep still
-//! arrives. It is dropped by not being recognised: [`Msg::Woke`] is offered
-//! around, this capability answers `None` for an id it no longer holds, and a
-//! stale wake reaches nothing.
+//! arrives. It is dropped by not being recognised: [`woke`] answers `None` for
+//! an id this file no longer holds, and a stale wake reaches nothing.
 //!
 //! # Ids are derived, never generated
 //!
@@ -33,14 +32,13 @@
 //! mints a uuid: `fire_at_unix_ms` is computed here, in the decision, and
 //! travels on the event.
 
-use super::{Act, CapCommand, Decision, Mailbox, Msg, TurnEvent};
-use crate::agent_loop::Incoming;
-use crate::agent_loop::state::AgentDomainEvent;
+use super::Mailbox;
 use crate::agent_loop::timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, cancel_timer_spec, list_timers_spec,
     set_timer_spec,
 };
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
+use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::runners::loading::AgentFacts;
 use horsie_agentcore::Toolbox;
 use horsie_models::now_ms;
@@ -62,20 +60,6 @@ pub const SET_TOOL: &str = "set_timer";
 pub const LIST_TOOL: &str = "list_timers";
 /// The tool that removes one, or all of them.
 pub const CANCEL_TOOL: &str = "cancel_timer";
-
-/// What the model asked this capability to do.
-///
-/// One arm per tool, decided by the layer that claimed the name. The three used
-/// to be told apart by a name match here, and the name is what no longer
-/// travels.
-pub enum Command {
-    /// `set_timer`.
-    Arm { input: Value },
-    /// `list_timers`. No input: reading them back takes no arguments.
-    List,
-    /// `cancel_timer`.
-    Cancel { input: Value },
-}
 
 /// The permission to arm one. What is armed is [`TimerState`], on
 /// [`AgentState`](crate::agent_loop::AgentState).
@@ -146,189 +130,246 @@ impl TimerState {
     }
 }
 
-impl TimersCapability {
-    #[must_use]
-    pub fn new() -> Self {
-        Self
-    }
+/// One sleep this capability asked for.
+///
+/// The one thing it cannot do for itself: everything else is a decision about
+/// state it holds, and this is a request for time to pass. The actor spawns the
+/// sleep and sends the id back when it elapses.
+///
+/// **Not journaled**, in either direction. The durable fact is the armed
+/// timer's own `fire_at_unix_ms`; a sleep is only ever a consequence of it, and
+/// two records of one fact could disagree. A load re-issues every wake from
+/// what is armed, with its *remaining* delay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Wake {
+    pub id: String,
+    pub after_secs: u64,
+}
 
-    /// The model called `set_timer`.
-    ///
-    /// The fire time is stamped here, once, and travels on the event: a fold
-    /// that recomputed it would move every timer forward on every replay.
-    fn arm(call: &str, input: &Value) -> Decision {
-        let kind = match input.get("kind").and_then(Value::as_str) {
-            Some("one_shot") => TimerKind::OneShot,
-            Some("recurring") => TimerKind::Recurring,
-            Some(_) | None => {
-                return Decision::refuse(
-                    call,
-                    format!("{SET_TOOL}.kind must be 'one_shot' or 'recurring'"),
-                );
-            }
-        };
-        let Some(after_secs) = input
-            .get("after_secs")
-            .and_then(Value::as_u64)
-            .filter(|n| *n >= 1)
-        else {
-            return Decision::refuse(
-                call,
-                format!("{SET_TOOL}.after_secs must be an integer >= 1"),
-            );
-        };
-        let Some(message) = input
-            .get("message")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-        else {
-            return Decision::refuse(
-                call,
-                format!("{SET_TOOL}.message must be a non-empty string"),
-            );
-        };
-        let label = input
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let record = TimerRecord::arm(
-            label,
-            message,
-            kind,
-            Duration::from_secs(after_secs),
-            now_ms(),
-        );
-        let id = record.id.clone();
-        Decision::record(vec![AgentDomainEvent::TimerArmed { record }])
-            .then(answer(call, &json!({ "timer_id": id.0 })))
-            .then(Act::Wake {
-                id: id.0,
-                after_secs,
-            })
-    }
+/// What a call to `set_timer` came to.
+#[derive(Debug)]
+pub(crate) enum Armed {
+    /// The model gets a tool *error*: `is_error` is read by agentcore's loop
+    /// detector and the nudge budget.
+    Refused(String),
+    Armed {
+        record: TimerRecord,
+        wake: Wake,
+        /// What the model is told, rendered the way agentcore forwards a result.
+        told: String,
+    },
+}
 
-    /// The model called `list_timers`.
-    fn list(state: &TimerState, call: &str) -> Decision {
-        let now = now_ms();
-        let views: Vec<_> = state.armed.iter().map(|t| t.view(now)).collect();
-        Decision::default().then(answer(call, &views))
-    }
-
-    /// The model called `cancel_timer`.
-    ///
-    /// Cancelling nothing journals nothing and is still an answer: a model that
-    /// names a timer that has already fired has not made an error worth
-    /// flagging, and the empty list says so.
-    fn cancel(state: &TimerState, call: &str, input: &Value) -> Decision {
-        let selector = if input.get("all").and_then(Value::as_bool) == Some(true) {
-            CancelSelector::All
-        } else if let Some(id) = input.get("id").and_then(Value::as_str) {
-            CancelSelector::One(TimerId(id.to_string()))
-        } else {
-            return Decision::refuse(call, format!("{CANCEL_TOOL} requires 'id' or 'all': true"));
-        };
-        let ids = state.select(&selector);
-        let names: Vec<&str> = ids.iter().map(|i| i.0.as_str()).collect();
-        let answered = Decision::default().then(answer(call, &json!({ "cancelled": names })));
-        match ids.is_empty() {
-            true => answered,
-            false => Decision {
-                events: vec![AgentDomainEvent::TimersCancelled { ids }],
-                ..answered
-            },
+/// The model called `set_timer`.
+///
+/// The fire time is stamped here, once, and travels on the event: a fold that
+/// recomputed it would move every timer forward on every replay.
+pub(crate) fn arm(input: &Value) -> Armed {
+    let kind = match input.get("kind").and_then(Value::as_str) {
+        Some("one_shot") => TimerKind::OneShot,
+        Some("recurring") => TimerKind::Recurring,
+        Some(_) | None => {
+            return Armed::Refused(format!("{SET_TOOL}.kind must be 'one_shot' or 'recurring'"));
         }
-    }
+    };
+    let Some(after_secs) = input
+        .get("after_secs")
+        .and_then(Value::as_u64)
+        .filter(|n| *n >= 1)
+    else {
+        return Armed::Refused(format!("{SET_TOOL}.after_secs must be an integer >= 1"));
+    };
+    let Some(message) = input
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+    else {
+        return Armed::Refused(format!("{SET_TOOL}.message must be a non-empty string"));
+    };
+    let label = input
+        .get("label")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let record = TimerRecord::arm(
+        label,
+        message,
+        kind,
+        Duration::from_secs(after_secs),
+        now_ms(),
+    );
+    let wake = Wake {
+        id: record.id.0.clone(),
+        after_secs,
+    };
+    let told = rendered(&json!({ "timer_id": record.id.0 }));
+    Armed::Armed { record, wake, told }
+}
 
-    /// A sleep elapsed.
-    ///
-    /// `None` for an id this capability no longer holds, which is the whole of
-    /// how a cancelled timer's sleep is dropped — the sleep itself cannot be
-    /// called back.
-    ///
-    /// The wake goes in the queue rather than starting a turn: a firing is one
-    /// more thing addressed to this agent, and it waits where everything else
-    /// does. That is what makes a timer firing mid-run harmless.
-    fn woke(state: &TimerState, id: &str) -> Option<Decision> {
-        let record = state.armed.iter().find(|t| t.id.0 == id)?;
-        let display_count = record.fire_count + 1;
-        // Recurring re-arms from now; a one-shot is removed. Computed here and
-        // carried on the event, because a fold may not read a clock.
-        let next_fire_at_unix_ms = match record.kind {
-            TimerKind::Recurring => {
-                Some(now_ms().saturating_add(record.interval_secs.saturating_mul(1000)))
-            }
-            TimerKind::OneShot => None,
-        };
-        let decision = Decision::record(vec![AgentDomainEvent::TimerFired {
-            id: record.id.clone(),
-            next_fire_at_unix_ms,
-        }])
-        .then(Act::Enqueue {
-            item: Incoming::Timer {
-                // Derived from the timer and its fire count, never generated:
-                // replay must land the id the live run wrote, which a uuid
-                // could not.
-                id: format!("{}:{display_count}", record.id),
-                message: record.wake_message(display_count),
-            },
-        });
-        Some(match record.kind {
-            TimerKind::Recurring => decision.then(Act::Wake {
-                id: record.id.0.clone(),
-                after_secs: record.interval_secs,
-            }),
-            TimerKind::OneShot => decision,
+/// The model called `list_timers`.
+///
+/// Reading them back changes nothing, so this is an answer and only an answer:
+/// there is no event for the actor's arm to journal.
+pub(crate) fn list(state: &TimerState) -> String {
+    let now = now_ms();
+    let views: Vec<_> = state.armed.iter().map(|t| t.view(now)).collect();
+    rendered(&views)
+}
+
+/// What a call to `cancel_timer` came to.
+#[derive(Debug)]
+pub(crate) enum Cancelled {
+    Refused(String),
+    /// Cancelling nothing journals nothing and is still an answer, so `ids` may
+    /// be empty.
+    Cancelled {
+        ids: Vec<TimerId>,
+        told: String,
+    },
+}
+
+/// The model called `cancel_timer`.
+///
+/// Cancelling nothing journals nothing and is still an answer: a model that
+/// names a timer that has already fired has not made an error worth flagging,
+/// and the empty list says so.
+pub(crate) fn cancel(state: &TimerState, input: &Value) -> Cancelled {
+    let selector = if input.get("all").and_then(Value::as_bool) == Some(true) {
+        CancelSelector::All
+    } else if let Some(id) = input.get("id").and_then(Value::as_str) {
+        CancelSelector::One(TimerId(id.to_string()))
+    } else {
+        return Cancelled::Refused(format!("{CANCEL_TOOL} requires 'id' or 'all': true"));
+    };
+    let ids = state.select(&selector);
+    let names: Vec<&str> = ids.iter().map(|i| i.0.as_str()).collect();
+    let told = rendered(&json!({ "cancelled": names }));
+    Cancelled::Cancelled { ids, told }
+}
+
+/// A timer fired.
+#[derive(Debug)]
+pub(crate) struct Fired {
+    pub id: TimerId,
+    /// The re-armed fire time for a recurring timer, so the fold stays pure;
+    /// `None` removes a one-shot.
+    pub next_fire_at_unix_ms: Option<u64>,
+    /// The firing, as one more thing addressed to this agent. It waits in the
+    /// queue where everything else does, which is what makes a timer firing
+    /// mid-run harmless.
+    pub item: Incoming,
+    /// A recurring timer's next sleep.
+    pub wake: Option<Wake>,
+}
+
+/// A sleep elapsed. `None` for an id this capability no longer holds, which is
+/// the whole of how a cancelled timer's sleep is dropped — the sleep itself
+/// cannot be called back.
+pub(crate) fn woke(state: &TimerState, id: &str) -> Option<Fired> {
+    let record = state.armed.iter().find(|t| t.id.0 == id)?;
+    let display_count = record.fire_count + 1;
+    // Recurring re-arms from now; a one-shot is removed. Computed here and
+    // carried on the event, because a fold may not read a clock.
+    let next_fire_at_unix_ms = match record.kind {
+        TimerKind::Recurring => {
+            Some(now_ms().saturating_add(record.interval_secs.saturating_mul(1000)))
+        }
+        TimerKind::OneShot => None,
+    };
+    let wake = match record.kind {
+        TimerKind::Recurring => Some(Wake {
+            id: record.id.0.clone(),
+            after_secs: record.interval_secs,
+        }),
+        TimerKind::OneShot => None,
+    };
+    Some(Fired {
+        id: record.id.clone(),
+        next_fire_at_unix_ms,
+        item: Incoming::Timer {
+            // Derived from the timer and its fire count, never generated:
+            // replay must land the id the live run wrote, which a uuid
+            // could not.
+            id: format!("{}:{display_count}", record.id),
+            message: record.wake_message(display_count),
+        },
+        wake,
+    })
+}
+
+/// Every timer still armed, asked for again — with its *remaining* delay, not
+/// its original interval. Empty when nothing is armed.
+///
+/// The crash window's counterpart for a wake: a sleep lives in the dead process
+/// and nothing survives it, so the fold is the only record that a timer is due.
+/// A five-minute timer armed four minutes ago is due in one, and re-arming it
+/// for five would silently move it.
+pub(crate) fn reloaded(state: &TimerState) -> Vec<Wake> {
+    let now = now_ms();
+    state
+        .armed
+        .iter()
+        .map(|t| Wake {
+            id: t.id.0.clone(),
+            after_secs: t.remaining(now).as_secs(),
         })
-    }
+        .collect()
+}
 
-    /// Every timer still armed, asked for again.
-    ///
-    /// The crash window's counterpart for a wake: a sleep lives in the dead
-    /// process and nothing survives it, so the fold is the only record that a
-    /// timer is due. Re-issued with the *remaining* delay rather than the
-    /// original interval — a five-minute timer armed four minutes ago is due in
-    /// one, and re-arming it for five would silently move it.
-    fn reloaded(state: &TimerState) -> Option<Decision> {
-        if state.armed.is_empty() {
-            return None;
-        }
-        let now = now_ms();
-        Some(state.armed.iter().fold(Decision::default(), |d, t| {
-            d.then(Act::Wake {
-                id: t.id.0.clone(),
-                after_secs: t.remaining(now).as_secs(),
-            })
-        }))
+/// Every timer, dropped: the agent said its work is done, so nothing is left
+/// for one to wake. `None` when nothing is armed.
+///
+/// Left armed, a reload would re-arm them and drop a wake into a finished
+/// agent's queue. Dropped rather than refused at the tool boundary, where the
+/// agent's own timers are invisible to it.
+pub(crate) fn concluded(state: &TimerState) -> Option<Vec<TimerId>> {
+    match state.armed.is_empty() {
+        true => None,
+        false => Some(state.select(&CancelSelector::All)),
+    }
+}
+
+/// Why this turn's end is not the agent finishing, when a timer is still armed.
+///
+/// Invariant 6, asked directly rather than merged out of a broadcast: the timer
+/// is what will start the next turn.
+pub(crate) fn holds(state: &TimerState) -> Option<String> {
+    match state.armed.is_empty() {
+        true => None,
+        false => Some(format!("{} timer(s) still armed", state.armed.len())),
     }
 }
 
 /// A tool result, rendered the way agentcore forwards one.
 ///
 /// Compact JSON, which is what a `serde_json::Value` result became before these
-/// tools answered through [`Act::Answer`] — a string is forwarded verbatim, so
-/// the bytes the model sees are the same either way.
-fn answer<T: Serialize>(call: &str, value: &T) -> Act {
-    Act::Answer {
-        call: call.to_string(),
-        text: serde_json::to_string(value)
-            .unwrap_or_else(|e| format!("could not render the timer result: {e}")),
-    }
+/// tools answered with a string — a string is forwarded verbatim, so the bytes
+/// the model sees are the same either way.
+fn rendered<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|e| format!("could not render the timer result: {e}"))
 }
 
 impl TimersCapability {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
     /// The three tools, each paired with the command a call to it becomes.
     fn claims(&self) -> Vec<ClaimedTool> {
         vec![
-            ClaimedTool::new(set_timer_spec(), |input, to| {
-                CapCommand::Timers(Command::Arm { input }, to)
+            ClaimedTool::new(set_timer_spec(), |input, to| AgentCommand::TimerArm {
+                input,
+                answering: to,
             }),
-            ClaimedTool::new(list_timers_spec(), |_input, to| {
-                CapCommand::Timers(Command::List, to)
+            ClaimedTool::new(list_timers_spec(), |_input, to| AgentCommand::TimerList {
+                answering: to,
             }),
-            ClaimedTool::new(cancel_timer_spec(), |input, to| {
-                CapCommand::Timers(Command::Cancel { input }, to)
+            ClaimedTool::new(cancel_timer_spec(), |input, to| AgentCommand::TimerCancel {
+                input,
+                answering: to,
             }),
         ]
     }
@@ -350,48 +391,6 @@ impl TimersCapability {
         mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
         claiming(inner, self.claims(), mailbox)
-    }
-
-    pub fn command(&self, state: &TimerState, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::Timers(cmd, to) = cmd else {
-            return None;
-        };
-        Some(match cmd {
-            Command::Arm { input } => Self::arm(&to.call, input),
-            Command::List => Self::list(state, &to.call),
-            Command::Cancel { input } => Self::cancel(state, &to.call, input),
-        })
-    }
-
-    pub fn handle(&self, state: &TimerState, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Woke { id } => Self::woke(state, id),
-            Msg::Loaded => Self::reloaded(state),
-            // Invariant 6, for the one thing an agent holds that owes it
-            // nothing: a turn ending with an armed timer is not the agent
-            // finishing, because the timer is what will start the next one.
-            Msg::Turn(TurnEvent::Ended) if !state.armed.is_empty() => {
-                Some(Decision::default().then(Act::Hold {
-                    note: format!("{} timer(s) still armed", state.armed.len()),
-                }))
-            }
-            // Submitting a result says the work is done, which makes an armed
-            // timer moot: nothing is left for it to wake, and a reload would
-            // otherwise re-arm it and drop a wake into a finished agent's queue.
-            // Dropped rather than refused at the tool boundary, where the
-            // agent's own timers are invisible to it.
-            Msg::Concluded if !state.armed.is_empty() => {
-                Some(Decision::record(vec![AgentDomainEvent::TimersCancelled {
-                    ids: state.select(&CancelSelector::All),
-                }]))
-            }
-            Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Concluded
-            | Msg::TurnProposed => None,
-        }
     }
 }
 
@@ -423,32 +422,46 @@ impl TimerState {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, answering, facts, someone_elses};
+    use super::super::testing::{advertised_by, facts};
     use super::*;
     use crate::agent_loop::capabilities::Capability;
-    use crate::agent_loop::capabilities::testing::Equipped;
+    use crate::agent_loop::state::AgentDomainEvent;
 
-    /// An agent that may arm timers, with none armed.
-    fn cap() -> Equipped {
-        Equipped::with(Capability::Timers(TimersCapability::new()))
+    /// Journal one event, the way the actor's arm does. A capability that
+    /// decided something has not yet changed anything; this is the step that
+    /// makes it true.
+    fn fold(timers: TimerState, event: AgentDomainEvent) -> TimerState {
+        crate::agent_loop::AgentState {
+            timers,
+            ..Default::default()
+        }
+        .apply(event)
+        .timers
     }
 
-    /// The timers this agent is holding.
-    fn armed(cap: &Equipped) -> &[TimerRecord] {
-        cap.0.timers.armed()
+    /// An agent holding one timer armed from `input`, folded the way the actor
+    /// does.
+    fn armed_one(input: Value) -> TimerState {
+        let Armed::Armed { record, .. } = arm(&input) else {
+            panic!("a well-formed set_timer arms a timer");
+        };
+        fold(
+            TimerState::default(),
+            AgentDomainEvent::TimerArmed { record },
+        )
     }
 
-    fn called(cap: &Equipped, cmd: Command) -> Decision {
-        cap.command(&CapCommand::Timers(cmd, answering("t1")))
-            .expect("timers own their commands")
+    /// What the model was told, read back as JSON.
+    fn told_json(told: &str) -> Value {
+        serde_json::from_str(told).expect("a timer answer is JSON")
     }
 
-    fn set(cap: &Equipped, input: Value) -> Decision {
-        called(cap, Command::Arm { input })
-    }
-
-    fn cancel(cap: &Equipped, input: Value) -> Decision {
-        called(cap, Command::Cancel { input })
+    /// The event the actor's arm journals for a firing.
+    fn fired_event(fired: &Fired) -> AgentDomainEvent {
+        AgentDomainEvent::TimerFired {
+            id: fired.id.clone(),
+            next_fire_at_unix_ms: fired.next_fire_at_unix_ms,
+        }
     }
 
     fn one_shot(after_secs: u64) -> Value {
@@ -469,41 +482,6 @@ mod tests {
         })
     }
 
-    fn wake(decision: &Decision) -> Option<(String, u64)> {
-        decision.acts.iter().find_map(|act| {
-            let Act::Wake { id, after_secs } = act else {
-                return None;
-            };
-            Some((id.clone(), *after_secs))
-        })
-    }
-
-    fn answered(decision: &Decision) -> Value {
-        for act in &decision.acts {
-            if let Act::Answer { text, .. } = act {
-                return serde_json::from_str(text).expect("a timer answer is JSON");
-            }
-        }
-        panic!("expected an answer, got {:?}", decision.acts);
-    }
-
-    fn queued(decision: &Decision) -> Incoming {
-        for act in &decision.acts {
-            if let Act::Enqueue { item } = act {
-                return item.clone();
-            }
-        }
-        panic!("expected a queued wake, got {:?}", decision.acts);
-    }
-
-    /// Arm one and fold it, the way the actor does.
-    fn armed_one(input: Value) -> Equipped {
-        let mut cap = cap();
-        let decision = set(&cap, input);
-        cap.fold(&decision);
-        cap
-    }
-
     #[test]
     fn it_advertises_the_three_timer_tools() {
         assert_eq!(
@@ -512,45 +490,44 @@ mod tests {
         );
     }
 
-    /// Arming journals the record with its fire time already stamped, answers
-    /// the model with the id, and asks the actor for the one thing the
+    /// Arming hands the actor the record to journal with its fire time already
+    /// stamped, answers the model with the id, and asks for the one thing the
     /// capability cannot do for itself.
     #[test]
     fn arming_journals_the_record_and_asks_to_be_woken() {
-        let cap = cap();
-        let decision = set(&cap, one_shot(3600));
-        let Some(AgentDomainEvent::TimerArmed { record }) = decision.events.first() else {
-            panic!("expected an armed event, got {:?}", decision.events);
+        let Armed::Armed { record, wake, told } = arm(&one_shot(3600)) else {
+            panic!("a well-formed set_timer arms a timer");
         };
         assert!(
             record.fire_at_unix_ms > now_ms(),
             "the fire time is stamped in the decision, not left for the fold"
         );
         assert_eq!(record.interval_secs, 3600);
-        assert_eq!(answered(&decision)["timer_id"], record.id.0.as_str());
-        assert_eq!(wake(&decision), Some((record.id.0.clone(), 3600)));
+        assert_eq!(told_json(&told)["timer_id"], record.id.0.as_str());
+        assert_eq!(
+            wake,
+            Wake {
+                id: record.id.0.clone(),
+                after_secs: 3600
+            }
+        );
     }
 
-    /// A malformed call is an error result rather than a plain one, and
-    /// journals nothing: no timer was armed, so nothing happened.
+    /// A malformed call is an error result rather than a plain one, and carries
+    /// no record: no timer was armed, so the actor journals nothing.
     #[test]
     fn a_malformed_set_timer_is_refused_and_journals_nothing() {
-        let cap = cap();
         for input in [
             json!({"kind": "sometimes", "after_secs": 10, "message": "x"}),
             json!({"kind": "one_shot", "after_secs": 0, "message": "x"}),
             json!({"kind": "one_shot", "after_secs": 10}),
         ] {
-            let decision = set(&cap, input.clone());
-            assert!(decision.events.is_empty(), "{input} armed something");
-            assert!(
-                decision
-                    .acts
-                    .iter()
-                    .any(|a| matches!(a, Act::Refuse { .. })),
-                "{input} was not refused: {:?}",
-                decision.acts
-            );
+            match arm(&input) {
+                Armed::Refused(_) => {}
+                Armed::Armed { record, .. } => {
+                    panic!("{input} was not refused, and armed {record:?}")
+                }
+            }
         }
     }
 
@@ -559,44 +536,50 @@ mod tests {
     /// land the same id the live run wrote — which a uuid could not.
     #[test]
     fn a_wake_queues_an_item_whose_id_is_derived_from_the_fire_count() {
-        let mut cap = armed_one(recurring(60));
-        let id = armed(&cap)[0].id.0.clone();
+        let timers = armed_one(recurring(60));
+        let id = timers.armed()[0].id.0.clone();
 
-        let first = cap.handle(&Msg::Woke { id: &id }).expect("its own wake");
-        let Incoming::Timer { id: item, message } = queued(&first) else {
+        let first = woke(&timers, &id).expect("its own wake");
+        let Incoming::Timer { id: item, message } = &first.item else {
             panic!("a timer's wake is queued as a timer");
         };
-        assert_eq!(item, format!("{id}:1"));
+        assert_eq!(*item, format!("{id}:1"));
         assert!(message.contains("re-run the sweep"));
-        cap.fold(&first);
+        let timers = fold(timers, fired_event(&first));
 
         // And the second fire numbers on from the count the fold carried, so
         // replaying both reproduces both ids.
-        let second = cap.handle(&Msg::Woke { id: &id }).expect("its own wake");
-        let Incoming::Timer { id: item, .. } = queued(&second) else {
+        let second = woke(&timers, &id).expect("its own wake");
+        let Incoming::Timer { id: item, .. } = &second.item else {
             panic!("a timer's wake is queued as a timer");
         };
-        assert_eq!(item, format!("{id}:2"));
+        assert_eq!(*item, format!("{id}:2"));
     }
 
     /// A recurring timer asks to be woken again; a one-shot does not, and is
     /// gone from the fold.
     #[test]
     fn a_recurring_timer_re_arms_and_a_one_shot_is_removed() {
-        let mut cap = armed_one(recurring(60));
-        let id = armed(&cap)[0].id.0.clone();
-        let fired = cap.handle(&Msg::Woke { id: &id }).expect("its own wake");
-        assert_eq!(wake(&fired), Some((id.clone(), 60)));
-        cap.fold(&fired);
-        assert_eq!(armed(&cap).len(), 1, "a recurring timer stays armed");
-        assert_eq!(armed(&cap)[0].fire_count, 1);
+        let timers = armed_one(recurring(60));
+        let id = timers.armed()[0].id.0.clone();
+        let fired = woke(&timers, &id).expect("its own wake");
+        assert_eq!(
+            fired.wake,
+            Some(Wake {
+                id: id.clone(),
+                after_secs: 60
+            })
+        );
+        let timers = fold(timers, fired_event(&fired));
+        assert_eq!(timers.armed().len(), 1, "a recurring timer stays armed");
+        assert_eq!(timers.armed()[0].fire_count, 1);
 
-        let mut cap = armed_one(one_shot(60));
-        let id = armed(&cap)[0].id.0.clone();
-        let fired = cap.handle(&Msg::Woke { id: &id }).expect("its own wake");
-        assert_eq!(wake(&fired), None, "a one-shot asks for nothing more");
-        cap.fold(&fired);
-        assert!(armed(&cap).is_empty());
+        let timers = armed_one(one_shot(60));
+        let id = timers.armed()[0].id.0.clone();
+        let fired = woke(&timers, &id).expect("its own wake");
+        assert_eq!(fired.wake, None, "a one-shot asks for nothing more");
+        let timers = fold(timers, fired_event(&fired));
+        assert!(timers.armed().is_empty());
     }
 
     /// A sleep cannot be cancelled once it is spawned, so a cancelled timer's
@@ -604,45 +587,56 @@ mod tests {
     /// `None` is what lets the actor tell that from a bug.
     #[test]
     fn a_wake_for_a_cancelled_timer_is_not_claimed() {
-        let mut cap = armed_one(one_shot(60));
-        let id = armed(&cap)[0].id.0.clone();
-        let cancelled = cancel(&cap, json!({"id": id}));
-        assert_eq!(answered(&cancelled)["cancelled"], json!([id.as_str()]));
-        cap.fold(&cancelled);
-        assert!(armed(&cap).is_empty());
+        let timers = armed_one(one_shot(60));
+        let id = timers.armed()[0].id.0.clone();
+        let Cancelled::Cancelled { ids, told } = cancel(&timers, &json!({"id": id})) else {
+            panic!("naming a timer is a well-formed cancel");
+        };
+        assert_eq!(told_json(&told)["cancelled"], json!([id.as_str()]));
+        let timers = fold(timers, AgentDomainEvent::TimersCancelled { ids });
+        assert!(timers.armed().is_empty());
         assert!(
-            cap.handle(&Msg::Woke { id: &id }).is_none(),
+            woke(&timers, &id).is_none(),
             "a stale sleep was claimed, and would have fired a cancelled timer"
+        );
+        assert!(
+            woke(&timers, "someone-else").is_none(),
+            "a wake for an id this agent never armed was claimed"
         );
     }
 
-    /// Cancelling everything is one event; cancelling nothing is an answer with
-    /// no event at all, because nothing happened.
+    /// Cancelling everything names every timer for one event; cancelling
+    /// nothing is an answer with no ids at all, because nothing happened.
     #[test]
     fn cancel_all_removes_every_timer_and_cancelling_nothing_journals_nothing() {
-        let mut cap = armed_one(one_shot(60));
-        let second = set(&cap, recurring(60));
-        cap.fold(&second);
-        assert_eq!(armed(&cap).len(), 2);
+        let timers = armed_one(one_shot(60));
+        let Armed::Armed { record, .. } = arm(&recurring(60)) else {
+            panic!("a well-formed set_timer arms a timer");
+        };
+        let timers = fold(timers, AgentDomainEvent::TimerArmed { record });
+        assert_eq!(timers.armed().len(), 2);
 
-        let all = cancel(&cap, json!({"all": true}));
-        assert_eq!(all.events.len(), 1);
-        cap.fold(&all);
-        assert!(armed(&cap).is_empty());
+        let Cancelled::Cancelled { ids, .. } = cancel(&timers, &json!({"all": true})) else {
+            panic!("'all': true is a well-formed cancel");
+        };
+        assert_eq!(ids.len(), 2);
+        let timers = fold(timers, AgentDomainEvent::TimersCancelled { ids });
+        assert!(timers.armed().is_empty());
 
-        let again = cancel(&cap, json!({"all": true}));
-        assert!(again.events.is_empty(), "cancelling nothing is not a fact");
-        assert_eq!(answered(&again)["cancelled"], json!([]));
+        let Cancelled::Cancelled { ids, told } = cancel(&timers, &json!({"all": true})) else {
+            panic!("'all': true is a well-formed cancel");
+        };
+        assert!(ids.is_empty(), "cancelling nothing is not a fact");
+        assert_eq!(told_json(&told)["cancelled"], json!([]));
     }
 
     /// `list_timers` is the reliable source of truth for cancelling, so it has
-    /// to report the remaining delay rather than the configured interval.
+    /// to report the remaining delay rather than the configured interval. It
+    /// answers and nothing else: there is no event for the actor to journal.
     #[test]
     fn listing_reports_what_is_armed_and_journals_nothing() {
-        let cap = armed_one(recurring(3600));
-        let listed = called(&cap, Command::List);
-        assert!(listed.events.is_empty());
-        let views = answered(&listed);
+        let timers = armed_one(recurring(3600));
+        let views = told_json(&list(&timers));
         assert_eq!(views[0]["label"], "nightly");
         assert_eq!(views[0]["kind"], "recurring");
         assert!(views[0]["fires_in_secs"].as_u64().unwrap() <= 3600);
@@ -651,28 +645,33 @@ mod tests {
     /// A sleep dies with the process that spawned it, so a load re-issues one
     /// for every timer still armed — with the *remaining* delay. Re-arming for
     /// the original interval would silently push every timer forward by a
-    /// restart's worth of time.
+    /// restart's worth of time. A load journals nothing, which is why it
+    /// returns wakes and no event at all.
     #[test]
     fn a_load_re_arms_every_timer_with_its_remaining_delay() {
-        let mut cap = cap();
-        cap.fold(&Decision::record(vec![AgentDomainEvent::TimerArmed {
-            record: TimerRecord {
-                id: TimerId("t-1".into()),
-                label: "nightly".into(),
-                message: "re-run the sweep".into(),
-                kind: TimerKind::Recurring,
-                interval_secs: 86_400,
-                fire_at_unix_ms: now_ms() + 60_000,
-                fire_count: 3,
+        let timers = fold(
+            TimerState::default(),
+            AgentDomainEvent::TimerArmed {
+                record: TimerRecord {
+                    id: TimerId("t-1".into()),
+                    label: "nightly".into(),
+                    message: "re-run the sweep".into(),
+                    kind: TimerKind::Recurring,
+                    interval_secs: 86_400,
+                    fire_at_unix_ms: now_ms() + 60_000,
+                    fire_count: 3,
+                },
             },
-        }]));
-        let reloaded = cap.handle(&Msg::Loaded).expect("a timer to re-arm");
-        assert!(reloaded.events.is_empty(), "a load journals nothing");
-        let (id, after) = wake(&reloaded).expect("a wake");
-        assert_eq!(id, "t-1");
+        );
+        let wakes = reloaded(&timers);
+        let [wake] = wakes.as_slice() else {
+            panic!("expected one wake, got {wakes:?}");
+        };
+        assert_eq!(wake.id, "t-1");
         assert!(
-            (55..=60).contains(&after),
-            "re-armed for {after}s, not the ~60s remaining"
+            (55..=60).contains(&wake.after_secs),
+            "re-armed for {}s, not the ~60s remaining",
+            wake.after_secs
         );
     }
 
@@ -680,7 +679,7 @@ mod tests {
     /// reload does not spawn a task per capability.
     #[test]
     fn a_load_with_nothing_armed_asks_for_nothing() {
-        assert!(cap().handle(&Msg::Loaded).is_none());
+        assert!(reloaded(&TimerState::default()).is_empty());
     }
 
     /// Invariant 6 for a timer: a turn that ends with one armed is not the
@@ -688,22 +687,15 @@ mod tests {
     #[test]
     fn a_turn_ending_with_a_timer_armed_is_held() {
         let holding = armed_one(one_shot(3600));
-        assert!(
-            holding
-                .handle(&Msg::Turn(TurnEvent::Ended))
-                .is_some_and(|d| d.acts.iter().any(|a| matches!(a, Act::Hold { .. }))),
+        assert_eq!(
+            holds(&holding),
+            Some("1 timer(s) still armed".to_string()),
             "a step holding a timer would be nudged into submitting a result it does not have"
         );
         assert!(
-            cap().handle(&Msg::Turn(TurnEvent::Ended)).is_none(),
+            holds(&TimerState::default()).is_none(),
             "an agent with nothing armed holds nothing"
         );
-        for boundary in [TurnEvent::Began, TurnEvent::Failed, TurnEvent::Cancelled] {
-            assert!(
-                holding.handle(&Msg::Turn(boundary)).is_none(),
-                "{boundary:?} is not the boundary a timer answers"
-            );
-        }
     }
 
     /// Submitting a result says the work is done, so an armed timer is moot.
@@ -711,31 +703,25 @@ mod tests {
     /// finished agent's queue.
     #[test]
     fn concluding_cancels_every_armed_timer() {
-        let mut cap = armed_one(one_shot(3600));
-        let concluded = cap.handle(&Msg::Concluded).expect("a timer to drop");
-        cap.fold(&concluded);
-        assert!(armed(&cap).is_empty());
+        let timers = armed_one(one_shot(3600));
+        let ids = concluded(&timers).expect("a timer to drop");
+        let timers = fold(timers, AgentDomainEvent::TimersCancelled { ids });
+        assert!(timers.armed().is_empty());
         assert!(
-            cap.handle(&Msg::Concluded).is_none(),
+            concluded(&timers).is_none(),
             "an agent with nothing armed has nothing to drop"
         );
-    }
-
-    /// It claims its own three commands and nothing else.
-    #[test]
-    fn it_claims_nothing_but_its_own_commands() {
-        let cap = armed_one(one_shot(60));
-        assert!(cap.command(&someone_elses()).is_none());
-        assert!(cap.handle(&Msg::Answer(&[])).is_none());
-        assert!(cap.handle(&Msg::Woke { id: "someone-else" }).is_none());
     }
 
     /// The armed timers have to survive the round trip a reload takes, or an
     /// agent comes back with nothing to wake it.
     #[test]
     fn armed_timers_survive_the_journal_round_trip() {
-        let cap = armed_one(recurring(60));
-        let written = serde_json::to_string(&cap.0).expect("write");
+        let state = crate::agent_loop::AgentState {
+            timers: armed_one(recurring(60)),
+            ..Default::default()
+        };
+        let written = serde_json::to_string(&state).expect("write");
         let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
         assert_eq!(back.timers.armed().len(), 1);
         assert_eq!(

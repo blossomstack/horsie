@@ -28,7 +28,7 @@
 //! returns `None` and [`super::Capability::layer`] claims nothing, and the tools are
 //! advertised by the toolbox that will actually run them.
 
-use super::{Decision, Msg, SetupError};
+use super::SetupError;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
 
@@ -90,17 +90,12 @@ impl McpCapability {
             })?;
         Ok(())
     }
-
-    /// Nothing reaches this capability through the mailbox; see the module doc.
-    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
-        None
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, facts, someone_elses};
+    use super::super::testing::{advertised_by, facts};
     use super::*;
     use crate::agent_loop::capabilities::testing::{loading, spec};
     use crate::agent_loop::capabilities::{Capabilities, Capability};
@@ -148,11 +143,6 @@ mod tests {
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = Capability::Mcp(McpCapability::new(vec!["github".into()]));
-        assert!(
-            super::super::testing::Equipped::with(c.clone())
-                .command(&someone_elses())
-                .is_none()
-        );
         assert!(
             advertised_by(&c, &facts()).is_empty(),
             "the tools are advertised by the toolbox that will run them"

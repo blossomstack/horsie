@@ -11,25 +11,21 @@
 //! to get from server constants. This capability owns exactly that policy and
 //! nothing else: no folded state, no events, no commands.
 //!
-//! # Why a hook and not a getter
+//! # Why the actor asks, and does not read a field
 //!
-//! The one question a capability answers from outside is
-//! [`super::Capability::carried_state`], and a compaction target is not it —
-//! that is compaction's own input rather than a decision about it. So this
-//! capability answers through the same mechanism every other decision in the
-//! tree uses: [`super::Msg::TurnProposed`]
-//! is broadcast before a turn's run starts, and this capability's answer comes
-//! back as [`super::Act::CompactionBudget`]. The actor combines it with the one
-//! thing this capability does not and should not hold — the model's own context
-//! window, known only once the run's provider is resolved — to build what
-//! agentcore's loop checks on every call.
+//! The two percentages are config, so a getter would do — but the question is
+//! asked at one exact moment and nowhere else. The agent actor asks *before* a
+//! turn's run is built, because the answer has to be in hand by the time the
+//! run's task combines it with the one thing this capability does not and
+//! should not hold: the model's own context window, known only once the run's
+//! provider is resolved. Together they are what agentcore's loop checks on
+//! every call.
 //!
-//! An agent equipped with none of these gets no [`super::Act::CompactionBudget`]
-//! at all, and therefore never compacts. That silence is deliberate: see
+//! An agent equipped with no such capability is asked nothing and never
+//! compacts. That silence is deliberate: see
 //! [`crate::sessions::runners::assemble`], which is why every agent-owning
 //! runner equips one unconditionally, the same as the task list and timers.
 
-use super::{Act, Decision, Msg};
 use serde::{Deserialize, Serialize};
 
 /// The share of a model's context window at which an agent compacts, absent a
@@ -86,20 +82,13 @@ impl TokenBudgetCapability {
         "token_budget"
     }
 
-    pub fn handle(&self, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::TurnProposed => Some(Decision::default().then(Act::CompactionBudget {
-                trigger_at_percent: self.trigger_at_percent,
-                retain_percent: self.retain_percent,
-            })),
-            Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::Loaded => None,
-        }
+    /// What this turn should compact at, and to what.
+    ///
+    /// `(trigger_at_percent, retain_percent)`, in that order, which is the
+    /// order the pair is read in everywhere it travels.
+    #[must_use]
+    pub(crate) fn target(&self) -> (u32, u32) {
+        (self.trigger_at_percent, self.retain_percent)
     }
 }
 
@@ -107,7 +96,7 @@ impl TokenBudgetCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::{Capabilities, Capability, testing::someone_elses};
+    use crate::agent_loop::capabilities::{Capabilities, Capability};
 
     fn budget(trigger: u32, retain: u32) -> crate::agent_loop::AgentState {
         crate::agent_loop::AgentState {
@@ -118,36 +107,28 @@ mod tests {
         }
     }
 
-    /// The one thing this capability says, and the only message it says it on:
-    /// a turn proposal answers with the config it was equipped with, matching
-    /// what every session got when this was two server constants.
+    /// The one thing this capability says: the target a turn proposal is
+    /// answered with is the config it was equipped with, matching what every
+    /// session got when this was two server constants.
     #[test]
     fn a_turn_proposal_answers_with_the_configured_budget() {
         let state = budget(80, 20);
-        let decision = super::super::broadcast(&state, &Msg::TurnProposed)
-            .acts
-            .into_iter()
-            .find_map(|act| match act {
-                Act::CompactionBudget {
-                    trigger_at_percent,
-                    retain_percent,
-                } => Some((trigger_at_percent, retain_percent)),
-                Act::Answer { .. }
-                | Act::Park { .. }
-                | Act::Resume { .. }
-                | Act::Conclude { .. }
-                | Act::Hold { .. }
-                | Act::Refuse { .. }
-                | Act::Enqueue { .. }
-                | Act::Record(_)
-                | Act::Wake { .. }
-                | Act::Ask(_) => None,
-            });
         assert_eq!(
-            decision,
+            state
+                .capabilities
+                .token_budget()
+                .map(TokenBudgetCapability::target),
             Some((80, 20)),
             "the answer did not carry equip-time config"
         );
+    }
+
+    /// An agent equipped with no such capability is asked nothing, and its runs
+    /// never compact. Deliberately loud in a test, never at runtime.
+    #[test]
+    fn an_agent_without_one_has_no_target_at_all() {
+        let state = crate::agent_loop::AgentState::default();
+        assert!(state.capabilities.token_budget().is_none());
     }
 
     /// A runner that never called `new` still gets the values every session
@@ -160,26 +141,6 @@ mod tests {
         );
     }
 
-    /// It has no tools, so it claims no command — including one built for a
-    /// tool name, the same "not mine" shape every other capability is tested
-    /// against.
-    #[test]
-    fn it_claims_no_commands_and_no_other_messages() {
-        let state = budget(80, 20);
-        assert!(super::super::dispatch(&state, &someone_elses()).is_none());
-        for msg in [
-            Msg::Turn(super::super::TurnEvent::Ended),
-            Msg::Answer(&[]),
-            Msg::Concluded,
-            Msg::Loaded,
-        ] {
-            assert!(
-                super::super::offer(&state, &msg).is_none(),
-                "answered {msg:?} unasked"
-            );
-        }
-    }
-
     /// Config survives the journal round trip untouched, the way any
     /// policy-only capability's has to for a reload to compact the same way
     /// the process that crashed would have.
@@ -187,13 +148,11 @@ mod tests {
     fn config_survives_the_journal_round_trip() {
         let written = serde_json::to_string(&budget(70, 30)).expect("write");
         let read: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
-        let decision = super::super::broadcast(&read, &Msg::TurnProposed);
-        assert!(matches!(
-            decision.acts.as_slice(),
-            [Act::CompactionBudget {
-                trigger_at_percent: 70,
-                retain_percent: 30,
-            }]
-        ));
+        assert_eq!(
+            read.capabilities
+                .token_budget()
+                .map(TokenBudgetCapability::target),
+            Some((70, 30))
+        );
     }
 }

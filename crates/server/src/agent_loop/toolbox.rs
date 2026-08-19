@@ -10,8 +10,9 @@
 //! ordinary `bash` call as cheap as it was.
 //!
 //! **A name is resolved here and nowhere else.** The layer that claims one says
-//! what it becomes, so what reaches the actor is a command that names its own
-//! capability. Downstream of this file nothing matches a tool name at all.
+//! which of the actor's own command arms it becomes, so what reaches the actor
+//! already names the capability that answers it. Downstream of this file
+//! nothing matches a tool name at all.
 //!
 //! # One layer each, and why that is the simplification
 //!
@@ -27,7 +28,7 @@
 //! claims it.
 
 use crate::agent_loop::agent_actor::AgentCommand;
-use crate::agent_loop::capabilities::{Answering, CapCommand, Mailbox, ToolReply};
+use crate::agent_loop::capabilities::{Answering, Mailbox, ToolReply};
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::Value;
@@ -47,14 +48,13 @@ pub(super) struct AgentMailbox {
 #[async_trait]
 impl Mailbox for AgentMailbox {
     /// The command is built from the reply channel here, at the one place that
-    /// has one — which is also the only place that knows the answer is an
-    /// [`AgentCommand`] at all.
+    /// has one.
     async fn send(
         &self,
-        make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
+        make: Box<dyn FnOnce(ToolReply) -> AgentCommand + Send>,
     ) -> Result<ToolOutcome, ToolCallError> {
         self.actor
-            .ask(|reply| AgentCommand::Capability(make(reply)))
+            .ask(make)
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
     }
@@ -68,7 +68,7 @@ impl Mailbox for AgentMailbox {
 /// capability is handed the arm it built rather than a string to match.
 pub(crate) struct ClaimedTool {
     spec: ToolSpec,
-    into_command: Arc<dyn Fn(Value, Answering) -> CapCommand + Send + Sync>,
+    into_command: Arc<dyn Fn(Value, Answering) -> AgentCommand + Send + Sync>,
 }
 
 impl ClaimedTool {
@@ -76,7 +76,7 @@ impl ClaimedTool {
     /// builds.
     pub(crate) fn new(
         spec: ToolSpec,
-        into_command: impl Fn(Value, Answering) -> CapCommand + Send + Sync + 'static,
+        into_command: impl Fn(Value, Answering) -> AgentCommand + Send + Sync + 'static,
     ) -> Self {
         Self {
             spec,

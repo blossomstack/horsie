@@ -8,15 +8,16 @@
 //!
 //! Everything else moved here because the fact it wanted was the agent's. This
 //! one is the other way round: a session's name is the *session's* state, and no
-//! agent can write it. So the tool is answered in two halves — the call decides
-//! and asks with [`Act::Ask`], and the session's [`SessionReply`] is what
-//! finally answers the model, possibly on a later process.
+//! agent can write it. So the tool is answered in two halves —
+//! [`TitleCapability::renamed`] decides, the actor journals what it decided and
+//! sends [`request`], and the session's [`SessionReply`] is what finally
+//! answers the model, possibly on a later process.
 //!
 //! That is why the name in flight is journaled rather than held in a field. Two
 //! things need it after the asking turn is over: the confirmation the model
-//! reads, which quotes the name back, and [`super::Capability::handle`] itself — a
-//! reply is *offered* around the capabilities, so the only way this one can
-//! recognise an answer to its own request is to have recorded the call it made.
+//! reads, which quotes the name back, and [`titled`] itself — the actor asks
+//! each capability whether a reply is one of its own, so the only way this one
+//! can answer is to have recorded the call it made.
 //!
 //! # Which conversation gets renamed
 //!
@@ -26,8 +27,8 @@
 //! for. [`TitleCapability::fork`] therefore only says *that* this agent is a
 //! fork, which is what the prompt below turns on.
 
-use super::{Act, CapCommand, Decision, Mailbox, Msg, SessionReply, SessionRequest, SetupError};
-use crate::agent_loop::state::AgentDomainEvent;
+use super::{Mailbox, SessionReply, SessionRequest, SetupError};
+use crate::agent_loop::AgentCommand;
 use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::ids::RunnerId;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
@@ -151,8 +152,8 @@ impl TitleState {
 /// What this state holds, for the tests that assert on it.
 ///
 /// `#[cfg(test)]` because nothing in production reads it: the decisions that
-/// need it are in this file and take `&self`. An accessor kept for a caller
-/// that does not exist is how a private field stops being private.
+/// need it are in this file and take it as an argument. An accessor kept for a
+/// caller that does not exist is how a private field stops being private.
 impl TitleState {
     /// The renames still waiting on the session.
     #[must_use]
@@ -168,11 +169,17 @@ pub struct Request {
     pub title: String,
 }
 
-/// What the model asked this capability to do.
-pub enum Command {
-    /// `set_session_title`, with the name still unread: a name the session
-    /// would refuse is a refusal the model has to see.
-    Rename { input: Value },
+/// What a call to `set_session_title` came to.
+///
+/// Deliberately not an event: what is journaled is the actor's to build, and a
+/// capability that handed one over could journal a rename nobody asked for.
+#[derive(Debug)]
+pub(crate) enum Renamed {
+    /// A name the session would refuse, in words. Journals nothing: nothing
+    /// was renamed.
+    Told(String),
+    /// Journal the ask and put this — normalized — name to the session.
+    Ask { name: String },
 }
 
 impl TitleCapability {
@@ -193,92 +200,100 @@ impl TitleCapability {
     /// must not reach the log as one it accepted. What is asked for is the
     /// *normalized* name, so what is journaled, what the session is told and
     /// what the model is finally shown are one string.
-    fn asked(&self, call: &str, input: &Value) -> Decision {
+    pub(crate) fn renamed(&self, input: &Value) -> Renamed {
         // A capability that owns a tool name owns every call to it, including
         // the malformed ones: declining would hand the call to the next
         // capability, and the last of those claims every name.
         let request: Request = match serde_json::from_value(input.clone()) {
             Ok(request) => request,
             Err(e) => {
-                return Decision::reply(
-                    call,
-                    format!("`{TOOL}` was called with arguments it cannot read: {e}"),
-                );
+                return Renamed::Told(format!(
+                    "`{TOOL}` was called with arguments it cannot read: {e}"
+                ));
             }
         };
-        let name = match normalize_session_title(&request.title) {
-            Ok(name) => name,
+        match normalize_session_title(&request.title) {
+            Ok(name) => Renamed::Ask { name },
             // A refusal journals nothing: nothing was renamed.
-            Err(error) => return Decision::reply(call, error.to_string()),
-        };
-        Decision::record(vec![AgentDomainEvent::TitleAsked {
-            call: call.to_string(),
-            name: name.clone(),
-        }])
-        .then(Act::Ask(SessionRequest::SetTitle {
-            call: call.to_string(),
-            title: name,
-        }))
-    }
-
-    /// The session answered a rename this capability asked for.
-    ///
-    /// The tool call has been dangling since the asking turn, so both arms end
-    /// in [`Act::Answer`] — a refusal the model cannot see is a tool call that
-    /// never returns.
-    fn answered(state: &TitleState, reply: &SessionReply) -> Decision {
-        match reply {
-            SessionReply::Done { call } => {
-                let name = state.pending.get(call).cloned().unwrap_or_default();
-                Decision::record(vec![AgentDomainEvent::TitleSet {
-                    call: call.clone(),
-                    name: name.clone(),
-                }])
-                .then(Act::Answer {
-                    call: call.clone(),
-                    // The sentence the session-owned toolbox used to render
-                    // around the bare name it was handed. There is no toolbox
-                    // in the way now, so it is written once, here.
-                    text: format!("Session title set to \"{name}\"."),
-                })
-            }
-            // Verbatim: the session is the only thing that knows why, and a
-            // reason reworded here is a reason the model cannot act on.
-            SessionReply::Refused { call, reason } => {
-                Decision::record(vec![AgentDomainEvent::TitleRefused { call: call.clone() }]).then(
-                    Act::Answer {
-                        call: call.clone(),
-                        text: reason.clone(),
-                    },
-                )
-            }
+            Err(error) => Renamed::Told(error.to_string()),
         }
     }
+}
 
-    /// Every rename asked for and never answered, asked again.
-    ///
-    /// `Asked` is journaled before the request goes out, so one still in the
-    /// fold may never have reached the session — and the tool call it was made
-    /// from has been dangling ever since.
-    ///
-    /// Nothing is journaled: the [`AgentDomainEvent::TitleAsked`] this reads is
-    /// still the only fact.
-    fn reloaded(state: &TitleState) -> Option<Decision> {
-        if state.pending.is_empty() {
-            return None;
-        }
-        Some(
-            state
-                .pending
-                .iter()
-                .fold(Decision::default(), |d, (call, name)| {
-                    d.then(Act::Ask(SessionRequest::SetTitle {
-                        call: call.clone(),
-                        title: name.clone(),
-                    }))
-                }),
-        )
+/// The request a name is asked for with.
+///
+/// One function and two callers — the rename and the re-ask on load — because
+/// the second has to send exactly what the first sent.
+pub(crate) fn request(call: &str, name: &str) -> SessionRequest {
+    SessionRequest::SetTitle {
+        call: call.to_string(),
+        title: name.to_string(),
     }
+}
+
+/// What the session said about a rename this agent asked for.
+#[derive(Debug)]
+pub(crate) enum Titled {
+    Set {
+        name: String,
+    },
+    /// Verbatim: the session is the only thing that knows why, and a reason
+    /// reworded here is a reason the model cannot act on.
+    Refused {
+        reason: String,
+    },
+}
+
+impl Titled {
+    /// What the model would be told.
+    ///
+    /// Would, not is: the `set_session_title` call is answered the moment the
+    /// ask goes out, so by the time the session replies there is no run parked
+    /// on it and the actor logs the answer rather than delivering it. The
+    /// sentence is still this capability's — nothing else knows how to word a
+    /// rename — and it is what a later step will deliver.
+    pub(crate) fn told(&self) -> String {
+        match self {
+            // The sentence the session-owned toolbox used to render around the
+            // bare name it was handed. There is no toolbox in the way now, so
+            // it is written once, here.
+            Titled::Set { name } => format!("Session title set to \"{name}\"."),
+            Titled::Refused { reason } => reason.clone(),
+        }
+    }
+}
+
+/// What the session answered about a rename.
+///
+/// `None` when this reply answers something that is not a rename of ours:
+/// every capability is asked, so claiming a reply this one never made would
+/// answer for whichever capability actually asked.
+pub(crate) fn titled(state: &TitleState, reply: &SessionReply) -> Option<Titled> {
+    let name = state.pending.get(reply.call())?;
+    Some(match reply {
+        SessionReply::Done { .. } => Titled::Set { name: name.clone() },
+        SessionReply::Refused { reason, .. } => Titled::Refused {
+            reason: reason.clone(),
+        },
+    })
+}
+
+/// Every rename asked for and never answered, asked again. Empty when there is
+/// nothing outstanding.
+///
+/// `Asked` is journaled before the request goes out, so one still in the fold
+/// may never have reached the session — and the tool call it was made from has
+/// been dangling ever since.
+///
+/// Nothing is journaled: the `TitleAsked` event this reads is still the only
+/// fact. No dedupe is owed in return — setting a session's title twice to the
+/// same string is the same session.
+pub(crate) fn reloaded(state: &TitleState) -> Vec<SessionRequest> {
+    state
+        .pending
+        .iter()
+        .map(|(call, name)| request(call, name))
+        .collect()
 }
 
 impl TitleCapability {
@@ -306,7 +321,10 @@ impl TitleCapability {
                 }
                 }),
             },
-            |input, to| CapCommand::Title(Command::Rename { input }, to),
+            |input, to| AgentCommand::TitleRename {
+                input,
+                answering: to,
+            },
         )]
     }
 }
@@ -347,86 +365,87 @@ impl TitleCapability {
     ) -> Arc<dyn Toolbox> {
         claiming(inner, self.claims(), mailbox)
     }
-
-    pub fn command(&self, _state: &TitleState, cmd: &CapCommand) -> Option<Decision> {
-        let CapCommand::Title(cmd, to) = cmd else {
-            return None;
-        };
-        let Command::Rename { input } = cmd;
-        Some(self.asked(&to.call, input))
-    }
-
-    pub fn handle(&self, state: &TitleState, msg: &Msg) -> Option<Decision> {
-        match msg {
-            // Replies are offered around, so this claims only the ones it can
-            // account for: a call it recorded asking about.
-            Msg::Reply(reply) if state.pending.contains_key(reply.call()) => {
-                Some(Self::answered(state, reply))
-            }
-            // The crash window, and the cheapest case of it: a rename journaled
-            // and never answered is asked again, with the call the model is
-            // still parked on and the name already recorded. No dedupe is owed
-            // in return — setting a session's title twice to the same string is
-            // the same session.
-            Msg::Loaded => Self::reloaded(state),
-            Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::Reply(_)
-            | Msg::TurnProposed => None,
-        }
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::agent_loop::AgentState;
     use crate::agent_loop::capabilities::testing::{
-        Equipped, advertised_by, answering, equipped, facts, loading, someone_elses, spec, specs_of,
+        advertised_by, equipped, facts, loading, spec, specs_of,
     };
     use crate::agent_loop::capabilities::{Capabilities, Capability};
+    use crate::agent_loop::state::AgentDomainEvent;
 
-    /// A conversation that can name itself, with nothing asked yet.
-    fn conversation() -> Equipped {
-        Equipped::with(Capability::Title(TitleCapability::new()))
+    /// A conversation that can name itself.
+    fn conversation() -> TitleCapability {
+        TitleCapability::new()
+    }
+
+    /// The agent this title state belongs to: what the journal round trips, and
+    /// what folds an event.
+    fn agent(title: TitleState) -> AgentState {
+        AgentState {
+            title,
+            ..AgentState::default()
+        }
+    }
+
+    /// Journal one event, the way the actor's arm does once a capability has
+    /// decided. A decision has changed nothing until this has run.
+    fn fold(title: TitleState, event: AgentDomainEvent) -> TitleState {
+        agent(title).apply(event).title
     }
 
     /// Ask for a name, the way the layer that claims `set_session_title`
     /// would.
-    fn set(c: &Equipped, id: &str, title: &str) -> Decision {
-        renamed(c, id, json!({ "title": title }))
+    fn set(title: &str) -> Renamed {
+        renamed(json!({ "title": title }))
     }
 
-    fn renamed(c: &Equipped, id: &str, input: Value) -> Decision {
-        c.command(&CapCommand::Title(Command::Rename { input }, answering(id)))
-            .expect("mine")
+    fn renamed(input: Value) -> Renamed {
+        conversation().renamed(&input)
     }
 
-    /// Ask for this name, the only way there is to get a request in flight.
-    fn asked(id: &str, title: &str) -> Equipped {
-        let mut c = conversation();
-        let d = set(&c, id, title);
-        c.fold(&d);
-        c
+    /// Ask for this name, the only way there is to get a request in flight:
+    /// decide, then journal what the actor's arm would.
+    fn asked(state: TitleState, call: &str, title: &str) -> TitleState {
+        let Renamed::Ask { name } = set(title) else {
+            panic!("{title:?} was not asked for at all");
+        };
+        fold(
+            state,
+            AgentDomainEvent::TitleAsked {
+                call: call.to_string(),
+                name,
+            },
+        )
+    }
+
+    /// One rename in flight and nothing else.
+    fn asking(call: &str, title: &str) -> TitleState {
+        asked(TitleState::default(), call, title)
     }
 
     /// The names this agent is still waiting on an answer to.
-    fn in_flight(c: &Equipped) -> Vec<(&str, &str)> {
-        c.0.title
+    fn in_flight(state: &TitleState) -> Vec<(&str, &str)> {
+        state
             .pending()
             .iter()
             .map(|(call, name)| (call.as_str(), name.as_str()))
             .collect()
     }
 
-    fn answer(d: &Decision) -> String {
-        let [Act::Answer { text, .. }] = d.acts.as_slice() else {
-            panic!("expected one answer, got {:?}", d.acts);
-        };
-        text.clone()
+    /// The session answered, and it is one of ours.
+    fn reply(state: &TitleState, reply: &SessionReply) -> Titled {
+        titled(state, reply).expect("mine")
+    }
+
+    fn done(call: &str) -> SessionReply {
+        SessionReply::Done {
+            call: call.to_string(),
+        }
     }
 
     /// The call decides and asks; the session renames. Nothing is called
@@ -434,23 +453,29 @@ mod tests {
     /// session may still refuse.
     #[test]
     fn setting_a_title_asks_the_session() {
-        let mut c = conversation();
-        let d = set(&c, "call-1", "the flake");
-
-        let [AgentDomainEvent::TitleAsked { call, name }] = d.events.as_slice() else {
-            panic!("expected one Asked event, got {:?}", d.events);
+        let decided = set("the flake");
+        let Renamed::Ask { name } = &decided else {
+            panic!("a title that did not ask the session: {decided:?}");
         };
-        assert_eq!(call, "call-1");
         assert_eq!(name, "the flake");
-        let [Act::Ask(SessionRequest::SetTitle { call, title })] = d.acts.as_slice() else {
-            panic!("a title that did not ask the session: {:?}", d.acts);
+
+        let ask = request("call-1", name);
+        let SessionRequest::SetTitle { call, title } = &ask else {
+            panic!("a title that did not ask the session: {ask:?}");
         };
         assert_eq!(call, "call-1");
         assert_eq!(title, "the flake");
 
-        c.fold(&d);
+        // What the actor journals for that ask, and what it leaves behind.
+        let state = fold(
+            TitleState::default(),
+            AgentDomainEvent::TitleAsked {
+                call: "call-1".into(),
+                name: name.clone(),
+            },
+        );
         assert_eq!(
-            in_flight(&c),
+            in_flight(&state),
             vec![("call-1", "the flake")],
             "the session has not answered yet"
         );
@@ -465,17 +490,18 @@ mod tests {
     /// the same thing twice leaves one session with one name.
     #[test]
     fn a_rename_the_session_never_answered_is_asked_again_on_load() {
-        let c = asked("call-1", "the flake");
+        let state = asking("call-1", "the flake");
 
         // The cut: the reply is never folded, and what comes back is read off
         // the journal the way a new process reads it.
-        let written = serde_json::to_string(&c.0).expect("write");
-        let reloaded: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&agent(state)).expect("write");
+        let back: AgentState = serde_json::from_str(&written).expect("read");
 
-        let d = super::super::broadcast(&reloaded, &Msg::Loaded);
-        assert!(d.events.is_empty(), "a re-ask is not a second rename");
-        let [Act::Ask(SessionRequest::SetTitle { call, title })] = d.acts.as_slice() else {
-            panic!("expected exactly one re-ask, got {:?}", d.acts);
+        // A re-ask is not a second rename: there is nothing here for the actor
+        // to journal, only the request it already journaled going out again.
+        let asks = reloaded(&back.title);
+        let [SessionRequest::SetTitle { call, title }] = asks.as_slice() else {
+            panic!("expected exactly one re-ask, got {asks:?}");
         };
         assert_eq!(call, "call-1", "the answer would reach nobody");
         assert_eq!(title, "the flake");
@@ -485,34 +511,40 @@ mod tests {
     /// every load renames the session to whatever it was last called.
     #[test]
     fn a_rename_the_session_answered_is_not_asked_again() {
-        let mut c = asked("call-1", "the flake");
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done {
+        let state = asking("call-1", "the flake");
+        let Titled::Set { name } = reply(&state, &done("call-1")) else {
+            panic!("the session took it");
+        };
+        let state = fold(
+            state,
+            AgentDomainEvent::TitleSet {
                 call: "call-1".into(),
-            }))
-            .expect("mine");
-        c.fold(&d);
-        assert!(c.handle(&Msg::Loaded).is_none());
+                name,
+            },
+        );
+        assert!(reloaded(&state).is_empty());
     }
 
-    /// The session took it: the conversation is named, and the model — whose
-    /// call has been dangling since the asking turn — is told so.
+    /// The session took it: the conversation is named, and the sentence the
+    /// model's dangling call would be answered with quotes the name back.
     #[test]
     fn the_session_taking_it_names_the_conversation_and_answers_the_model() {
-        let mut c = asked("call-1", "the flake");
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done {
-                call: "call-1".into(),
-            }))
-            .expect("mine");
-        assert_eq!(answer(&d), "Session title set to \"the flake\".");
-        let [AgentDomainEvent::TitleSet { call, name }] = d.events.as_slice() else {
-            panic!("expected one Set event, got {:?}", d.events);
+        let state = asking("call-1", "the flake");
+        let answer = reply(&state, &done("call-1"));
+        assert_eq!(answer.told(), "Session title set to \"the flake\".");
+        let Titled::Set { name } = &answer else {
+            panic!("expected a name that took, got {answer:?}");
         };
-        assert_eq!((call.as_str(), name.as_str()), ("call-1", "the flake"));
+        assert_eq!(name, "the flake");
 
-        c.fold(&d);
-        assert!(in_flight(&c).is_empty(), "an answered request is over");
+        let state = fold(
+            state,
+            AgentDomainEvent::TitleSet {
+                call: "call-1".into(),
+                name: name.clone(),
+            },
+        );
+        assert!(in_flight(&state).is_empty(), "an answered request is over");
     }
 
     /// **A refusal is passed back to the model verbatim.** The session is the
@@ -521,86 +553,91 @@ mod tests {
     /// was refused.
     #[test]
     fn a_refused_rename_is_passed_back_to_the_model_verbatim() {
-        let mut c = asked("call-1", "the flake");
+        let state = asking("call-1", "the flake");
         let reason = "this session belongs to a routine and cannot be renamed";
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Refused {
+        let answer = reply(
+            &state,
+            &SessionReply::Refused {
                 call: "call-1".into(),
                 reason: reason.into(),
-            }))
-            .expect("mine");
-        assert_eq!(answer(&d), reason, "the session's reason was reworded");
+            },
+        );
+        assert_eq!(answer.told(), reason, "the session's reason was reworded");
         assert!(
-            matches!(d.events.as_slice(), [AgentDomainEvent::TitleRefused { .. }]),
-            "a refused name was journaled as one that took: {:?}",
-            d.events
+            matches!(answer, Titled::Refused { .. }),
+            "a refused name was read as one that took: {answer:?}"
         );
 
-        c.fold(&d);
+        let state = fold(
+            state,
+            AgentDomainEvent::TitleRefused {
+                call: "call-1".into(),
+            },
+        );
         assert!(
-            in_flight(&c).is_empty(),
+            in_flight(&state).is_empty(),
             "a refused request stayed in flight for ever"
         );
     }
 
-    /// A reply for a call this capability never made is not its own. Replies
-    /// are offered around, so claiming one would answer for whichever
+    /// A reply for a call this capability never made is not its own. Every
+    /// capability is asked, so claiming one would answer for whichever
     /// capability actually asked.
     #[test]
     fn a_reply_for_someone_elses_request_is_not_mine() {
-        let c = asked("call-1", "the flake");
-        assert!(
-            c.handle(&Msg::Reply(&SessionReply::Done {
-                call: "call-9".into()
-            }))
-            .is_none()
-        );
+        let state = asking("call-1", "the flake");
+        assert!(titled(&state, &done("call-9")).is_none());
         // And one that has asked nothing at all claims nothing.
-        assert!(
-            conversation()
-                .handle(&Msg::Reply(&SessionReply::Done {
-                    call: "call-1".into()
-                }))
-                .is_none()
-        );
+        assert!(titled(&TitleState::default(), &done("call-1")).is_none());
     }
 
     /// Normalization happens before the ask, so what is journaled, what the
     /// session is told and what the model is shown are the same string.
     #[test]
     fn the_asked_name_is_the_normalized_one() {
-        let mut c = conversation();
-        let d = set(&c, "call-1", "  Fix café login ☕  ");
-        let [Act::Ask(SessionRequest::SetTitle { title, .. })] = d.acts.as_slice() else {
-            panic!("expected an ask, got {:?}", d.acts);
+        let decided = set("  Fix café login ☕  ");
+        let Renamed::Ask { name } = &decided else {
+            panic!("expected an ask, got {decided:?}");
+        };
+        let ask = request("call-1", name);
+        let SessionRequest::SetTitle { title, .. } = &ask else {
+            panic!("expected an ask, got {ask:?}");
         };
         assert_eq!(title, "Fix café login ☕");
 
-        c.fold(&d);
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done {
+        let state = fold(
+            TitleState::default(),
+            AgentDomainEvent::TitleAsked {
                 call: "call-1".into(),
-            }))
-            .expect("mine");
-        assert_eq!(answer(&d), "Session title set to \"Fix café login ☕\".");
+                name: name.clone(),
+            },
+        );
+        assert_eq!(
+            reply(&state, &done("call-1")).told(),
+            "Session title set to \"Fix café login ☕\"."
+        );
     }
 
     /// A title the session would refuse is refused here, and journals nothing:
-    /// a name that never took must not replay as one that did. Refused rather
-    /// than declined, because the capability behind this one claims every name.
+    /// a name that never took must not replay as one that did. Told rather than
+    /// declined, because the capability behind this one claims every name.
     #[test]
     fn an_invalid_title_is_refused_and_records_nothing() {
         for bad in ["   ", "one\ntwo"] {
-            let d = set(&conversation(), "call-1", bad);
-            assert!(d.events.is_empty(), "{bad:?} was journaled");
-            let text = answer(&d);
+            // `Told` is the whole decision: there is no name to ask for and so
+            // nothing for the actor to journal.
+            let Renamed::Told(text) = set(bad) else {
+                panic!("{bad:?} was journaled");
+            };
             assert!(text.contains("session title must"), "{text}");
         }
         // Arguments that are not a title at all are the same story: owned,
         // answered, and journaled nowhere.
-        let d = renamed(&conversation(), "call-1", json!({}));
-        assert!(d.events.is_empty());
-        assert!(answer(&d).contains("cannot read"));
+        let decided = renamed(json!({}));
+        let Renamed::Told(text) = &decided else {
+            panic!("unreadable arguments were journaled: {decided:?}");
+        };
+        assert!(text.contains("cannot read"));
     }
 
     /// Both variants advertise the one tool: the model calls
@@ -696,36 +733,30 @@ mod tests {
         assert_eq!(keys, vec!["title"]);
     }
 
-    #[test]
-    fn another_capabilitys_command_is_not_mine() {
-        assert!(conversation().command(&someone_elses()).is_none());
-    }
-
     /// The name in flight is what the reply is answered with, and the reply may
     /// land on a process that has since rehydrated the session — so losing it
     /// in the journal loses both the confirmation and the capability's claim on
     /// its own reply.
     #[test]
     fn the_request_in_flight_survives_the_journal_round_trip() {
-        let mut c = asked("call-1", "the flake");
-        let d = c
-            .handle(&Msg::Reply(&SessionReply::Done {
+        let state = asking("call-1", "the flake");
+        let Titled::Set { name } = reply(&state, &done("call-1")) else {
+            panic!("the session took it");
+        };
+        let state = fold(
+            state,
+            AgentDomainEvent::TitleSet {
                 call: "call-1".into(),
-            }))
-            .expect("mine");
-        c.fold(&d);
+                name,
+            },
+        );
         // One taken, one still in flight.
-        let d = set(&c, "call-2", "the other one");
-        c.fold(&d);
+        let state = asked(state, "call-2", "the other one");
 
-        let written = serde_json::to_string(&c.0).expect("write");
-        let back: crate::agent_loop::AgentState = serde_json::from_str(&written).expect("read");
+        let written = serde_json::to_string(&agent(state)).expect("write");
+        let back: AgentState = serde_json::from_str(&written).expect("read");
         assert_eq!(
-            back.title
-                .pending()
-                .iter()
-                .map(|(call, name)| (call.as_str(), name.as_str()))
-                .collect::<Vec<_>>(),
+            in_flight(&back.title),
             vec![("call-2", "the other one")],
             "a reload that lost the request in flight leaves the model parked"
         );

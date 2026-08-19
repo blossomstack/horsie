@@ -23,7 +23,7 @@
 //! equipped layer against — a sixth tool the toolbox grows and this list does
 //! not is a real drift, and one that is otherwise silent.
 
-use super::{Decision, Msg, SetupError};
+use super::SetupError;
 use crate::agent_loop::capabilities::or_empty;
 use crate::sessions::runners::loading::{AgentSpec, Loading};
 use serde::{Deserialize, Serialize};
@@ -104,17 +104,12 @@ impl MemoryCapability {
         });
         Ok(())
     }
-
-    /// Nothing reaches this capability through the mailbox; see the module doc.
-    pub fn handle(&self, _msg: &Msg) -> Option<Decision> {
-        None
-    }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, facts, someone_elses};
+    use super::super::testing::{advertised_by, facts};
     use super::*;
     use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
     use crate::agent_loop::capabilities::{Capabilities, Capability};
@@ -181,11 +176,6 @@ mod tests {
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = Capability::Memory(MemoryCapability::new(vec!["default".into()]));
-        assert!(
-            super::super::testing::Equipped::with(c.clone())
-                .command(&someone_elses())
-                .is_none()
-        );
         assert!(
             advertised_by(&c, &facts()).is_empty(),
             "the five are advertised by the toolbox that will run them"
