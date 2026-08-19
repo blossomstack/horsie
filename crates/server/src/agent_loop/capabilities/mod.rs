@@ -1061,7 +1061,6 @@ pub mod testing {
             session,
             session_id,
             role: crate::sessions::runners::loading::AgentRole::Root,
-            agent: crate::sessions::runners::ids::AgentId::new_v4(),
             agent: AgentId::new_v4(),
             narrate: false,
             runtimes,

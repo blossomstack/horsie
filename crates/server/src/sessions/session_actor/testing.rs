@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use super::{ReadCommand, SubAgentCommand, TurnCommand};
+use super::{ReadCommand, TurnCommand};
 use super::{
     context::{TestKind, SessionContextProvider},
     *,
@@ -26,7 +26,7 @@ use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use std::sync::{Mutex, PoisonError};
 
-pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
+pub(super) fn fold(events: Vec<SessionEvent>) -> SessionState {
     events
         .into_iter()
         .fold(SessionState::default(), SessionActor::apply_event)
@@ -606,7 +606,7 @@ pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
     spec: SessionSpec,
-    events: &[SessionDomainEvent],
+    events: &[SessionEvent],
 ) -> SessionRef {
     f.node.restart().await;
     let journal = f.journal();
@@ -615,7 +615,7 @@ pub(crate) async fn seed_session(
     let mut encoded = Vec::new();
     if at == 0 {
         encoded.push(
-            serde_json::to_vec(&SessionDomainEvent::SpecRecorded {
+            serde_json::to_vec(&SessionEvent::SpecRecorded {
                 spec: Box::new(spec.clone()),
             })
             .unwrap(),
@@ -646,8 +646,8 @@ pub(super) async fn wait_for_events(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     what: &str,
-    pred: impl Fn(&[SessionDomainEvent]) -> bool,
-) -> Vec<SessionDomainEvent> {
+    pred: impl Fn(&[SessionEvent]) -> bool,
+) -> Vec<SessionEvent> {
     for _ in 0..200 {
         let events = crate::sessions::events::session_events(journal, session_id).await;
         if pred(&events) {

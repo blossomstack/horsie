@@ -661,7 +661,8 @@ mod tests {
                 loading: test_loading(&f, &session, id, kind),
                 equipment: test_equipment(kind, &settings, false, None),
                 settings,
-                kind,
+                role: kind.role(),
+                agent: kind.agent(),
                 agent_type: None,
                 plugins: Vec::new(),
             }
@@ -739,7 +740,8 @@ mod tests {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -764,7 +766,8 @@ mod tests {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -813,7 +816,8 @@ mod tests {
             loading: test_loading(&f, &session, id, TestKind::Main),
             equipment: test_equipment(TestKind::Main, &settings, false, None),
             settings,
-            kind: TestKind::Main,
+            role: TestKind::Main.role(),
+            agent: TestKind::Main.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -841,7 +845,8 @@ mod tests {
                 None,
             ),
             settings: agent_settings_fixture(),
-            kind: TestKind::Main,
+            role: TestKind::Main.role(),
+            agent: TestKind::Main.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -1158,7 +1163,8 @@ mod tests {
                 Some("uninstalled-agent".to_string()),
             ),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: Some("uninstalled-agent".to_string()),
             plugins: Vec::new(),
         };
@@ -1342,7 +1348,8 @@ mod tests {
             None,
         );
         let loading = loading_for(
-            kind,
+            kind.agent(),
+            kind.role(),
             session,
             id,
             LoadingDeps {
@@ -1364,7 +1371,8 @@ mod tests {
             loading,
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         }
