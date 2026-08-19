@@ -70,33 +70,40 @@ impl SessionActor {
                 // cannot — a session created a moment ago, whose log is empty
                 // and whose agents nothing else would ever start.
                 self.adopt((*spec).clone(), state, ctx).await;
-                CommandEffect::persist(vec![SessionEvent::SpecRecorded { spec }])
+                // The root runner rides the same batch: a session and the
+                // runner it *is* are one creation, and anything already queued
+                // behind this command — the first message, a spawn — must find
+                // the root there when it is handled.
+                let mut events = vec![SessionEvent::SpecRecorded { spec }];
+                if state.root().is_none() {
+                    events.push(self.root_created());
+                    // A workflow root begins on its own — creating the session
+                    // is enough to start it. A self-send rather than a drain
+                    // here: it queues behind the `Provision` the supervisor
+                    // sent with this command, so the first step starts under a
+                    // sandbox rather than before one.
+                    if matches!(self.spec().kind, SessionKind::Workflow { .. }) {
+                        let me = self.me(ctx);
+                        tokio::spawn(async move {
+                            let _ = me
+                                .tell(super::SessionCommand::Run(super::RunCommand::Advance))
+                                .await;
+                        });
+                    }
+                }
+                CommandEffect::persist(events)
             }
             CoreCommand::CreateRoot => {
-                // Once: replaying, or two adopts racing, must not seed twice.
+                // The repair path only: `RecordSpec` journals the root in its
+                // own batch, so this fires for a journal that somehow holds a
+                // spec and no root. Once — replaying must not seed twice.
                 if state.root().is_some() {
                     return CommandEffect::none();
                 }
-                let args = match &self.spec().kind {
-                    SessionKind::Agent { .. } => RunnerArgs::Main,
-                    // The graph is snapshotted into the runner's own record,
-                    // so a root run and a nested one are self-contained the
-                    // same way.
-                    SessionKind::Workflow { run } => RunnerArgs::Workflow {
-                        graph: (**run).clone(),
-                    },
-                };
-                let created = SessionEvent::Runner {
-                    id: RunnerId(self.id),
-                    at_ms: now_ms(),
-                    event: RunnerEvent::Created {
-                        parent: None,
-                        args: Box::new(args),
-                    },
-                };
                 // Through the boundary: a workflow root's first step starts
                 // the moment the record exists — gated, as everything is, on
                 // the sandbox being ready.
+                let created = self.root_created();
                 self.persist_and_advance(state, vec![created], ctx).await
             }
             CoreCommand::Progress {
@@ -113,6 +120,26 @@ impl SessionActor {
                 .await;
                 CommandEffect::none()
             }
+        }
+    }
+
+    /// The event that journals this session's root runner, from its spec.
+    fn root_created(&self) -> SessionEvent {
+        let args = match &self.spec().kind {
+            SessionKind::Agent { .. } => RunnerArgs::Main,
+            // The graph is snapshotted into the runner's own record, so a
+            // root run and a nested one are self-contained the same way.
+            SessionKind::Workflow { run } => RunnerArgs::Workflow {
+                graph: (**run).clone(),
+            },
+        };
+        SessionEvent::Runner {
+            id: RunnerId(self.id),
+            at_ms: now_ms(),
+            event: RunnerEvent::Created {
+                parent: None,
+                args: Box::new(args),
+            },
         }
     }
 

@@ -667,6 +667,29 @@ pub(crate) async fn seed_session(
             })
             .unwrap(),
         );
+        // The root runner rides the creation batch in a real journal, so a
+        // seeded one is shaped the same — without it, loading repairs the
+        // missing root and the repair's boundary drain delivers what the test
+        // meant to leave owed.
+        let args = match &spec.kind {
+            crate::sessions::spec::SessionKind::Agent { .. } => runner::event::RunnerArgs::Main,
+            crate::sessions::spec::SessionKind::Workflow { run } => {
+                runner::event::RunnerArgs::Workflow {
+                    graph: (**run).clone(),
+                }
+            }
+        };
+        encoded.push(
+            serde_json::to_vec(&SessionEvent::Runner {
+                id: RunnerId(id),
+                at_ms: 0,
+                event: runner::event::RunnerEvent::Created {
+                    parent: None,
+                    args: Box::new(args),
+                },
+            })
+            .unwrap(),
+        );
     }
     encoded.extend(events.iter().map(|e| serde_json::to_vec(e).unwrap()));
     journal.persist(&pid, &encoded, at).await.unwrap();
@@ -1662,4 +1685,66 @@ impl crate::runtime_vendor::RuntimeVendor for BootingVendor {
             reason: "deleted".into(),
         })
     }
+}
+
+// -- runner-tree queries for tests ---------------------------------------
+
+/// The sub runner behind `id`, if the state holds one.
+pub(super) fn sub_of(state: &SessionState, id: Uuid) -> Option<&runner::state::SubState> {
+    match state.record(RunnerId(id)).map(|r| &r.state) {
+        Some(runner::state::RunnerState::Sub(s)) => Some(s),
+        _ => None,
+    }
+}
+
+pub(super) fn sub_running(state: &SessionState, id: Uuid) -> bool {
+    matches!(
+        sub_of(state, id).map(|s| &s.phase),
+        Some(runner::state::SubPhase::Running { .. })
+    )
+}
+
+pub(super) fn sub_notified(state: &SessionState, id: Uuid) -> bool {
+    matches!(
+        sub_of(state, id).map(|s| &s.phase),
+        Some(runner::state::SubPhase::Done { notified: true, .. })
+    )
+}
+
+/// The sub's terminal result, if it holds one: `Ok(output)` or `Err(error)`.
+pub(super) fn sub_result(state: &SessionState, id: Uuid) -> Option<Result<String, String>> {
+    match sub_of(state, id).map(|s| &s.phase) {
+        Some(runner::state::SubPhase::Done { result, .. }) => Some(result.clone()),
+        _ => None,
+    }
+}
+
+/// Every sub still mid-run — at recovery, the ones the process died under.
+pub(super) fn interrupted_subs(state: &SessionState) -> Vec<Uuid> {
+    state
+        .runners
+        .iter()
+        .filter(|(id, _)| sub_running_by(state, **id))
+        .map(|(id, _)| id.0)
+        .collect()
+}
+
+fn sub_running_by(state: &SessionState, id: RunnerId) -> bool {
+    sub_running(state, id.0)
+}
+
+/// Whether any sub is mid-run anywhere in the session.
+pub(super) fn any_sub_active(state: &SessionState) -> bool {
+    state.runners.keys().any(|id| sub_running(state, id.0))
+}
+
+/// The current step's agent of the root run, folded from the journal.
+pub(super) async fn current_step_agent(
+    journal: &Arc<dyn horsie_actor::Journal>,
+    session_id: Uuid,
+) -> Uuid {
+    let state = crate::sessions::events::fold_session_state(journal, session_id).await;
+    root_run_of(&state)
+        .and_then(|r| r.current_agent())
+        .expect("a step in flight")
 }
