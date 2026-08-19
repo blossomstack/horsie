@@ -790,7 +790,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let _ = session
                             .tell(SessionCommand::Fork(ForkCommand::Delete {
-                                id: fork,
+                                id: crate::sessions::session_actor::AgentId(fork),
                                 reply,
                             }))
                             .await;
@@ -1249,7 +1249,7 @@ mod tests {
     use crate::sessions::addressing::SupervisorShard;
     use crate::sessions::clock::TestClock;
     use crate::sessions::session_actor::SessionActor;
-    use crate::sessions::session_actor::SessionDomainEvent;
+    use crate::sessions::session_actor::SessionEvent;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::Journal;
 
@@ -1929,7 +1929,12 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                &[serde_json::to_vec(&SessionEvent::TurnEnded {
+                    at_ms: 0,
+                    agent: crate::sessions::session_actor::AgentId(Uuid::parse_str(&id).unwrap()),
+                    end: crate::sessions::session_actor::RecordedEnd::Asked,
+                })
+                .unwrap()],
                 at,
             )
             .await

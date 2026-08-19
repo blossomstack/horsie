@@ -17,7 +17,7 @@ use horsie_models::workflow::{
     RunEdge, RunNode, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
     StepRunning, WorkflowRetryRequest, WorkflowRunGraph,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// GET /api/sessions/:id/workflow — the run, projected onto its graph.
 ///
@@ -81,7 +81,7 @@ fn project_run(
     spec: &WorkflowRunSpec,
     run: &WorkflowRunState,
     usage: crate::agent_loop::UsageTotal,
-    per_agent: &HashMap<String, crate::agent_loop::UsageTotal>,
+    per_agent: &BTreeMap<String, crate::agent_loop::UsageTotal>,
 ) -> WorkflowRunGraph {
     let nodes = spec
         .steps
@@ -145,7 +145,7 @@ fn project_run(
 fn step_run_view(
     index: u32,
     r: &StepRun,
-    per_agent: &HashMap<String, crate::agent_loop::UsageTotal>,
+    per_agent: &BTreeMap<String, crate::agent_loop::UsageTotal>,
 ) -> StepRunView {
     // A step's agent id is exactly how its usage is banked, so the lookup needs
     // nothing but the map. Zero until the execution's turn ends, which is when

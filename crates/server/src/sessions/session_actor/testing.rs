@@ -13,11 +13,9 @@
 
 #![allow(dead_code)]
 
+use super::runner::role::{AgentRole, StopHookKind, TitleScope};
 use super::{ReadCommand, SubAgentCommand, TurnCommand};
-use super::{
-    context::{SessionAgentKind, SessionContextProvider},
-    *,
-};
+use super::{context::SessionContextProvider, *};
 use crate::agent_loop::{ContextProvider, StartTurn};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::spec::SessionSpec;
@@ -26,17 +24,16 @@ use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use std::sync::PoisonError;
 
-pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
+pub(super) fn fold(events: Vec<SessionEvent>) -> SessionState {
     events
         .into_iter()
         .fold(SessionState::default(), SessionActor::apply_event)
 }
 
-/// What this actor's orchestrator decides for a state. `drain` used to be a
-/// method here; the decision moved to the orchestrator and the actor only
-/// performs it, so these tests assert on the decision.
-pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
-    actor.next_actions(state)
+/// What the runners decide for a state at a boundary. The actor only performs
+/// it, so tests assert on the decision.
+pub(super) fn decisions(state: &SessionState) -> Vec<runner::action::RunnerAction> {
+    runner::boundary_actions(state)
 }
 
 pub(super) fn agent_settings_fixture() -> AgentSettings {
@@ -73,6 +70,44 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
         origin: crate::sessions::spec::SessionOrigin::User,
         environment: None,
         env_vars: vec![],
+    }
+}
+
+/// A main agent's role over `session`, for building a provider by hand.
+pub(super) fn main_role_fixture(session: Uuid) -> AgentRole {
+    AgentRole {
+        agent: AgentId(session),
+        name: MAIN_AGENT_ID.to_string(),
+        journal: session,
+        settings: agent_settings_fixture(),
+        prompt_suffix: None,
+        broadcasts: true,
+        scoped: None,
+        control_plane: false,
+        may_ask: true,
+        titles: TitleScope::Session,
+        step_result: None,
+        stop_hook: StopHookKind::Stop,
+        agent_type: None,
+    }
+}
+
+/// A subagent's role, for building a provider by hand.
+pub(super) fn sub_role_fixture(sub: Uuid, agent_type: Option<&str>) -> AgentRole {
+    AgentRole {
+        agent: AgentId(sub),
+        name: sub.to_string(),
+        journal: sub,
+        settings: agent_settings_fixture(),
+        prompt_suffix: Some(super::runner::role::SUBAGENT_PROMPT_SUFFIX),
+        broadcasts: false,
+        scoped: Some(sub),
+        control_plane: false,
+        may_ask: false,
+        titles: TitleScope::None,
+        step_result: None,
+        stop_hook: StopHookKind::SubagentStop,
+        agent_type: agent_type.map(str::to_string),
     }
 }
 
@@ -512,7 +547,7 @@ pub(super) async fn wait_for_run(
 ) -> crate::sessions::workflow::WorkflowRunState {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if let Some(run) = state.run.as_ref()
+        if let Some(run) = root_run_of(&state)
             && pred(run)
         {
             return run.clone();
@@ -522,8 +557,18 @@ pub(super) async fn wait_for_run(
     let state = crate::sessions::events::fold_session_state(journal, session_id).await;
     panic!(
         "run never satisfied the predicate: {:?}",
-        state.run.as_ref()
+        root_run_of(&state)
     );
+}
+
+/// The root run of a folded state, if the session is one.
+pub(super) fn root_run_of(
+    state: &SessionState,
+) -> Option<&crate::sessions::workflow::WorkflowRunState> {
+    match state.root().map(|(_, r)| &r.state) {
+        Some(runner::state::RunnerState::Workflow(w)) => Some(&w.run),
+        _ => None,
+    }
 }
 
 /// A scripted `submit_result` call carrying this result.
@@ -581,11 +626,11 @@ pub(super) const ASK_CALL_ID: &str = "a-1";
 pub(super) async fn wait_for_tree(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
-    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
+    pred: impl Fn(&SessionState) -> bool,
 ) {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(&state.subagents) {
+        if pred(&state) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -608,7 +653,7 @@ pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
     spec: SessionSpec,
-    events: &[SessionDomainEvent],
+    events: &[SessionEvent],
 ) -> SessionRef {
     f.node.restart().await;
     let journal = f.journal();
@@ -617,7 +662,7 @@ pub(crate) async fn seed_session(
     let mut encoded = Vec::new();
     if at == 0 {
         encoded.push(
-            serde_json::to_vec(&SessionDomainEvent::SpecRecorded {
+            serde_json::to_vec(&SessionEvent::SpecRecorded {
                 spec: Box::new(spec.clone()),
             })
             .unwrap(),
@@ -648,8 +693,8 @@ pub(super) async fn wait_for_events(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     what: &str,
-    pred: impl Fn(&[SessionDomainEvent]) -> bool,
-) -> Vec<SessionDomainEvent> {
+    pred: impl Fn(&[SessionEvent]) -> bool,
+) -> Vec<SessionEvent> {
     for _ in 0..200 {
         let events = crate::sessions::events::session_events(journal, session_id).await;
         if pred(&events) {
@@ -806,11 +851,11 @@ impl horsie_actor::Journal for CountingJournal {
     }
 }
 
-pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
+pub(super) async fn spawn_sub(session: &SessionRef, main: Uuid, label: &str, task: &str) -> Uuid {
     session
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
+                caller: AgentId(main),
                 label: label.into(),
                 task: task.into(),
                 agent_type: None,
@@ -1275,12 +1320,8 @@ pub(super) fn catalog_provider(
         mcp: None,
         memory: None,
         services: None,
-        settings: agent_settings_fixture(),
-        step_result: Default::default(),
         session_id: id,
-        kind: SessionAgentKind::Main,
-        agent_type: None,
-        unattended: false,
+        role: main_role_fixture(id),
         session: session.clone(),
         plugins: Vec::new(),
         plugin_library: f.deps.plugins.clone(),
@@ -1340,12 +1381,13 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
 
 pub(super) async fn spawn_typed(
     session: &SessionRef,
+    main: Uuid,
     agent_type: Option<&str>,
 ) -> Result<Uuid, String> {
     session
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
+                caller: AgentId(main),
                 label: "review".into(),
                 task: "look at the diff".into(),
                 agent_type: agent_type.map(str::to_string),
@@ -1379,12 +1421,12 @@ pub(super) fn typed_provider(
         mcp: None,
         memory: None,
         services: None,
-        settings,
-        step_result: Default::default(),
         session_id: id,
-        kind: SessionAgentKind::Sub(sub),
-        agent_type: Some("code-reviewer".to_string()),
-        unattended: false,
+        role: {
+            let mut role = sub_role_fixture(sub, Some("code-reviewer"));
+            role.settings = settings;
+            role
+        },
         session: session.clone(),
         plugins: Vec::new(),
         plugin_library: None,

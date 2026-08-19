@@ -144,7 +144,7 @@ impl Toolbox for SessionTitleToolbox {
                 }),
                 TitleTarget::Fork(id) => {
                     SessionCommand::Fork(crate::sessions::session_actor::ForkCommand::SetTitle {
-                        id,
+                        id: crate::sessions::session_actor::AgentId(id),
                         title: title.to_string(),
                         reply,
                     })

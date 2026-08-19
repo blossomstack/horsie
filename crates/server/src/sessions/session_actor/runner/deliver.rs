@@ -142,7 +142,12 @@ pub(crate) fn run_part_for(id: RunnerId, w: &WorkflowState) -> Option<SubAgentRe
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::super::event::{RecordedEnd, RunnerEvent, SessionEvent};
     use super::super::ids::RunnerId;

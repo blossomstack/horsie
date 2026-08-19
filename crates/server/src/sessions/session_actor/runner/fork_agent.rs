@@ -161,7 +161,12 @@ impl RunnerBehavior for ForkAgentRunner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::super::event::RunnerEvent;
     use super::super::testkit::*;

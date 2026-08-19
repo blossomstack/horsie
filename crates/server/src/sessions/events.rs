@@ -42,7 +42,7 @@ pub(in crate::sessions) async fn fold_session_state(
     while let Some(item) = stream.next().await {
         let Ok((_seq, bytes)) = item else { break };
         if let Ok(event) =
-            serde_json::from_slice::<crate::sessions::session_actor::SessionDomainEvent>(&bytes)
+            serde_json::from_slice::<crate::sessions::session_actor::SessionEvent>(&bytes)
         {
             state = crate::sessions::session_actor::SessionActor::apply_event(state, event);
         }
@@ -98,7 +98,7 @@ pub(in crate::sessions) async fn fold_agent_state(
 pub(in crate::sessions) async fn session_events(
     journal: &std::sync::Arc<dyn horsie_actor::Journal>,
     session_id: uuid::Uuid,
-) -> Vec<crate::sessions::session_actor::SessionDomainEvent> {
+) -> Vec<crate::sessions::session_actor::SessionEvent> {
     use futures_util::StreamExt;
 
     let pid = crate::sessions::session_actor::SessionActor::persistence_id_for(session_id);

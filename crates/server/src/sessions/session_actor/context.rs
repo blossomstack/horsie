@@ -6,14 +6,16 @@
 //! rather than holding them, which is what lets an agent stay resident across a
 //! hibernate and resume without knowing either happened.
 //!
-//! One type serves all three kinds of agent a session hosts — main, subagent
-//! and workflow step — because they differ only in which layers they get.
-//! [`SessionAgentKind`] is what decides: the session-metadata tools are
-//! main-only, `submit_result` is step-only, and preparation progress is broadcast
-//! for everything except a subagent, which is quiet by design.
+//! One type serves every kind of agent a session hosts, because they differ
+//! only in which layers they get — and which layers is not decided here. The
+//! owning runner resolved it all into an [`AgentRole`], so this file reads
+//! values (`may_ask`, `titles`, `step_result`, `prompt_suffix`) and never asks
+//! what kind of agent it is assembling for.
 
 use super::CoreCommand;
-use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
+use super::runner::ids::AgentId;
+use super::runner::role::{AgentRole, StopHookKind, TitleScope};
+use super::{SessionCommand, hooks::SessionHookSink};
 use crate::agent_loop::{
     AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
     StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
@@ -23,7 +25,7 @@ use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
         ask_tool::AskUserToolbox, spawn_tool::SubAgentToolbox, spec::AgentSettings,
-        subagents::SubAgentParent, title_tool::SessionTitleToolbox,
+        title_tool::SessionTitleToolbox,
     },
 };
 use async_trait::async_trait;
@@ -49,10 +51,10 @@ use uuid::Uuid;
 /// Routed through the session's mailbox rather than straight at the agent, so
 /// a caller needs only the session handle it already holds and the entry is
 /// ordered against whatever else the session is doing.
-async fn emit_progress(session: &SessionRef, key: AgentKey, stage: &str, detail: Option<String>) {
+async fn emit_progress(session: &SessionRef, agent: AgentId, stage: &str, detail: Option<String>) {
     let _ = session
         .tell(SessionCommand::Core(CoreCommand::Progress {
-            key,
+            agent,
             stage: stage.to_string(),
             detail,
         }))
@@ -70,7 +72,7 @@ async fn emit_progress(session: &SessionRef, key: AgentKey, stage: &str, detail:
 /// ends when the sink is dropped, which the acquisition does on its way out.
 fn narration_pump(
     session: &SessionRef,
-    key: AgentKey,
+    agent: AgentId,
 ) -> (
     crate::runtime_manager::NarrationSink,
     tokio::task::JoinHandle<()>,
@@ -79,7 +81,7 @@ fn narration_pump(
     let session = session.clone();
     let task = tokio::spawn(async move {
         while let Some(detail) = rx.recv().await {
-            emit_progress(&session, key, "acquiring_runtime", Some(detail)).await;
+            emit_progress(&session, agent, "acquiring_runtime", Some(detail)).await;
         }
     });
     (tx, task)
@@ -129,6 +131,9 @@ async fn build_memory_layer(
 pub(crate) struct StepResultDef {
     pub(crate) outcomes: Vec<horsie_models::workflow::StepOutcome>,
     pub(crate) fields: Vec<horsie_models::workflow::StepField>,
+    /// Whether the step may ask. Consumed by the runner when it resolves the
+    /// role's `may_ask`; carried here so the contract stays one value.
+    #[allow(dead_code)]
     pub(crate) interactive: bool,
 }
 
@@ -141,10 +146,9 @@ pub(crate) struct StepResultDef {
 fn build_control_layer(
     base: Arc<dyn Toolbox>,
     services: Option<&Arc<crate::users::UserServices>>,
-    settings: &AgentSettings,
-    kind: SessionAgentKind,
+    enabled: bool,
 ) -> (Arc<dyn Toolbox>, String) {
-    if !matches!(kind, SessionAgentKind::Main) || settings.control_plane != Some(true) {
+    if !enabled {
         return (base, String::new());
     }
     let Some(services) = services else {
@@ -167,58 +171,7 @@ fn build_control_layer(
     (Arc::new(toolbox), index)
 }
 
-/// Which of a session's agents a [`SessionContextProvider`] serves. The kind
-/// decides the toolbox layers (session-metadata tools are main-only) and
-/// whether preparation progress is broadcast (main-only — subagents are
-/// quiet).
-#[derive(Clone, Copy)]
-pub(super) enum SessionAgentKind {
-    Main,
-    Sub(Uuid),
-    Step(Uuid),
-    /// A fork of a conversation. Its own kind, not `Sub`: it owes nobody a
-    /// result, it can ask the user, and it names itself.
-    Fork(Uuid),
-}
-
-impl SessionAgentKind {
-    /// The key this agent is registered under on the session. One vocabulary:
-    /// what the provider knows itself as is what the session looks it up by.
-    pub(super) fn agent_key(&self) -> AgentKey {
-        match self {
-            Self::Main => AgentKey::Main,
-            Self::Sub(id) => AgentKey::Sub(*id),
-            Self::Step(id) => AgentKey::Step(*id),
-            Self::Fork(id) => AgentKey::Fork(*id),
-        }
-    }
-
-    /// Whether this agent narrates its own setup. Everything a person opens a
-    /// session to watch does; a subagent is quiet by design, and its progress
-    /// reaches the reader as the parent's `SubAgent` entry instead.
-    fn broadcasts(&self) -> bool {
-        matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
-    }
-}
-
-/// The runtime client an agent runs with. Subagents share the session's
-/// sandbox but never its cwd/env bucket: the runtime keys that state by
-/// agent id, so each subagent acts under its own identity.
-pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
-    match kind {
-        SessionAgentKind::Main => client,
-        // Steps share the run's sandbox — that is the point — but never its
-        // cwd/env bucket: the runtime keys that state by agent id, so each acts
-        // under its own identity, exactly as a subagent does.
-        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-            client.with_agent_id(id.to_string())
-        }
-    }
-}
-
-use super::runner::role::{
-    FORK_PROMPT_SUFFIX, STEP_PROMPT_SUFFIX, SUBAGENT_PROMPT_SUFFIX, UNATTENDED_PROMPT_SUFFIX,
-};
+use super::runner::role::SUBAGENT_PROMPT_SUFFIX;
 
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
@@ -235,21 +188,11 @@ pub(super) struct SessionContextProvider {
     /// is no single service to hold. `None` wherever the control plane is not
     /// wired, which is every test that does not exercise it.
     pub(super) services: Option<Arc<crate::users::UserServices>>,
-    pub(super) settings: AgentSettings,
-    /// What a workflow step promises to return, and whether it may ask. Empty
-    /// and false for every other kind of agent, which never gets the
-    /// `submit_result` layer at all.
-    pub(super) step_result: StepResultDef,
     pub(super) session_id: Uuid,
-    pub(super) kind: SessionAgentKind,
-    /// The plugin-declared agent type this agent runs as, for a subagent that
-    /// was spawned with one. The *name* only — the definition is resolved from
-    /// the library scan on every `provide()`, so a subagent that outlives its
-    /// plugin fails rather than running a prompt nobody can point at.
-    pub(super) agent_type: Option<String>,
-    /// Whether nobody is watching this session (a routine run). Decides one
-    /// thing: the main agent gets no `ask_user`, and is told why.
-    pub(super) unattended: bool,
+    /// Everything kind-specific about the agent this provider serves, resolved
+    /// by its runner: settings, toolbox layers, prompt suffix, hook shape. The
+    /// provider reads values and never asks what kind of agent it is.
+    pub(super) role: AgentRole,
     /// The owning session's mailbox — routes the server-owned tools.
     pub(super) session: SessionRef,
     /// The plugin bundles this session selected, and the library that can say
@@ -283,9 +226,14 @@ impl SessionContextProvider {
             .registry
             .read()
             .map_err(|_| "provider registry lock poisoned".to_string())?;
-        reg.get(&self.settings.model)
+        reg.get(&self.role.settings.model)
             .map(|e| e.provider.clone())
-            .ok_or_else(|| format!("no provider registered for model '{}'", self.settings.model))
+            .ok_or_else(|| {
+                format!(
+                    "no provider registered for model '{}'",
+                    self.role.settings.model
+                )
+            })
     }
 
     /// This session's model's context window, when its card declares one.
@@ -297,7 +245,7 @@ impl SessionContextProvider {
         self.registry
             .read()
             .ok()?
-            .get(&self.settings.model)?
+            .get(&self.role.settings.model)?
             .context_window
     }
 
@@ -312,7 +260,7 @@ impl SessionContextProvider {
     /// Whether this agent loads the shared plugin library — and so whether any
     /// hook could possibly be declared for it.
     pub(super) fn use_plugins(&self) -> bool {
-        self.settings.use_plugins.unwrap_or(true)
+        self.role.settings.use_plugins.unwrap_or(true)
     }
 
     /// Install this agent's own plugin bundles into its own tree on the runtime.
@@ -336,7 +284,7 @@ impl SessionContextProvider {
                 .map(|_| ())
                 .map_err(|e| ContextError::retryable(e.to_string()));
         }
-        let mut names = self.settings.plugins.clone();
+        let mut names = self.role.settings.plugins.clone();
         if names.is_empty() {
             // Nothing selected falls back to the account's default-enabled set,
             // exactly as session-wide provisioning did.
@@ -375,9 +323,9 @@ impl SessionContextProvider {
         // then on its sink — so those words are carried into this agent's log
         // as they arrive rather than summarised once it is over.
         let (narrate, task) = self
-            .kind
-            .broadcasts()
-            .then(|| narration_pump(&self.session, self.kind.agent_key()))
+            .role
+            .broadcasts
+            .then(|| narration_pump(&self.session, self.role.agent))
             .unzip();
         let acquired = self.runtimes.get(narrate).await;
         // Joined rather than detached. The acquisition dropped the sender on
@@ -396,7 +344,13 @@ impl SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
-        Ok(scoped_client(&self.kind, client))
+        // Every agent but the main one acts under its own identity: they
+        // share the sandbox, never its cwd/env bucket — the runtime keys that
+        // state by agent id.
+        Ok(match self.role.scoped {
+            Some(id) => client.with_agent_id(id.to_string()),
+            None => client,
+        })
     }
 
     /// Expand `/name` or `@name`, if this prompt is one.
@@ -497,7 +451,8 @@ impl SessionContextProvider {
     /// `reviewer` and fire for reviewers only. An untyped spawn reports
     /// `"subagent"` — the general-purpose case, which is a kind and not a lie.
     pub(super) fn agent_type(&self) -> String {
-        self.agent_type
+        self.role
+            .agent_type
             .clone()
             .unwrap_or_else(|| "subagent".to_string())
     }
@@ -553,14 +508,14 @@ impl ContextProvider for SessionContextProvider {
             // `SessionStart`, because this call was not gated on the kind at
             // all — a subagent is not a session, and the two events carry
             // different matcher domains.
-            let event = match self.kind {
-                SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStart(SubagentStartInput {
-                    agent_id: id.to_string(),
+            let event = match self.role.stop_hook {
+                StopHookKind::SubagentStop => ServerHookEvent::SubagentStart(SubagentStartInput {
+                    agent_id: self.role.agent.to_string(),
                     agent_type: self.agent_type(),
                 }),
-                SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                    ServerHookEvent::SessionStart(SessionStartInput { source })
-                }
+                // A step keeps `SessionStart`: it roots its own subagent tree,
+                // so answering `SubagentStart` would contradict its own start.
+                StopHookKind::Stop => ServerHookEvent::SessionStart(SessionStartInput { source }),
             };
             records.extend(client.run_hooks(event).await.unwrap_or_default());
         }
@@ -595,20 +550,15 @@ impl ContextProvider for SessionContextProvider {
     }
 
     async fn provide(&self) -> Result<Contexts, ContextError> {
-        let settings = &self.settings;
+        let settings = &self.role.settings;
         let mut def = session_run_def(settings);
         let use_plugins = settings.use_plugins.unwrap_or(true);
-        // Preparation progress is main-only: subagents are quiet by design.
-        let broadcast = self.kind.broadcasts();
+        // Preparation progress reaches watchers only where somebody watches:
+        // subagents are quiet by design.
+        let broadcast = self.role.broadcasts;
 
         if broadcast {
-            emit_progress(
-                &self.session,
-                self.kind.agent_key(),
-                "acquiring_runtime",
-                None,
-            )
-            .await;
+            emit_progress(&self.session, self.role.agent, "acquiring_runtime", None).await;
         }
         let runtime_client = self.runtime_client().await?;
         // Hooks run runtime-side and report what they did on the tool response.
@@ -616,7 +566,7 @@ impl ContextProvider for SessionContextProvider {
         // visible to the user rather than silent.
         let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink::new(
             self.session.clone(),
-            self.kind.agent_key(),
+            self.role.agent,
         )));
         // Cached *after* the sink is attached, not before: `Stop` runs its hooks
         // through this handle once the turn is over, and a sink-less clone would
@@ -634,13 +584,7 @@ impl ContextProvider for SessionContextProvider {
         self.provision_agent(&runtime_client).await?;
 
         if broadcast {
-            emit_progress(
-                &self.session,
-                self.kind.agent_key(),
-                "scanning_workspace",
-                None,
-            )
-            .await;
+            emit_progress(&self.session, self.role.agent, "scanning_workspace", None).await;
         }
         let (ws, shared_scan) = scan_workspace(&runtime_client, None).await;
         // No `SessionStart` here any more. It used to fire on this line, once
@@ -656,7 +600,7 @@ impl ContextProvider for SessionContextProvider {
         // Resolved here rather than carried from the spawn: the definition is a
         // property of the library as it is *now*, so an agent whose plugin was
         // uninstalled between spawn and wake fails loudly.
-        let plugin_agent = match (&self.agent_type, shared.as_ref()) {
+        let plugin_agent = match (&self.role.agent_type, shared.as_ref()) {
             (None, _) => None,
             (Some(name), Some(shared)) => Some(shared.agents.get(name).cloned().ok_or_else(|| {
                 ContextError::retryable(format!(
@@ -725,13 +669,7 @@ impl ContextProvider for SessionContextProvider {
             crate::agent_loop::McpToolboxes::default()
         } else if let Some(mcp_svc) = self.mcp.as_ref() {
             if broadcast {
-                emit_progress(
-                    &self.session,
-                    self.kind.agent_key(),
-                    "connecting_tools",
-                    None,
-                )
-                .await;
+                emit_progress(&self.session, self.role.agent, "connecting_tools", None).await;
             }
             mcp_svc
                 .toolboxes_for(&settings.mcp_servers)
@@ -812,15 +750,9 @@ impl ContextProvider for SessionContextProvider {
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
-            build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
-        let caller = match self.kind {
-            // A step roots its own tree, so its spawns are that tree's `Main`.
-            // A fork roots its own tree too, for the same reason a step does.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                SubAgentParent::Main
-            }
-            SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
-        };
+            build_control_layer(with_memory, self.services.as_ref(), self.role.control_plane);
+        // Whoever this agent is, its spawns register under its own id — the
+        // unified identity is what dissolved the old per-kind caller enum.
         // A zero cap disables subagents outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.
         let with_spawn: Arc<dyn Toolbox> = if settings.max_subagents() == 0 {
@@ -829,50 +761,39 @@ impl ContextProvider for SessionContextProvider {
             Arc::new(SubAgentToolbox::new(
                 with_memory,
                 self.session.clone(),
-                caller,
+                self.role.agent,
                 shared
                     .as_ref()
                     .map(|s| Arc::clone(&s.agents))
                     .unwrap_or_default(),
             ))
         };
-        let toolbox: Arc<dyn Toolbox> = match self.kind {
-            // An unattended session skips the ask layer entirely rather than
-            // offering a tool whose answer would never come.
-            SessionAgentKind::Main if self.unattended => {
-                Arc::new(SessionTitleToolbox::new(with_spawn, self.session.clone()))
+        // The role's values, layered in a fixed order: the result contract
+        // innermost (a step's `submit_result`), then `ask_user` where asking
+        // is allowed, then the title tool the role names. An unattended main
+        // agent simply has `may_ask` false, so the ask layer never exists to
+        // offer a tool whose answer would never come.
+        let mut toolbox: Arc<dyn Toolbox> = with_spawn;
+        if let Some(step_result) = &self.role.step_result {
+            toolbox = crate::sessions::workflow::StepResultToolbox::wrap(
+                toolbox,
+                step_result.outcomes.clone(),
+                step_result.fields.clone(),
+            );
+        }
+        if self.role.may_ask {
+            toolbox = Arc::new(AskUserToolbox::new(toolbox));
+        }
+        toolbox = match self.role.titles {
+            TitleScope::Session => {
+                Arc::new(SessionTitleToolbox::new(toolbox, self.session.clone()))
             }
-            SessionAgentKind::Main => {
-                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::new(inner, self.session.clone()))
-            }
-            // A step gets `submit_result` instead of the title layer — its
-            // title belongs to the run rather than to one step — and `ask_user`
-            // only when the definition says it is interactive and somebody is
-            // there to answer.
-            SessionAgentKind::Step(_) => {
-                let result = crate::sessions::workflow::StepResultToolbox::wrap(
-                    with_spawn,
-                    self.step_result.outcomes.clone(),
-                    self.step_result.fields.clone(),
-                );
-                if self.step_result.interactive && !self.unattended {
-                    Arc::new(AskUserToolbox::new(result))
-                } else {
-                    result
-                }
-            }
-            // A fork takes the main agent's arms: it is a conversation, so
-            // it can ask the user — and it names *itself*, not the session.
-            SessionAgentKind::Fork(id) => {
-                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::for_fork(
-                    inner,
-                    self.session.clone(),
-                    id,
-                ))
-            }
-            SessionAgentKind::Sub(_) => with_spawn,
+            TitleScope::Fork(id) => Arc::new(SessionTitleToolbox::for_fork(
+                toolbox,
+                self.session.clone(),
+                id,
+            )),
+            TitleScope::None => toolbox,
         };
         let system_prompt = compose_system_prompt(
             Some(SESSION_AGENT_PROMPT),
@@ -893,14 +814,14 @@ impl ContextProvider for SessionContextProvider {
                 a.def.name, a.def.prompt
             )
         });
-        let suffix: Option<&str> = match &self.kind {
-            SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
-            SessionAgentKind::Main => None,
-            SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
-            SessionAgentKind::Fork(_) => Some(FORK_PROMPT_SUFFIX),
-            SessionAgentKind::Sub(_) => {
-                Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
+        // The role's suffix, except a typed subagent's composed section takes
+        // the generic one's place — `SUBAGENT_PROMPT_SUFFIX` is folded into
+        // the composition above.
+        let suffix: Option<&str> = match (&subagent_role, self.role.prompt_suffix) {
+            (Some(composed), Some(s)) if std::ptr::eq(s, SUBAGENT_PROMPT_SUFFIX) => {
+                Some(composed.as_str())
             }
+            (_, suffix) => suffix,
         };
         let system_prompt = match suffix {
             None => system_prompt,
@@ -920,863 +841,16 @@ impl ContextProvider for SessionContextProvider {
             (None, true) => None,
         };
         if broadcast {
-            emit_progress(&self.session, self.kind.agent_key(), "ready", None).await;
+            emit_progress(&self.session, self.role.agent, "ready", None).await;
         }
         Ok(Contexts {
             provider,
             toolbox,
             system_prompt,
             context_window: crate::agent_loop::compaction_window(
-                self.settings.auto_compact,
+                self.role.settings.auto_compact,
                 self.context_window(),
             ),
         })
-    }
-}
-
-#[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::wildcard_enum_match_arm
-)]
-mod tests {
-    //! What a turn is assembled from: which tools each kind of agent gets, and
-    //! what a slash command expands into.
-    use super::super::testing::*;
-    use super::super::*;
-    use super::*;
-    use crate::sessions::addressing::SessionInbox;
-
-    use crate::agent_loop::{ContextProvider, Contexts, StartTurn};
-    use horsie_models::hooks::HookAction;
-    use std::sync::Arc;
-    use uuid::Uuid;
-
-    /// The gate, at the layer that applies it: off unless the preset says so,
-    /// and never for an agent that is not the session's main one.
-    #[tokio::test]
-    async fn control_tools_reach_only_a_main_agent_that_asked_for_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = crate::testing::state(dir.path()).build().await;
-        let services = state.services().await;
-        let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
-
-        let mut settings = AgentSettings {
-            model: "m".into(),
-            allowed_tools: None,
-            use_plugins: None,
-            max_iterations: None,
-            max_retries: 0,
-            mcp_servers: Vec::new(),
-            memory_spaces: Vec::new(),
-            thinking_effort: None,
-            max_concurrent_subagents: None,
-            instructions: None,
-            auto_compact: None,
-            control_plane: None,
-            plugins: Vec::new(),
-        };
-        let (toolbox, index) = build_control_layer(
-            base.clone(),
-            Some(&services),
-            &settings,
-            SessionAgentKind::Main,
-        );
-        assert!(
-            !toolbox
-                .specs()
-                .iter()
-                .any(|s| s.name.starts_with("horsie_")),
-            "a preset that never asked must not get them"
-        );
-        assert!(index.is_empty());
-
-        settings.control_plane = Some(true);
-        let (toolbox, index) = build_control_layer(
-            base.clone(),
-            Some(&services),
-            &settings,
-            SessionAgentKind::Main,
-        );
-        assert!(toolbox.specs().iter().any(|s| s.name == "horsie_agents"));
-        assert!(index.contains("agents {"), "{index}");
-
-        for kind in [
-            SessionAgentKind::Sub(Uuid::new_v4()),
-            SessionAgentKind::Step(Uuid::new_v4()),
-            SessionAgentKind::Fork(Uuid::new_v4()),
-        ] {
-            let (toolbox, _) = build_control_layer(base.clone(), Some(&services), &settings, kind);
-            assert!(
-                !toolbox
-                    .specs()
-                    .iter()
-                    .any(|s| s.name.starts_with("horsie_")),
-                "a non-main agent inherits the setting but must not inherit the authority"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn subagent_toolbox_strips_session_metadata_tools() {
-        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-
-        let build = |kind: SessionAgentKind| SessionContextProvider {
-            agent_type: None,
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
-            settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
-            session_id: id,
-            kind,
-            unattended: false,
-            session: session.clone(),
-            plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
-        };
-
-        let main = build(SessionAgentKind::Main).provide().await.unwrap();
-        let main_tools: Vec<String> = main.toolbox.specs().into_iter().map(|s| s.name).collect();
-        for t in [
-            "spawn_agent",
-            "subagent_status",
-            "set_session_title",
-            "ask_user",
-        ] {
-            assert!(main_tools.contains(&t.to_string()), "main lacks {t}");
-        }
-
-        let sub_id = Uuid::new_v4();
-        let sub = build(SessionAgentKind::Sub(sub_id))
-            .provide()
-            .await
-            .unwrap();
-        let sub_tools: Vec<String> = sub.toolbox.specs().into_iter().map(|s| s.name).collect();
-        for t in ["spawn_agent", "subagent_status"] {
-            assert!(sub_tools.contains(&t.to_string()), "sub lacks {t}");
-        }
-        for t in ["set_session_title", "ask_user"] {
-            assert!(!sub_tools.contains(&t.to_string()), "sub must not have {t}");
-        }
-        let prompt = sub.system_prompt.unwrap();
-        assert!(
-            prompt.contains("# Subagent role"),
-            "the subagent prompt must explain its role"
-        );
-        assert!(prompt.contains("automatically delivered"), "{prompt}");
-        assert!(prompt.contains("do not poll"), "{prompt}");
-        assert!(
-            prompt.contains("user requests a progress update"),
-            "{prompt}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_zero_subagent_cap_hides_the_spawn_tools() {
-        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let mut settings = agent_settings_fixture();
-        settings.max_concurrent_subagents = Some(0);
-        let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
-            settings,
-            step_result: StepResultDef::default(),
-            session_id: id,
-            kind: SessionAgentKind::Main,
-            agent_type: None,
-            unattended: false,
-            session: session.clone(),
-            plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
-        };
-        let tools: Vec<String> = provider
-            .provide()
-            .await
-            .unwrap()
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        // Disabled, not merely unusable: an advertised tool that always
-        // rejects reads as a bug to the model.
-        for t in ["spawn_agent", "subagent_status"] {
-            assert!(!tools.contains(&t.to_string()), "disabled session has {t}");
-        }
-    }
-
-    #[tokio::test]
-    async fn an_unattended_session_is_offered_no_ask_user_tool() {
-        // A routine run has nobody to answer a question: offering `ask_user`
-        // would let the agent park the run forever. The prompt has to say so
-        // too -- the base prompt tells the model the tool exists.
-        let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let build = |unattended: bool| SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
-            settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
-            session_id: id,
-            kind: SessionAgentKind::Main,
-            agent_type: None,
-            unattended,
-            session: session.clone(),
-            plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
-        };
-        let names = |c: &Contexts| -> Vec<String> {
-            c.toolbox.specs().into_iter().map(|s| s.name).collect()
-        };
-
-        let unattended = build(true).provide().await.unwrap();
-        let tools = names(&unattended);
-        assert!(!tools.contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
-        // Everything else the main agent has is untouched.
-        assert!(tools.contains(&"set_session_title".to_string()));
-        assert!(tools.contains(&"spawn_agent".to_string()));
-        assert!(
-            unattended
-                .system_prompt
-                .unwrap()
-                .contains("# Unattended run"),
-            "an unattended run must be told there is no user"
-        );
-
-        let attended = build(false).provide().await.unwrap();
-        assert!(names(&attended).contains(&crate::sessions::ask_tool::ASK_USER_TOOL.to_string()));
-        assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
-    }
-
-    #[test]
-    fn a_subagent_gets_its_own_runtime_identity() {
-        let client = horsie_runtime_host::RuntimeClient::detached(
-            horsie_runtime_host::MockTransport::ok(""),
-            "session-id",
-        );
-        let main = scoped_client(&SessionAgentKind::Main, client.clone());
-        assert_eq!(main.agent_id(), "session-id");
-
-        let sub_id = Uuid::new_v4();
-        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
-        assert_eq!(sub.agent_id(), sub_id.to_string());
-    }
-
-    #[tokio::test]
-    async fn a_slash_command_expands_into_its_framed_template() {
-        let (f, session, id) = catalog_harness(vec![catalog_entry(
-            horsie_support::plugin::catalog::CatalogKind::Command,
-            "review",
-            Some("Review $1 for bugs. Full args: $ARGUMENTS"),
-        )])
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-        let message = prepared_message(&provider, "/review src/a.rs carefully")
-            .await
-            .expect("a command expands");
-        assert!(
-            message.starts_with("<command name=\"review\" args=\"src/a.rs carefully\">"),
-            "framed so a client can tell an invocation from typed text: {message}"
-        );
-        assert!(message.contains("Review src/a.rs for bugs."), "{message}");
-        assert!(
-            message.contains("Full args: src/a.rs carefully"),
-            "{message}"
-        );
-    }
-
-    /// A skill and an agent have no template, so expansion names the thing and
-    /// lets the agent reach for the tool it already has.
-    #[tokio::test]
-    async fn a_skill_and_an_agent_expand_under_their_own_sigils() {
-        use horsie_support::plugin::catalog::CatalogKind;
-        let (f, session, id) = catalog_harness(vec![
-            catalog_entry(CatalogKind::Skill, "tdd", None),
-            catalog_entry(CatalogKind::Agent, "reviewer", None),
-        ])
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-
-        let skill = prepared_message(&provider, "/tdd on the parser")
-            .await
-            .unwrap();
-        assert!(skill.starts_with("<skill name=\"tdd\""), "{skill}");
-        assert!(skill.contains("Use the `tdd` skill."), "{skill}");
-        assert!(skill.contains("on the parser"), "{skill}");
-
-        let agent = prepared_message(&provider, "@reviewer this diff")
-            .await
-            .unwrap();
-        assert!(agent.starts_with("<agent name=\"reviewer\""), "{agent}");
-        assert!(agent.contains("spawn_agent"), "{agent}");
-
-        // The sigil is part of the identity: `@` must not become a second `/`.
-        assert_eq!(
-            prepared_message(&provider, "@tdd").await.as_deref(),
-            Some("@tdd"),
-            "a skill is not reachable as an agent"
-        );
-    }
-
-    /// An unknown name is left exactly as written: a message may legitimately
-    /// begin with a slash, and refusing it would make `/etc/hosts` unsendable.
-    #[tokio::test]
-    async fn an_unknown_name_leaves_the_prompt_alone() {
-        let (f, session, id) = catalog_harness(vec![catalog_entry(
-            horsie_support::plugin::catalog::CatalogKind::Command,
-            "review",
-            Some("body"),
-        )])
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-        for prompt in [
-            "/nosuch thing",
-            "/etc/hosts is a file",
-            "hello",
-            "mail me at a@b.com",
-        ] {
-            assert_eq!(
-                prepared_message(&provider, prompt).await.as_deref(),
-                Some(prompt),
-                "{prompt} must reach the model unchanged"
-            );
-        }
-    }
-
-    /// Expanding costs no runtime call — which is the whole reason the
-    /// catalogue moved to the server.
-    #[tokio::test]
-    async fn expansion_makes_no_workspace_scan() {
-        let (f, session, id) = catalog_harness(vec![catalog_entry(
-            horsie_support::plugin::catalog::CatalogKind::Command,
-            "review",
-            Some("body"),
-        )])
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-        prepared_message(&provider, "/review a.rs").await;
-        assert_eq!(
-            f.agent.scan_count(),
-            0,
-            "the seam answers from the database, not the sandbox"
-        );
-    }
-
-    /// `UserPromptExpansion` fires for the entry being expanded, carrying its
-    /// name as the matcher domain and its kind alongside — and before
-    /// `UserPromptSubmit` sees the result, which is the order the spec gives
-    /// them.
-    #[tokio::test]
-    async fn expansion_is_hooked_before_submission() {
-        let (f, session, id) = catalog_harness(vec![catalog_entry(
-            horsie_support::plugin::catalog::CatalogKind::Command,
-            "review",
-            Some("body"),
-        )])
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-        prepared_message(&provider, "/review a.rs").await;
-
-        let events = f.agent.hook_events();
-        let expansion = events.iter().position(|e| *e == "UserPromptExpansion");
-        let submit = events.iter().position(|e| *e == "UserPromptSubmit");
-        assert!(
-            expansion.is_some(),
-            "the expansion must be hooked: {events:?}"
-        );
-        assert!(
-            expansion < submit,
-            "expansion runs first, so a submit guard reads what the model will: {events:?}"
-        );
-        let named: Vec<(String, String)> = f
-            .agent
-            .server_hook_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                horsie_models::runtime::ServerHookEvent::UserPromptExpansion(i) => {
-                    Some((i.command, i.kind))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(named, vec![("review".to_string(), "command".to_string())]);
-    }
-
-    /// A hook answering `{"decision":"block"}` must stop the expansion itself,
-    /// not merely be noticed a layer later with the work already done. The
-    /// block is not a halt, and reading only the halt is how this regressed.
-    #[tokio::test]
-    async fn a_blocking_expansion_hook_stops_the_expansion() {
-        let blocked = HookRecord {
-            plugin: "guard".into(),
-            duration_ms: 0,
-            halt: None,
-            action: HookAction::UserPromptExpansion(
-                horsie_models::hooks::UserPromptExpansionRecord {
-                    command: "review".into(),
-                    system_message: None,
-                    outcome: horsie_models::hooks::UserPromptExpansionOutcome::Blocked(
-                        horsie_models::hooks::HookBlocked {
-                            reason: Some("not this one".into()),
-                        },
-                    ),
-                },
-            ),
-        };
-        let (f, session, id) = catalog_harness_with(
-            vec![catalog_entry(
-                horsie_support::plugin::catalog::CatalogKind::Command,
-                "review",
-                Some("the template"),
-            )],
-            vec![vec![blocked]],
-        )
-        .await;
-        let provider = catalog_provider(&f, &session, id);
-        let prep = provider
-            .start_hooks(StartTurn {
-                start_source: None,
-                prompt: Some("/review a.rs".to_string()),
-            })
-            .await
-            .expect("prepare");
-        assert_eq!(
-            prep.message.as_deref(),
-            Some("/review a.rs"),
-            "a refused expansion leaves the prompt as typed"
-        );
-        assert_eq!(
-            crate::agent_loop::start_blocked(&prep.records).as_deref(),
-            Some("not this one"),
-            "and the refusal still abandons the turn"
-        );
-        assert!(
-            !f.agent.hook_events().contains(&"UserPromptSubmit"),
-            "a refused prompt never becomes a submission: {:?}",
-            f.agent.hook_events()
-        );
-    }
-
-    /// The agent's body is added to the generic subagent role, and its `tools`
-    /// allowlist reaches the toolbox through the same alias table hook matchers
-    /// use.
-    #[tokio::test]
-    async fn a_typed_subagent_runs_with_its_plugins_prompt() {
-        let (f, session, id) = agent_harness().await;
-        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
-
-        let provider = typed_provider(&f, &session, id, sub, None);
-        let contexts = provider.provide().await.expect("contexts");
-        let prompt = contexts.system_prompt.unwrap_or_default();
-        assert!(
-            prompt.contains("# Agent type: code-reviewer"),
-            "the plugin's agent names its own section: {prompt}"
-        );
-        // The generic framing is the only place a subagent is told where its
-        // output goes; a plugin's prompt never says it, so it must survive.
-        assert!(
-            prompt.contains("Your final message is your report"),
-            "a typed subagent must still know it reports to its parent: {prompt}"
-        );
-        assert!(
-            prompt.contains("Report only high-confidence bugs."),
-            "the plugin's body is the role: {prompt}"
-        );
-        // `Read, Grep` in Claude's vocabulary is `read_file, grep` in horsie's.
-        let tools: Vec<String> = contexts
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(tools.contains(&"read_file".to_string()), "{tools:?}");
-        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
-        assert!(
-            !tools.contains(&"bash".to_string()),
-            "the allowlist must exclude what it did not name: {tools:?}"
-        );
-    }
-
-    /// An agent definition is a file inside a plugin. It may narrow the tools
-    /// the session already grants it and must not be able to widen them —
-    /// otherwise installing a plugin would hand back what an operator withheld.
-    #[tokio::test]
-    async fn an_agents_tools_cannot_widen_the_sessions_own_allowlist() {
-        let (f, session, id) = agent_harness().await;
-        let sub = spawn_typed(&session, Some("code-reviewer")).await.unwrap();
-
-        // The session grants `grep` only; the agent asks for `Read, Grep`.
-        let provider = typed_provider(&f, &session, id, sub, Some(vec!["grep".to_string()]));
-        let contexts = provider.provide().await.expect("contexts");
-        let tools: Vec<String> = contexts
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(tools.contains(&"grep".to_string()), "{tools:?}");
-        assert!(
-            !tools.contains(&"read_file".to_string()),
-            "an agent must not grant itself a tool the session withheld: {tools:?}"
-        );
-    }
-
-    /// The definition is resolved when the subagent runs, not carried from the
-    /// spawn — so an agent whose plugin has gone fails loudly rather than
-    /// running a prompt nobody can point at.
-    #[tokio::test]
-    async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
-        let (f, session, id) = agent_harness().await;
-        let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".to_string(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: f.deps.provider_registry.clone(),
-            mcp: None,
-            memory: None,
-            services: None,
-            settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
-            session_id: id,
-            kind: SessionAgentKind::Sub(Uuid::new_v4()),
-            agent_type: Some("uninstalled-agent".to_string()),
-            unattended: false,
-            session: session.clone(),
-            plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
-        };
-        let Err(err) = provider.provide().await else {
-            panic!("a subagent whose agent type is gone must not run generic");
-        };
-        assert!(err.message.contains("uninstalled-agent"), "{}", err.message);
-        assert!(
-            !err.terminal,
-            "a missing plugin is not the end of a session"
-        );
-    }
-
-    /// The type is what `SubagentStart` / `SubagentStop` matchers select on. It
-    /// was the constant `"subagent"` for every subagent before agent types
-    /// existed, so a matcher could only select all or none.
-    #[tokio::test]
-    async fn the_agent_type_reaches_the_subagent_hook_matcher() {
-        let (f, session, _id) = agent_harness().await;
-        spawn_typed(&session, Some("code-reviewer")).await.unwrap();
-        for _ in 0..200 {
-            if f.agent.hook_events().contains(&"SubagentStart") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let types: Vec<String> = f
-            .agent
-            .server_hook_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(types, vec!["code-reviewer".to_string()]);
-    }
-
-    /// An untyped spawn is the general-purpose subagent, unchanged.
-    #[tokio::test]
-    async fn an_untyped_spawn_still_reports_the_generic_type() {
-        let (f, session, _id) = agent_harness().await;
-        spawn_typed(&session, None).await.unwrap();
-        for _ in 0..200 {
-            if f.agent.hook_events().contains(&"SubagentStart") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let types: Vec<String> = f
-            .agent
-            .server_hook_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                horsie_models::runtime::ServerHookEvent::SubagentStart(i) => Some(i.agent_type),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(types, vec!["subagent".to_string()]);
-    }
-
-    /// `SessionStart` used to fire from `provide()`, which is per-run — so every
-    /// turn re-ran every start hook, always reporting `source: "startup"`. It
-    /// fires once per agent load now; `UserPromptSubmit` is the one that belongs
-    /// to every turn.
-    #[tokio::test]
-    async fn a_session_starts_once_but_every_prompt_is_hooked() {
-        let (f, session) = stop_harness(vec![]).await;
-        send(&session, "first").await;
-        settled_inputs(&session).await;
-        send(&session, "second").await;
-        settled_inputs(&session).await;
-
-        let starts = f
-            .agent
-            .hook_events()
-            .into_iter()
-            .filter(|e| *e == "SessionStart")
-            .count();
-        let prompts = f
-            .agent
-            .hook_events()
-            .into_iter()
-            .filter(|e| *e == "UserPromptSubmit")
-            .count();
-        assert_eq!(starts, 1, "the start hook is due once per agent load");
-        assert_eq!(prompts, 2, "the prompt hook is due every turn");
-    }
-
-    /// A subagent is not a session. The call fired `SessionStart` for one before
-    /// this, because it was not gated on the agent's kind at all — so a hook
-    /// matching `startup` fired again for every subagent spawned.
-    #[tokio::test]
-    async fn a_subagent_fires_subagent_start_never_session_start() {
-        let (f, session) = stop_harness(vec![]).await;
-        spawn_sub(&session, "research", "dig into it").await;
-        // Waited for on the *last* of the events asserted about, not the first.
-        // `SessionStart` here belongs to the turn the main agent runs after the
-        // subagent reports back, so stopping at `SubagentStart` left the
-        // assertion reading a list the run had not finished writing — and the
-        // count it wanted was the one still to come.
-        for _ in 0..200 {
-            if f.agent.hook_events().contains(&"SessionStart") {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        // The main agent runs a turn of its own once the subagent reports back,
-        // so one `SessionStart` is correct here. What must never happen is the
-        // subagent contributing a second one — which is what it did before,
-        // because the call was not gated on the agent's kind.
-        let events = f.agent.hook_events();
-        assert_eq!(
-            events.iter().filter(|e| **e == "SubagentStart").count(),
-            1,
-            "the subagent starts as a subagent, got {events:?}"
-        );
-        assert_eq!(
-            events.iter().filter(|e| **e == "SessionStart").count(),
-            1,
-            "only the session's own agent may claim a session start, got {events:?}"
-        );
-    }
-
-    /// A session stand-in that keeps whatever progress it is told about, so a
-    /// test can watch the narration pump without assembling a whole session.
-    /// Every progress report a session was told about: the stage, and whatever
-    /// detail came with it.
-    type Reported = Arc<Mutex<Vec<(String, Option<String>)>>>;
-
-    struct RecordingSession(Reported);
-
-    #[async_trait]
-    impl horsie_actor::EventSourcedActor for RecordingSession {
-        type Command = SessionInbox;
-        type Event = ();
-        type State = ();
-
-        fn persistence_id(&self) -> horsie_actor::PersistenceId {
-            horsie_actor::PersistenceId::new("test", "recording-session")
-        }
-
-        fn initial_state() {}
-
-        fn apply_event((): (), (): ()) {}
-
-        async fn handle_command(
-            &mut self,
-            (): &(),
-            cmd: SessionInbox,
-            _ctx: &mut horsie_actor::ActorContext<SessionInbox>,
-        ) -> super::super::CommandEffect<()> {
-            if let SessionCommand::Core(CoreCommand::Progress { stage, detail, .. }) = cmd.cmd {
-                self.0
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push((stage, detail));
-            }
-            super::super::CommandEffect::none()
-        }
-    }
-
-    /// A context provider over a vendor that has to boot something, reporting
-    /// into a session that keeps whatever it is told.
-    fn booting_provider(seen: &Reported, kind: SessionAgentKind) -> SessionContextProvider {
-        let mut vendors = std::collections::HashMap::new();
-        vendors.insert(
-            "mock".to_string(),
-            Arc::new(BootingVendor) as Arc<dyn crate::runtime_vendor::RuntimeVendor>,
-        );
-        let vendors = Arc::new(std::sync::RwLock::new(vendors));
-        let id = Uuid::new_v4();
-        let session = SessionRef::new(
-            crate::testing::spawn_detached(
-                &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
-                RecordingSession(seen.clone()),
-            ),
-            crate::auth::UserId::bootstrap(),
-            id,
-            None,
-        );
-        SessionContextProvider {
-            agent_type: None,
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock"),
-            ),
-            registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
-            mcp: None,
-            memory: None,
-            services: None,
-            settings: agent_settings_fixture(),
-            step_result: StepResultDef::default(),
-            session_id: id,
-            kind,
-            unattended: false,
-            session,
-            plugins: Vec::new(),
-            plugin_library: None,
-            last_client: Mutex::new(None),
-        }
-    }
-
-    /// Whatever the session was told, once it has had a chance to hear it.
-    async fn settled(seen: &Reported) -> Vec<(String, Option<String>)> {
-        for _ in 0..200 {
-            if !seen
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_empty()
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        seen.lock().unwrap_or_else(PoisonError::into_inner).clone()
-    }
-
-    /// The wait a person actually sits through, and what it says. An
-    /// acquisition can hold here for minutes while a machine resumes; the
-    /// vendor describes it the whole time, and those words belong in the log of
-    /// the agent that is waiting, under the stage it already announced.
-    #[tokio::test]
-    async fn a_vendors_account_of_an_acquisition_reaches_the_agents_log() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Main);
-        provider.runtime_client().await.expect("acquire");
-
-        assert_eq!(
-            settled(&seen).await,
-            vec![(
-                "acquiring_runtime".to_string(),
-                Some(BOOTING_ACQUIRE.to_string())
-            )],
-            "the vendor's account of the wait has to reach the log, under the \
-             stage the agent is actually in"
-        );
-    }
-
-    /// And a subagent stays quiet, exactly as it does for every other
-    /// preparation stage: its progress reaches a reader as the parent's
-    /// `SubAgent` entry, not as a second narration of the same sandbox.
-    /// Provisioning reaches the runtime before the hooks that read what it
-    /// installed.
-    ///
-    /// A hook is a file inside a plugin bundle, so hooks fired against an agent
-    /// whose tree does not exist find nothing — and a runtime refuses a request
-    /// naming an agent it has never been told about. `run_hooks` swallows that
-    /// refusal with `unwrap_or_default`, so getting this order wrong is not an
-    /// error anywhere: it is every plugin hook silently never running.
-    ///
-    /// Ordering rather than mere presence, because `start_hooks` runs *ahead* of
-    /// `provide` — provisioning only in `provide` looks correct and is exactly
-    /// the bug.
-    #[tokio::test]
-    async fn an_agent_is_provisioned_before_its_hooks_run() {
-        let (f, session, id) = catalog_harness_with(Vec::new(), Vec::new()).await;
-        let provider = catalog_provider(&f, &session, id);
-
-        provider
-            .start_hooks(StartTurn {
-                start_source: Some(horsie_models::runtime::SessionStartSource::Startup),
-                prompt: Some("hello".to_string()),
-            })
-            .await
-            .expect("prepare");
-
-        let relayed = f.agent.relayed();
-        let first_provision = relayed.iter().position(|k| k == "ProvisionAgent");
-        let first_hooks = relayed.iter().position(|k| k == "RunHooks");
-        assert!(
-            first_provision.is_some(),
-            "the agent must be provisioned at all: {relayed:?}"
-        );
-        assert!(
-            first_hooks.is_some(),
-            "the hooks must actually have run: {relayed:?}"
-        );
-        assert!(
-            first_provision < first_hooks,
-            "provisioning must precede the hooks that read it: {relayed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_subagent_narrates_nothing() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Sub(Uuid::new_v4()));
-        provider.runtime_client().await.expect("acquire");
-        // Long enough for a line to have arrived if one were ever sent.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(
-            seen.lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .is_empty()
-        );
     }
 }

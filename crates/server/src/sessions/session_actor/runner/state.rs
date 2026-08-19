@@ -669,7 +669,12 @@ pub(crate) fn born(args: RunnerArgs, at_ms: u64) -> RunnerState {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     //! The fold, tested as the behavioral spec it is: each test pins a rule
     //! the component-era folds enforced, in the runner vocabulary.

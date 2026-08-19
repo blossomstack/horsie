@@ -58,6 +58,9 @@ pub const MAX_RUNNER_DEPTH: u32 = 4;
 /// session's agents.
 pub const MAX_LIVE_RUNS: usize = 8;
 
+/// Cap on concurrently-active subagents when the caller's settings name none.
+pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: u32 = 8;
+
 /// Error recorded for work that was mid-run when the process died.
 pub const INTERRUPTED_ERROR: &str = "interrupted by restart";
 
@@ -440,7 +443,12 @@ pub(crate) mod testkit {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     use super::event::{RecordedEnd, RunnerEvent, SessionEvent};
     use super::testkit::*;

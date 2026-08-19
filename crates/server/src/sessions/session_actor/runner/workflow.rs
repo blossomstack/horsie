@@ -273,7 +273,24 @@ impl RunnerBehavior for WorkflowRunner {
         let w = self.workflow(state)?;
         let index = w.run.index_of_agent(agent.0)?;
         let entry = w.run.get(index)?;
-        let step = w.graph.step(&entry.step)?;
+        let step = entry.step.clone();
+        self.role_for_step(spec, state, &step, agent)
+    }
+}
+
+impl WorkflowRunner {
+    /// The role for one execution of `step_name`, resolvable *before* the
+    /// execution is in the log: the spawner needs it while the `StepStarted`
+    /// that records it is still in flight.
+    pub(crate) fn role_for_step(
+        &self,
+        spec: &SessionSpec,
+        state: &SessionState,
+        step_name: &str,
+        agent: AgentId,
+    ) -> Option<AgentRole> {
+        let w = self.workflow(state)?;
+        let step = w.graph.step(step_name)?;
         Some(AgentRole {
             agent,
             name: agent.to_string(),
@@ -302,7 +319,12 @@ impl RunnerBehavior for WorkflowRunner {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
 mod tests {
     //! The run's decisions, ported from the orchestrator-era driver tests:
     //! same graph, same rules, now per-run.
