@@ -645,6 +645,94 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
     use uuid::Uuid;
 
+    /// **A stop reaches the sandbox.**
+    ///
+    /// The client a run acquired is cached on the [`Loading`] its provider
+    /// holds, and `cancel_agent` reads it back off the provider the session
+    /// keeps for that agent. Those were two different objects: a runner asking
+    /// for its agent to start built a fresh provider and overwrote the map,
+    /// while the actor system handed back the actor that was already running.
+    /// So the run cached its client into one provider and the stop looked in
+    /// another, found nothing, and never wrote a cancel to the wire — the turn
+    /// ended and the tool call went on running in the sandbox.
+    #[tokio::test]
+    async fn stopping_a_turn_cancels_the_call_in_flight_in_the_sandbox() {
+        /// The one answer the model gives: a sandbox tool the fake will hold.
+        fn calls_bash() -> horsie_agentcore::CompletionResponse {
+            horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "t-1".into(),
+                        name: "bash".into(),
+                        input: serde_json::json!({"command": "sleep 999"}),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            }
+        }
+
+        /// Poll until `pred` holds, or give up after two seconds.
+        async fn until(what: &str, pred: impl Fn() -> bool) {
+            for _ in 0..200 {
+                if pred() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for {what}");
+        }
+
+        // The fake holds every tool call, so the stop lands while one is
+        // genuinely in flight, and records the cancels it is sent.
+        let f = actor_fixture_from(
+            crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock").block_tool_calls(),
+        )
+        .await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(
+                horsie_agentcore::testkit::MockProvider::scripted(
+                    horsie_agentcore::testkit::Script::of([])
+                        .then_repeating_with(|| Ok(calls_bash())),
+                ),
+            ),
+        );
+        let session = f.start(id, actor_spec_fixture()).await;
+        send(&session, "run something slow").await;
+
+        // The turn reports `Running` at its *start*, before the provider has
+        // answered, so waiting on the status would cancel an empty set. The
+        // fake records a call before blocking on its gate and the client tracks
+        // one before sending it, so an arrival here means there is something to
+        // cancel.
+        until("the tool call to reach the runtime", || {
+            !f.agent.tool_agent_ids().is_empty()
+        })
+        .await;
+
+        session
+            .ask(|reply| SessionCommand::Stop {
+                agent_id: crate::sessions::session_actor::MAIN_AGENT_ID.to_string(),
+                reply,
+            })
+            .await
+            .expect("the session answers")
+            .expect("a running turn can be stopped");
+        f.agent.release_tool_calls();
+
+        until("a cancel the sandbox actually hears", || {
+            !f.agent.cancelled_calls().is_empty()
+        })
+        .await;
+    }
+
     /// The gate, at the layer that now applies it: a worker inherits the
     /// session's settings but not its authority over the server.
     ///

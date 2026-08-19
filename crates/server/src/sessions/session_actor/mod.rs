@@ -429,6 +429,21 @@ impl SessionActor {
         state: &SessionState,
         plan: AgentPlan,
     ) -> Option<ResidentAgent> {
+        // Already running: hand back the one that is. `actor_of` is
+        // get-or-create and answers with the live actor, so everything built
+        // below would be thrown away — except the provider, which was written
+        // into `agents` regardless and replaced the one that actor is holding.
+        //
+        // That copy is what a stop reads: the runtime client a run acquires is
+        // cached on its provider's `Loading`, and `cancel_agent` looks it up
+        // there. Replaced, the cache was empty for ever, so a stop cancelled
+        // the turn locally and never wrote a cancel to the wire — the tool call
+        // went on running in the sandbox. Two spawners ask for the same agent
+        // routinely: `reach` when a message arrives, and the boundary that
+        // message creates through the conversation's own `actions`.
+        if let Some(resident) = self.agents.get(&plan.agent) {
+            return Some(resident.clone());
+        }
         // Taken from the account's registry rather than owned here, because the
         // channels have to outlive this actor: unloading an idle session must
         // leave a reader waiting rather than disconnecting it.
