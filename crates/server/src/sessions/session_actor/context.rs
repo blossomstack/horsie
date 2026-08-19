@@ -193,15 +193,18 @@ pub(super) struct LoadingDeps {
 /// The runtime client an agent runs with. Subagents share the session's
 /// sandbox but never its cwd/env bucket: the runtime keys that state by
 /// agent id, so each subagent acts under its own identity.
-pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
-    match kind {
-        SessionAgentKind::Main => client,
-        // Steps share the run's sandbox — that is the point — but never its
-        // cwd/env bucket: the runtime keys that state by agent id, so each acts
-        // under its own identity, exactly as a subagent does.
-        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-            client.with_agent_id(id.to_string())
-        }
+pub(super) fn scoped_client(
+    agent: crate::sessions::runners::ids::AgentId,
+    role: crate::sessions::runners::loading::AgentRole,
+    client: RuntimeClient,
+) -> RuntimeClient {
+    // Steps and forks share the sandbox — that is the point — but never its
+    // cwd/env bucket: the runtime keys that state by agent id, so each acts
+    // under its own identity, exactly as a subagent does. Only the root
+    // conversation is unscoped.
+    match role.scoped() {
+        false => client,
+        true => client.with_agent_id(agent.to_string()),
     }
 }
 
@@ -240,7 +243,10 @@ pub(super) struct SessionContextProvider {
     /// `submit_result`, whether it may ask) be equipped without this file
     /// knowing steps exist.
     pub(super) equipment: Capabilities,
-    pub(super) kind: SessionAgentKind,
+    /// What this agent is, for the decisions that are not identity.
+    pub(super) role: crate::sessions::runners::loading::AgentRole,
+    /// Who it is.
+    pub(super) agent: crate::sessions::runners::ids::AgentId,
     /// The plugin-declared agent type this agent runs as, for a subagent that
     /// was spawned with one. The *name* only — the definition is resolved from
     /// the library scan on every `provide()`, so a subagent that outlives its
@@ -362,7 +368,7 @@ impl SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
-        Ok(scoped_client(&self.kind, client))
+        Ok(scoped_client(self.agent, self.role, client))
     }
 
     /// Expand `/name` or `@name`, if this prompt is one.
@@ -563,12 +569,14 @@ impl ContextProvider for SessionContextProvider {
             // `SessionStart`, because this call was not gated on the kind at
             // all — a subagent is not a session, and the two events carry
             // different matcher domains.
-            let event = match self.kind {
-                SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStart(SubagentStartInput {
-                    agent_id: id.to_string(),
-                    agent_type: self.agent_type(),
-                }),
-                SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
+            let event = match self.role {
+                crate::sessions::runners::loading::AgentRole::Sub => {
+                    ServerHookEvent::SubagentStart(SubagentStartInput {
+                        agent_id: self.agent.to_string(),
+                        agent_type: self.agent_type(),
+                    })
+                }
+                _ => {
                     ServerHookEvent::SessionStart(SessionStartInput { source })
                 }
             };

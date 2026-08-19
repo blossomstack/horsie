@@ -19,6 +19,7 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::RunnerId;
@@ -51,7 +52,7 @@ pub(super) struct SessionParent {
 
 impl SessionParent {
     pub(super) fn new(target: SessionRef, agent: AgentId) -> Self {
-        Self { target, key }
+        Self { target, agent }
     }
 
     /// Create a child runner by the command the session already has for it.
@@ -81,7 +82,7 @@ impl SessionParent {
                 label,
                 task,
                 agent_type,
-                ..
+                settings,
             } => match self
                 .target
                 .ask(|reply| {
@@ -93,7 +94,7 @@ impl SessionParent {
                             label,
                             task,
                             agent_type,
-                            settings: Box::new(settings),
+                            settings,
                         }),
                         parent: self.agent,
                         reply,
@@ -194,7 +195,7 @@ pub(crate) struct SessionHookSink {
 
 impl SessionHookSink {
     pub(crate) fn new(target: SessionRef, agent: AgentId) -> Self {
-        Self { target, key }
+        Self { target, agent }
     }
 }
 
@@ -216,7 +217,7 @@ impl horsie_runtime_host::HookSink for SessionHookSink {
         let _ = self
             .target
             .tell(SessionCommand::Hooks(HookCommand::Ran {
-                key: self.key,
+                key: self.agent,
                 records: hooks,
             }))
             .await;
@@ -226,7 +227,7 @@ impl horsie_runtime_host::HookSink for SessionHookSink {
             let _ = self
                 .target
                 .tell(SessionCommand::Hooks(HookCommand::Halt {
-                    key: self.key,
+                    key: self.agent,
                     reason,
                 }))
                 .await;
@@ -358,7 +359,7 @@ impl AgentOutcomeSink for StopHookParent {
                 let _ = self
                     .session
                     .tell(SessionCommand::Hooks(HookCommand::ContinueAfterStop {
-                        key: self.key,
+                        key: self.agent,
                         reason,
                     }))
                     .await;
@@ -370,7 +371,7 @@ impl AgentOutcomeSink for StopHookParent {
                 let _ = self
                     .session
                     .tell(SessionCommand::Hooks(HookCommand::Ran {
-                        key: self.key,
+                        key: self.agent,
                         records: cap_reached(records),
                     }))
                     .await;

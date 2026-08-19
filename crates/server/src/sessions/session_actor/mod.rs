@@ -27,6 +27,7 @@
 //! same lookup answers what used to need three registries probed in a
 //! load-bearing order.
 
+use crate::sessions::UserMessageError;
 use crate::sessions::runners::action::Action;
 use crate::sessions::runners::ids::{AgentId, RunnerId};
 use crate::sessions::runners::loading::AgentRole;
@@ -447,7 +448,8 @@ impl SessionActor {
         let provider = Arc::new(SessionContextProvider {
             loading,
             equipment: plan.equipment,
-            kind: plan.kind,
+            role: plan.role,
+            agent: plan.agent,
             agent_type: plan.agent_type,
             plugins: self.spec().plugins.clone(),
             settings: plan.settings.clone(),
@@ -1521,7 +1523,7 @@ impl EventSourcedActor for SessionActor {
     /// everything else may take it for granted.
     async fn on_recovery_complete(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         ctx: &mut ActorContext<SessionInbox>,
     ) {
         self.services = resolve(&self.users, &self.account).await;
