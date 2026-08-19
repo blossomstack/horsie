@@ -762,6 +762,63 @@ mod actor_tests {
     use crate::sessions::runners::{Runner, RunnerState};
     use crate::sessions::session_actor::testing::{spawn_sub, stop_harness_with_journal};
 
+    /// A finished worker's report is offered to its asker exactly once.
+    ///
+    /// The offer wakes the parent, so an un-recorded hand-over is not merely
+    /// noisy: `owed` re-offers every terminal child at every boundary, and a
+    /// conversation that has gone cold would be rehydrated for ever on behalf
+    /// of a worker that finished days ago. The acknowledgement that stops it is
+    /// this runner's own, journaled after the offer — a crash in that window
+    /// replays as a report still owed, which the asking agent recognises as a
+    /// repeat.
+    #[tokio::test]
+    async fn a_finished_workers_report_is_handed_over_once() {
+        let (_f, session, id, journal) = stop_harness_with_journal(vec![]).await;
+        let worker = spawn_sub(&session, "research", "dig into it").await;
+        // Several boundaries after the worker ended, so a hand-over that was
+        // not recorded would show up more than once.
+        for _ in 0..3 {
+            crate::sessions::session_actor::testing::send(&session, "and again").await;
+        }
+        crate::sessions::session_actor::testing::wait_for_events(
+            &journal,
+            id,
+            "the worker's report handed over",
+            |events| events.iter().filter(|e| is_reported(e)).count() == 1,
+        )
+        .await;
+        let events = crate::sessions::events::session_events(&journal, id).await;
+        assert_eq!(
+            events.iter().filter(|e| is_reported(e)).count(),
+            1,
+            "one hand-over for one worker, whatever else the session did"
+        );
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let runner = state
+            .runner_of(crate::sessions::runners::ids::AgentId(worker))
+            .expect("the worker's runner");
+        assert!(
+            state
+                .record(runner)
+                .and_then(|r| Runner::outcome(&r.state))
+                .is_none(),
+            "a handed-over outcome is no longer owed"
+        );
+    }
+
+    /// Whether this is the worker runner saying its report has been handed
+    /// over.
+    fn is_reported(event: &crate::sessions::runners::state::SessionEvent) -> bool {
+        matches!(
+            event,
+            crate::sessions::runners::state::SessionEvent::Runner { event, .. }
+                if matches!(
+                    event.as_ref(),
+                    crate::sessions::runners::RunnerEvent::SubAgent(super::Event::Reported)
+                )
+        )
+    }
+
     /// A worker is equipped one level below the agent that asked for it.
     ///
     /// The depth gate is answered from this number without asking anyone, so a

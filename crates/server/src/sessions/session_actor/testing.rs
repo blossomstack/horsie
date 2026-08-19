@@ -648,7 +648,7 @@ pub(super) async fn spawn_unprovisioned(
 /// Asserting on the *events* rather than the fold is what makes a transition
 /// observable: a turn that begins and ends between two polls leaves the status
 /// exactly where it started, and only the journal remembers it happened.
-pub(super) async fn wait_for_events(
+pub(crate) async fn wait_for_events(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     what: &str,
@@ -1186,7 +1186,7 @@ pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
     last
 }
 
-pub(super) async fn send(session: &SessionRef, text: &str) {
+pub(crate) async fn send(session: &SessionRef, text: &str) {
     session
         .ask(|reply| SessionCommand::UserMessage {
             agent_id: None,

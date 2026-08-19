@@ -1076,6 +1076,31 @@ impl SessionActor {
             .collect()
     }
 
+    /// Every runner that has reached a terminal status and has not been
+    /// recorded as reaching one.
+    ///
+    /// Derived from the runner's own slice rather than written twice: the
+    /// previous shape kept a fork's roster entry and the session's status as
+    /// separate variables, and they disagreed. `Runner::finished` is the single
+    /// answer and this is its only caller — without it no runner was ever
+    /// terminal, so `owed` found nothing and **no worker's report and no run's
+    /// output ever reached the agent that asked for it**.
+    fn endings(&self, state: &RunnerSessionState) -> Vec<SessionEvent> {
+        let at_ms = now_ms();
+        state
+            .runners
+            .iter()
+            .filter(|(_, rec)| !rec.status.is_terminal())
+            .filter_map(|(id, rec)| {
+                Runner::finished(&rec.state).map(|status| SessionEvent::RunnerEnded {
+                    id: *id,
+                    status,
+                    at_ms,
+                })
+            })
+            .collect()
+    }
+
     /// Every finished child whose creator has not been told yet.
     ///
     /// The scan the two-batch delivery rests on: a runner that is terminal and
@@ -1132,6 +1157,12 @@ impl SessionActor {
     ) -> Vec<SessionEvent> {
         let mut events = Vec::new();
         let mut next = state.clone();
+        // Endings first: a runner that has reached one is what makes it a
+        // candidate to report, and nothing else journals them.
+        for e in self.endings(&next) {
+            next.apply(&e);
+            events.push(e);
+        }
         for (child, parent, outcome) in self.owed(&next) {
             let produced = self
                 .offer_to_parent(child, parent, &outcome, &next, ctx)
