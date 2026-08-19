@@ -46,11 +46,11 @@ pub(super) struct SessionParent {
     /// Which agent reports through this sink. Only requests need it — a
     /// subagent's parent has to be named, and the caller is the one thing a
     /// capability cannot say about itself.
-    key: AgentKey,
+    agent: AgentId,
 }
 
 impl SessionParent {
-    pub(super) fn new(target: SessionRef, key: AgentKey) -> Self {
+    pub(super) fn new(target: SessionRef, agent: AgentId) -> Self {
         Self { target, key }
     }
 
@@ -75,13 +75,6 @@ impl SessionParent {
             call: call.clone(),
             reason,
         };
-        let caller = match self.key {
-            AgentKey::Main => SubAgentParent::Main,
-            AgentKey::Sub(id) => SubAgentParent::SubAgent(id),
-            // A step and a fork each root a subagent tree of their own, so a
-            // spawn from one is that tree's `Main`.
-            AgentKey::Step(_) | AgentKey::Fork(_) => SubAgentParent::Main,
-        };
         match args {
             RunnerArgs::SubAgent {
                 agent,
@@ -92,14 +85,19 @@ impl SessionParent {
             } => match self
                 .target
                 .ask(|reply| {
-                    SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                        caller,
-                        agent,
-                        label,
-                        task,
-                        agent_type,
+                    SessionCommand::StartRunner {
+                        id,
+                        kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                        args: Box::new(RunnerArgs::SubAgent {
+                            agent,
+                            label,
+                            task,
+                            agent_type,
+                            settings: Box::new(settings),
+                        }),
+                        parent: self.agent,
                         reply,
-                    })
+                    }
                 })
                 .await
             {
@@ -147,27 +145,19 @@ impl AgentOutcomeSink for SessionParent {
         }
         match request {
             SessionRequest::SetTitle { title, .. } => {
-                // Which title depends on who asked, and the request cannot
-                // say: a fork naming itself and a conversation naming the
-                // session are the same tool call. `key` is the only thing that
-                // knows, which is why this sink carries it. Routing both to
-                // `Core` would let a fork rename the whole session.
+                // Which conversation gets renamed is decided by the session,
+                // from the runner this agent belongs to — a fork names itself,
+                // the root names the session. One command, and the caller's id
+                // is the whole of what it needs to say: routing here would put
+                // the answer in a sink that cannot see the tree.
                 match self
                     .target
-                    .ask(|reply| match self.key {
-                        AgentKey::Fork(id) => SessionCommand::Fork(super::ForkCommand::SetTitle {
-                            id,
-                            agent: crate::sessions::runners::ids::AgentId::default(),
+                    .ask(|reply| {
+                        SessionCommand::Core(super::CoreCommand::SetTitle {
+                            agent: self.agent,
                             title: title.clone(),
                             reply,
-                        }),
-                        AgentKey::Main | AgentKey::Sub(_) | AgentKey::Step(_) => {
-                            SessionCommand::Core(super::CoreCommand::SetTitle {
-                                agent: crate::sessions::runners::ids::AgentId::default(),
-                                title: title.clone(),
-                                reply,
-                            })
-                        }
+                        })
                     })
                     .await
                 {
@@ -199,11 +189,11 @@ pub(crate) struct SessionHookSink {
     /// Which agent's transcript these records belong in. A subagent's hooks are
     /// its own; without this they would all pile into one log with no way to
     /// tell whose call they guarded.
-    key: AgentKey,
+    agent: AgentId,
 }
 
 impl SessionHookSink {
-    pub(crate) fn new(target: SessionRef, key: AgentKey) -> Self {
+    pub(crate) fn new(target: SessionRef, agent: AgentId) -> Self {
         Self { target, key }
     }
 }
@@ -261,7 +251,7 @@ pub(super) const MAX_STOP_CONTINUATIONS: usize = 3;
 pub(super) struct StopHookParent {
     inner: Arc<dyn AgentOutcomeSink>,
     session: SessionRef,
-    key: AgentKey,
+    agent: AgentId,
     /// The provider whose `provide()` cached this agent's client. `Stop` never
     /// acquires a runtime of its own: a turn that already concluded must not be
     /// able to fail on provisioning, and there is nothing to guard if no runtime
@@ -278,13 +268,13 @@ impl StopHookParent {
     /// wrapped so this agent's `Stop` hooks run first.
     pub(super) fn wrap(
         session: SessionRef,
-        key: AgentKey,
+        agent: AgentId,
         provider: Arc<SessionContextProvider>,
     ) -> Arc<dyn AgentOutcomeSink> {
         Arc::new(Self {
             inner: Arc::new(SessionParent::new(session.clone(), key)),
             session,
-            key,
+            agent,
             provider,
             continuations: Arc::new(AtomicUsize::new(0)),
         })

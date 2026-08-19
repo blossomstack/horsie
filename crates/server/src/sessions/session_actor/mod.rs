@@ -1028,6 +1028,232 @@ impl SessionActor {
     /// agent sent it. Answering the two non-ending reports first is what lets
     /// each of those three read the outcome as a turn that ended, rather than
     /// re-answering variants that mean the same thing to all of them.
+    /// Put a person's message in an agent's queue.
+    ///
+    /// The session's part is only to resolve the addressee — spawning a cold
+    /// agent if need be — and to title an unnamed session from its first
+    /// message. The message itself never touches session state: it is addressed
+    /// to an agent, and that is where it is stored.
+    ///
+    /// `/fork` is deliberately not intercepted here any more. It is a
+    /// `Command` its agent's `ForkCapability` claims, which is what lets the
+    /// branch point be the *asking agent's* log sequence — a fact this actor
+    /// cannot see.
+    async fn on_user_message(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: Option<String>,
+        text: String,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        if let SessionStatus::Unrecoverable { reason } =
+            crate::sessions::runners::reads::session_status(state)
+        {
+            let _ = reply.send(Err(UserMessageError::Unrecoverable(reason)));
+            return CommandEffect::none();
+        }
+        let Some(agent_id) = crate::sessions::runners::reads::resolve(state, agent_id.as_deref())
+        else {
+            // A run has no root conversation, so an unaddressed message there
+            // reaches nobody. Naming a step is fine — that agent exists and can
+            // be spoken to like any other.
+            let _ = reply.send(Err(UserMessageError::NotFound));
+            return CommandEffect::none();
+        };
+        let Some(agent) = self.reach(agent_id, state, ctx) else {
+            let _ = reply.send(Err(UserMessageError::NotFound));
+            return CommandEffect::none();
+        };
+        // An unnamed session is titled from its first message, once. The rule is
+        // `SessionCore`'s — a session's name is its own bookkeeping, not the
+        // turn's — so this only says when to apply it.
+        self.title_from_first_message(&text).await;
+
+        let id = Uuid::new_v4().to_string();
+        // A built-in is resolved here, before anything treats the text as a
+        // prompt: `/compact` asks the server to do something and must never
+        // reach `expand_invocation`, a template, or the model. Consulted ahead
+        // of the plugin catalogue, so an installed bundle cannot take over a
+        // control the product owns.
+        let item = match horsie_support::plugin::commands::parse_invocation(text.trim(), '/')
+            .and_then(|(name, args)| {
+                horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
+            }) {
+            Some((builtin, args)) if builtin.name == "compact" => Incoming::Compact {
+                id: id.clone(),
+                instructions: (!args.trim().is_empty()).then(|| args.trim().to_string()),
+            },
+            // Every other built-in, present and future. Reaching here means the
+            // table names something this match does not handle, which is a bug
+            // rather than a message: sending it on as a prompt would show the
+            // user's `/thing` to the model as if it were prose.
+            Some((builtin, _)) => {
+                tracing::error!(builtin = builtin.name, "unhandled builtin command");
+                Incoming::User {
+                    id: id.clone(),
+                    text: text.clone(),
+                }
+            }
+            None => Incoming::User {
+                id: id.clone(),
+                text: text.clone(),
+            },
+        };
+        let (tx, rx) = oneshot::channel();
+        let accepted = id.clone();
+        tokio::spawn(async move {
+            let answer = match rx.await {
+                Ok(Ok(())) => Ok(MessageAccepted::queued(accepted)),
+                // Never written, so it is not owed an answer, and the caller
+                // must not be told it was accepted.
+                Ok(Err(e)) => Err(UserMessageError::Rejected(format!("persist message: {e}"))),
+                Err(_) => Err(UserMessageError::NotFound),
+            };
+            let _ = reply.send(answer);
+        });
+        if agent
+            .tell(AgentCommand::Enqueue {
+                item,
+                ack: Some(ReplyTo::from_sender(tx)),
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(session = %self.id, "message could not reach the agent");
+        }
+        // A person acting is the boundary that flushes results owed to parents.
+        // Those strand once every child is terminal — no further outcome will
+        // arrive to trigger the flush — so the next thing the user does has to
+        // be what delivers them.
+        //
+        // It is also what re-asks for a sandbox after a failed create: the
+        // runtime runner is `Failed { terminal: false }`, and its `actions()`
+        // asks again. No `Provision` command, and so no second path.
+        self.persist_and_advance(state, Vec::new(), ctx).await
+    }
+
+    /// Cancel one agent's turn in flight.
+    ///
+    /// The gate is what matters: stopping something that was not working is
+    /// nothing, never a failure. A boundary journaled over an agent that had
+    /// already ended rewrites history — it moves an idle conversation backwards,
+    /// or concludes a step the run has already routed past — and a stop is the
+    /// easiest way to arrive twice, because a person can press it while the
+    /// ending is in flight.
+    async fn on_stop(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: &str,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(agent) = crate::sessions::runners::reads::resolve(state, Some(agent_id)) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(runner) = state.runner_of(agent) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            let _ = reply.send(Ok(()));
+            return CommandEffect::none();
+        };
+        self.cancel_agent(agent).await;
+        let _ = reply.send(Ok(()));
+        let emit = lifecycle.on_agent_stopped(agent);
+        let events = self.wrap(runner, emit);
+        self.persist_and_advance(state, events, ctx).await
+    }
+
+    /// Hand a person's answers to the agent that asked.
+    ///
+    /// Routed, never decided: the questions live in the asking agent's own
+    /// journal, and the capability that recorded them is what validates the set.
+    async fn on_answer(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: Option<&str>,
+        answers: Vec<AskAnswer>,
+        reply: ReplyTo<Result<(), AnswerError>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(agent) = crate::sessions::runners::reads::resolve(state, agent_id)
+            .and_then(|id| self.reach(id, state, ctx))
+        else {
+            let _ = reply.send(Err(AnswerError::NothingPending));
+            return CommandEffect::none();
+        };
+        if agent
+            .tell(AgentCommand::Answer { answers, reply })
+            .await
+            .is_err()
+        {
+            tracing::warn!(session = %self.id, "answers could not reach the agent");
+        }
+        CommandEffect::none()
+    }
+
+    /// A person removed a runner. Nothing removes one on its own.
+    async fn on_delete_runner(
+        &mut self,
+        state: &RunnerSessionState,
+        id: RunnerId,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(record) = state.record(id) else {
+            let _ = reply.send(Err(format!("no such runner: {id}")));
+            return CommandEffect::none();
+        };
+        // Its agents go with it, so they are stopped before the record that
+        // named them is gone.
+        for agent in record.state.rows().iter().filter_map(|r| r.id.parse().ok()) {
+            self.cancel_agent(AgentId(agent)).await;
+            if let Some(resident) = self.agents.remove(&AgentId(agent)) {
+                let _ = resident.actor.tell(AgentCommand::Shutdown).await;
+            }
+        }
+        let _ = reply.send(Ok(()));
+        self.persist_and_advance(state, vec![SessionEvent::RunnerDeleted { id }], ctx)
+            .await
+    }
+
+    /// A person asked a workflow step to run again.
+    async fn on_retry_step(
+        &mut self,
+        state: &RunnerSessionState,
+        index: usize,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let root = state.root;
+        let Some(record) = state.record(root) else {
+            let _ = reply.send(Err("this session is not a run".to_string()));
+            return CommandEffect::none();
+        };
+        let crate::sessions::runners::RunnerState::Workflow(run) = &record.state else {
+            let _ = reply.send(Err("this session is not a run".to_string()));
+            return CommandEffect::none();
+        };
+        match run.retry(index) {
+            Ok(emit) => {
+                let _ = reply.send(Ok(()));
+                let events = self.wrap(root, emit);
+                self.persist_and_advance(state, events, ctx).await
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                CommandEffect::none()
+            }
+        }
+    }
+
     /// Hand one agent's ending to the runner that owns it.
     ///
     /// Still routed by *identity* rather than by variant — the same `Concluded`
@@ -1209,21 +1435,76 @@ impl EventSourcedActor for SessionActor {
     /// below is the command it was wrapped around.
     async fn handle_command(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         cmd: SessionInbox,
         ctx: &mut ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd.cmd {
-            SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
-            SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
-            SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
-            SessionCommand::SubAgent(c) => SubAgents::handle(self, state, c, ctx).await,
-            SessionCommand::Fork(c) => ForkedAgents::handle(self, state, c, ctx).await,
+            SessionCommand::StartRunner {
+                id,
+                kind,
+                args,
+                parent,
+                reply,
+            } => {
+                // Deduped on the capability-minted id, atomically with the
+                // persist: a capability re-asking after a crash names the child
+                // it already journaled, and a check at the sink would race.
+                if state.record(id).is_some() {
+                    let _ = reply.send(Ok(()));
+                    return CommandEffect::none();
+                }
+                let events = self.create_child(id, kind, *args, parent, state, ctx).await;
+                let _ = reply.send(match events.is_empty() {
+                    true => Err("the runner could not be created".to_string()),
+                    false => Ok(()),
+                });
+                self.persist_and_advance(state, events, ctx).await
+            }
+            SessionCommand::UserMessage {
+                agent_id,
+                text,
+                reply,
+            } => {
+                self.on_user_message(state, agent_id, text, reply, ctx)
+                    .await
+            }
+            SessionCommand::Stop { agent_id, reply } => {
+                self.on_stop(state, &agent_id, reply, ctx).await
+            }
+            SessionCommand::Answer {
+                agent_id,
+                answers,
+                reply,
+            } => {
+                self.on_answer(state, agent_id.as_deref(), answers, reply, ctx)
+                    .await
+            }
+            SessionCommand::DeleteRunner { id, reply } => {
+                self.on_delete_runner(state, id, reply, ctx).await
+            }
+            SessionCommand::RetryStep { index, reply } => {
+                self.on_retry_step(state, index, reply, ctx).await
+            }
+            SessionCommand::PrepareOffload { reply } => {
+                let busy = self.busy(state);
+                let _ = reply.send(!busy);
+                if !busy {
+                    self.stop_agents().await;
+                }
+                CommandEffect::none()
+            }
+            SessionCommand::Delete { reply } => {
+                self.cancel_in_flight(state).await;
+                self.stop_agents().await;
+                let _ = reply.send(());
+                CommandEffect::none()
+            }
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             SessionCommand::Hooks(c) => HookRouting::handle(self, state, c, ctx).await,
             SessionCommand::Core(c) => SessionCore::handle(self, state, c, ctx).await,
             // The one command routed by identity rather than by variant: which
-            // agent sent the outcome decides which component answers it.
+            // agent sent the outcome decides which runner answers it.
             SessionCommand::AgentOutcome(outcome) => {
                 self.on_agent_outcome(state, outcome, ctx).await
             }

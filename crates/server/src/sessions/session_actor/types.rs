@@ -31,27 +31,80 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Commands accepted by a [`SessionActor`].
+///
+/// Two kinds only: addressed to an agent, or the session's own. There is no
+/// third — the six command groups this replaces were six ways of asking "which
+/// of my four kinds of agent is this", and that question is now one lookup in
+/// `SessionState::agents`.
 #[derive(Serialize, Deserialize)]
 pub enum SessionCommand {
-    /// Getting and releasing this session's sandbox.
-    Lifecycle(LifecycleCommand),
-    /// The conversation: what a person sends and how a turn ends.
-    Turn(TurnCommand),
-    /// The workflow graph, when this session is a run.
-    Run(RunCommand),
-    /// The tree of delegated work.
-    SubAgent(SubAgentCommand),
-    /// Branching a conversation into a second one inside this session.
-    Fork(ForkCommand),
-    /// Questions answered without waking anything.
+    /// A capability asking for a child runner.
+    ///
+    /// The id is the capability's, not the session's, so the event it journaled
+    /// and the command it sent name the same child — which is what lets the
+    /// session dedupe a re-ask after a crash rather than spawning twice.
+    StartRunner {
+        id: crate::sessions::runners::ids::RunnerId,
+        kind: crate::sessions::runners::ids::RunnerKind,
+        args: Box<crate::sessions::runners::action::RunnerArgs>,
+        /// The agent that asked. The session resolves its runner; the caller
+        /// cannot see the tree and must not guess at it.
+        parent: AgentId,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// A message for one of this session's agents. Always accepted: the agent
+    /// queues it durably and answers it at its next turn, so there is no
+    /// rejection path and no `409`.
+    UserMessage {
+        agent_id: Option<String>,
+        text: String,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+    },
+    /// Cancel one agent's turn in flight. Queued messages are *not* discarded —
+    /// stop means "not this turn", not "throw away what I asked for".
+    ///
+    /// An agent that is simply not working is `Ok`: nothing to stop is not a
+    /// failure, and a client racing a turn's own end would otherwise see an
+    /// error for winning the race.
+    Stop {
+        agent_id: String,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// Answer every question one agent is parked on, at once. Routed, not
+    /// decided: the agent owns what it asked and validates the set.
+    Answer {
+        agent_id: Option<String>,
+        answers: Vec<AskAnswer>,
+        reply: ReplyTo<Result<(), AnswerError>>,
+    },
+    /// A person removed a runner — a fork, today. Nothing removes one on its
+    /// own.
+    DeleteRunner {
+        id: crate::sessions::runners::ids::RunnerId,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// A person asked a workflow step to run again.
+    ///
+    /// Not part of the agent lifecycle: a retry comes from a person, not from
+    /// an agent, which is why it is the session's command and not an outcome.
+    RetryStep {
+        index: usize,
+        reply: ReplyTo<Result<(), String>>,
+    },
+    /// The supervisor wants to unload this session. Answers `false` if work
+    /// started in the meantime, in which case the idle clock simply restarts.
+    PrepareOffload { reply: ReplyTo<bool> },
+    /// Delete: cancel, tell the vendor, and stop.
+    Delete { reply: ReplyTo<()> },
+    /// Questions answered from the resident actor's memory.
     Read(ReadCommand),
     /// What plugin hooks did, routed to the agent it happened to.
     Hooks(HookCommand),
-    /// The session's own bookkeeping: its title, and preparation progress.
+    /// The session's own bookkeeping: its title, its spec, its boundary.
     Core(CoreCommand),
     /// Internal: an agent reported its terminal outcome. Top-level because it is
-    /// the one command routed by *identity* rather than by variant — which agent
-    /// sent it decides which component answers.
+    /// the one command routed by *identity* — which agent sent it decides which
+    /// runner answers.
     AgentOutcome(AgentOutcome),
 }
 
