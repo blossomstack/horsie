@@ -19,15 +19,15 @@ mod context;
 mod hook_translation;
 mod inbox;
 mod mcp_toolbox;
+mod repair;
+mod retries;
+mod state;
 mod task_list;
 mod timers;
+mod toolbox;
 mod workspace;
 
-pub use agent_actor::{
-    AgentActor, AgentCommand, AgentDomainEvent, AgentObserver, AgentParams, AgentState,
-    AgentStateView, AgentUsageSnapshot, ReadOutcome, ReplayWindow, UsageTotal, hook_entry,
-    hook_entry_id,
-};
+pub use agent_actor::{AgentActor, AgentCommand, AgentObserver, AgentParams};
 pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};
 pub use context::compaction_window;
 pub use context::{
@@ -42,6 +42,10 @@ pub use inbox::{
 };
 pub use mcp_toolbox::{
     CompositeToolbox, McpToolbox, McpToolboxes, McpUnavailable, PluginMcpToolbox,
+};
+pub use state::{
+    AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome, ReplayWindow,
+    UsageTotal, hook_entry, hook_entry_id,
 };
 pub use task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, TaskStatus, task_list_tool_spec,

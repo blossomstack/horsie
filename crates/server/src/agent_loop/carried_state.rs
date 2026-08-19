@@ -19,7 +19,7 @@
 //! and an agent that is unsure can run `pwd` — where a lost task list is
 //! neither.
 
-use super::agent_actor::AgentState;
+use super::state::AgentState;
 use horsie_agentcore::{AgentLogBody, LifecycleEvent};
 use std::collections::BTreeMap;
 

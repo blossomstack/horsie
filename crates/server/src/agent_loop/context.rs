@@ -1,5 +1,5 @@
-use crate::agent_loop::agent_actor::UsageTotal;
 use crate::agent_loop::mcp_toolbox::CompositeToolbox;
+use crate::agent_loop::state::UsageTotal;
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, ToolCallError, ToolOutcome, ToolSpec, Toolbox, ToolboxImpl};
 use horsie_runtime_host::{RuntimeClient, add_runtime_tools};
