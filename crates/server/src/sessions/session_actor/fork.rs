@@ -555,7 +555,7 @@ impl SessionActor {
     /// Best effort: a fork that is not resident has nothing to stop, and the
     /// `ForkDeleted` that follows is what makes the removal durable either way.
     pub(super) async fn retire_fork_actor(&mut self, id: Uuid) {
-        let Some(agent) = self.agents.as_mut().and_then(|a| a.remove_sub(id)) else {
+        let Some(agent) = self.agents.as_mut().and_then(|a| a.remove(id)) else {
             return;
         };
         agent.actor.stop().await;

@@ -239,9 +239,9 @@ impl SessionActor {
     /// Three pieces of state nothing above this actor holds together.
     ///
     /// A run has no main agent — it *is* its steps, and the definition rather
-    /// than a person decides which one runs. The same fact
-    /// [`SessionAgents::Workflow`](super::SessionAgents) records about the live
-    /// actors, asked of the durable state instead.
+    /// than a person decides which one runs. The roster of live actors never
+    /// registers an entry under the session id for a run; here the same fact
+    /// is asked of the durable state instead.
     pub(super) fn agent_roster(&self, state: &SessionState) -> Vec<AgentEntry> {
         let mut agents: Vec<AgentEntry> = match self.spec().workflow_run() {
             Some(_) => state
