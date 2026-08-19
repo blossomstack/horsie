@@ -80,6 +80,15 @@ impl State {
     pub fn ready(&self) -> bool {
         self.phase == Phase::Ready
     }
+
+    /// Whether this sandbox has already been recorded as gone for good.
+    ///
+    /// Asked before condemning it, so a second turn failing the same way
+    /// journals nothing: the phase is already what that event would set.
+    #[must_use]
+    pub fn gone(&self) -> bool {
+        self.phase == Phase::Failed { terminal: true }
+    }
 }
 
 impl Runner for State {
@@ -346,5 +355,65 @@ mod tests {
         assert_eq!(back.phase, Phase::Ready);
         assert_eq!(back.provisioned_at_ms, Some(9));
         assert_eq!(back.detail.as_deref(), Some("warm"));
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod actor_tests {
+    use crate::sessions::session_actor::testing::{
+        EchoProvider, actor_fixture_from, actor_spec_fixture, send, wait_for_state,
+    };
+    use crate::sessions::spec::SessionStatus;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// **A vendor that says the runtime is gone ends the session.**
+    ///
+    /// The classification is made where the failure is — `RuntimeError::Gone`
+    /// becomes a terminal `ContextError` — and travels intact as far as the
+    /// turn that failed. But the runner that owns the agent deliberately keeps
+    /// no opinion about whether a sandbox can come back, so it dropped the flag
+    /// and the session read `Failed` for ever: retryable, and retried.
+    ///
+    /// Its twin — an unreachable vendor failing one turn and staying retryable
+    /// — is `an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next`,
+    /// over the wire, because taking a socket away needs a real one.
+    #[tokio::test]
+    async fn a_gone_runtime_ends_the_session() {
+        // The create succeeds and every acquisition afterwards is refused,
+        // which is what a vendor whose machine has been destroyed does.
+        let f = actor_fixture_from(
+            crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock").gone_on_get(true),
+        )
+        .await;
+        let id = Uuid::new_v4();
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .await
+            .expect("create");
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn horsie_agentcore::LlmProvider>
+            ),
+        );
+        let journal = f.journal();
+        let session = f.start(id, actor_spec_fixture()).await;
+
+        send(&session, "go").await;
+        wait_for_state(&journal, id, "the session to become unrecoverable", |s| {
+            matches!(
+                crate::sessions::runners::reads::session_status(s),
+                SessionStatus::Unrecoverable { .. }
+            )
+        })
+        .await;
     }
 }

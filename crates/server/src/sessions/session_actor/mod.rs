@@ -1729,8 +1729,53 @@ impl SessionActor {
         let Some(lifecycle) = record.state.lifecycle() else {
             return CommandEffect::none();
         };
-        let events = self.wrap(runner, lifecycle.on_agent_ended(who, &end).events);
+        let mut events = self.wrap(runner, lifecycle.on_agent_ended(who, &end).events);
+        events.extend(self.sandbox_gone(state, &end));
         self.persist_and_advance(state, events, ctx).await
+    }
+
+    /// The runtime runner hearing that its sandbox will never come back.
+    ///
+    /// A turn that failed *terminally* is not the news of the agent that ran
+    /// it. `terminal` is set in exactly one place — the acquisition that turned
+    /// `RuntimeError::Gone` into a terminal `ContextError` — and it means a live
+    /// vendor refused to produce the runtime, never that the vendor could not be
+    /// reached. So the flag belongs to the runner that owns the sandbox, and
+    /// every `AgentLifecycle` impl drops it on purpose: whether a sandbox can
+    /// come back is not a conversation's fact to hold. Nothing was telling the
+    /// runtime runner, so the phase stayed `Ready`, the session read `Failed`
+    /// rather than `Unrecoverable`, and the next message started another turn
+    /// against a machine that no longer exists.
+    ///
+    /// An unreachable vendor arrives here as `terminal: false` and is left
+    /// alone, which is the whole of the distinction: it fails one turn and the
+    /// next one may well work.
+    fn sandbox_gone(
+        &self,
+        state: &RunnerSessionState,
+        end: &crate::sessions::runners::TurnEnd,
+    ) -> Vec<SessionEvent> {
+        let crate::sessions::runners::TurnEnd::Failed {
+            error,
+            terminal: true,
+        } = end
+        else {
+            return Vec::new();
+        };
+        // Said once. A second failing turn — one already in flight when the
+        // first landed — would otherwise journal the same ending again.
+        let Some((runner, _)) = state.runtime().filter(|(_, sandbox)| !sandbox.gone()) else {
+            return Vec::new();
+        };
+        self.wrap(
+            runner,
+            vec![RunnerEvent::Runtime(
+                crate::sessions::runners::runtime::Event::Failed {
+                    error: error.clone(),
+                    terminal: true,
+                },
+            )],
+        )
     }
 
     /// One of this session's agents drained its queue into a turn.

@@ -144,7 +144,7 @@ pub(crate) async fn actor_fixture_blocking_creates() -> ActorFixture {
     .await
 }
 
-pub(super) async fn actor_fixture_from(
+pub(crate) async fn actor_fixture_from(
     builder: crate::runtime_vendor::fake::FakeRuntimeVendorBuilder,
 ) -> ActorFixture {
     let agent = builder.serve_in_process().await.expect("fake agent");

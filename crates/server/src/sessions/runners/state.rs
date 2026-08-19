@@ -150,9 +150,26 @@ impl SessionState {
     /// it would be starting work with nowhere to run it.
     #[must_use]
     pub fn runtime_ready(&self) -> bool {
+        self.runtime().is_some_and(|(_, sandbox)| sandbox.ready())
+    }
+
+    /// The runner that owns the sandbox, and its slice.
+    ///
+    /// One is still the rule, so the first is the answer. The slice comes back
+    /// with the id because both callers want it: the readiness gate above, and
+    /// the session telling this runner that its sandbox is gone for good —
+    /// which has to know what it already recorded, or a second failing turn
+    /// journals the same ending again.
+    #[must_use]
+    pub fn runtime(&self) -> Option<(RunnerId, &super::runtime::State)> {
         self.runners
-            .values()
-            .any(|r| matches!(&r.state, RunnerState::Runtime(rt) if rt.ready()))
+            .iter()
+            .find_map(|(id, record)| match &record.state {
+                RunnerState::Runtime(sandbox) => Some((*id, sandbox)),
+                RunnerState::Conversation(_)
+                | RunnerState::SubAgent(_)
+                | RunnerState::Workflow(_) => None,
+            })
     }
 
     /// How many of this session's runners have an agent working right now.
