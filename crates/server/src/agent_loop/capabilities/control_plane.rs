@@ -13,8 +13,8 @@
 //! A control-plane call reaches the server's own tables and comes straight back
 //! with a value, so it wants none of what this actor's mailbox is for: no park,
 //! no journal entry, no request to the session. The whole capability is
-//! therefore the layer [`super::Capability::setup`] pushes, which runs on the agent's
-//! own task — [`super::Capability::layer`] claims nothing and so does
+//! therefore the layer [`super::Capability::setup`] pushes, which runs on the
+//! agent's own task — [`super::Capability::claims`] claims nothing and so does
 //! [`super::Capability::handle`].
 //!
 //! That is the one difference from its session-side twin, which had to claim
@@ -148,8 +148,8 @@ mod tests {
         assert!(spec.toolbox().is_none());
     }
 
-    /// The whole capability is its layer: it advertises nothing through the
-    /// mailbox. A `horsie_*` name claimed here would reach the actor as a
+    /// The whole capability is the toolbox layer it pushes in `setup`: it
+    /// claims nothing, so it advertises nothing through the mailbox. A `horsie_*` name claimed here would reach the actor as a
     /// command, and this capability has none — the model would be left waiting
     /// on a tool call that never returns.
     #[test]

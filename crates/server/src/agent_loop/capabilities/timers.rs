@@ -32,19 +32,15 @@
 //! mints a uuid: `fire_at_unix_ms` is computed here, in the decision, and
 //! travels on the event.
 
-use super::Mailbox;
 use crate::agent_loop::timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, cancel_timer_spec, list_timers_spec,
     set_timer_spec,
 };
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
+use crate::agent_loop::toolbox::ClaimedTool;
 use crate::agent_loop::{AgentCommand, Incoming};
-use crate::sessions::runners::loading::AgentFacts;
-use horsie_agentcore::Toolbox;
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::sync::Arc;
 use std::time::Duration;
 
 /// What [`TimerState::carried_state`] writes above the armed timers it lists.
@@ -358,7 +354,7 @@ impl TimersCapability {
     }
 
     /// The three tools, each paired with the command a call to it becomes.
-    fn claims(&self) -> Vec<ClaimedTool> {
+    pub(crate) fn claims(&self) -> Vec<ClaimedTool> {
         vec![
             ClaimedTool::new(set_timer_spec(), |input, to| AgentCommand::TimerArm {
                 input,
@@ -382,15 +378,6 @@ impl TimersCapability {
 impl TimersCapability {
     pub fn name(&self) -> &'static str {
         "timers"
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        _facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(), mailbox)
     }
 }
 

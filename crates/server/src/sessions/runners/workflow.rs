@@ -416,13 +416,8 @@ impl State {
         // 2 not. Neither carries state between steps — a submitted result is
         // this runner's own `StepConcluded` to fold.
         //
-        // Both go to the front, because both answer for a fixed tool name and
-        // the list ends with the capability that claims everything offered to
-        // it. Same rule read from both ends: appended, `submit_result` would
-        // never be reached, and its layer would be built inside the sandbox
-        // base — which wraps nothing — and dropped on the floor.
         let mut equipment = self.capabilities.clone();
-        equipment.push_front(Capability::StepResult(StepResultCapability::new(
+        equipment.push(Capability::StepResult(StepResultCapability::new(
             step.outcomes.clone(),
             step.fields.clone(),
             step.interactive,
@@ -430,7 +425,7 @@ impl State {
         // Equipped either way, and the flag is the whole difference: a step
         // that may not ask still needs somebody to answer for `ask_user`, or
         // the call falls through to the sandbox and the model is never told no.
-        equipment.push_front(Capability::AskUser(match step.interactive {
+        equipment.push(Capability::AskUser(match step.interactive {
             true => AskUserCapability::new(),
             false => AskUserCapability::not_interactive(),
         }));
@@ -1554,13 +1549,13 @@ mod tests {
         }
     }
 
-    /// A step's own capabilities are spliced in *ahead* of the runtime's, and
-    /// both orders say why: the runtime claims every tool name, so
-    /// `submit_result` behind it is never offered — and the runtime's layer is
-    /// the sandbox base, which wraps nothing, so a layer behind it is built and
-    /// dropped. Appended, an interactive step would silently have neither tool.
+    /// A step's own capabilities are spliced into the copy the step agent is
+    /// equipped from. Where they land no longer decides anything — a name
+    /// belongs to one capability and the sandbox is underneath all of them —
+    /// but forgetting them entirely would leave an interactive step with
+    /// neither tool and nothing saying so.
     #[test]
-    fn a_steps_own_capabilities_sort_ahead_of_the_runtime() {
+    fn a_step_is_equipped_with_its_own_result_and_ask_tools() {
         let s = settings();
         let mut graph = graph();
         graph.steps[0].interactive = true;
@@ -1581,12 +1576,10 @@ mod tests {
             panic!("expected a start, got {:?}", actions[0]);
         };
         let names: Vec<&str> = equipment.iter().map(|c| c.name()).collect();
-        assert_eq!(
-            names.last(),
-            Some(&"runtime"),
-            "a step's tools ended up behind the open-namespace capability: {names:?}"
+        assert!(
+            names.contains(&"step_result"),
+            "a step cannot submit its result: {names:?}"
         );
-        assert!(names.contains(&"step_result"));
         assert!(
             names.contains(&"ask_user"),
             "an interactive step cannot ask: {names:?}"

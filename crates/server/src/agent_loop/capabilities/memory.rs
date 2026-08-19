@@ -16,7 +16,7 @@
 //! layer this pushes in [`super::Capability::setup`] answers those calls on the
 //! agent's task, and routing them to this mailbox would only stop a tool that
 //! already works. So [`super::Capability::handle`] returns `None` and
-//! [`super::Capability::layer`] claims nothing, and [`crate::memory::MemoryToolbox`]
+//! [`super::Capability::claims`] is empty, and [`crate::memory::MemoryToolbox`]
 //! goes on advertising the five itself.
 //!
 //! [`TOOLS`] survives the move anyway, because it is what the tests check the

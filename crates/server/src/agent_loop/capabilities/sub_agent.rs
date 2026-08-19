@@ -54,15 +54,15 @@
 //!
 //! A refusal made here is [`Spawned::Told`] and journals nothing — the model is
 //! told no, and no trace of a child that never existed reaches the log. It is
-//! still *answered*: the layer that advertised `spawn_agent` is what turns a
+//! still *answered*: the claim that advertised `spawn_agent` is what turns a
 //! call into this capability's command, so every call to that name arrives
 //! here, including the ones over budget. If this file did not answer them the
-//! name would have to be left to the layers beneath, the last of which is the
-//! open-namespace sandbox that answers to every name — so the model would be
-//! answered by the sandbox and never learn it had hit a budget.
+//! name would fall through to the sandbox, which answers for a namespace nobody
+//! can enumerate — so the model would be answered by the sandbox and never
+//! learn it had hit a budget.
 
-use super::{Mailbox, SessionReply, SessionRequest};
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
+use super::{SessionReply, SessionRequest};
+use crate::agent_loop::toolbox::ClaimedTool;
 use crate::agent_loop::{AgentCatalog, AgentCommand, Incoming};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
@@ -70,7 +70,7 @@ use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::{ChildMsg, ChildOutcome, SubAgentOutcome};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::subagents::MAX_SUBAGENT_DEPTH;
-use horsie_agentcore::{ToolSpec, Toolbox};
+use horsie_agentcore::ToolSpec;
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -538,8 +538,8 @@ fn failed_part(child: RunnerId, label: String, error: String) -> SubAgentResultP
 }
 
 impl SubAgentCapability {
-    /// Both tools, claimed by this capability's own layer rather than pushed as
-    /// a layer in `setup`.
+    /// Both tools, claimed here rather than pushed as a toolbox layer in
+    /// `setup`.
     ///
     /// That is the change the move made: a layer pushed there runs on the
     /// agent's task, where there is no mailbox to journal an intent on and no
@@ -551,12 +551,12 @@ impl SubAgentCapability {
     /// that does not exist and invites a retry loop against a fixed number.
     ///
     /// The facts are what carry the agent catalogue, and this is the only reason
-    /// [`super::Capability::layer`] takes them: the types a session can spawn are found
-    /// by the workspace scan, which runs in a capability that sorts *after* this
-    /// one — so the layers are composed on the run's task, after `provide`, and
-    /// this list is built there. A model not shown it can only guess at a name,
-    /// and every guess is refused.
-    fn claims(&self, facts: &AgentFacts) -> Vec<ClaimedTool> {
+    /// [`super::Capability::claims`] takes them: the types a session can spawn
+    /// are found by the workspace scan, which runs in a capability equipped
+    /// *after* this one — so the toolbox is composed on the run's task, after
+    /// `provide`, and this list is built there. A model not shown it can only
+    /// guess at a name, and every guess is refused.
+    pub(crate) fn claims(&self, facts: &AgentFacts) -> Vec<ClaimedTool> {
         if self.child_settings.max_subagents() == 0 || self.depth >= MAX_SUBAGENT_DEPTH {
             return Vec::new();
         }
@@ -656,15 +656,6 @@ impl SubAgentCapability {
 impl SubAgentCapability {
     pub fn name(&self) -> &'static str {
         "sub_agent"
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(facts), mailbox)
     }
 }
 
@@ -1064,7 +1055,7 @@ mod tests {
     }
 
     /// Arguments this capability cannot read are still *its* call to answer:
-    /// the layer that advertised the name is what routed the call here, and
+    /// the claim that advertised the name is what routed the call here, and
     /// leaving it unanswered would hand the model to the sandbox instead.
     #[test]
     fn a_malformed_spawn_is_refused_in_words_and_journals_nothing() {
@@ -1273,9 +1264,9 @@ mod tests {
         assert!(!render_status(&state).contains(&kid.to_string()));
     }
 
-    /// Both tools, claimed by this capability's own layer — which is what
-    /// routes the call to the mailbox, where the intent can be journaled and the
-    /// call parked.
+    /// Both tools, claimed by this capability itself — which is what routes the
+    /// call to the mailbox, where the intent can be journaled and the call
+    /// parked.
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(

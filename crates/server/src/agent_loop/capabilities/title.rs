@@ -27,16 +27,15 @@
 //! for. [`TitleCapability::fork`] therefore only says *that* this agent is a
 //! fork, which is what the prompt below turns on.
 
-use super::{Mailbox, SessionReply, SessionRequest, SetupError};
+use super::{SessionReply, SessionRequest, SetupError};
 use crate::agent_loop::AgentCommand;
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
+use crate::agent_loop::toolbox::ClaimedTool;
 use crate::sessions::runners::ids::RunnerId;
-use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use horsie_agentcore::{ToolSpec, Toolbox};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
+use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 /// Appended to a fork's system prompt.
 ///
@@ -297,11 +296,11 @@ pub(crate) fn reloaded(state: &TitleState) -> Vec<SessionRequest> {
 }
 
 impl TitleCapability {
-    /// Claimed by this capability's own layer, which dispatches to the mailbox:
-    /// answering the call means asking the session and waiting for a reply, and
-    /// a layer pushed in `setup` runs on the agent's task where there is
-    /// nothing to ask with.
-    fn claims(&self) -> Vec<ClaimedTool> {
+    /// Claimed here, which is what dispatches it to the mailbox: answering the
+    /// call means asking the session and waiting for a reply, and a toolbox
+    /// layer pushed in `setup` runs on the agent's task where there is nothing
+    /// to ask with.
+    pub(crate) fn claims(&self) -> Vec<ClaimedTool> {
         vec![ClaimedTool::new(
             ToolSpec {
                 name: TOOL.to_string(),
@@ -355,15 +354,6 @@ impl TitleCapability {
             ),
         }
         Ok(())
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        _facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(), mailbox)
     }
 }
 
@@ -644,9 +634,9 @@ mod tests {
     /// `set_session_title` whichever kind of conversation it is in, and the
     /// session is what decides which conversation that renames.
     ///
-    /// Through its own layer, which dispatches to the mailbox, rather than a
-    /// layer pushed in `setup`: one of those runs on the agent's task, where
-    /// there is nothing to ask the session with.
+    /// Through its own claim, which dispatches to the mailbox, rather than a
+    /// toolbox layer pushed in `setup`: one of those runs on the agent's task,
+    /// where there is nothing to ask the session with.
     #[tokio::test]
     async fn either_variant_advertises_the_tool_without_equipping_a_layer() {
         for cap in [

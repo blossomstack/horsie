@@ -25,7 +25,7 @@
 //! answered by the toolbox built out of [`AgentSpec::mcp`], which runs on the
 //! agent's task, so routing it to this mailbox would only park a call that has
 //! nothing to journal and nobody to answer it. So [`super::Capability::handle`]
-//! returns `None` and [`super::Capability::layer`] claims nothing, and the tools are
+//! returns `None` and [`super::Capability::claims`] is empty, and the tools are
 //! advertised by the toolbox that will actually run them.
 
 use super::SetupError;

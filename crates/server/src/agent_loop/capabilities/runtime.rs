@@ -3,17 +3,19 @@
 //! The one capability with an open namespace. What tools exist is not knowable
 //! until the turn is prepared — it is whatever the runtime accepts plus
 //! whatever the plugin library scan discovered — so the base toolbox answers
-//! for anything nobody else equipped, and assembly therefore sorts this last.
+//! for anything nobody else equipped.
 //!
-//! Sorting last is also what makes it the *innermost* toolbox: it is the base
-//! every other capability decorates, and the only one that wraps nothing.
+//! It reaches the model as the sandbox every claimed name falls through to,
+//! which is the one fallthrough there is: the agent's own tools, then this.
+//! Where it sits in the enabled list decides nothing, because it claims no name
+//! that could contest one.
 //!
 //! # Setup-only: the sandbox is a `setup` layer, never a claimed name
 //!
 //! This capability advertises no tool and claims no message. The sandbox
 //! reaches the model as a [`AgentSpec::wrap`] layer, which runs on the agent's
-//! own task — and that is the whole reason it is not claimed by
-//! [`super::Capability::layer`]. A name claimed there is
+//! own task — and that is the whole reason it is not named by
+//! [`super::Capability::claims`]. A name claimed there is
 //! dispatched through the actor's mailbox so it can park and journal, which is
 //! right for `ask_user` and wrong twice over here: the sandbox namespace cannot
 //! be enumerated, so there is no list to claim, and round-tripping the

@@ -22,16 +22,15 @@
 //! its result"; nothing here can end a run, so an outcome cannot be acted on
 //! twice by two different owners.
 
-use super::{Mailbox, SetupError};
+use super::SetupError;
 use crate::agent_loop::AgentCommand;
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
-use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
+use crate::agent_loop::toolbox::ClaimedTool;
+use crate::sessions::runners::loading::{AgentSpec, Loading};
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
-use horsie_agentcore::{ToolSpec, Toolbox};
+use horsie_agentcore::ToolSpec;
 use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
 /// and that its result is what decides where the run goes next. Deliberately
@@ -121,7 +120,7 @@ impl StepResultCapability {
     /// its tool and the answer that comes back, and a second advertisement of
     /// the same tool from over here would offer a question nothing could route
     /// the answer to.
-    fn claims(&self) -> Vec<ClaimedTool> {
+    pub(crate) fn claims(&self) -> Vec<ClaimedTool> {
         vec![ClaimedTool::new(
             ToolSpec {
                 name: SUBMIT_RESULT_TOOL.to_string(),
@@ -148,22 +147,13 @@ impl StepResultCapability {
     /// The paragraph that says what a step is, and nothing else.
     ///
     /// The tool itself is claimed by this capability's own
-    /// [`super::Capability::layer`] rather than pushed as a layer here, which is the
-    /// change the move made: a layer pushed here runs on the agent's task,
-    /// where there is no mailbox to journal the submitted output on and nothing
-    /// that could conclude the step.
+    /// [`super::Capability::claims`] rather than pushed as a toolbox layer
+    /// here, which is the change the move made: a layer pushed here runs on the
+    /// agent's task, where there is no mailbox to journal the submitted output
+    /// on and nothing that could conclude the step.
     pub async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         spec.say("step_result", STEP_PROMPT_SUFFIX);
         Ok(())
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        _facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(), mailbox)
     }
 }
 
@@ -322,8 +312,8 @@ mod tests {
     }
 
     /// Setup is left with the paragraph and nothing else: the tool is claimed
-    /// by this capability's own layer, which is what routes the call to this
-    /// actor's mailbox, where the output can be journaled.
+    /// by this capability's own [`Capability::claims`], which is what routes the
+    /// call to this actor's mailbox, where the output can be journaled.
     #[tokio::test]
     async fn the_step_says_what_it_is_and_equips_no_layer() {
         let mut spec = spec();
@@ -383,7 +373,7 @@ mod tests {
     }
 
     /// It claims the one tool it answers for, so a step's result is reached by
-    /// the layer that builds its command rather than by a name matched later.
+    /// the claim that builds its command rather than by a name matched later.
     #[test]
     fn it_advertises_its_own_result_tool() {
         assert_eq!(

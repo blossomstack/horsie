@@ -12,7 +12,6 @@ use crate::agent_loop::state::{
     AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome,
     coarse_appends_an_entry, coarse_event,
 };
-use crate::agent_loop::toolbox::AgentMailbox;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
@@ -1005,24 +1004,51 @@ impl AgentActor {
                     return;
                 }
             };
-            // Each capability wraps the sandbox in its own layer, first one
-            // outermost. That wrapping *is* the routing: the layer that claims a
-            // name says which command a call to it becomes, so a name resolves
-            // to one capability at advertisement and at execution by being
-            // resolved once.
+            // One composition over the sandbox, from the whole enabled list.
+            // Each claim says which command a call to its name becomes, so a
+            // name resolves to one capability at advertisement and at execution
+            // by being resolved once, here.
             //
-            // Layered *here*, after `provide`, because that is the first moment
+            // Composed *here*, after `provide`, because that is the first moment
             // the facts exist: `sub_agent` lists the installed agent types, and
             // the scan that found them is the runtime capability's `setup`,
             // which `provide` has just run. Composed on the mailbox instead, the
             // model would be shown a `spawn_agent` that names no types at all —
-            // and the layer captures what it advertised, so a refusal on the
+            // and the claim captures what it advertised, so a refusal on the
             // mailbox names the same list.
             let facts = contexts.facts;
-            let mailbox: Arc<dyn capabilities::Mailbox> = Arc::new(AgentMailbox {
-                actor: self_ref.clone(),
-            });
-            let toolbox = capabilities.layer(contexts.toolbox, &facts, &mailbox);
+            let composed = crate::agent_loop::toolbox::compose(
+                capabilities.as_slice(),
+                &facts,
+                contexts.toolbox,
+                self_ref.clone(),
+            );
+            let toolbox = match composed {
+                Ok(toolbox) => toolbox,
+                // A bug in assembly, not in anything a person did: two
+                // capabilities claim one name. Reported as an ordinary run
+                // failure rather than left to a panic on this spawned task,
+                // where nobody joins the handle and the turn would simply never
+                // end.
+                Err(conflict) => {
+                    parent
+                        .deliver(AgentOutcome::Failed {
+                            agent,
+                            error: conflict.to_string(),
+                            recoverable: false,
+                            terminal: false,
+                        })
+                        .await;
+                    let _ = self_ref
+                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                            run_id,
+                            outcome: RunOutcome::AlreadyReported,
+                            fork_summary: None,
+                        })))
+                        .await;
+                    return;
+                }
+            };
             let system_prompt = contexts
                 .system_prompt
                 .or(configured_prompt)
@@ -4627,44 +4653,33 @@ mod capability_tests {
         }
     }
 
-    /// One capability's layer over the sandbox, dispatching through a real
-    /// mailbox — the actor behind it fails the test if it is ever reached.
-    fn layer(specs: Vec<ToolSpec>) -> Arc<dyn horsie_agentcore::Toolbox> {
-        let mailbox: Arc<dyn capabilities::Mailbox> = Arc::new(AgentMailbox {
-            actor: crate::testing::spawn_detached(
+    /// The agent's own tools over the sandbox, dispatching to a real actor —
+    /// which fails the test if it is ever reached.
+    fn composed(tools: Vec<&str>) -> Arc<dyn horsie_agentcore::Toolbox> {
+        let caps: Vec<capabilities::Capability> = tools
+            .into_iter()
+            .map(|tool| {
+                capabilities::Capability::Fake(capabilities::testing::FakeCapability::new(tool))
+            })
+            .collect();
+        crate::agent_loop::toolbox::compose(
+            &caps,
+            &crate::sessions::runners::loading::AgentFacts::default(),
+            Arc::new(Sandbox),
+            crate::testing::spawn_detached(
                 &ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 NeverAsked,
             ),
-        });
-        let claims = specs
-            .into_iter()
-            .map(|spec| {
-                let tool = spec.name.clone();
-                crate::agent_loop::toolbox::ClaimedTool::new(spec, move |_input, to| {
-                    AgentCommand::FakeCall {
-                        tool: tool.clone(),
-                        answering: to,
-                    }
-                })
-            })
-            .collect();
-        crate::agent_loop::toolbox::claiming(Arc::new(Sandbox), claims, &mailbox)
+        )
+        .expect("one capability, one name")
     }
 
-    fn spec(name: &str) -> ToolSpec {
-        ToolSpec {
-            name: name.into(),
-            description: String::new(),
-            input_schema: serde_json::json!({"type": "object"}),
-        }
-    }
-
-    /// The layer advertises what the capability answers for *alongside* the
-    /// sandbox's own tools, rather than replacing them — and its own first,
-    /// because it is the outer one and would win a name against them.
+    /// The composed toolbox advertises what the capabilities answer for
+    /// *alongside* the sandbox's own tools, rather than replacing them — and
+    /// the agent's own first, which is the order every model sees.
     #[tokio::test]
-    async fn the_layer_advertises_capabilities_beside_the_sandbox() {
-        let names: Vec<String> = layer(vec![spec("ask_user")])
+    async fn the_agents_own_tools_are_advertised_beside_the_sandbox() {
+        let names: Vec<String> = composed(vec!["ask_user"])
             .specs()
             .into_iter()
             .map(|s| s.name)
@@ -4677,7 +4692,7 @@ mod capability_tests {
     /// the stub actor panics if the round trip happens.
     #[tokio::test]
     async fn an_ordinary_call_never_touches_the_mailbox() {
-        let outcome = layer(vec![spec("ask_user")])
+        let outcome = composed(vec!["ask_user"])
             .execute("bash", Value::Null, "tc1")
             .await
             .expect("the sandbox answers");

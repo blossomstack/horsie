@@ -1330,12 +1330,12 @@ pub(super) fn test_equipment(
         SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
         SessionAgentKind::Step(_) => {
             let mut caps = assemble(RunnerKind::Workflow, &opts);
-            caps.push_front(Capability::StepResult(StepResultCapability::new(
+            caps.push(Capability::StepResult(StepResultCapability::new(
                 Vec::new(),
                 Vec::new(),
                 false,
             )));
-            caps.push_front(Capability::AskUser(AskUserCapability::not_interactive()));
+            caps.push(Capability::AskUser(AskUserCapability::not_interactive()));
             caps
         }
     }

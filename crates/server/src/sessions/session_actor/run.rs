@@ -308,11 +308,7 @@ impl SessionActor {
         // so the workflow runner cannot hold either — the run outlives every
         // step and could only describe one of them. They are equipped when the
         // step agent starts, which is here.
-        //
-        // Front, not back: the list ends with the capability that claims every
-        // call offered to it, so an appended `submit_result` would be swallowed
-        // by the sandbox.
-        equipment.push_front(crate::agent_loop::capabilities::Capability::StepResult(
+        equipment.push(crate::agent_loop::capabilities::Capability::StepResult(
             crate::agent_loop::capabilities::step_result::StepResultCapability::new(
                 step.outcomes.clone(),
                 step.fields.clone(),
@@ -327,7 +323,7 @@ impl SessionActor {
         // not declare itself interactive is not the same fact as nobody being
         // there — usually somebody is — and telling an attended run it was
         // started by a routine is simply false.
-        equipment.push_front(crate::agent_loop::capabilities::Capability::AskUser({
+        equipment.push(crate::agent_loop::capabilities::Capability::AskUser({
             use crate::agent_loop::capabilities::ask_user::AskUserCapability;
             match (step.interactive, unattended) {
                 (true, false) => AskUserCapability::new(),

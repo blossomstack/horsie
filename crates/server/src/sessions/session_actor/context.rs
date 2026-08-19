@@ -733,8 +733,8 @@ mod tests {
 
     /// Every tool this agent will actually be offered.
     ///
-    /// Two halves, because that is how the agent runs: the layers `provide`
-    /// composed — the sandbox, MCP, memory — plus what its capabilities answer
+    /// Two halves, because that is how the agent runs: the sandbox `provide`
+    /// composed — the runtime, MCP, memory — plus what its capabilities answer
     /// for on the mailbox, which the agent actor advertises beside them. A test
     /// reading only the toolbox would pass with `ask_user` missing entirely.
     fn offered(provider: &SessionContextProvider, contexts: &Contexts) -> Vec<String> {
@@ -746,7 +746,7 @@ mod tests {
     }
 
     /// The toolbox this run would hand the model: the sandbox `provide`
-    /// composed, wrapped in each capability's own layer.
+    /// composed, under everything this agent's capabilities claim.
     ///
     /// Built the way the agent actor builds it, so what these tests read is
     /// what the model is shown rather than a second list assembled beside it.

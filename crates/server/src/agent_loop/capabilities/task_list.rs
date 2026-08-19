@@ -26,15 +26,11 @@
 //! same rendering the tool returns — ids and all, because an agent that reads a
 //! paraphrase of its own list cannot call `task_list` against it afterwards.
 
-use super::Mailbox;
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::task_list::{TaskListAction, TaskListState, task_list_tool_spec};
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
-use crate::sessions::runners::loading::AgentFacts;
-use horsie_agentcore::Toolbox;
+use crate::agent_loop::toolbox::ClaimedTool;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
 /// The permission to keep a list, and nothing more.
 ///
@@ -111,7 +107,7 @@ pub(crate) enum Changed {
 }
 
 impl TaskListCapability {
-    fn claims(&self) -> Vec<ClaimedTool> {
+    pub(crate) fn claims(&self) -> Vec<ClaimedTool> {
         vec![ClaimedTool::new(task_list_tool_spec(), |input, to| {
             AgentCommand::TaskListChange {
                 input,
@@ -128,15 +124,6 @@ impl TaskListCapability {
 impl TaskListCapability {
     pub fn name(&self) -> &'static str {
         "task_list"
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        _facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(), mailbox)
     }
 }
 

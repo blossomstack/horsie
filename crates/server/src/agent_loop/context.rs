@@ -166,10 +166,10 @@ pub struct Contexts {
     /// library, the runtime.
     ///
     /// Carried out of `provide` rather than dropped with the spec, because the
-    /// tools a capability advertises are computed from it — and a layer that
+    /// tools a capability advertises are computed from it — and a claim that
     /// advertised a list keeps what it needs of it, so a refusal on the mailbox
     /// names what the model was shown. See
-    /// [`Capability::layer`](crate::agent_loop::capabilities::Capability::layer).
+    /// [`Capability::claims`](crate::agent_loop::capabilities::Capability::claims).
     pub facts: crate::sessions::runners::loading::AgentFacts,
     /// This run's model's context window, when its card declares one.
     ///

@@ -3,8 +3,8 @@
 //! The one capability with no tool. A fork is asked for by a person typing a
 //! built-in, never by a model calling something, so nothing here is
 //! advertised — a tool for it would offer the model a button it has no
-//! business pressing, so [`super::Capability::layer`] hands the toolbox back
-//! untouched for this arm and wraps it in nothing at all.
+//! business pressing, so [`super::Capability::claims`] is empty for this arm
+//! and it contributes nothing to the composed toolbox at all.
 //!
 //! It is also the one command with no run waiting on it, which is why the
 //! agent's own `Fork` command carries no [`Answering`](super::Answering). A

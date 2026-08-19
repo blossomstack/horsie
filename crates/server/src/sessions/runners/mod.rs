@@ -340,15 +340,14 @@ pub trait AgentLifecycle {
     fn on_agent_stopped(&self, agent: AgentId) -> Emit;
 }
 
-/// What a runner of this kind holds, in the order tool calls are offered
-/// around them.
+/// What a runner of this kind holds, in the order its tools are advertised.
 ///
-/// The order is the conflict resolution for a tool call, so it is written down
-/// here rather than left to whoever constructs a runner: the fixed-name
-/// capabilities come first and the open-namespace ones last, because
-/// [`capabilities::runtime::RuntimeCapability`] answers for a namespace nobody
-/// can enumerate — the sandbox toolbox plus whatever the plugin scan found.
-/// Put it first and it silently shadows every named tool behind it.
+/// The order resolves nothing: a tool name belongs to exactly one capability or
+/// [`compose`](crate::agent_loop::toolbox::compose) refuses to build the toolbox
+/// at all, and [`capabilities::runtime::RuntimeCapability`]'s open namespace —
+/// the sandbox toolbox plus whatever the plugin scan found — sits underneath
+/// every claimed name wherever it is equipped. What the order does decide is the
+/// sequence the model is shown these tools in.
 #[must_use]
 pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use crate::agent_loop::capabilities::{
@@ -413,7 +412,6 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
             s.memory_spaces.clone(),
         )));
     }
-    // Last, and last on purpose.
     if !s.mcp_servers.is_empty() {
         caps.push(Capability::Mcp(McpCapability::new(s.mcp_servers.clone())));
     }
@@ -640,30 +638,6 @@ mod tests {
         }
     }
 
-    /// The runtime capability answers for a namespace nobody can enumerate, so
-    /// it must sort last. First, it silently shadows every named tool behind
-    /// it — which is exactly the failure the written order exists to prevent.
-    #[test]
-    fn the_open_namespace_capability_sorts_last() {
-        let s = empty_settings();
-        for kind in [
-            RunnerKind::Conversation,
-            RunnerKind::SubAgent,
-            RunnerKind::Workflow,
-        ] {
-            let caps = assemble(kind, &opts(&s));
-            let last = caps
-                .iter()
-                .last()
-                .expect("every agent-owning runner equips one");
-            assert_eq!(
-                last.name(),
-                "runtime",
-                "{kind:?} put something after the runtime capability"
-            );
-        }
-    }
-
     /// A runner that owns no agents equips nothing — there is no agent to
     /// equip, and nothing that could send it a tool call.
     #[test]
@@ -675,8 +649,8 @@ mod tests {
     /// Every runner that owns an agent can delegate. That uniformity is the
     /// whole point: a subagent spawning a subagent, and a step invoking a
     /// workflow, are the same capability in a different holder.
-    #[tokio::test]
-    async fn every_agent_owning_runner_can_delegate() {
+    #[test]
+    fn every_agent_owning_runner_can_delegate() {
         let s = empty_settings();
         for kind in [
             RunnerKind::Conversation,
@@ -686,11 +660,11 @@ mod tests {
             let caps = assemble(kind, &opts(&s));
             assert!(caps.has("sub_agent"), "{kind:?} cannot spawn");
             assert!(caps.has("workflow"), "{kind:?} cannot invoke a workflow");
-            // And the runtime does not swallow the named tool on the way past:
-            // the layer that claims it decides whose command it becomes, so
-            // this is asked of the composed toolbox rather than of the list.
+            // And the sandbox does not swallow the named tool on the way past:
+            // the claim decides whose command it becomes, so this is asked of
+            // the composed claim table rather than of the list.
             assert_eq!(
-                claimed_by(&caps, &facts(), "spawn_agent").await,
+                claimed_by(&caps, &facts(), "spawn_agent"),
                 Some("sub_agent"),
                 "{kind:?} left spawn_agent unclaimed or misrouted"
             );
@@ -704,8 +678,8 @@ mod tests {
     ///
     /// Asserted on what is *advertised*, not on what is held: a tool the model
     /// is never shown may as well not exist.
-    #[tokio::test]
-    async fn every_agent_owning_runner_gets_a_task_list_and_timers() {
+    #[test]
+    fn every_agent_owning_runner_gets_a_task_list_and_timers() {
         let s = empty_settings();
         for kind in [
             RunnerKind::Conversation,
@@ -724,15 +698,15 @@ mod tests {
                     "{kind:?} advertises no {timer_tool}: {names:?}"
                 );
             }
-            // And the open-namespace capability does not swallow the call on
-            // its way past, which is what the fixed-name end of the list is for.
+            // And the sandbox's open namespace does not swallow the call on
+            // its way past: an agent-owned name is looked up first.
             assert_eq!(
-                claimed_by(&caps, &facts(), crate::agent_loop::TASK_LIST_TOOL).await,
+                claimed_by(&caps, &facts(), crate::agent_loop::TASK_LIST_TOOL),
                 Some("task_list"),
                 "{kind:?} left task_list unclaimed or misrouted"
             );
             assert_eq!(
-                claimed_by(&caps, &facts(), "set_timer").await,
+                claimed_by(&caps, &facts(), "set_timer"),
                 Some("timers"),
                 "{kind:?} left set_timer unclaimed or misrouted"
             );

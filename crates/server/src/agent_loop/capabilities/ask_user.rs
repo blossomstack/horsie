@@ -27,11 +27,11 @@
 //!
 //! A muted agent is [`Asked::Told`] why, in words, and nothing is journaled — a
 //! refusal is not a fact about the agent. It is answered here rather than left
-//! to the toolbox beneath, whose last layer is the open-namespace sandbox that
-//! claims every name: the model would be answered by the sandbox and never
-//! learn why its question went nowhere. A muted agent also claims no `ask_user`
-//! in its [`super::Capability::layer`], so in practice the call only arrives
-//! from a plugin or a resumed transcript.
+//! to the sandbox beneath, which answers for a namespace nobody can enumerate:
+//! the model would be answered by the sandbox and never learn why its question
+//! went nowhere. A muted agent also claims no `ask_user` in its
+//! [`super::Capability::claims`], so in practice the call only arrives from a
+//! plugin or a resumed transcript.
 //!
 //! # Abandonment stays in `queued_turn`
 //!
@@ -63,17 +63,16 @@
 //! So the queue decides *whether* a park is abandoned and *what the model is
 //! told*; this decides nothing and only says whether anything is still held.
 
-use super::{Mailbox, SetupError};
+use super::SetupError;
 use crate::agent_loop::AgentCommand;
-use crate::agent_loop::toolbox::{ClaimedTool, claiming};
+use crate::agent_loop::toolbox::ClaimedTool;
 use crate::agent_loop::{AnswerError, AskAnswer};
-use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec, Toolbox};
+use crate::sessions::runners::loading::{AgentSpec, Loading};
+use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec};
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 /// Appended to an unattended run's system prompt (a routine). It has no
 /// `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -346,7 +345,7 @@ impl AskUserCapability {
 impl AskUserCapability {
     /// Nothing when muted, which is the whole of "a muted agent has no
     /// `ask_user`".
-    fn claims(&self) -> Vec<ClaimedTool> {
+    pub(crate) fn claims(&self) -> Vec<ClaimedTool> {
         if self.mute.is_some() {
             return Vec::new();
         }
@@ -409,9 +408,10 @@ impl AskUserCapability {
     /// working out why.
     ///
     /// An unmuted one equips nothing here either: the tool is claimed by this
-    /// capability's own [`super::Capability::layer`], which is what routes the call to
-    /// this actor's mailbox, where the park can be journaled. A layer pushed
-    /// here in `setup` runs on the agent's task and could do neither.
+    /// capability's own [`super::Capability::claims`], which is what routes the
+    /// call to this actor's mailbox, where the park can be journaled. A toolbox
+    /// layer pushed here in `setup` runs on the agent's task and could do
+    /// neither.
     pub async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
         match self.mute {
             Some(Mute::Unattended) => spec.say("unattended", UNATTENDED_PROMPT_SUFFIX),
@@ -421,15 +421,6 @@ impl AskUserCapability {
             None => {}
         }
         Ok(())
-    }
-
-    pub fn layer(
-        &self,
-        inner: Arc<dyn Toolbox>,
-        _facts: &AgentFacts,
-        mailbox: &Arc<dyn Mailbox>,
-    ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.claims(), mailbox)
     }
 }
 
@@ -542,9 +533,9 @@ mod tests {
     /// An attended session does advertise the tool — the counterpart that stops
     /// the unattended test passing for the wrong reason.
     ///
-    /// Through its own layer, which dispatches to the mailbox, rather than a
-    /// layer pushed in `setup`: one of those runs on the agent's task, where
-    /// there is no mailbox to journal a park on.
+    /// Through its own claim, which dispatches to the mailbox, rather than a
+    /// toolbox layer pushed in `setup`: one of those runs on the agent's task,
+    /// where there is no mailbox to journal a park on.
     #[tokio::test]
     async fn an_attended_session_advertises_the_tool_without_equipping_a_layer() {
         let mut spec = spec();
