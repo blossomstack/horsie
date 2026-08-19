@@ -95,91 +95,6 @@ struct ResidentAgent {
     provider: Arc<SessionContextProvider>,
 }
 
-/// The agent actors a session hosts.
-///
-/// An enum rather than an `Option` plus a map: a session's topology is decided
-/// at creation and never changes, and a workflow run has no main agent at all.
-enum SessionAgents {
-    Interactive {
-        main: ResidentAgent,
-        subs: HashMap<Uuid, ResidentAgent>,
-    },
-    /// A workflow run: step agents and their subagents, all keyed by id. There
-    /// is no main agent — the definition, not a person, decides who runs.
-    Workflow { live: HashMap<Uuid, ResidentAgent> },
-}
-
-impl SessionAgents {
-    fn interactive(main: ResidentAgent) -> Self {
-        Self::Interactive {
-            main,
-            subs: HashMap::new(),
-        }
-    }
-
-    fn workflow() -> Self {
-        Self::Workflow {
-            live: HashMap::new(),
-        }
-    }
-
-    /// The session's primary agent, for the kinds that have one.
-    fn main(&self) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { main, .. } => Some(main),
-            Self::Workflow { .. } => None,
-        }
-    }
-
-    fn sub(&self, id: Uuid) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.get(&id),
-            Self::Workflow { live } => live.get(&id),
-        }
-    }
-
-    /// The agent registered under `key`, if it is still resident.
-    fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
-        match key {
-            AgentKey::Main => self.main(),
-            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.sub(id),
-        }
-    }
-
-    fn insert_sub(&mut self, id: Uuid, agent: ResidentAgent) {
-        match self {
-            Self::Interactive { subs, .. } => {
-                subs.insert(id, agent);
-            }
-            Self::Workflow { live } => {
-                live.insert(id, agent);
-            }
-        }
-    }
-
-    /// Forget one agent, handing it back so the caller can stop it. Only a
-    /// fork's delete uses this: every other agent lives as long as the session
-    /// is loaded, and nothing else removes one on request.
-    fn remove_sub(&mut self, id: Uuid) -> Option<ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.remove(&id),
-            Self::Workflow { live } => live.remove(&id),
-        }
-    }
-
-    /// Every agent, emptying the set. Used when the session unloads.
-    fn drain_all(&mut self) -> Vec<ResidentAgent> {
-        match self {
-            Self::Interactive { main, subs } => {
-                let mut out: Vec<_> = subs.drain().map(|(_, a)| a).collect();
-                out.push(main.clone());
-                out
-            }
-            Self::Workflow { live } => live.drain().map(|(_, a)| a).collect(),
-        }
-    }
-}
-
 /// Everything that differs between the three kinds of agent a session spawns.
 ///
 /// The rest — the runtime provider, the plugin library, the MCP and memory
@@ -231,7 +146,13 @@ pub struct SessionActor {
     /// know what it is — which is why the topology inside is a value rather
     /// than a second `Option`: a session's shape is decided at creation and
     /// never changes.
-    agents: Option<SessionAgents>,
+    /// The agent actors this session hosts, resident while this actor is
+    /// loaded.
+    ///
+    /// One flat map, because one flat id space. Which runner owns an agent is
+    /// `state.agents[&id]`, and the topology the old enum encoded — a workflow
+    /// run has no main agent — is now just which runner is the root.
+    agents: HashMap<AgentId, ResidentAgent>,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
@@ -254,7 +175,7 @@ impl SessionActor {
             users,
             services: None,
             supervisor,
-            agents: None,
+            agents: HashMap::new(),
             last_reported: None,
             last_reported_forks: Vec::new(),
         }
@@ -337,12 +258,11 @@ impl SessionActor {
     ) {
         self.spec = Some(spec);
         match &self.spec().kind {
-            SessionKind::Workflow { .. } => {
-                // A run has no main agent. Step actors, like subagent actors,
-                // stay cold: they spawn on demand for a history read, a retry,
-                // or the next step a boundary picks.
-                self.agents = Some(SessionAgents::workflow());
-            }
+            // A run has no main agent, and every other agent — a step, a
+            // worker, a fork — stays cold: it spawns on demand for a read, a
+            // retry, or the next thing a boundary picks. The map simply starts
+            // empty, so there is no topology to record here at all.
+            SessionKind::Workflow { .. } => {}
             SessionKind::Agent { .. } => self.spawn_main_agent(ctx, state),
         }
         // Each component repairs itself. A self-send rather than direct work,
@@ -579,16 +499,9 @@ impl SessionActor {
             }
         };
         let resident = ResidentAgent { actor, provider };
-        match plan.kind {
-            SessionAgentKind::Main => {
-                self.agents = Some(SessionAgents::interactive(resident.clone()));
-            }
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                if let Some(agents) = self.agents.as_mut() {
-                    agents.insert_sub(id, resident.clone());
-                }
-            }
-        }
+        // One map, one key. Which runner this agent belongs to is the session
+        // state's business, not this map's.
+        self.agents.insert(plan.agent, resident.clone());
         Some(resident)
     }
 
@@ -706,11 +619,14 @@ impl SessionActor {
         ))
     }
 
-    fn agent(&self) -> Option<ActorRef<AgentCommand>> {
-        self.agents
-            .as_ref()
-            .and_then(SessionAgents::main)
-            .map(|a| a.actor.clone())
+    /// The root conversation's mailbox, if this session has one resident.
+    ///
+    /// Takes the state because "the session's own agent" is a fact about the
+    /// runner tree now: it is the root runner's agent, and a run has none.
+    fn agent(&self, state: &RunnerSessionState) -> Option<ActorRef<AgentCommand>> {
+        let root = state.record(state.root)?;
+        let agent = root.state.primary_agent()?;
+        self.agents.get(&agent).map(|a| a.actor.clone())
     }
 
     /// The settings an agent runs under, resolved from what this session is
@@ -1129,9 +1045,12 @@ impl SessionActor {
     /// Whether this session's agents may start a turn at all: it has a runtime,
     /// and it is not terminal. The whole of what an agent's own drain gate
     /// cannot answer for itself.
-    fn runnable(state: &SessionState) -> bool {
-        RuntimeLifecycle::ready(state)
-            && !matches!(state.status, SessionStatus::Unrecoverable { .. })
+    fn runnable(state: &RunnerSessionState) -> bool {
+        state.runtime_ready()
+            && !matches!(
+                crate::sessions::runners::reads::session_status(state),
+                SessionStatus::Unrecoverable { .. }
+            )
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.
