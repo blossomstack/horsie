@@ -238,11 +238,13 @@ fn from_conversation(
         // agent that decided them, in its own log, so routing them from here
         // would render the same fact twice. A branch point landing, or failing
         // to, changes nothing in the source's transcript — the fork's row in the
-        // session list is where a reader watches that.
+        // session list is where a reader watches that, and the same row is where
+        // a rename shows up.
         conversation::Event::Started
         | conversation::Event::Seeded
         | conversation::Event::SeedFailed { .. }
         | conversation::Event::TurnBegan
+        | conversation::Event::Titled { .. }
         | conversation::Event::Asked => return Vec::new(),
     };
     conversation_agent(runner, state)
@@ -804,6 +806,7 @@ mod tests {
                     | conversation::Event::Seeded
                     | conversation::Event::SeedFailed { .. }
                     | conversation::Event::TurnBegan
+                    | conversation::Event::Titled { .. }
                     | conversation::Event::Asked => true,
                     conversation::Event::TurnEnded
                     | conversation::Event::TurnFailed { .. }

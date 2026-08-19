@@ -76,11 +76,14 @@ pub struct State {
     /// and this does.
     pub started: bool,
     pub turn: TurnStatus,
-    /// The name this conversation was created with.
+    /// What this conversation is called.
     ///
-    /// What an agent names itself with `set_session_title` is not folded here:
-    /// the tool asks the *session*, and the session journals the rename against
-    /// itself. A second copy on this side would be a second writer of one fact.
+    /// The name it was branched as until something renames it. A *fork* is
+    /// renamed here, by [`Event::Titled`]: `set_session_title` asks the
+    /// session, and the session hands the name to the conversation the asking
+    /// agent belongs to. The session's own conversation is not — it *is* the
+    /// session, so naming it is a rename of the session, and a copy here would
+    /// be a second writer of one fact.
     pub title: Option<String>,
     /// What a fork was told to do, and the first thing its agent is handed.
     /// `None` for the session's own conversation, which waits for a person.
@@ -148,6 +151,14 @@ pub enum Event {
     TurnEnded,
     TurnFailed {
         error: String,
+    },
+    /// This conversation was given a name.
+    ///
+    /// Only a fork records one. `set_session_title` names the conversation the
+    /// asking agent is in, and for the session's own that is the session — so
+    /// its rename is a `Renamed` on the session and never reaches here.
+    Titled {
+        name: String,
     },
     /// A person stopped the turn.
     TurnStopped,
@@ -382,6 +393,7 @@ impl Runner for State {
                 // shown beside a running turn it reads as a live failure.
                 self.last_error = None;
             }
+            Event::Titled { name } => self.title = Some(name.clone()),
             Event::Asked => self.turn = TurnStatus::AwaitingInput,
             Event::TurnEnded | Event::TurnStopped | Event::TurnInterrupted => {
                 self.turn = TurnStatus::Idle;

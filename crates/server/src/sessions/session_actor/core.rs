@@ -10,6 +10,9 @@ use super::{CommandEffect, SessionActor, SessionEvent, SessionState};
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::title::normalize_session_title;
 use crate::sessions::addressing::SessionInbox;
+use crate::sessions::runners::conversation;
+use crate::sessions::runners::ids::{AgentId, RunnerId};
+use crate::sessions::runners::{RunnerEvent, RunnerState};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use horsie_actor::ActorContext;
 use horsie_models::now_ms;
@@ -30,6 +33,43 @@ fn derive_title(text: &str) -> Option<String> {
     Some(format!("{}…", truncated.trim_end()))
 }
 
+/// Which conversation a `set_session_title` call names.
+///
+/// The tool is one tool and the model is never told which kind of conversation
+/// it is in, so the question is the session's to answer — from the runner the
+/// asking agent belongs to, which is the same fact every other routing here
+/// reads. Answering it with `rename_session` regardless is how a fork renamed
+/// the session out from under the person reading the conversation it branched
+/// from.
+#[derive(Debug, PartialEq, Eq)]
+enum Names {
+    /// The session itself. Its own conversation *is* the session, so there is
+    /// nothing on the runner to write: the name is the session's.
+    Session,
+    /// One fork, by the runner holding it.
+    Fork(RunnerId),
+    /// No conversation at all. Only a conversation is equipped with the tool,
+    /// so this is a request that should not have been made — refused in words
+    /// rather than dropped, because the agent that made it is parked on an
+    /// answer.
+    Nothing,
+}
+
+/// What this agent's `set_session_title` renames.
+fn names(state: &SessionState, agent: AgentId) -> Names {
+    let Some(runner) = state.runner_of(agent) else {
+        return Names::Nothing;
+    };
+    match state.record(runner).map(|record| &record.state) {
+        // The root conversation is the session, whatever else it is; every
+        // other one is a fork, and a fork names itself.
+        Some(RunnerState::Conversation(_)) if runner == state.root => Names::Session,
+        Some(RunnerState::Conversation(_)) => Names::Fork(runner),
+        Some(RunnerState::SubAgent(_) | RunnerState::Workflow(_) | RunnerState::Runtime(_))
+        | None => Names::Nothing,
+    }
+}
+
 /// SessionCore.
 pub(super) struct SessionCore;
 
@@ -41,21 +81,55 @@ impl SessionCore {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionEvent> {
         match cmd {
-            CoreCommand::SetTitle { title, reply, .. } => {
-                let result = match normalize_session_title(&title) {
-                    Ok(title) => actor.rename_session(title).await,
-                    Err(error) => Err(error.to_string()),
-                };
-                // Journal the name this session now answers to, but only if it
-                // actually took: a rejected title must not be recorded as one.
-                let effect = match result.as_ref() {
-                    Ok(name) => {
-                        CommandEffect::persist(vec![SessionEvent::Renamed { name: name.clone() }])
+            CoreCommand::SetTitle {
+                agent,
+                title,
+                reply,
+            } => {
+                let name = match normalize_session_title(&title) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        let _ = reply.send(Err(error.to_string()));
+                        return CommandEffect::none();
                     }
-                    Err(_) => CommandEffect::none(),
                 };
-                let _ = reply.send(result);
-                effect
+                match names(state, agent) {
+                    Names::Session => {
+                        let result = actor.rename_session(name).await;
+                        // Journal the name this session now answers to, but only
+                        // if it actually took: a rejected title must not be
+                        // recorded as one.
+                        let effect = match result.as_ref() {
+                            Ok(name) => CommandEffect::persist(vec![SessionEvent::Renamed {
+                                name: name.clone(),
+                            }]),
+                            Err(_) => CommandEffect::none(),
+                        };
+                        let _ = reply.send(result);
+                        effect
+                    }
+                    // Nothing to ask the supervisor: a fork's name is its own
+                    // runner's, read from there by its row in the session list.
+                    // The session's list entry is the session's name, and this
+                    // is not it.
+                    Names::Fork(runner) => {
+                        let _ = reply.send(Ok(name.clone()));
+                        CommandEffect::persist(vec![SessionEvent::Runner {
+                            id: runner,
+                            event: Box::new(RunnerEvent::Conversation(
+                                conversation::Event::Titled { name },
+                            )),
+                            at_ms: now_ms(),
+                        }])
+                    }
+                    Names::Nothing => {
+                        let _ = reply.send(Err(
+                            "only a conversation can be renamed, and this agent is not in one"
+                                .to_string(),
+                        ));
+                        CommandEffect::none()
+                    }
+                }
             }
             // The one boundary nothing else reaches. Everything it starts is
             // whatever `Runner::actions` asked for, which is the same call a
@@ -229,6 +303,7 @@ impl SessionActor {
 mod tests {
     use super::super::testing::*;
     use super::*;
+    use crate::sessions::addressing::SessionRef;
     use crate::sessions::session_actor::SessionCommand;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -291,6 +366,11 @@ mod tests {
         journal: &Arc<dyn horsie_actor::Journal>,
         id: Uuid,
     ) -> Option<crate::sessions::spec::SessionSpec> {
+        folded(journal, id).await.spec
+    }
+
+    /// The whole of what a session's log says, folded the way a load would.
+    async fn folded(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid) -> SessionState {
         use futures_util::StreamExt;
         let pid = SessionActor::persistence_id_for(id);
         #[expect(
@@ -304,7 +384,7 @@ mod tests {
             let event: SessionEvent = serde_json::from_slice(&payload).unwrap();
             state = <SessionActor as horsie_actor::EventSourcedActor>::apply_event(state, event);
         }
-        state.spec
+        state
     }
 
     /// Wait until the session's log says what the test is waiting for. `tell`
@@ -396,6 +476,98 @@ mod tests {
         assert_eq!(
             journaled_spec(&journal, id).await.and_then(|s| s.name),
             Some("named".to_string())
+        );
+    }
+
+    /// Type `text` at the session's own conversation and hand back the fork it
+    /// created.
+    async fn fork_via(session: &SessionRef, text: &str) -> String {
+        session
+            .ask(|reply| SessionCommand::UserMessage {
+                agent_id: None,
+                text: text.into(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .forked_agent
+            .expect("a fork command answers with a fork")
+    }
+
+    /// What one conversation is called, read off the session's folded state.
+    fn conversation_title(state: &SessionState, agent: &str) -> Option<String> {
+        let agent = crate::sessions::runners::ids::AgentId(agent.parse().ok()?);
+        match &state.record(state.runner_of(agent)?)?.state {
+            crate::sessions::runners::RunnerState::Conversation(c) => c.title.clone(),
+            crate::sessions::runners::RunnerState::SubAgent(_)
+            | crate::sessions::runners::RunnerState::Workflow(_)
+            | crate::sessions::runners::RunnerState::Runtime(_) => None,
+        }
+    }
+
+    /// **A fork names itself, and leaves the session's name alone.**
+    ///
+    /// `set_session_title` is one tool in every conversation — the model is not
+    /// told which kind it is in — so which conversation a call renames is the
+    /// session's to decide, from the runner the asking agent belongs to.
+    /// Answering every call with `rename_session` renames the whole session out
+    /// from under the person reading the conversation the fork branched from.
+    #[tokio::test]
+    async fn a_fork_renaming_itself_does_not_rename_the_session() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let fork = fork_via(&session, "/fork try the other migration").await;
+
+        let named = session
+            .ask(|reply| {
+                SessionCommand::Core(CoreCommand::SetTitle {
+                    agent: crate::sessions::runners::ids::AgentId(fork.parse().unwrap()),
+                    title: "the other migration".into(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the session answers")
+            .expect("a name a fork may take");
+        assert_eq!(named, "the other migration");
+
+        wait_for_state(&journal, id, "the fork is named", |s| {
+            conversation_title(s, &fork).as_deref() == Some("the other migration")
+        })
+        .await;
+        assert_eq!(
+            journaled_spec(&journal, id).await.and_then(|s| s.name),
+            actor_spec_fixture().name,
+            "a fork renamed the session it branched from"
+        );
+    }
+
+    /// And the other half of the same routing: the session's own conversation
+    /// *is* the session, so naming it renames the session and writes nothing on
+    /// the runner.
+    #[tokio::test]
+    async fn the_session_s_own_conversation_renames_the_session() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let main = main_agent(&session).await;
+
+        let named = session
+            .ask(|reply| {
+                SessionCommand::Core(CoreCommand::SetTitle {
+                    agent: main,
+                    title: "the flake".into(),
+                    reply,
+                })
+            })
+            .await
+            .expect("the session answers")
+            .expect("a name the session may take");
+        assert_eq!(named, "the flake");
+
+        until_named(&journal, id, "the flake").await;
+        assert_eq!(
+            conversation_title(&folded(&journal, id).await, &main.to_string()),
+            None,
+            "the session's own conversation kept a second copy of the session's name"
         );
     }
 
