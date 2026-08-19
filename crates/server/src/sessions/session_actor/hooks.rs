@@ -23,7 +23,6 @@ use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::RunnerId;
-use crate::sessions::session_actor::types::SubAgentCommand;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;

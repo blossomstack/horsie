@@ -23,7 +23,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, ReadCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{SessionRevisions, UserMessageError};

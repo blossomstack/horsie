@@ -321,7 +321,7 @@ pub trait Runner {
 /// agent role: a workflow owns several step agents over time, but they are all
 /// step agents. A runner's state, its agent role and its outcome vocabulary
 /// are one triple.
-pub trait AgentLifecycle {
+pub trait AgentLifecycle: Send + Sync {
     fn on_agent_started(&self, agent: AgentId) -> Emit;
 
     /// The method that separates the runners: the same ending is a result for

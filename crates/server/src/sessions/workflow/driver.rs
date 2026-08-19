@@ -5,8 +5,6 @@
 //! is. What is left is the pure transition lookup both shapes needed, which
 //! never belonged to the orchestrator in the first place.
 
-use crate::sessions::workflow::{StepTransition, WorkflowStepOutcome};
-
 pub fn next_transition(
     transitions: &[crate::sessions::workflow::TransitionSpec],
     outcome: &str,
