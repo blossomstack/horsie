@@ -164,6 +164,16 @@ pub struct SessionActor {
     /// `state.agents[&id]`, and the topology the old enum encoded — a workflow
     /// run has no main agent — is now just which runner is the root.
     agents: HashMap<AgentId, ResidentAgent>,
+    /// Runners this actor has already emitted a `RunnerCreated` for, but whose
+    /// persist may not have folded yet.
+    ///
+    /// The folded state is the real record and survives a reload; this covers
+    /// only the window between answering the caller and the journal landing.
+    /// A capability re-asking after a crash names the child it already
+    /// journaled, so on a *reload* the state answers — but two asks inside one
+    /// process can both see a state that has not folded the first yet, and that
+    /// is what doubles the fleet.
+    created: std::collections::HashSet<RunnerId>,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
@@ -187,6 +197,7 @@ impl SessionActor {
             services: None,
             supervisor,
             agents: HashMap::new(),
+            created: std::collections::HashSet::new(),
             last_reported: None,
             last_reported_forks: Vec::new(),
         }
@@ -1554,7 +1565,7 @@ impl EventSourcedActor for SessionActor {
                 // Deduped on the capability-minted id, atomically with the
                 // persist: a capability re-asking after a crash names the child
                 // it already journaled, and a check at the sink would race.
-                if state.record(id).is_some() {
+                if state.record(id).is_some() || !self.created.insert(id) {
                     let _ = reply.send(Ok(()));
                     return CommandEffect::none();
                 }

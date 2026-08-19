@@ -682,15 +682,15 @@ mod tests {
              when the child is running: {second:?}"
         );
 
-        // Counted in the journal, not in the tree. The tree is a map keyed by
-        // the worker, so a second spawn of the same id overwrites the node and
-        // leaves the count at one — while having journaled the spawn twice,
-        // started a second child actor and queued the task again. What "one
-        // child" means is one `SubAgentSpawned`.
+        // Counted in the journal, not in the roster. The roster is keyed by
+        // the worker, so a second create of the same id overwrites the record
+        // and leaves the count at one — while having journaled the create
+        // twice, started a second child actor and queued the task again. What
+        // "one child" means is one `RunnerCreated` naming a `SubAgent`.
         let spawns = journaled_events(&journal, id)
             .await
             .into_iter()
-            .filter(|e| e.contains("SubAgentSpawned"))
+            .filter(|e| e.contains("RunnerCreated") && e.contains("\"kind\":\"SubAgent\""))
             .count();
         assert_eq!(
             spawns, 1,
