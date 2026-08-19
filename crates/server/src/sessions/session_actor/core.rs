@@ -69,6 +69,13 @@ impl SessionCore {
                 }];
                 actor.persist_and_advance(state, events, ctx).await
             }
+            // Through `persist_and_advance` rather than a bare persist: a
+            // branch point landing is what releases the fork's own agent, and
+            // starting it is an action the boundary this creates performs.
+            CoreCommand::SeedSettled { runner, result } => {
+                let events = actor.seed_settled(runner, result, state, ctx).await;
+                actor.persist_and_advance(state, events, ctx).await
+            }
             CoreCommand::Advance => {
                 // The one boundary that is a *load*: `adopt` sends this and
                 // nothing else does, which is what makes the reconciliation

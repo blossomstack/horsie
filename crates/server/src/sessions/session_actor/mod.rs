@@ -43,6 +43,7 @@ mod core;
 /// this actor's mailbox, so it cannot live anywhere else.
 pub(crate) mod hooks;
 mod reads;
+mod seeding;
 mod types;
 
 pub use types::*;
@@ -206,6 +207,14 @@ pub struct SessionActor {
     /// process can both see a state that has not folded the first yet, and that
     /// is what doubles the fleet.
     created: std::collections::HashSet<RunnerId>,
+    /// Forks whose branch point this process is building right now.
+    ///
+    /// In memory and nowhere else, which is the whole design — see
+    /// [`seeding`]. A journaled flag would survive the process that was
+    /// carrying the seed and leave the fork waiting on a task that no longer
+    /// exists; an empty set at load is what makes the first boundary build it
+    /// again.
+    seeding: std::collections::HashSet<RunnerId>,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
@@ -230,6 +239,7 @@ impl SessionActor {
             supervisor,
             agents: HashMap::new(),
             created: std::collections::HashSet::new(),
+            seeding: std::collections::HashSet::new(),
             last_reported: None,
             last_reported_forks: Vec::new(),
         }
@@ -728,6 +738,12 @@ impl SessionActor {
                 Vec::new()
             }
             Action::Provision => self.provision(runner, ctx).await,
+            // Nothing to journal: a seed in flight is this process's own
+            // bookkeeping, and what it produces arrives on another command.
+            Action::Seed { fork, branch } => {
+                self.seed_fork(runner, fork, branch, state, ctx).await;
+                Vec::new()
+            }
             // Answered on the call that is waiting, never journaled: a refusal
             // is not something that happened to this session.
             Action::Reply { text } => {
@@ -819,12 +835,26 @@ impl SessionActor {
         &mut self,
         id: RunnerId,
         kind: crate::sessions::runners::ids::RunnerKind,
-        args: crate::sessions::runners::action::RunnerArgs,
+        mut args: crate::sessions::runners::action::RunnerArgs,
         parent: AgentId,
         state: &RunnerSessionState,
-        _ctx: &ActorContext<SessionInbox>,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionEvent> {
         use crate::sessions::runners::action::RunnerArgs;
+        // A fork's branch point, stamped here and only here. The capability
+        // that asked carries a zero: where the source's log ends is a fact the
+        // session reads, and reading it any later than this would include the
+        // `Forked` entry that journaling this very fork writes onto that log.
+        if let RunnerArgs::Conversation {
+            seed: Some(cut), ..
+        } = &mut args
+        {
+            let Some(at_seq) = self.source_log_head(cut.source, state, ctx).await else {
+                tracing::warn!(session = %self.id, runner = %id, "the conversation to fork is not available");
+                return Vec::new();
+            };
+            cut.source_seq = at_seq;
+        }
         // The child's settings travel on the args, because the asker fixed
         // them: a worker inherits its caller's, a fork the conversation's. A
         // run carries none — each step resolves its own preset, which is what
@@ -1629,12 +1659,10 @@ impl SessionActor {
                 return self.on_agent_started(state, AgentId(agent)).await;
             }
             // A summary taken for somebody else. Not this agent's turn ending —
-            // it may still be running — so the fork capability answers it and
-            // the routing below never sees it.
-            Err((agent, NotAnEnd::ForkSummary { forks, result })) => {
-                return self
-                    .on_fork_summary(state, AgentId(agent), forks, result)
-                    .await;
+            // it may still be running — so the forks waiting on it are answered
+            // and the routing below never sees it.
+            Err((_, NotAnEnd::ForkSummary { forks, result })) => {
+                return self.on_fork_summary(state, forks, result, ctx).await;
             }
         };
         let who = AgentId(who);
@@ -1651,34 +1679,6 @@ impl SessionActor {
         let emit = lifecycle.on_agent_ended(who, &end);
         let events = self.wrap(runner, emit);
         self.persist_and_advance(state, events, ctx).await
-    }
-
-    /// A `/summary-n-fork` summary, offered to the capabilities of the agent it
-    /// was taken from.
-    ///
-    /// The forks waiting on it are the fork capability's own business — it
-    /// recorded them when it asked — so this is a plain offer rather than a
-    /// command the session understands.
-    async fn on_fork_summary(
-        &mut self,
-        state: &RunnerSessionState,
-        agent: AgentId,
-        forks: Vec<Uuid>,
-        result: Result<String, String>,
-    ) -> CommandEffect<SessionEvent> {
-        let _ = state;
-        // Not yet routed: `Msg` has no summary arm, so there is nothing for the
-        // fork capability to claim. Loud rather than silent — a dropped summary
-        // leaves every fork that queued into this turn waiting for a seed that
-        // will never come, and a silent `none()` here would read as "handled".
-        tracing::error!(
-            session = %self.id,
-            %agent,
-            forks = forks.len(),
-            ok = result.is_ok(),
-            "a fork summary has nowhere to go: ForkCapability cannot yet be offered one"
-        );
-        CommandEffect::none()
     }
 
     /// One of this session's agents drained its queue into a turn.

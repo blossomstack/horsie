@@ -227,6 +227,17 @@ pub enum CoreCommand {
         runner: crate::sessions::runners::ids::RunnerId,
         event: crate::sessions::runners::runtime::Event,
     },
+    /// Internal: the detached seed of a fork has settled.
+    ///
+    /// The twin of [`Self::RuntimeEvent`], and for the same reason: building a
+    /// branch point is a whole conversation to copy or a provider call to wait
+    /// for, so it happens off the mailbox and its answer has to arrive as a
+    /// command. Addressed to the fork's runner, which is what turns it into
+    /// that conversation's own `Seeded` or `SeedFailed`.
+    SeedSettled {
+        runner: crate::sessions::runners::ids::RunnerId,
+        result: Result<(), String>,
+    },
     /// Internal: drive the boundary, persisting whatever it starts.
     ///
     /// Self-sent once at load, because that is the one boundary nothing else

@@ -16,8 +16,10 @@
 //!
 //! A fork does not run until its seed lands. The branch point is a copy or a
 //! summary of the source's log, and an agent started before it exists would
-//! answer from an empty transcript — so [`State::seeded`] gates
-//! [`Runner::actions`], and a seed that failed leaves it false for good.
+//! answer from an empty transcript — so until [`State::seeded`] is true what
+//! [`Runner::actions`] asks for is the branch point itself, and only then the
+//! agent. A seed that failed leaves `seeded` false for good, and the fork asks
+//! for nothing ever again.
 //!
 //! It is nonetheless *addressable* the whole time. [`State::agent`] is decided
 //! when the fork is created, because the reply to `/fork` and the fork's row in
@@ -154,6 +156,20 @@ pub enum Event {
 }
 
 impl State {
+    /// Whether this conversation is a fork whose branch point has still to
+    /// land.
+    ///
+    /// One question asked in four places — the status a reader sees, what
+    /// [`Runner::actions`] asks for, whether the session may unload, and
+    /// whether the fork may start — so that they cannot answer it differently.
+    ///
+    /// A failed seed is *not* seeding. Nothing will retry it, so a fork that
+    /// answered `true` here would ask to be seeded at every boundary for ever
+    /// and hold the session loaded while it did.
+    fn seeding(&self) -> bool {
+        self.seed.is_some() && !self.seeded && self.turn != TurnStatus::Failed
+    }
+
     /// Where this conversation's agent is, as a reader sees it.
     ///
     /// A fork is listed and addressable from the moment it is created, and
@@ -165,7 +181,7 @@ impl State {
     /// One source for both the roster entry and the fork's row in the session
     /// list, so the same conversation cannot be badged two ways.
     fn agent_status(&self) -> AgentStatus {
-        let seeding = self.seed.is_some() && !self.seeded;
+        let seeding = self.seeding();
         match self.turn {
             TurnStatus::Failed => AgentStatus::Failed,
             TurnStatus::Idle if seeding => AgentStatus::Provisioning,
@@ -182,13 +198,33 @@ impl Runner for State {
     }
 
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
-        if self.started {
-            return Vec::new();
-        }
         // A fork whose branch point has not landed is a conversation with no
-        // transcript. Starting it here would have the model answer from
-        // nothing, and the copy would then land underneath it.
-        if self.seed.is_some() && !self.seeded {
+        // transcript. Starting its agent here would have the model answer from
+        // nothing, and the copy would then land underneath it — so the branch
+        // point is what it asks for, and it goes on asking until the seed
+        // lands or fails for good.
+        //
+        // Asked at every boundary rather than once, like every other action
+        // here: a seed the last process was carrying when it died is
+        // indistinguishable from one nobody has started, and asking again is
+        // what makes those two the same case. The session recognises a seed it
+        // already has in flight.
+        //
+        // Cloned rather than borrowed: an action is a value the session carries
+        // off this state and performs later.
+        if let Some(branch) = self.seed.clone().filter(|_| !self.seeded) {
+            // A seed that failed is never retried, so this fork asks for
+            // nothing ever again — the alternative is starting its agent
+            // against the empty transcript the failure was about.
+            return match self.seeding() {
+                true => vec![Action::Seed {
+                    fork: self.agent,
+                    branch,
+                }],
+                false => Vec::new(),
+            };
+        }
+        if self.started {
             return Vec::new();
         }
         vec![Action::StartAgent {
@@ -219,8 +255,16 @@ impl Runner for State {
         None
     }
 
+    /// A turn in flight, or a branch point still being built.
+    ///
+    /// Seeding counts because a summary is provider time with nothing durable
+    /// behind it: unloaded halfway, the session stops the source's turn and the
+    /// fork sits `Provisioning` until somebody happens to open it again. A
+    /// failed seed does not count — see [`State::seeding`] — or a fork whose
+    /// copy never landed would hold the session loaded for the rest of its
+    /// life.
     fn busy(&self) -> bool {
-        matches!(self.turn, TurnStatus::Running)
+        matches!(self.turn, TurnStatus::Running) || self.seeding()
     }
 
     /// Always `None`, for the same reason [`Runner::outcome`] is.
@@ -475,6 +519,77 @@ mod tests {
         assert!(state.actions(&view()).is_empty());
     }
 
+    /// **A fork asks for its branch point, and goes on asking.**
+    ///
+    /// The one action a conversation has before it has an agent. It is asked
+    /// for at every boundary rather than once, because nothing journals that a
+    /// seed is in flight — which is exactly what makes a seed the last process
+    /// abandoned indistinguishable from one nobody has started, and so
+    /// repairable. The session recognises one it already has going.
+    #[test]
+    fn a_fork_asks_to_be_seeded_at_every_boundary_until_its_seed_lands() {
+        let state = fork();
+        for _ in 0..2 {
+            let actions = state.actions(&view());
+            assert_eq!(actions.len(), 1, "expected one action, got {actions:?}");
+            let Action::Seed { fork, branch } = &actions[0] else {
+                panic!("expected a seed, got {:?}", actions[0]);
+            };
+            assert_eq!(*fork, state.agent, "the seed names the wrong conversation");
+            assert_eq!(
+                Some(branch),
+                state.seed.as_ref(),
+                "the branch point asked for is not the one recorded"
+            );
+        }
+
+        // And once it lands there is nothing left to ask for: the agent is.
+        let mut seeded = state;
+        seeded.apply(&RunnerEvent::Conversation(Event::Seeded), 0);
+        assert!(matches!(
+            seeded.actions(&view())[0],
+            Action::StartAgent { .. }
+        ));
+    }
+
+    /// The session's own conversation has nothing to wait for, so it never asks
+    /// for a branch point at all.
+    #[test]
+    fn a_conversation_that_is_not_a_fork_never_asks_for_a_seed() {
+        let actions = State::default().actions(&view());
+        assert!(matches!(actions[0], Action::StartAgent { .. }));
+        assert_eq!(actions.len(), 1);
+    }
+
+    /// **A seed in flight holds the session open.** A summary is provider time
+    /// with nothing durable behind it: unloaded halfway, the source's turn is
+    /// stopped and the fork sits `Provisioning` until somebody happens to open
+    /// it again.
+    ///
+    /// And a *failed* seed does not, or a fork whose copy never landed would
+    /// keep the session loaded for the rest of its life.
+    #[test]
+    fn a_seed_in_flight_is_busy_and_a_failed_one_is_not() {
+        let mut state = fork();
+        assert!(state.busy(), "a branch point being built is work in flight");
+
+        let mut failed = state.clone();
+        failed.apply(
+            &RunnerEvent::Conversation(Event::SeedFailed {
+                error: "the copy failed".into(),
+            }),
+            0,
+        );
+        assert!(
+            !failed.busy(),
+            "nothing will retry it, so nothing is waiting"
+        );
+        assert!(failed.actions(&view()).is_empty());
+
+        state.apply(&RunnerEvent::Conversation(Event::Seeded), 0);
+        assert!(!state.busy(), "a fork between turns is idle like any other");
+    }
+
     /// **A fork is addressable before it can run.** The `MessageAccepted` that
     /// answers `/fork` names the new conversation's agent, and so does its row
     /// in the session list — both of which are answered while the copy of the
@@ -486,7 +601,10 @@ mod tests {
         let mut state = fork();
         let addressed = state.agent;
         assert!(
-            state.actions(&view()).is_empty(),
+            !state
+                .actions(&view())
+                .iter()
+                .any(|a| matches!(a, Action::StartAgent { .. })),
             "it must not run before its seed lands"
         );
 
@@ -508,7 +626,7 @@ mod tests {
     #[test]
     fn a_fork_does_not_start_until_its_seed_lands() {
         let mut state = fork();
-        assert!(state.actions(&view()).is_empty());
+        assert!(matches!(state.actions(&view())[0], Action::Seed { .. }));
 
         state.apply(&RunnerEvent::Conversation(Event::Seeded), 0);
         let actions = state.actions(&view());

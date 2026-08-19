@@ -346,13 +346,12 @@ pub enum Seed {
 /// A fork moved.
 ///
 /// `None` for anything this capability is not holding a seed for.
-#[must_use]
 ///
-/// **No production sender reaches this yet.** The runners redesign routes a
-/// child's movement through `sessions::runners::message`, which nothing
-/// forwards to an agent so far, so only tests call this. Kept and kept public
-/// rather than deleted: the behaviour is the settled answer for when that
-/// forwarding lands, and deleting it would have to be re-derived.
+/// Sent by the session when a branch point settles, one way or the other. This
+/// is the only thing that ever clears [`ForkState::seeding`], so an agent that
+/// was never told would carry every branch it has ever taken as still in
+/// flight, for the life of its journal.
+#[must_use]
 pub fn child(state: &ForkState, m: &ChildMsg) -> Option<Seed> {
     match m {
         // The seed landed; the fork is a conversation like any other, and its

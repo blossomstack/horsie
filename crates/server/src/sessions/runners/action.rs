@@ -80,6 +80,20 @@ pub enum Action {
     /// session already holds; a runner that copied it would be a second place
     /// for it to be wrong.
     Provision,
+    /// Give a fork the history it branched from.
+    ///
+    /// Asked for at every boundary until the branch point lands, exactly as
+    /// [`Self::Provision`] is asked for until the sandbox does — and for the
+    /// same reason. Nothing journals that a seed is *in flight*, because there
+    /// is no event for the process carrying it dying; the session holds that in
+    /// memory instead, so a reload starts with nothing in flight and the first
+    /// boundary asks again. That is what re-seeds a fork the last process
+    /// abandoned half-built.
+    ///
+    /// Carries what the runner knows and nothing else. Which agent's log is
+    /// read, and what the conversation it came from is called, are the
+    /// session's facts about the tree — a runner cannot see either.
+    Seed { fork: AgentId, branch: Branch },
     /// Answer the caller's tool call with a message rather than an effect —
     /// a refusal, or a rendered status.
     Reply { text: String },
