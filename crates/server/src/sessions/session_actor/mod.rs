@@ -1629,18 +1629,37 @@ impl EventSourcedActor for SessionActor {
                 self.on_retry_step(state, index, reply, ctx).await
             }
             SessionCommand::PrepareOffload { reply } => {
-                let busy = self.busy(state);
-                let _ = reply.send(!busy);
-                if !busy {
-                    self.stop_agents().await;
+                // Work started while the supervisor was deciding: refuse, and
+                // let the idle clock start again.
+                if self.busy(state) {
+                    let _ = reply.send(false);
+                    return CommandEffect::none();
                 }
-                CommandEffect::none()
+                self.stop_agents().await;
+                // Going cold releases the sandbox. Without it a session that
+                // nobody has touched for hours keeps a machine running, which
+                // is the whole reason the idle sweep exists.
+                self.deps()
+                    .runtimes
+                    .hibernate(&self.id.to_string(), &self.spec().vendor)
+                    .await;
+                // Answered as this actor's last act: it writes nothing after
+                // returning, so the supervisor can drop its reference the
+                // moment it sees `true`.
+                let _ = reply.send(true);
+                CommandEffect::stop()
             }
             SessionCommand::Delete { reply } => {
                 self.cancel_in_flight(state).await;
                 self.stop_agents().await;
+                // A deleted session's sandbox goes with it. Hibernating it
+                // would leave a machine nothing will ever wake.
+                self.deps()
+                    .runtimes
+                    .delete(&self.id.to_string(), &self.spec().vendor)
+                    .await;
                 let _ = reply.send(());
-                CommandEffect::none()
+                CommandEffect::stop()
             }
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             SessionCommand::Hooks(c) => HookRouting::handle(self, state, c, ctx).await,
