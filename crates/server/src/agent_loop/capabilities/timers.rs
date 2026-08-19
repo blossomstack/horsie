@@ -352,7 +352,12 @@ impl Capability for TimersCapability {
                     ids: self.select(&CancelSelector::All),
                 })]))
             }
-            Msg::Turn(_) | Msg::Answer(_) | Msg::Child(_) | Msg::Reply(_) | Msg::Concluded => None,
+            Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Child(_)
+            | Msg::Reply(_)
+            | Msg::Concluded
+            | Msg::TurnProposed => None,
         }
     }
 

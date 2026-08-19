@@ -343,7 +343,8 @@ impl Capability for TitleCapability {
             | Msg::Child(_)
             | Msg::Woke { .. }
             | Msg::Concluded
-            | Msg::Reply(_) => None,
+            | Msg::Reply(_)
+            | Msg::TurnProposed => None,
         }
     }
 

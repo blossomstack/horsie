@@ -7,7 +7,7 @@ use crate::agent_loop::repair::{
     missing_tool_results, parked_call_ids, repair_unanswered_tool_calls,
     repair_unanswered_tool_calls_except,
 };
-use crate::agent_loop::retries::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, run_with_retries};
+use crate::agent_loop::retries::run_with_retries;
 use crate::agent_loop::state::{
     AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome,
     coarse_appends_an_entry, coarse_event,
@@ -266,6 +266,13 @@ struct RunStart {
     summarise: Option<Summarise>,
     /// Whether that summary is all this turn is.
     summarise_only: bool,
+    /// What [`AgentActor::propose_turn`] got back from the token budget
+    /// capability — `(trigger_at_percent, retain_percent)` — or `None` if no
+    /// capability answered. Combined with the model's own context window,
+    /// which only the run's task learns once its provider is resolved, to
+    /// build the [`horsie_agentcore::CompactionBudget`] this run compacts
+    /// against.
+    compaction_target: Option<(u32, u32)>,
 }
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
@@ -780,6 +787,11 @@ impl AgentActor {
                 message: agent_input.to_message(now_ms()),
             });
         }
+        // Before the run is built, not after: `TurnProposed` is what the token
+        // budget capability answers "should this turn compact, and to what
+        // target?" on, and the answer has to be in hand by the time the run's
+        // task builds its `CompactionBudget`.
+        let compaction_target = Self::propose_turn(&folded, ctx);
         self.start_run(
             RunStart {
                 input: agent_input,
@@ -788,6 +800,7 @@ impl AgentActor {
                 capabilities: folded.capabilities.clone(),
                 summarise: summarise.clone(),
                 summarise_only,
+                compaction_target,
             },
             ctx,
         );
@@ -802,6 +815,7 @@ impl AgentActor {
             capabilities,
             summarise,
             summarise_only,
+            compaction_target,
         } = start;
         let cancel = CancellationToken::new();
         let run_id = self.next_run_id;
@@ -907,17 +921,21 @@ impl AgentActor {
             let sink: Arc<dyn EventSink> = Arc::new(PersistSink {
                 actor: self_ref.clone(),
             });
-            // Auto-compaction is on unless the context layer withheld a
-            // window — which it does both when the session turned it off and
-            // when the model's card declares none.
-            let compaction =
-                contexts
-                    .context_window
-                    .map(|context_window| horsie_agentcore::CompactionBudget {
+            // Auto-compaction needs both halves: a window from the context
+            // layer, which is absent both when the session turned it off and
+            // when the model's card declares none, and a target from the
+            // token budget capability, absent when this runner equipped none —
+            // see `AgentActor::propose_turn`. Either missing and this run does
+            // not compact.
+            let compaction = contexts.context_window.zip(compaction_target).map(
+                |(context_window, (trigger_at_percent, retain_percent))| {
+                    horsie_agentcore::CompactionBudget {
                         context_window,
-                        trigger_at_percent: COMPACT_AT_PERCENT,
-                        retain_percent: COMPACT_RETAIN_PERCENT,
-                    });
+                        trigger_at_percent,
+                        retain_percent,
+                    }
+                },
+            );
             let (outcome, fork_summary) = run_with_retries(
                 contexts.provider,
                 toolbox,
@@ -1842,6 +1860,7 @@ impl EventSourcedActor for AgentActor {
             return;
         }
         let history = repair_unanswered_tool_calls(state.prompt_messages());
+        let compaction_target = Self::propose_turn(state, ctx);
         self.start_run(
             RunStart {
                 input: AgentInput::user_message(new_message_id(), "continue the interrupted task"),
@@ -1850,6 +1869,7 @@ impl EventSourcedActor for AgentActor {
                 capabilities: state.capabilities.clone(),
                 summarise: None,
                 summarise_only: false,
+                compaction_target,
             },
             ctx,
         );
@@ -1900,6 +1920,11 @@ struct Performed {
     /// Sleeps capabilities asked for. Spawned off the mailbox; each one comes
     /// back as [`AgentCommand::Woke`] with the id its capability minted.
     wakes: Vec<Wake>,
+    /// What the token budget capability said on [`Msg::TurnProposed`], if one
+    /// is equipped. `None` either way — no such capability, or one that had
+    /// nothing to say — is indistinguishable, and both mean the same thing:
+    /// this run gets no [`Act::CompactionBudget`] and does not compact.
+    compaction: Option<(u32, u32)>,
 }
 
 /// One sleep a capability asked for.
@@ -1935,6 +1960,37 @@ impl AgentActor {
     fn consult_command(state: &AgentState, cmd: &capabilities::CapCommand) -> Option<Performed> {
         let decision = state.capabilities.dispatch(cmd)?;
         Some(Self::performed(decision, cmd.call(), cmd.owner()))
+    }
+
+    /// Ask what this turn's compaction budget should be, before its run
+    /// exists to read one.
+    ///
+    /// [`Msg::TurnProposed`] is broadcast rather than offered — same as a turn
+    /// boundary — because nothing is being answered to; the actor merely
+    /// collects an opinion. Only the token budget capability has one today, and
+    /// its whole answer is config it was equipped with, never anything read off
+    /// `state`, which is why `state` here is only ever the capability list. A
+    /// runner that equipped none gets `None` back, and its runs never compact —
+    /// see [`Act::CompactionBudget`].
+    ///
+    /// Events are discarded rather than journaled, the same as a load's: a
+    /// policy-only capability owns no state, so one producing an event here
+    /// would be a bug worth seeing rather than a fact worth keeping.
+    fn propose_turn(state: &AgentState, ctx: &ActorContext<AgentCommand>) -> Option<(u32, u32)> {
+        let performed = Self::consult(state, &Msg::TurnProposed)?;
+        if !performed.events.is_empty() {
+            tracing::error!("a capability journaled something on a turn proposal; discarded");
+        }
+        debug_assert!(
+            performed.answer.is_none()
+                && performed.resume.is_empty()
+                && performed.hold.is_empty()
+                && performed.conclusion.is_none()
+                && performed.asks.is_empty(),
+            "a turn proposal is not a tool call and holds nothing open"
+        );
+        Self::spawn_wakes(performed.wakes, ctx);
+        performed.compaction
     }
 
     /// Turn a decision into what the actor has to do about it.
@@ -2013,6 +2069,7 @@ impl AgentActor {
             asks,
             hold,
             wakes,
+            compaction,
         } = performed;
         if !hold.is_empty() {
             // Only a turn boundary can be held, and this is not one.
@@ -2023,6 +2080,13 @@ impl AgentActor {
         }
         if conclusion.is_some() {
             tracing::error!("a capability concluded outside a turn");
+        }
+        if compaction.is_some() {
+            // Only `Msg::TurnProposed` is answered with one, and `AgentActor`
+            // reads that answer itself through `propose_turn` rather than
+            // through this general tail — so a value here means some
+            // capability answered a message that was not a turn proposal.
+            tracing::error!("a capability proposed a compaction budget outside a turn proposal");
         }
         self.dispatch_asks(asks, ctx);
         Self::spawn_wakes(wakes, ctx);
@@ -2096,6 +2160,10 @@ impl AgentActor {
             // and asking the session is I/O that must not happen on the
             // mailbox. The caller sends them once it has journaled.
             Act::Ask(request) => out.asks.push(request),
+            Act::CompactionBudget {
+                trigger_at_percent,
+                retain_percent,
+            } => out.compaction = Some((trigger_at_percent, retain_percent)),
         }
     }
 

@@ -352,10 +352,11 @@ pub trait AgentLifecycle {
 #[must_use]
 pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use crate::agent_loop::capabilities::{
-        ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
-        mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
-        sub_agent::SubAgentCapability, task_list::TaskListCapability, timers::TimersCapability,
-        title::TitleCapability, workflow::WorkflowCapability,
+        ask_user::AskUserCapability, budget::TokenBudgetCapability,
+        control_plane::ControlPlaneCapability, fork::ForkCapability, mcp::McpCapability,
+        memory::MemoryCapability, runtime::RuntimeCapability, sub_agent::SubAgentCapability,
+        task_list::TaskListCapability, timers::TimersCapability, title::TitleCapability,
+        workflow::WorkflowCapability,
     };
     let s = opts.settings;
     let mut caps = Capabilities::default();
@@ -370,11 +371,15 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     // makes nesting uniform rather than a privilege of the main agent.
     caps.push(SubAgentCapability::new(s.clone(), opts.depth));
     caps.push(WorkflowCapability::default());
-    // Unconditional, and both were unconditional before they were
-    // capabilities: a task list and a timer are ways of working rather than
-    // permissions, so every agent that exists has them.
+    // Unconditional, and all three were unconditional before they were
+    // capabilities: a task list, a timer and a compaction target are ways of
+    // working rather than permissions, so every agent that exists has them.
+    // Losing the last one is silent — no tool goes missing, an agent just
+    // never compacts — which is exactly why it is equipped here rather than
+    // left to a runner to remember.
     caps.push(TaskListCapability::new());
     caps.push(TimersCapability::new());
+    caps.push(TokenBudgetCapability::default());
 
     match kind {
         // A conversation can ask, name itself, and branch.
@@ -740,6 +745,23 @@ mod tests {
                 Some("timers"),
                 "{kind:?} left set_timer unclaimed or misrouted"
             );
+        }
+    }
+
+    /// Every agent that exists compacts, the same as the task list and timers
+    /// above — it was two server constants read unconditionally before this
+    /// was a capability, so a runner kind that forgot to equip one would
+    /// silently stop compacting rather than fail loudly anywhere near here.
+    #[test]
+    fn every_agent_owning_runner_gets_a_token_budget() {
+        let s = empty_settings();
+        for kind in [
+            RunnerKind::Conversation,
+            RunnerKind::SubAgent,
+            RunnerKind::Workflow,
+        ] {
+            let caps = assemble(kind, &opts(&s));
+            assert!(caps.has("token_budget"), "{kind:?} never compacts");
         }
     }
 

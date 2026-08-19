@@ -632,7 +632,11 @@ impl Capability for SubAgentCapability {
                     note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
                 }))
             }
-            Msg::Turn(_) | Msg::Answer(_) | Msg::Woke { .. } | Msg::Concluded => None,
+            Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded
+            | Msg::TurnProposed => None,
         }
     }
 

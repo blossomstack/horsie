@@ -46,22 +46,6 @@ impl horsie_agentcore::CompactionPolicy for NeverCompacts {
     async fn after(&self, _: &horsie_agentcore::CompactionResult) {}
 }
 
-/// The share of a model's context window at which an agent compacts.
-///
-/// A server constant rather than a session setting: the right value is a
-/// property of the model, not of the session, so it stays retunable centrally
-/// instead of frozen into everyone's saved presets. The headroom above it is
-/// also what absorbs this check's one-iteration lag — `context_tokens` is the
-/// last provider call's prompt size and does not count tool results appended
-/// since.
-pub(super) const COMPACT_AT_PERCENT: u32 = 80;
-
-/// Roughly how much of the window a compaction leaves as raw recent messages.
-///
-/// Not zero, because a summary alone loses the file path or error the agent was
-/// part-way through, and those live in the last few messages.
-pub(super) const COMPACT_RETAIN_PERCENT: u32 = 20;
-
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_with_retries(
     provider: Arc<dyn LlmProvider>,

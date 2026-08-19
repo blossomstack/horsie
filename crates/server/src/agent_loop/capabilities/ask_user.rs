@@ -389,7 +389,8 @@ impl Capability for AskUserCapability {
             | Msg::Reply(_)
             | Msg::Woke { .. }
             | Msg::Concluded
-            | Msg::Loaded => None,
+            | Msg::Loaded
+            | Msg::TurnProposed => None,
         }
     }
 

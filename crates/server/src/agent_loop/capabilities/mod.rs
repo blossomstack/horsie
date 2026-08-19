@@ -62,6 +62,7 @@
 //! namespace nobody can enumerate. See [`Capabilities::push_front`].
 
 pub mod ask_user;
+pub mod budget;
 pub mod control_plane;
 pub mod fork;
 pub mod mcp;
@@ -231,6 +232,13 @@ pub trait Mailbox: Send + Sync {
 /// it keeps.
 #[derive(Debug)]
 pub enum Msg<'a> {
+    /// A turn is about to be built from the queue.
+    ///
+    /// Fired before the run that answers it exists, which is what lets the
+    /// token budget capability say what this run's compaction target should
+    /// be before there is any history to read — see [`Act::CompactionBudget`]
+    /// and [`crate::agent_loop::capabilities::budget`].
+    TurnProposed,
     /// This agent's turn reached a boundary.
     Turn(TurnEvent),
     /// Every question this agent was parked on has been answered.
@@ -321,6 +329,9 @@ impl Msg<'_> {
             // The agent finishing is news for every capability holding
             // something meant to wake it, not just the first.
             Self::Concluded => Routing::Broadcast,
+            // A proposal has no owner to find — nothing is being answered to,
+            // so every capability with an opinion gets to give it.
+            Self::TurnProposed => Routing::Broadcast,
         }
     }
 
@@ -328,6 +339,7 @@ impl Msg<'_> {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
+            Self::TurnProposed => "turn proposed".to_string(),
             Self::Turn(t) => format!("turn {t:?}"),
             Self::Answer(a) => format!("{} answer(s)", a.len()),
             Self::Child(c) => format!("child {}", c.child()),
@@ -487,6 +499,22 @@ pub enum Act {
     /// recognise the answer, and by then the turn that made the call may be
     /// long over.
     Ask(SessionRequest),
+    /// Compact once the run's history reaches `trigger_at_percent` of the
+    /// model's context window, leaving roughly `retain_percent` as raw recent
+    /// messages.
+    ///
+    /// Answered on [`Msg::TurnProposed`] by the token budget capability, which
+    /// is the only one with an opinion on the question — see
+    /// [`crate::agent_loop::capabilities::budget`]. The actor supplies the one
+    /// thing the capability does not and should not hold: the model's own
+    /// context window, which only the run's own provider knows. An agent
+    /// equipped with no such capability gets no [`Self::CompactionBudget`] at
+    /// all, which is what "silently stop compacting" means for a runner that
+    /// forgot to equip one — deliberately loud in a test, never at runtime.
+    CompactionBudget {
+        trigger_at_percent: u32,
+        retain_percent: u32,
+    },
 }
 
 /// What a capability can ask the session for.
@@ -712,6 +740,7 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CapSlice {
     AskUser(ask_user::AskUserCapability),
+    Budget(budget::TokenBudgetCapability),
     ControlPlane(control_plane::ControlPlaneCapability),
     Fork(fork::ForkCapability),
     Mcp(mcp::McpCapability),
@@ -735,6 +764,7 @@ impl From<CapSlice> for Box<dyn Capability> {
     fn from(slice: CapSlice) -> Self {
         match slice {
             CapSlice::AskUser(c) => Box::new(c),
+            CapSlice::Budget(c) => Box::new(c),
             CapSlice::ControlPlane(c) => Box::new(c),
             CapSlice::Fork(c) => Box::new(c),
             CapSlice::Mcp(c) => Box::new(c),
@@ -1167,7 +1197,8 @@ pub mod testing {
                 | Msg::Reply(_)
                 | Msg::Woke { .. }
                 | Msg::Concluded
-                | Msg::Loaded => None,
+                | Msg::Loaded
+                | Msg::TurnProposed => None,
             }
         }
 

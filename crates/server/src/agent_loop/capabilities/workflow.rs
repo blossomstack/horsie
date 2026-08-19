@@ -429,7 +429,11 @@ impl Capability for WorkflowCapability {
                     note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
                 }))
             }
-            Msg::Turn(_) | Msg::Answer(_) | Msg::Woke { .. } | Msg::Concluded => None,
+            Msg::Turn(_)
+            | Msg::Answer(_)
+            | Msg::Woke { .. }
+            | Msg::Concluded
+            | Msg::TurnProposed => None,
         }
     }
 
