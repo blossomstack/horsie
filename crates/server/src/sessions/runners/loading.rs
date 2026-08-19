@@ -183,6 +183,50 @@ pub struct PromptSection {
 
 /// What a capability acquires from while an agent loads.
 ///
+/// What an agent is, for the four decisions that are not identity.
+///
+/// [`AgentKey`]'s replacement, and deliberately not the same thing. A key
+/// answered "who is this" *and* "how do I treat it", and the first question is
+/// now a lookup — `state.agents[&id]` names the owning runner. What is left is
+/// the second, and it is derived from that runner rather than stored: a stored
+/// role is a second place for it to be wrong.
+///
+/// [`AgentKey`]: crate::sessions::session_actor::AgentKey
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRole {
+    /// The session's own conversation. The one agent whose runtime client is
+    /// unscoped: the cwd and env bucket hang off that client, so scoping it
+    /// now would move every existing session's working directory.
+    Root,
+    Fork,
+    Sub,
+    Step,
+}
+
+impl AgentRole {
+    /// The owning runner's kind, plus whether that runner is the session's
+    /// root. Those two facts decide all four roles between them.
+    #[must_use]
+    pub fn of(kind: super::ids::RunnerKind, is_root: bool) -> Self {
+        use super::ids::RunnerKind;
+        match kind {
+            RunnerKind::Conversation if is_root => Self::Root,
+            RunnerKind::Conversation => Self::Fork,
+            RunnerKind::SubAgent => Self::Sub,
+            // A run's agents are step agents whether or not the run is what
+            // this session is. The runtime owns no agents and reaches here
+            // only if something asks it for a role it will never use.
+            RunnerKind::Workflow | RunnerKind::Runtime => Self::Step,
+        }
+    }
+
+    /// Whether this agent's runtime client is scoped to its own id.
+    #[must_use]
+    pub fn scoped(self) -> bool {
+        !matches!(self, Self::Root)
+    }
+}
+
 /// The session's own services, plus who is being equipped. Deliberately *not*
 /// the agent's config — the model, the step's declared outcomes, whether this
 /// conversation is a fork — because every one of those already lives in the
@@ -245,6 +289,39 @@ impl Loading {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use super::*;
+    use crate::sessions::runners::ids::RunnerKind;
+
+    /// The root conversation's client is unscoped and every other agent's is
+    /// scoped. Getting this backwards moves every existing session's working
+    /// directory — silently, and only visible on the second turn.
+    #[test]
+    fn only_the_root_conversation_is_unscoped() {
+        assert!(!AgentRole::Root.scoped());
+        assert!(AgentRole::Fork.scoped());
+        assert!(AgentRole::Sub.scoped());
+        assert!(AgentRole::Step.scoped());
+    }
+
+    /// A role is derived from the runner that owns the agent, never stored: a
+    /// second field would be a second place for it to be wrong.
+    #[test]
+    fn a_role_comes_off_the_runner_and_whether_it_is_the_root() {
+        assert_eq!(
+            AgentRole::of(RunnerKind::Conversation, true),
+            AgentRole::Root
+        );
+        assert_eq!(
+            AgentRole::of(RunnerKind::Conversation, false),
+            AgentRole::Fork
+        );
+        assert_eq!(AgentRole::of(RunnerKind::SubAgent, false), AgentRole::Sub);
+        assert_eq!(AgentRole::of(RunnerKind::Workflow, false), AgentRole::Step);
+        // A workflow-rooted session's steps are still steps: being the root
+        // makes a conversation the session's, and makes nothing else anything.
+        assert_eq!(AgentRole::of(RunnerKind::Workflow, true), AgentRole::Step);
+    }
+
     use super::*;
     use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec};
 

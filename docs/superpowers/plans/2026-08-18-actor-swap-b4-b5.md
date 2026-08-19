@@ -320,21 +320,20 @@ git commit -m "feat(sessions): one seam where a runner's arguments become its sl
 
 ---
 
-### Task 2: one flat agent map, and `AgentKey` deleted
+### Task 2: `AgentRole`, the four decisions that are not identity
 
-`SessionAgents` is an enum — `Interactive { main, subs }` or `Workflow { live }` — keyed by `AgentKey::{Main, Sub, Step, Fork}`. Under runners every agent is an `AgentId` and its runner is a lookup, so the enum, the four-variant key and the topology split all go.
+`AgentKey` carries two questions at once: *who is this agent* and *how do I treat it*. The first becomes a lookup — `state.agents[&id]`. This task extracts the second into `AgentRole`, which is what the flat map in Task 3 needs in order to spawn an agent without a key.
 
-This task is deliberately *before* the fold swap: it is mechanical, it touches the most call sites, and doing it while the old components still compile means the compiler checks each one.
+**Corrected during execution — the flat map moved to Task 3, and `AgentKey` dies in Task 8.** The first draft of this task deleted `AgentKey` here, on the reasoning that doing it while the old components still compile means the compiler checks each call site. Measuring first showed that backwards: of 142 uses, **60 are in files Task 8 deletes** — `sessions/lifecycle_routing.rs` alone has 31, `turns.rs` 16, `orchestrator.rs` 7. Rewriting those to `AgentId` is work discarded an hour later, and worse, it is the kind of mechanical edit that quietly changes behaviour in code nobody will review because it is about to be deleted. `AgentKey` dies *with* its users, not before them.
+
+So this task adds a type and deletes nothing.
 
 **Files:**
-- Modify: `crates/server/src/sessions/session_actor/mod.rs:99-182` (`SessionAgents`), `:205-243` (`SessionActor.agents`), `:463-597` (`spawn_agent`), `:867-905` (`reach`)
-- Modify: `crates/server/src/sessions/session_actor/types.rs:925-936` (delete `AgentKey`), and `SessionAgentKind`
-- Modify: `crates/server/src/sessions/session_actor/context.rs` (`loading_for`), `hooks.rs` (`StopHookParent`, `SessionHookSink`)
-- Modify: `crates/server/src/sessions/runners/loading.rs:47` (drops `use crate::sessions::session_actor::AgentKey;`)
+- Modify: `crates/server/src/sessions/runners/loading.rs` (add `AgentRole`)
 
 **Interfaces:**
-- Consumes: `AgentId` from `runners::ids`; `Loading`, `AgentSpec` from `runners::loading`.
-- Produces: `SessionActor.agents: HashMap<AgentId, ResidentAgent>`; `fn reach(&mut self, agent: AgentId, state: &SessionState, ctx: &ActorContext<SessionInbox>) -> Option<ActorRef<AgentCommand>>`; `AgentRole` in `runners::loading` replacing `AgentKey`'s four decisions. Tasks 4, 5 and 6 all call `reach`.
+- Consumes: `RunnerKind` from `runners::ids`.
+- Produces: `pub enum AgentRole { Root, Fork, Sub, Step }` with `AgentRole::of(kind: RunnerKind, is_root: bool) -> Self` and `AgentRole::scoped(self) -> bool`. Task 3 calls both from `spawn_agent`.
 
 **Why a role and not just an id.** `AgentKey` was carrying four decisions besides identity, and they do not all reduce to "look up the runner": the root conversation's runtime client stays unscoped while everything else gets `with_agent_id` (spec, swap-decision 5 — scoping the root would silently move every existing session's working directory), the subagent role prompt, `SubagentStart` vs `SessionStart`, and progress narration. So `Loading` gains `role: AgentRole { Root, Fork, Sub, Step }`, derived from the owning `RunnerKind` plus `runner == state.root`.
 
@@ -413,28 +412,57 @@ impl AgentRole {
 }
 ```
 
-Then, in `session_actor/mod.rs`, replace the `SessionAgents` enum and its eight methods with a plain map on the actor:
+Nothing else changes here. `Loading.key: AgentKey` stays as it is until Task 3, when the flat map arrives and there is something to replace it *with* — swapping the field now would leave `AgentRole` derivable from nothing, since the runner that decides it is not consulted until the fold lands.
+
+- [ ] **Step 4: Run tests**
+
+Run: `cargo test -p horsie-server --lib runners::loading`
+Expected: PASS, 5 tests — the 2 new ones plus the 3 already there. The tree stays green: this task only adds a type.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt
+git add -A
+git commit -m "feat(sessions): a role for the four things an agent key decided besides identity"
+```
+
+---
+
+### Task 3: the fold, the flat agent map, and the actor's trait impl
+
+**This is the atomic one.** There is no intermediate commit in which half the session reads `state.run` and half reads `state.runners`, and the flat agent map is part of the same change: `spawn_agent` cannot register by `AgentKey` once the runner tree decides who exists. Tasks 4–7 are all downstream of a tree that compiles again.
+
+`SessionAgents` — the `Interactive { main, subs }` / `Workflow { live }` enum keyed by `AgentKey` — collapses to `HashMap<AgentId, ResidentAgent>` here. The topology that enum encoded (a workflow has no main agent) is now just which runner is the root.
+
+**Files:**
+- Modify: `crates/server/src/sessions/session_actor/mod.rs:99-182` (`SessionAgents` → a plain map), `:205-243` (`SessionActor.agents`), `:463-597` (`spawn_agent` takes an `AgentId` + `AgentRole`), `:867-905` (`reach`), and `:1179-1290` (the `EventSourcedActor` impl)
+- Modify: `crates/server/src/sessions/session_actor/mod.rs` (`record_lifecycle`, `report_forks`, `report_status`)
+
+**Interfaces:**
+- Consumes: `SessionState::apply`, `SessionState::status`, `runners::reads::fork_rows`, `runners::lifecycle_routing::route`, `birth::runtime_born` (Task 1), `AgentRole` (Task 2).
+- Produces: the actor compiles as `EventSourcedActor<Event = SessionEvent, State = runners::SessionState>`; `SessionActor.agents: HashMap<AgentId, ResidentAgent>`; `fn reach(&mut self, agent: AgentId, state: &SessionState, ctx: &ActorContext<SessionInbox>) -> Option<ActorRef<AgentCommand>>`. Tasks 4, 5 and 6 all call `reach`.
+
+**Salvage:** reverted commit `0ef59ebb` on this branch holds a first cut of the trait impl plus `view`/`busy`/`next_actions`/`owed`, which typechecked against the runner tree. Take them from there rather than rewriting.
+
+The flat map, and `reach` losing its four-arm match:
 
 ```rust
     /// The agent actors this session hosts, resident while this actor is
     /// loaded.
     ///
     /// One flat map, because one flat id space: which runner owns an agent is
-    /// `state.agents[&id]`, and the topology that used to be encoded in an enum
-    /// — a workflow has no main agent — is now just which runner is the root.
+    /// `state.agents[&id]`, and the topology the enum encoded — a workflow has
+    /// no main agent — is now just which runner is the root.
     agents: HashMap<AgentId, ResidentAgent>,
-```
 
-`reach` loses its four-arm match and becomes one lookup plus a spawn from the record:
-
-```rust
     /// The mailbox of one of this session's agents, spawning a cold one on
     /// demand. `None` when no runner owns that id.
     ///
     /// The three-registry probe this replaces answered "what kind of agent is
-    /// this uuid" by trying the run log, then the fork roster, then the subagent
-    /// forest — an order that was load-bearing, and getting it wrong made a fork
-    /// of a fork read as a fork of a subagent.
+    /// this uuid" by trying the run log, then the fork roster, then the
+    /// subagent forest — an order that was load-bearing, and getting it wrong
+    /// made a fork of a fork read as a fork of a subagent.
     fn reach(
         &mut self,
         agent: AgentId,
@@ -447,36 +475,11 @@ Then, in `session_actor/mod.rs`, replace the `SessionAgents` enum and its eight 
         let runner = state.runner_of(agent)?;
         let record = state.record(runner)?;
         let settings = record.state.settings(agent)?.clone();
-        self.spawn_agent(ctx, state, agent, runner, settings)
+        let role = AgentRole::of(record.kind, runner == state.root);
+        self.spawn_agent(ctx, state, agent, role, settings)
             .map(|r| r.actor)
     }
 ```
-
-Delete `AgentKey` and `SessionAgentKind` from `types.rs`. **Keep** the `AskAnswer`/`AnswerError` re-export directly above them — `supervisor.rs` and `http/handlers.rs` both import those *through* `session_actor`, and dropping it breaks two call sites for types that did not change.
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test -p horsie-server --lib runners::loading`
-Expected: PASS, 2 tests. The crate will not build yet — Task 3 lands the fold — so run the filtered test, not the suite.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add -A
-git commit -m "refactor(sessions)!: one flat agent map, and a role where a key was doing four jobs"
-```
-
----
-
-### Task 3: the fold, and the actor's trait impl
-
-**Files:**
-- Modify: `crates/server/src/sessions/session_actor/mod.rs:1179-1290` (the `EventSourcedActor` impl)
-- Modify: `crates/server/src/sessions/session_actor/mod.rs` (`record_lifecycle`, `report_forks`, `report_status`)
-
-**Interfaces:**
-- Consumes: `SessionState::apply`, `SessionState::status`, `runners::reads::fork_rows`, `runners::lifecycle_routing::route`, `birth::runtime_born` (Task 1).
-- Produces: the actor compiles as `EventSourcedActor<Event = SessionEvent, State = runners::SessionState>`. Tasks 4 and 5 build on it.
 
 - [ ] **Step 1: Write the failing test**
 
