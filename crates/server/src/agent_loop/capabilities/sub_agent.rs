@@ -51,20 +51,21 @@
 //! never learn it had hit a budget.
 
 use super::{
-    Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, TurnEvent,
+    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SessionReply,
+    SessionRequest, TurnEvent,
 };
-use crate::agent_loop::toolbox::claiming;
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AgentCatalog, Incoming};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::AgentFacts;
-use crate::sessions::runners::message::{ChildMsg, ChildOutcome, SubAgentOutcome, ToolCall};
+use crate::sessions::runners::message::{ChildMsg, ChildOutcome, SubAgentOutcome};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::subagents::MAX_SUBAGENT_DEPTH;
 use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -145,6 +146,24 @@ pub struct Request {
     pub agent_type: Option<String>,
 }
 
+/// What the model asked this capability to do.
+pub enum Command {
+    /// `spawn_agent`, with the catalogue the advertisement was built from.
+    ///
+    /// The catalogue rides on the command rather than being held, for the same
+    /// reason it was never held before: it is what the *current* library
+    /// declares, and this capability is folded from a journal that may be older
+    /// than the plugins installed since. It is captured when the layer is
+    /// composed, so a refusal names exactly the list the model was shown.
+    Spawn {
+        input: Value,
+        catalog: Option<Arc<AgentCatalog>>,
+    },
+    /// `subagent_status`. No input: reading back what is running takes no
+    /// arguments.
+    Status,
+}
+
 impl SubAgentCapability {
     #[must_use]
     pub fn new(child_settings: AgentSettings, depth: u32) -> Self {
@@ -168,15 +187,15 @@ impl SubAgentCapability {
     }
 
     /// The model called `spawn_agent`.
-    fn spawn(&self, call: &ToolCall, facts: &AgentFacts) -> Decision {
-        let req: Request = match serde_json::from_value(call.input.clone()) {
+    fn spawn(&self, call: &str, input: &Value, catalog: Option<&AgentCatalog>) -> Decision {
+        let req: Request = match serde_json::from_value(input.clone()) {
             Ok(req) => req,
             // A capability that owns a tool name owns every call to it,
             // including the malformed ones — see the module doc on why this is
             // answered rather than declined.
             Err(e) => {
                 return Decision::reply(
-                    &call.id,
+                    call,
                     format!("`{SPAWN_TOOL}` was called with arguments it cannot read: {e}"),
                 );
             }
@@ -187,7 +206,7 @@ impl SubAgentCapability {
         // here: see the module doc.
         if self.depth >= MAX_SUBAGENT_DEPTH {
             return Decision::reply(
-                &call.id,
+                call,
                 format!("max subagent depth {MAX_SUBAGENT_DEPTH} reached"),
             );
         }
@@ -197,9 +216,9 @@ impl SubAgentCapability {
         // runtime capability resolves the type against the library it loads —
         // but by then a child exists, and its complaint reaches the model as a
         // failed worker rather than as an answer to the call that named it.
-        let agent_type = match resolve_type(req.agent_type.as_deref(), facts) {
+        let agent_type = match resolve_type(req.agent_type.as_deref(), catalog) {
             Ok(resolved) => resolved,
-            Err(reason) => return Decision::reply(&call.id, reason),
+            Err(reason) => return Decision::reply(call, reason),
         };
         // Both ids are minted here rather than in `apply`: a decision may be
         // non-deterministic, a fold may not. Replay must land the ids the log
@@ -220,15 +239,15 @@ impl SubAgentCapability {
         };
         let note = format!("spawning subagent {}", pending.label);
         Decision::record(vec![CapEvent::SubAgent(Event::Requested {
-            call: call.id.clone(),
+            call: call.to_string(),
             pending: pending.clone(),
         })])
-        .then(Act::Ask(self.ask(&call.id, &pending)))
+        .then(Act::Ask(self.ask(call, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message. The dangling
         // `tool_use` is what the reply fills in.
         .then(Act::Park {
-            call: call.id.clone(),
+            call: call.to_string(),
             note,
         })
     }
@@ -391,15 +410,27 @@ fn catalog(facts: &AgentFacts) -> Option<&AgentCatalog> {
     facts.shared.as_deref().map(|shared| shared.agents.as_ref())
 }
 
+/// The same catalogue, in the form a command can carry: shared rather than
+/// borrowed, because the call it is refused against happens on the mailbox long
+/// after the facts it was advertised from went out of scope.
+fn shared_catalog(facts: &AgentFacts) -> Option<Arc<AgentCatalog>> {
+    facts
+        .shared
+        .as_ref()
+        .map(|shared| Arc::clone(&shared.agents))
+}
+
 /// A requested agent type, checked against the catalogue that was advertised.
 ///
 /// `None` for an omitted or blank type, which is the general-purpose worker and
 /// not a mistake. The error is the model's to read, so it names what does exist.
-fn resolve_type(requested: Option<&str>, facts: &AgentFacts) -> Result<Option<String>, String> {
+fn resolve_type(
+    requested: Option<&str>,
+    catalog: Option<&AgentCatalog>,
+) -> Result<Option<String>, String> {
     let Some(requested) = requested.map(str::trim).filter(|r| !r.is_empty()) else {
         return Ok(None);
     };
-    let catalog = catalog(facts);
     if catalog.is_some_and(|c| c.get(requested).is_some()) {
         return Ok(Some(requested.to_string()));
     }
@@ -460,7 +491,7 @@ impl SubAgentCapability {
     /// one — so the layers are composed on the run's task, after `provide`, and
     /// this list is built there. A model not shown it can only guess at a name,
     /// and every guess is refused.
-    fn specs(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
+    fn claims(&self, facts: &AgentFacts) -> Vec<ClaimedTool> {
         if self.child_settings.max_subagents() == 0 || self.depth >= MAX_SUBAGENT_DEPTH {
             return Vec::new();
         }
@@ -515,25 +546,44 @@ impl SubAgentCapability {
                 }),
             );
         }
+        // Captured here, at the one moment the scan exists, and carried on the
+        // command: the mailbox has no scan of its own, and a refusal has to
+        // name the same list the model was shown.
+        let advertised = shared_catalog(facts);
         vec![
-            ToolSpec {
-                name: SPAWN_TOOL.to_string(),
-                description,
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["label", "task"],
-                    "properties": properties,
-                }),
-            },
-            ToolSpec {
-                name: STATUS_TOOL.to_string(),
-                description: "Inspect subagent status only for a user-requested progress update \
-                    or to diagnose a suspected result-delivery problem. Do not poll or call this \
-                    tool repeatedly: terminal results and failures are automatically delivered \
-                    to you as messages. Lists the subagents you spawned that are still running."
-                    .to_string(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
+            ClaimedTool::new(
+                ToolSpec {
+                    name: SPAWN_TOOL.to_string(),
+                    description,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["label", "task"],
+                        "properties": properties,
+                    }),
+                },
+                move |input, to| {
+                    CapCommand::SubAgent(
+                        Command::Spawn {
+                            input,
+                            catalog: advertised.clone(),
+                        },
+                        to,
+                    )
+                },
+            ),
+            ClaimedTool::new(
+                ToolSpec {
+                    name: STATUS_TOOL.to_string(),
+                    description: "Inspect subagent status only for a user-requested progress \
+                        update or to diagnose a suspected result-delivery problem. Do not poll or \
+                        call this tool repeatedly: terminal results and failures are automatically \
+                        delivered to you as messages. Lists the subagents you spawned that are \
+                        still running."
+                        .to_string(),
+                    input_schema: json!({ "type": "object", "properties": {} }),
+                },
+                |_input, to| CapCommand::SubAgent(Command::Status, to),
+            ),
         ]
     }
 }
@@ -548,19 +598,25 @@ impl Capability for SubAgentCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(facts), mailbox)
+        claiming(inner, self.claims(facts), mailbox)
+    }
+
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::SubAgent(cmd, to) = cmd else {
+            return None;
+        };
+        Some(match cmd {
+            Command::Spawn { input, catalog } => self.spawn(&to.call, input, catalog.as_deref()),
+            // A read, so it journals nothing: an event for it would grow the
+            // log every time the model looked.
+            Command::Status => Decision::reply(&to.call, self.render_status()),
+        })
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool { call, facts } if call.name == SPAWN_TOOL => Some(self.spawn(call, facts)),
-            // A read, so it journals nothing: an event for it would grow the
-            // log every time the model looked.
-            Msg::Tool { call, .. } if call.name == STATUS_TOOL => {
-                Some(Decision::reply(&call.id, self.render_status()))
-            }
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
             // The crash window: a spawn journaled and never answered is re-asked
@@ -576,12 +632,7 @@ impl Capability for SubAgentCapability {
                     note: format!("{} subagent(s) still owe a report", self.outstanding.len()),
                 }))
             }
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded => None,
+            Msg::Turn(_) | Msg::Answer(_) | Msg::Woke { .. } | Msg::Concluded => None,
         }
     }
 
@@ -618,7 +669,9 @@ impl Capability for SubAgentCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{FakeCapability, advertised_by, facts, tool};
+    use super::super::testing::{
+        FakeCapability, advertised_by, answering, facts, someone_elses, specs_of,
+    };
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::settings;
@@ -628,16 +681,25 @@ mod tests {
         SubAgentCapability::new(settings(), 0)
     }
 
-    fn call(name: &str, input: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: "t1".into(),
-            name: name.into(),
-            input,
-        }
+    /// A spawn as the layer builds it, under a load that found no agent types.
+    fn spawn_cmd(input: serde_json::Value) -> CapCommand {
+        spawn_under(input, &facts())
     }
 
-    fn spawn_call() -> ToolCall {
-        call(SPAWN_TOOL, json!({"label": "l", "task": "t"}))
+    /// The same, under the facts a load actually found — which is what the
+    /// layer captures, so a refusal names the list the model was shown.
+    fn spawn_under(input: serde_json::Value, facts: &AgentFacts) -> CapCommand {
+        CapCommand::SubAgent(
+            Command::Spawn {
+                input,
+                catalog: shared_catalog(facts),
+            },
+            answering("t1"),
+        )
+    }
+
+    fn spawn_call() -> CapCommand {
+        spawn_cmd(json!({"label": "l", "task": "t"}))
     }
 
     /// The facts a load leaves behind when the shared library declared these
@@ -668,7 +730,7 @@ mod tests {
 
     /// What the model is shown for `spawn_agent` under these facts.
     fn spawn_spec(c: &SubAgentCapability, facts: &AgentFacts) -> ToolSpec {
-        c.specs(facts)
+        specs_of(c, facts)
             .into_iter()
             .find(|t| t.name == SPAWN_TOOL)
             .expect("spawn_agent is advertised")
@@ -699,7 +761,7 @@ mod tests {
     /// Ask for a worker and let the session say yes, which is the only way
     /// there is to an outstanding child.
     fn spawned(c: &mut SubAgentCapability) -> RunnerId {
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
@@ -722,10 +784,9 @@ mod tests {
     fn a_spawn_journals_and_asks_for_the_same_child() {
         let mut c = cap();
         let d = c
-            .handle(&tool(&call(
-                SPAWN_TOOL,
+            .command(&spawn_cmd(
                 json!({"label": "read the flake", "task": "look"}),
-            )))
+            ))
             .expect("mine");
 
         let [CapEvent::SubAgent(Event::Requested { call, pending })] = d.events.as_slice() else {
@@ -782,12 +843,12 @@ mod tests {
     fn a_spawn_at_the_depth_limit_is_refused_without_asking_the_session() {
         // The last depth that may still delegate, and the first that may not.
         let ok = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH - 1)
-            .handle(&tool(&spawn_call()))
+            .command(&spawn_call())
             .expect("mine");
         assert!(matches!(ok.acts.first(), Some(Act::Ask(_))));
 
         let d = SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)
-            .handle(&tool(&spawn_call()))
+            .command(&spawn_call())
             .expect("mine, refused or not");
         assert_eq!(refusal(&d), "max subagent depth 4 reached");
         assert!(
@@ -803,7 +864,7 @@ mod tests {
     #[test]
     fn a_cap_refusal_from_the_session_becomes_the_parked_calls_result() {
         let mut c = cap();
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(&mut c, &d);
 
         let d = c
@@ -835,7 +896,7 @@ mod tests {
     #[test]
     fn a_started_child_answers_the_parked_call_and_becomes_outstanding() {
         let mut c = cap();
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(&mut c, &d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Done { call: "t1".into() }))
@@ -879,7 +940,7 @@ mod tests {
     #[test]
     fn a_spawn_the_session_never_answered_is_asked_again_on_load() {
         let mut c = cap();
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(&mut c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, args, .. }),
@@ -957,7 +1018,7 @@ mod tests {
         // A refusal retracts the intent too, so a load after one asks for
         // nothing rather than re-running into the same budget.
         let mut c = cap();
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(&mut c, &d);
         let d = c
             .handle(&Msg::Reply(&SessionReply::Refused {
@@ -992,12 +1053,9 @@ mod tests {
             Box::new(SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)),
             Box::new(FakeCapability::new(SPAWN_TOOL)),
         ]);
-        let taken = caps
-            .iter()
-            .find_map(|c| c.handle(&tool(&spawn_call())).map(|d| (c.name(), d)));
-        let Some(("sub_agent", d)) = taken else {
-            panic!("the sandbox layer swallowed the spawn: {taken:?}");
-        };
+        let d = caps
+            .dispatch(&spawn_call())
+            .expect("a refused spawn that answers nobody");
         assert!(!refusal(&d).is_empty());
     }
 
@@ -1006,7 +1064,7 @@ mod tests {
     #[test]
     fn a_malformed_spawn_is_refused_in_words_and_journals_nothing() {
         let d = cap()
-            .handle(&tool(&call(SPAWN_TOOL, json!({"label": "l"}))))
+            .command(&spawn_cmd(json!({"label": "l"})))
             .expect("the name is mine, so the mistake is mine to answer");
         assert!(refusal(&d).contains(SPAWN_TOOL));
     }
@@ -1180,7 +1238,7 @@ mod tests {
     #[test]
     fn a_requested_child_does_not_hold_the_conclusion() {
         let mut c = cap();
-        let d = c.handle(&tool(&spawn_call())).expect("mine");
+        let d = c.command(&spawn_call()).expect("mine");
         fold(&mut c, &d);
         assert!(!c.requested.is_empty());
         assert!(!c.holds_conclusion());
@@ -1209,7 +1267,7 @@ mod tests {
         let mut c = cap();
         let child = spawned(&mut c);
         let d = c
-            .handle(&tool(&call(STATUS_TOOL, json!({}))))
+            .command(&CapCommand::SubAgent(Command::Status, answering("t1")))
             .expect("mine");
         assert!(d.events.is_empty());
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
@@ -1219,7 +1277,7 @@ mod tests {
 
         c.apply(&CapEvent::SubAgent(Event::Reported { child }));
         let d = c
-            .handle(&tool(&call(STATUS_TOOL, json!({}))))
+            .command(&CapCommand::SubAgent(Command::Status, answering("t1")))
             .expect("mine");
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
             panic!("expected one answer, got {:?}", d.acts);
@@ -1289,13 +1347,10 @@ mod tests {
     fn an_unknown_agent_type_is_refused_and_names_the_installed_ones() {
         let installed = facts_with(&[("code-reviewer", "reviews"), ("scout", "searches")]);
         let d = cap()
-            .handle(&Msg::Tool {
-                call: &call(
-                    SPAWN_TOOL,
-                    json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
-                ),
-                facts: &installed,
-            })
+            .command(&spawn_under(
+                json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
+                &installed,
+            ))
             .expect("the name is mine, so the mistake is mine to answer");
         assert_eq!(
             refusal(&d),
@@ -1309,13 +1364,9 @@ mod tests {
         // With nothing installed the refusal says so, rather than naming an
         // empty list.
         let d = cap()
-            .handle(&Msg::Tool {
-                call: &call(
-                    SPAWN_TOOL,
-                    json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
-                ),
-                facts: &facts(),
-            })
+            .command(&spawn_cmd(
+                json!({"label": "l", "task": "t", "agent_type": "reviewer"}),
+            ))
             .expect("mine");
         assert_eq!(
             refusal(&d),
@@ -1336,12 +1387,7 @@ mod tests {
             (json!({"label": "l", "task": "t", "agent_type": "  "}), None),
             (json!({"label": "l", "task": "t"}), None),
         ] {
-            let d = cap()
-                .handle(&Msg::Tool {
-                    call: &call(SPAWN_TOOL, input),
-                    facts: &facts,
-                })
-                .expect("mine");
+            let d = cap().command(&spawn_under(input, &facts)).expect("mine");
             let [CapEvent::SubAgent(Event::Requested { pending, .. })] = d.events.as_slice() else {
                 panic!("expected one Requested event, got {:?}", d.events);
             };
@@ -1392,14 +1438,7 @@ mod tests {
     #[test]
     fn another_message_is_not_mine() {
         let c = cap();
-        assert!(c.handle(&tool(&call("bash", json!({})))).is_none());
-        assert!(
-            c.handle(&Msg::Command(&crate::sessions::runners::message::Command {
-                name: "fork".into(),
-                args: String::new(),
-            }))
-            .is_none()
-        );
+        assert!(c.command(&someone_elses()).is_none());
         assert!(c.handle(&Msg::Answer(&[])).is_none());
     }
 }

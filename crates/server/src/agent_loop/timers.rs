@@ -137,58 +137,73 @@ pub enum CancelSelector {
 }
 
 /// The three agent-control timer tools, advertised on top of an agent's toolbox.
+///
+/// One function per tool, because each is paired with the command a call to it
+/// becomes — see [`crate::agent_loop::capabilities::timers`]. A list would make
+/// that pairing positional, which is the one way to get it wrong silently.
 pub fn timer_tool_specs() -> Vec<ToolSpec> {
-    vec![
-        ToolSpec {
-            name: "set_timer".to_string(),
-            description: "Schedule a wake-up. Use it to suspend and be re-prompted later to \
+    vec![set_timer_spec(), list_timers_spec(), cancel_timer_spec()]
+}
+
+/// `set_timer`: arm one.
+pub fn set_timer_spec() -> ToolSpec {
+    ToolSpec {
+        name: "set_timer".to_string(),
+        description: "Schedule a wake-up. Use it to suspend and be re-prompted later to \
                           re-check external state. Returns a timer id."
-                .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "required": ["kind", "after_secs", "label", "message"],
-                "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": ["one_shot", "recurring"],
-                        "description": "one_shot fires once; recurring fires every after_secs."
-                    },
-                    "after_secs": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Delay in seconds until the timer fires."
-                    },
-                    "label": {
-                        "type": "string",
-                        "description": "A short note to yourself, echoed back when it fires."
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "A message to yourself, delivered verbatim each time the \
-                                        timer fires — use it to recall the context or instructions \
-                                        you need when you wake up."
-                    }
+            .to_string(),
+        input_schema: json!({
+            "type": "object",
+            "required": ["kind", "after_secs", "label", "message"],
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["one_shot", "recurring"],
+                    "description": "one_shot fires once; recurring fires every after_secs."
+                },
+                "after_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Delay in seconds until the timer fires."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "A short note to yourself, echoed back when it fires."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "A message to yourself, delivered verbatim each time the \
+                                    timer fires — use it to recall the context or instructions \
+                                    you need when you wake up."
                 }
-            }),
-        },
-        ToolSpec {
-            name: "list_timers".to_string(),
-            description: "List your active timers (the reliable source of truth for cancelling)."
-                .to_string(),
-            input_schema: json!({ "type": "object", "properties": {} }),
-        },
-        ToolSpec {
-            name: "cancel_timer".to_string(),
-            description: "Cancel one timer by id, or all of them.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Timer id to cancel." },
-                    "all": { "type": "boolean", "description": "Cancel every active timer." }
-                }
-            }),
-        },
-    ]
+            }
+        }),
+    }
+}
+
+/// `list_timers`: read them back.
+pub fn list_timers_spec() -> ToolSpec {
+    ToolSpec {
+        name: "list_timers".to_string(),
+        description: "List your active timers (the reliable source of truth for cancelling)."
+            .to_string(),
+        input_schema: json!({ "type": "object", "properties": {} }),
+    }
+}
+
+/// `cancel_timer`: remove one, or all of them.
+pub fn cancel_timer_spec() -> ToolSpec {
+    ToolSpec {
+        name: "cancel_timer".to_string(),
+        description: "Cancel one timer by id, or all of them.".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Timer id to cancel." },
+                "all": { "type": "boolean", "description": "Cancel every active timer." }
+            }
+        }),
+    }
 }
 
 #[cfg(test)]

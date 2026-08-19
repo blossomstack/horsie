@@ -37,23 +37,29 @@
 //! that pair with it and starts the next one. Everything else a capability can
 //! ask for is a convenience beside those two.
 //!
-//! # Offer and broadcast
+//! # Commands and lifecycle are different things
 //!
+//! A capability owns its own commands. What a person or a model asked *this*
+//! capability to do arrives as a [`CapCommand`] — one arm per capability, built
+//! by the toolbox layer that claimed the name — and reaches it through
+//! [`Capabilities::dispatch`]. Nothing downstream of that layer ever sees a tool
+//! name: which capability answers is decided by which arm was constructed, so
+//! the "first claimant wins" rule is enforced by wrapping order at compose time
+//! rather than by a scan at call time.
+//!
+//! [`Msg`] is what is left, and it is lifecycle only: a turn boundary, a load,
+//! an answer, a child, a session reply, a wake, a conclusion. Those *are*
+//! routed, and [`Msg::routing`] carries which way rather than a table above it.
 //! [`Capabilities::offer`] hands a message to each capability in order until one
-//! takes it, and `None` from all of them is an error at the one place the scan
-//! lives. [`Capabilities::broadcast`] hands it to every one of them.
+//! takes it — for the four that exactly one capability can account for.
+//! [`Capabilities::broadcast`] hands it to every one of them, because a turn
+//! ending is news for all of them: the ask holds a park open across it, the step
+//! result counts its nudges by it, and the subagent list checks it for children
+//! still outstanding.
 //!
-//! Which mode a message gets is carried by [`Msg::routing`] rather than by the
-//! caller, so there is no table above this to keep in step. A tool call is
-//! offered because exactly one capability owns a name. A turn boundary is
-//! broadcast because a turn ending is news for all of them: the ask holds a
-//! park open across it, the step result counts its nudges by it, and the
-//! subagent list checks it for children still outstanding.
-//!
-//! Order is therefore the conflict resolution for tool calls, and it is a
-//! written property of assembly: the open-namespace capabilities — the sandbox
-//! above all — sort last, because they answer for a namespace nobody can
-//! enumerate. See [`Capabilities::push_front`].
+//! Order is still a written property of assembly — the open-namespace
+//! capabilities, the sandbox above all, sort last because they answer for a
+//! namespace nobody can enumerate. See [`Capabilities::push_front`].
 
 pub mod ask_user;
 pub mod control_plane;
@@ -71,33 +77,160 @@ pub mod workflow;
 use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use crate::sessions::runners::message::{ChildMsg, Command, ToolCall};
-use horsie_agentcore::Toolbox;
+use crate::sessions::runners::message::ChildMsg;
+use horsie_actor::ReplyTo;
+use horsie_agentcore::{ToolCallError, ToolOutcome, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Something reaching an agent's capabilities.
+/// How a tool call is answered: the outcome the run is waiting for, or the
+/// error it is told instead.
+pub type ToolReply = ReplyTo<Result<ToolOutcome, ToolCallError>>;
+
+/// The run waiting for a command's answer.
+///
+/// Carried beside the command rather than inside it, because the shape of an
+/// answer is the same for every capability — a tool outcome — and only *what*
+/// was asked varies. So a capability's own command type says what to do and
+/// nothing about who is listening.
+///
+/// The channel is never used by a capability. A capability decides what the
+/// answer is, in [`Act::Answer`] or [`Act::Refuse`] or [`Act::Park`]; the actor
+/// decides *when* it goes out, which is after the events behind it are durable.
+/// A capability that could send would be able to report success for work a
+/// crash loses, and no test could fail for it.
+pub struct Answering {
+    /// The provider's `tool_use` id. Still here beside the channel because a
+    /// park outlives it: the call dangles, and the result arrives against this
+    /// id on a process that has since rehydrated the session.
+    pub call: String,
+    pub reply: ToolReply,
+}
+
+/// One capability's command, tagged with which capability owns it.
+///
+/// The third application of the pattern [`CapEvent`] and [`CapSlice`] already
+/// use, and for the third reason: dispatch stays open through
+/// [`dyn Capability`](Capability), and the enum stays closed so nothing can be
+/// forgotten. What it buys over a tool call is that **routing is by
+/// construction**. The layer that claimed a name builds the arm, so a command
+/// can only ever reach the capability whose own type it carries — where a name
+/// had to be matched against a list, and the first capability to recognise it
+/// won.
+///
+/// Never journaled, which is why this is the one of the three with no serde
+/// bound: it carries [`Answering`], and a channel to a caller that has gone
+/// away is not a fact about the agent.
+pub enum CapCommand {
+    AskUser(ask_user::Command, Answering),
+    /// The one command a person types rather than a model calls, so there is no
+    /// run waiting and nothing to answer. See [`fork`].
+    Fork(fork::Command),
+    StepResult(step_result::Command, Answering),
+    SubAgent(sub_agent::Command, Answering),
+    TaskList(task_list::Command, Answering),
+    Timers(timers::Command, Answering),
+    Title(title::Command, Answering),
+    Workflow(workflow::Command, Answering),
+    #[cfg(test)]
+    Fake(testing::FakeCommand, Answering),
+}
+
+impl CapCommand {
+    /// Whose command this is, for the diagnostic when that capability is not
+    /// equipped.
+    #[must_use]
+    pub fn owner(&self) -> &'static str {
+        match self {
+            Self::AskUser(..) => "ask_user",
+            Self::Fork(_) => "fork",
+            Self::StepResult(..) => "step_result",
+            Self::SubAgent(..) => "sub_agent",
+            Self::TaskList(..) => "task_list",
+            Self::Timers(..) => "timers",
+            Self::Title(..) => "title",
+            Self::Workflow(..) => "workflow",
+            #[cfg(test)]
+            Self::Fake(..) => "fake",
+        }
+    }
+
+    /// The call a run is waiting on, if a run made this.
+    ///
+    /// What the actor pairs an [`Act::Answer`] with: a capability answering a
+    /// call other than the one in flight is a bug, and this is what makes it
+    /// visible rather than an answer sent to the wrong run.
+    #[must_use]
+    pub fn call(&self) -> Option<&str> {
+        match self {
+            Self::AskUser(_, a)
+            | Self::StepResult(_, a)
+            | Self::SubAgent(_, a)
+            | Self::TaskList(_, a)
+            | Self::Timers(_, a)
+            | Self::Title(_, a)
+            | Self::Workflow(_, a) => Some(&a.call),
+            #[cfg(test)]
+            Self::Fake(_, a) => Some(&a.call),
+            Self::Fork(_) => None,
+        }
+    }
+
+    /// The channel the answer goes back on, taken once there is an answer to
+    /// send. Consumes the command, because answering is the last thing that
+    /// happens to one.
+    #[must_use]
+    pub fn into_reply(self) -> Option<ToolReply> {
+        match self {
+            Self::AskUser(_, a)
+            | Self::StepResult(_, a)
+            | Self::SubAgent(_, a)
+            | Self::TaskList(_, a)
+            | Self::Timers(_, a)
+            | Self::Title(_, a)
+            | Self::Workflow(_, a) => Some(a.reply),
+            #[cfg(test)]
+            Self::Fake(_, a) => Some(a.reply),
+            Self::Fork(_) => None,
+        }
+    }
+}
+
+/// The agent's own mailbox, in the shape a capability's layer can reach it.
+///
+/// Not an [`ActorRef`](horsie_actor::ActorRef): a capability is persisted state
+/// and cannot hold an address, and passing this in is also what lets a test
+/// compose a layer with no actor and no tokio runtime. Not a [`Toolbox`] either,
+/// which is what it was until commands existed — a toolbox takes a *name*, and
+/// the whole point of a command is that the name was resolved by the layer that
+/// claimed it.
+///
+/// The command is built from the channel rather than handed over with one,
+/// because the channel does not exist until the send does. That is
+/// [`ActorRef::ask`](horsie_actor::ActorRef::ask)'s shape, and this is that
+/// shape with the actor's command enum kept out of a capability's sight.
+#[async_trait::async_trait]
+pub trait Mailbox: Send + Sync {
+    async fn send(
+        &self,
+        make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
+    ) -> Result<ToolOutcome, ToolCallError>;
+}
+
+/// Something that happened to an agent, reaching its capabilities.
+///
+/// **Lifecycle only.** What a person or a model asked a capability to *do* is a
+/// [`CapCommand`], which is that capability's own type and is routed by
+/// construction; this is the fixed set of moments the loop defines, and a
+/// capability that wants one the loop does not define adds it here, deliberately.
+/// It may not smuggle one in as a command.
 ///
 /// Borrowed rather than owned because the same message is handed to one
 /// capability after another until it is claimed; whoever claims it clones what
 /// it keeps.
 #[derive(Debug)]
 pub enum Msg<'a> {
-    /// A tool the model called, and what the run that called it found.
-    ///
-    /// The facts ride with the call because they are the same ones the
-    /// advertisement was built from — [`Capability::layer`] is composed on that
-    /// run's task from this very value — so a refusal here names exactly the
-    /// catalogue the model was shown. Nothing else carries them: facts exist for
-    /// as long as a run does, and a tool call is the only message that is always
-    /// inside one.
-    Tool {
-        call: &'a ToolCall,
-        facts: &'a AgentFacts,
-    },
-    /// A `/builtin` the person typed, already parsed.
-    Command(&'a Command),
     /// This agent's turn reached a boundary.
     Turn(TurnEvent),
     /// Every question this agent was parked on has been answered.
@@ -170,11 +303,9 @@ impl Msg<'_> {
     #[must_use]
     pub fn routing(&self) -> Routing {
         match self {
-            // Exactly one capability owns a tool name, a slash command, a
-            // child, or the request a reply answers.
-            Self::Tool { .. } | Self::Command(_) | Self::Child(_) | Self::Reply(_) => {
-                Routing::Offer
-            }
+            // Exactly one capability created a child, or made the request a
+            // reply answers.
+            Self::Child(_) | Self::Reply(_) => Routing::Offer,
             // And so is a wake: the capability that asked for the sleep minted
             // the id, so exactly one of them can answer for it.
             Self::Woke { .. } => Routing::Offer,
@@ -197,8 +328,6 @@ impl Msg<'_> {
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
-            Self::Tool { call, .. } => format!("tool call `{}`", call.name),
-            Self::Command(c) => format!("command `/{}`", c.name),
             Self::Turn(t) => format!("turn {t:?}"),
             Self::Answer(a) => format!("{} answer(s)", a.len()),
             Self::Child(c) => format!("child {}", c.child()),
@@ -479,15 +608,15 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
     ///
     /// A layer answers the names it claims and passes everything else straight
     /// through — see [`crate::agent_loop::toolbox::claiming`], which is what
-    /// every capability here builds its layer with. Claimed names reach
-    /// [`Self::handle`] on the actor's mailbox, so a tool can park, journal and
-    /// ask the session; unclaimed ones never touch the mailbox.
+    /// every capability here builds its layer with. A claimed name becomes one
+    /// of this capability's own commands and reaches [`Self::command`] on the
+    /// actor's mailbox, so a tool can park, journal and ask the session;
+    /// unclaimed ones never touch the mailbox.
     ///
     /// **Wrapping order is precedence.** [`Capabilities::layer`] applies the
     /// list back to front, so the *first* capability ends up outermost and wins
-    /// a name against everything behind it — the same answer the offer scan
-    /// gives, which is why there is now one ordering rather than two that read
-    /// opposite ways.
+    /// a name against everything behind it. That is the whole of the ordering
+    /// rule now: there is nowhere else a name is resolved.
     ///
     /// [`AgentFacts`] rather than nothing, because an advertisement can depend
     /// on what the load found: `sub_agent` lists the installed agent types, and
@@ -496,17 +625,31 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
     /// a capability that sorts ahead of `runtime`, as `sub_agent` must to win
     /// the `spawn_agent` name, has no scan of its own to read.
     ///
-    /// `mailbox` is the agent's own, in toolbox form. Passed in rather than
-    /// held, because a capability is persisted state and an address is not; it
-    /// is also what lets a test compose a layer with no actor running.
+    /// `mailbox` is the agent's own. Passed in rather than held, because a
+    /// capability is persisted state and an address is not; it is also what
+    /// lets a test compose a layer with no actor running.
     fn layer(
         &self,
         inner: Arc<dyn Toolbox>,
         facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
         let _ = (facts, mailbox);
         inner
+    }
+
+    /// Do one of my own commands. `None` means "not mine".
+    ///
+    /// The default claims nothing, which is the honest answer for a capability
+    /// whose tools are a `setup` layer answered on the agent's own task: it has
+    /// no commands at all, because nothing of its needs the mailbox.
+    ///
+    /// A capability matches its own arm with `let ... else` rather than a match
+    /// naming its siblings — the same shape [`Self::apply`] uses, and for the
+    /// same reason.
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let _ = cmd;
+        None
     }
 
     /// `None` means "not mine".
@@ -650,7 +793,8 @@ pub enum CapView {
     TaskList(Vec<crate::agent_loop::task_list::TaskRecord>),
 }
 
-/// What an agent is equipped with, in the order messages are offered around.
+/// What an agent is equipped with, in the order its layers wrap and its
+/// lifecycle messages are offered around.
 ///
 /// A newtype so the list round-trips through the journal as `Vec<CapSlice>`
 /// with no hydration step: what comes back is what went in, including config.
@@ -740,12 +884,24 @@ impl Capabilities {
         &self,
         inner: Arc<dyn Toolbox>,
         facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
         self.0
             .iter()
             .rev()
             .fold(inner, |inner, cap| cap.layer(inner, facts, mailbox))
+    }
+
+    /// Give a command to the capability whose command it is.
+    ///
+    /// Not an offer, though it walks the same list: an arm can only be
+    /// recognised by the capability whose own type it carries, so there is no
+    /// first-claimant rule here and no name to contest. `None` means that
+    /// capability is not equipped at all, which the actor turns into an error
+    /// the model can see rather than a call that never returns.
+    #[must_use]
+    pub fn dispatch(&self, cmd: &CapCommand) -> Option<Decision> {
+        self.0.iter().find_map(|c| c.command(cmd))
     }
 
     /// Hand a message to each capability until one takes it.
@@ -865,6 +1021,39 @@ pub mod testing {
     use super::*;
     use horsie_agentcore::ToolSpec;
 
+    /// A tool call, as the layer that claimed the name would have built one.
+    ///
+    /// The channel goes nowhere: every capability test asserts on the
+    /// [`Decision`], and *when* an answer is sent is the actor's business
+    /// rather than a capability's — so there is nothing here for a capability
+    /// to send on.
+    #[must_use]
+    pub fn answering(call: &str) -> Answering {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Held nowhere: a capability never sends, so a dropped receiver is the
+        // honest shape rather than a leak.
+        drop(rx);
+        Answering {
+            call: call.to_string(),
+            reply: horsie_actor::ReplyTo::from_sender(tx),
+        }
+    }
+
+    /// A command belonging to some other capability.
+    ///
+    /// What a "not mine" assertion is written against now: a capability can no
+    /// longer be offered a name it does not claim, so what it has to decline is
+    /// somebody else's arm.
+    #[must_use]
+    pub fn someone_elses() -> CapCommand {
+        CapCommand::Fake(
+            FakeCommand {
+                tool: "someone else's".to_string(),
+            },
+            answering("t1"),
+        )
+    }
+
     /// A capability with a name, one tool, and one piece of folded state.
     ///
     /// Enough to exercise every composition rule without a real capability
@@ -917,6 +1106,15 @@ pub mod testing {
         pub what: String,
     }
 
+    /// The fake's only command: its tool was called.
+    ///
+    /// It carries the tool's name — which a real capability's command never
+    /// does — because two fakes claiming one name are only tellable apart by
+    /// what they were built with, and that is the composition rule under test.
+    pub struct FakeCommand {
+        pub tool: String,
+    }
+
     #[async_trait::async_trait]
     impl Capability for FakeCapability {
         fn name(&self) -> &'static str {
@@ -927,35 +1125,44 @@ pub mod testing {
             &self,
             inner: Arc<dyn Toolbox>,
             _facts: &AgentFacts,
-            mailbox: &Arc<dyn Toolbox>,
+            mailbox: &Arc<dyn Mailbox>,
         ) -> Arc<dyn Toolbox> {
+            let tool = self.tool.clone();
             crate::agent_loop::toolbox::claiming(
                 inner,
-                vec![ToolSpec {
-                    name: self.tool.clone(),
-                    description: self.description.clone(),
-                    input_schema: serde_json::json!({"type": "object"}),
-                }],
+                vec![crate::agent_loop::toolbox::ClaimedTool::new(
+                    ToolSpec {
+                        name: self.tool.clone(),
+                        description: self.description.clone(),
+                        input_schema: serde_json::json!({"type": "object"}),
+                    },
+                    move |_input, to| CapCommand::Fake(FakeCommand { tool: tool.clone() }, to),
+                )],
                 mailbox,
             )
         }
 
+        fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+            let CapCommand::Fake(cmd, _) = cmd else {
+                return None;
+            };
+            (cmd.tool == self.tool).then(|| {
+                Decision::record(vec![CapEvent::Fake(FakeEvent {
+                    tool: self.tool.clone(),
+                    what: format!("tool:{}", cmd.tool),
+                })])
+            })
+        }
+
         fn handle(&self, msg: &Msg) -> Option<Decision> {
             match msg {
-                Msg::Tool { call, .. } => (call.name == self.tool).then(|| {
-                    Decision::record(vec![CapEvent::Fake(FakeEvent {
-                        tool: self.tool.clone(),
-                        what: format!("tool:{}", call.name),
-                    })])
-                }),
                 Msg::Turn(t) => self.watches_turns.then(|| {
                     Decision::record(vec![CapEvent::Fake(FakeEvent {
                         tool: self.tool.clone(),
                         what: format!("turn:{t:?}"),
                     })])
                 }),
-                Msg::Command(_)
-                | Msg::Answer(_)
+                Msg::Answer(_)
                 | Msg::Child(_)
                 | Msg::Reply(_)
                 | Msg::Woke { .. }
@@ -979,13 +1186,15 @@ pub mod testing {
         }
     }
 
+    /// The fake's own command, as its layer would build it.
     #[must_use]
-    pub fn call(name: &str) -> ToolCall {
-        ToolCall {
-            id: "t1".into(),
-            name: name.into(),
-            input: serde_json::json!({}),
-        }
+    pub fn call(tool: &str) -> CapCommand {
+        CapCommand::Fake(
+            FakeCommand {
+                tool: tool.to_string(),
+            },
+            answering("t1"),
+        )
     }
 
     /// What a load that found nothing leaves behind: no workspace scan, no
@@ -994,21 +1203,6 @@ pub mod testing {
     #[must_use]
     pub fn facts() -> AgentFacts {
         AgentFacts::default()
-    }
-
-    /// A tool call made under a load that found nothing.
-    ///
-    /// What every capability but one is tested against: the facts are the
-    /// workspace scan, and only `sub_agent` reads them. A capability that wants
-    /// facts of its own writes [`Msg::Tool`] out and supplies them.
-    #[must_use]
-    pub fn tool(call: &ToolCall) -> Msg<'_> {
-        static NOTHING: std::sync::LazyLock<AgentFacts> =
-            std::sync::LazyLock::new(AgentFacts::default);
-        Msg::Tool {
-            call,
-            facts: &NOTHING,
-        }
     }
 
     /// The shared empty settings, re-exported so a capability test does not
@@ -1123,12 +1317,79 @@ pub mod testing {
     /// A toolbox that answers nothing, standing in for whatever a real run
     /// would have wrapped or dispatched to.
     ///
-    /// Advertising never touches the mailbox and a prompt-only agent wraps no
-    /// sandbox, so both ends of a composition are this in a test — and a test
-    /// composing a layer therefore needs no actor running.
+    /// A prompt-only agent wraps no sandbox, so the inner end of a composition
+    /// is this in a test.
     #[must_use]
     pub fn nothing() -> Arc<dyn horsie_agentcore::Toolbox> {
         Arc::new(horsie_agentcore::EmptyToolbox)
+    }
+
+    /// Which capability a call to `name` becomes a command for.
+    ///
+    /// The question the offer scan used to answer. It is now settled by the
+    /// layer that claimed the name, so the answer is read off the command the
+    /// *composed toolbox* produced — the same object the run hands the model —
+    /// rather than by asking each capability whether a name is its.
+    ///
+    /// `None` when nothing claimed it: the call went straight through to
+    /// whatever the layers wrap, which in a real run is the sandbox.
+    pub async fn claimed_by(
+        caps: &Capabilities,
+        facts: &AgentFacts,
+        name: &str,
+    ) -> Option<&'static str> {
+        let recorder = Arc::new(Recorder::default());
+        let mailbox: Arc<dyn Mailbox> = Arc::clone(&recorder) as Arc<dyn Mailbox>;
+        let _ = caps
+            .layer(nothing(), facts, &mailbox)
+            .execute(name, serde_json::json!({}), "t1")
+            .await;
+        *recorder.owner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A mailbox that remembers whose command reached it.
+    #[derive(Default)]
+    struct Recorder {
+        owner: std::sync::Mutex<Option<&'static str>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Mailbox for Recorder {
+        async fn send(
+            &self,
+            make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
+        ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let cmd = make(horsie_actor::ReplyTo::from_sender(tx));
+            *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(cmd.owner());
+            // Nothing answers it: the command is the answer this is asking for.
+            drop((cmd, rx));
+            Ok(horsie_agentcore::ToolOutcome::Result(
+                serde_json::Value::Null,
+            ))
+        }
+    }
+
+    /// A mailbox with no actor behind it.
+    ///
+    /// Advertising never sends anything, so composing a layer to ask what it
+    /// claims needs no actor and no tokio runtime — which is the whole reason
+    /// [`Capability::layer`] is handed a mailbox rather than holding one.
+    #[must_use]
+    pub fn nobody() -> Arc<dyn Mailbox> {
+        Arc::new(Nobody)
+    }
+
+    struct Nobody;
+
+    #[async_trait::async_trait]
+    impl Mailbox for Nobody {
+        async fn send(
+            &self,
+            _make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
+        ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+            panic!("a test composed a layer and then called it with no actor behind it");
+        }
     }
 
     /// The toolbox an equipped agent would run with, wrapping `inner`.
@@ -1141,7 +1402,7 @@ pub mod testing {
         inner: Arc<dyn horsie_agentcore::Toolbox>,
         facts: &AgentFacts,
     ) -> Arc<dyn horsie_agentcore::Toolbox> {
-        caps.layer(inner, facts, &nothing())
+        caps.layer(inner, facts, &nobody())
     }
 
     /// What one capability adds to the toolbox it wraps.
@@ -1152,11 +1413,17 @@ pub mod testing {
     /// forwards.
     #[must_use]
     pub fn advertised_by(cap: &dyn Capability, facts: &AgentFacts) -> Vec<String> {
-        cap.layer(nothing(), facts, &nothing())
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect()
+        specs_of(cap, facts).into_iter().map(|s| s.name).collect()
+    }
+
+    /// The same, in full: what a capability shows the model, schemas and all.
+    ///
+    /// Read off its composed layer rather than a `specs()` of its own, because
+    /// what a capability advertises and what a call to it becomes are now one
+    /// declaration — so there is no list of specs to ask for separately.
+    #[must_use]
+    pub fn specs_of(cap: &dyn Capability, facts: &AgentFacts) -> Vec<ToolSpec> {
+        cap.layer(nothing(), facts, &nobody()).specs()
     }
 
     /// What an equipped agent advertises, outermost first.
@@ -1203,33 +1470,37 @@ mod tests {
         )
     }
 
-    /// The first capability to claim a name wins, so order is the conflict
-    /// resolution for tool calls rather than an accident of construction.
+    /// A command reaches the capability whose command it is — by construction,
+    /// not by a scan that the wrong capability could win. The arm names its
+    /// owner, so precedence between two capabilities is decided when their
+    /// layers are wrapped and never again.
     #[test]
-    fn the_first_capability_to_claim_a_tool_wins() {
+    fn a_command_reaches_the_capability_whose_command_it_is() {
         let caps = caps(vec![
             FakeCapability::new("first"),
             FakeCapability::new("second"),
         ]);
-        let d = caps
-            .offer(&tool(&call("second")))
-            .expect("someone takes it");
+        let d = caps.dispatch(&call("second")).expect("someone takes it");
         let Some(CapEvent::Fake(e)) = d.events.first() else {
             panic!("expected the fake's own event, got {:?}", d.events);
         };
-        assert_eq!(e.tool, "second");
+        assert_eq!(
+            e.tool, "second",
+            "the command was answered by a capability it does not belong to"
+        );
     }
 
-    /// A call nobody claims is `None` at the one place the scan lives — loudly,
-    /// so the actor can say which call went unclaimed rather than dropping it.
+    /// A command whose capability is not equipped is `None` at the one place
+    /// dispatch lives — loudly, so the actor can say whose it was rather than
+    /// dropping it and leaving the call hanging.
     #[test]
-    fn a_call_nobody_claims_is_none() {
+    fn a_command_nobody_owns_is_none() {
         let caps = caps(vec![FakeCapability::new("only")]);
-        assert!(caps.offer(&tool(&call("nope"))).is_none());
+        assert!(caps.dispatch(&call("nope")).is_none());
         assert_eq!(
-            tool(&call("nope")).describe(),
-            "tool call `nope`",
-            "the diagnostic has to name the call"
+            call("nope").owner(),
+            "fake",
+            "the diagnostic has to name the capability"
         );
     }
 
@@ -1275,11 +1546,11 @@ mod tests {
         assert_eq!(d.events.len(), 1);
     }
 
-    /// A tool call is offered, never broadcast: two capabilities answering one
-    /// call would produce two results for one `tool_use` id.
+    /// An answer set is offered and a turn is broadcast. A tool call is
+    /// neither: it is a command now, and which capability owns it is settled by
+    /// the arm rather than by a routing mode.
     #[test]
-    fn a_tool_call_is_offered_and_a_turn_is_broadcast() {
-        assert_eq!(tool(&call("x")).routing(), Routing::Offer);
+    fn an_answer_is_offered_and_a_turn_is_broadcast() {
         assert_eq!(Msg::Turn(TurnEvent::Began).routing(), Routing::Broadcast);
         assert_eq!(
             Msg::Answer(&[AskAnswer {
@@ -1353,8 +1624,7 @@ mod tests {
             FakeCapability::describing("shared", "the first one's"),
             FakeCapability::describing("shared", "the second one's"),
         ]);
-        let empty: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
-        let specs = caps.layer(Arc::clone(&empty), &facts(), &empty).specs();
+        let specs = caps.layer(nothing(), &facts(), &nobody()).specs();
         let [spec] = specs.as_slice() else {
             panic!("one name, advertised once, got {specs:?}");
         };
@@ -1373,7 +1643,7 @@ mod tests {
             FakeCapability::new("first"),
             FakeCapability::new("second"),
         ]);
-        let refuses: Arc<dyn Toolbox> = Arc::new(RefusingMailbox);
+        let refuses: Arc<dyn Mailbox> = Arc::new(RefusingMailbox);
         let sandbox: Arc<dyn Toolbox> = Arc::new(Sandbox);
         let outcome = caps
             .layer(sandbox, &facts(), &refuses)
@@ -1420,18 +1690,12 @@ mod tests {
     struct RefusingMailbox;
 
     #[async_trait::async_trait]
-    impl Toolbox for RefusingMailbox {
-        fn specs(&self) -> Vec<ToolSpec> {
-            Vec::new()
-        }
-
-        async fn execute(
+    impl Mailbox for RefusingMailbox {
+        async fn send(
             &self,
-            name: &str,
-            _input: serde_json::Value,
-            _id: &str,
+            _make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
         ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
-            panic!("`{name}` is nobody's: it must never reach the mailbox");
+            panic!("a name nobody claims must never reach the mailbox");
         }
     }
 
@@ -1442,7 +1706,7 @@ mod tests {
         let caps = Capabilities::default();
         assert!(caps.is_empty());
         assert!(advertised(&caps, &facts()).is_empty());
-        assert!(caps.offer(&tool(&call("x"))).is_none());
+        assert!(caps.dispatch(&call("x")).is_none());
         assert!(caps.broadcast(&Msg::Turn(TurnEvent::Ended)).acts.is_empty());
     }
 }

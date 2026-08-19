@@ -22,15 +22,22 @@
 //! its result"; nothing here can end a run, so an outcome cannot be acted on
 //! twice by two different owners.
 
-use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
-use crate::agent_loop::toolbox::claiming;
+use super::{Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SetupError};
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use crate::sessions::runners::message::ToolCall;
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
 use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
+
+/// What the model asked this capability to do.
+pub enum Command {
+    /// `submit_result`, with the result still unvalidated: an undeclared
+    /// outcome is a refusal the step has to see.
+    Submit { input: Value },
+}
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
 /// and that its result is what decides where the run goes next. Deliberately
@@ -84,21 +91,19 @@ impl StepResultCapability {
     }
 
     /// The model submitted this step's result.
-    fn submitted(&self, call: &ToolCall) -> Decision {
-        match validate_result(&call.input, &self.outcomes, &self.fields) {
+    fn submitted(&self, call: &str, input: &Value) -> Decision {
+        match validate_result(input, &self.outcomes, &self.fields) {
             Ok(()) => Decision::record(vec![CapEvent::StepResult(Event::Submitted {
-                output: call.input.clone(),
+                output: input.clone(),
             })])
             .then(Act::Conclude {
-                output: call.input.clone(),
+                output: input.clone(),
             }),
             // Journals nothing: an undeclared outcome in the log is one the
             // workflow runner would try to route on. The validator's own words
             // go back, against the call the model actually made, so it can
             // correct the field it got wrong.
-            Err(reason) => {
-                Decision::refuse(&call.id, format!("submit_result was rejected: {reason}"))
-            }
+            Err(reason) => Decision::refuse(call, format!("submit_result was rejected: {reason}")),
         }
     }
 }
@@ -117,12 +122,15 @@ impl StepResultCapability {
     /// its tool and the answer that comes back, and a second advertisement of
     /// the same tool from over here would offer a question nothing could route
     /// the answer to.
-    fn specs(&self) -> Vec<ToolSpec> {
-        vec![ToolSpec {
-            name: SUBMIT_RESULT_TOOL.to_string(),
-            description: TOOL_DESCRIPTION.to_string(),
-            input_schema: result_schema(&self.outcomes, &self.fields),
-        }]
+    fn claims(&self) -> Vec<ClaimedTool> {
+        vec![ClaimedTool::new(
+            ToolSpec {
+                name: SUBMIT_RESULT_TOOL.to_string(),
+                description: TOOL_DESCRIPTION.to_string(),
+                input_schema: result_schema(&self.outcomes, &self.fields),
+            },
+            |input, to| CapCommand::StepResult(Command::Submit { input }, to),
+        )]
     }
 }
 
@@ -148,26 +156,24 @@ impl Capability for StepResultCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(), mailbox)
+        claiming(inner, self.claims(), mailbox)
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Tool { call, .. } if call.name == SUBMIT_RESULT_TOOL => Some(self.submitted(call)),
-            // Nothing to re-ask: this capability asks the session for nothing,
-            // so it holds nothing a load could have to send again.
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::Loaded => None,
-        }
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::StepResult(cmd, to) = cmd else {
+            return None;
+        };
+        let Command::Submit { input } = cmd;
+        Some(self.submitted(&to.call, input))
+    }
+
+    /// Nothing here is this one's, and nothing is re-asked on a load: this
+    /// capability asks the session for nothing, so it holds nothing a dead
+    /// process could have failed to send.
+    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+        None
     }
 
     // `apply` keeps the trait's no-op: the submitted output belongs to the
@@ -184,7 +190,8 @@ impl Capability for StepResultCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{
-        advertised, equipped, facts, loading, settings, spec, tool,
+        advertised, advertised_by, answering, equipped, facts, loading, settings, someone_elses,
+        spec, specs_of,
     };
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
     use horsie_models::workflow::StepFieldType;
@@ -216,17 +223,17 @@ mod tests {
         StepResultCapability::new(outcomes(), fields(), interactive)
     }
 
-    fn submit(id: &str, input: Value) -> ToolCall {
-        ToolCall {
-            id: id.into(),
-            name: SUBMIT_RESULT_TOOL.into(),
-            input,
-        }
+    fn submitted(c: &StepResultCapability, id: &str, input: Value) -> Decision {
+        c.command(&CapCommand::StepResult(
+            Command::Submit { input },
+            answering(id),
+        ))
+        .expect("mine")
     }
 
     /// The advertised schema, as the model is shown it.
     fn schema(c: &StepResultCapability) -> Value {
-        c.specs()
+        specs_of(c, &facts())
             .into_iter()
             .find(|s| s.name == SUBMIT_RESULT_TOOL)
             .expect("a step is equipped to submit")
@@ -240,24 +247,23 @@ mod tests {
     /// runner routes on what the log says rather than on what the act carried.
     #[test]
     fn a_valid_submission_concludes_with_the_submitted_output() {
-        let submitted = json!({
+        let output = json!({
             "outcome": "p0",
             "description": "found the flake",
             "owner": "shawn",
         });
-        let d = cap(false)
-            .handle(&tool(&submit("call-1", submitted.clone())))
-            .expect("mine");
+        let d = submitted(&cap(false), "call-1", output.clone());
 
-        let [CapEvent::StepResult(Event::Submitted { output })] = d.events.as_slice() else {
+        let [CapEvent::StepResult(Event::Submitted { output: journaled })] = d.events.as_slice()
+        else {
             panic!("expected one Submitted, got {:?}", d.events)
         };
-        assert_eq!(output, &submitted, "the journal must carry it verbatim");
+        assert_eq!(journaled, &output, "the journal must carry it verbatim");
 
-        let [Act::Conclude { output }] = d.acts.as_slice() else {
+        let [Act::Conclude { output: concluded }] = d.acts.as_slice() else {
             panic!("a submission that did not conclude: {:?}", d.acts)
         };
-        assert_eq!(output, &submitted, "the act must carry it verbatim");
+        assert_eq!(concluded, &output, "the act must carry it verbatim");
     }
 
     /// **An undeclared outcome is refused and journals nothing.** Journaling it
@@ -266,12 +272,11 @@ mod tests {
     /// on it would end the step as though the graph were finished.
     #[test]
     fn an_undeclared_outcome_is_refused_and_journals_nothing() {
-        let d = cap(false)
-            .handle(&tool(&submit(
-                "call-1",
-                json!({"outcome": "p9", "description": "x", "owner": "shawn"}),
-            )))
-            .expect("mine");
+        let d = submitted(
+            &cap(false),
+            "call-1",
+            json!({"outcome": "p9", "description": "x", "owner": "shawn"}),
+        );
 
         assert!(d.events.is_empty(), "nothing undeclared reaches the log");
         // `Refuse`, not `Answer`: this reaches the model as a tool *error*.
@@ -296,12 +301,11 @@ mod tests {
     /// the refusal can name.
     #[test]
     fn a_missing_required_field_is_refused() {
-        let d = cap(false)
-            .handle(&tool(&submit(
-                "call-1",
-                json!({"outcome": "p0", "description": "did it"}),
-            )))
-            .expect("mine");
+        let d = submitted(
+            &cap(false),
+            "call-1",
+            json!({"outcome": "p0", "description": "did it"}),
+        );
         assert!(d.events.is_empty());
         let [Act::Refuse { reason: text, .. }] = d.acts.as_slice() else {
             panic!("expected one Refuse, got {:?}", d.acts)
@@ -420,17 +424,20 @@ mod tests {
     }
 
     #[test]
-    fn another_tool_is_not_mine() {
+    fn another_capabilitys_command_is_not_mine() {
         let c = cap(false);
-        assert!(
-            c.handle(&tool(&ToolCall {
-                id: "t1".into(),
-                name: "bash".into(),
-                input: json!({}),
-            }))
-            .is_none()
-        );
+        assert!(c.command(&someone_elses()).is_none());
         // And with no park to hold, a turn boundary is nothing to it either.
         assert!(c.handle(&Msg::Turn(TurnEvent::Ended)).is_none());
+    }
+
+    /// It claims the one tool it answers for, so a step's result is reached by
+    /// the layer that builds its command rather than by a name matched later.
+    #[test]
+    fn it_advertises_its_own_result_tool() {
+        assert_eq!(
+            advertised_by(&cap(false), &facts()),
+            vec![SUBMIT_RESULT_TOOL]
+        );
     }
 }

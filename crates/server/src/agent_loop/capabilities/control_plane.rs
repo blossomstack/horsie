@@ -116,7 +116,7 @@ impl Capability for ControlPlaneCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{
-        advertised_by, call, equipped, facts, loading, spec, tool,
+        advertised_by, equipped, facts, loading, someone_elses, spec,
     };
 
     /// Holding the capability is what equips the tools and the prompt that
@@ -178,11 +178,9 @@ mod tests {
     fn it_claims_nothing_through_the_mailbox() {
         let c = ControlPlaneCapability;
         assert!(advertised_by(&c, &facts()).is_empty());
-        for name in ["horsie_sessions", "horsie", "bash"] {
-            assert!(
-                c.handle(&tool(&call(name))).is_none(),
-                "{name} was claimed through the mailbox"
-            );
-        }
+        assert!(
+            c.command(&someone_elses()).is_none(),
+            "a capability with no commands claimed one"
+        );
     }
 }

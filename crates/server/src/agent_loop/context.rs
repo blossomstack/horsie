@@ -166,10 +166,10 @@ pub struct Contexts {
     /// library, the runtime.
     ///
     /// Carried out of `provide` rather than dropped with the spec, because the
-    /// run has two uses for it that the toolbox composition cannot serve: the
-    /// tools a capability advertises are computed from it, and the tool calls
-    /// that come back carry it — see
-    /// [`Msg::Tool`](crate::agent_loop::capabilities::Msg::Tool).
+    /// tools a capability advertises are computed from it — and a layer that
+    /// advertised a list keeps what it needs of it, so a refusal on the mailbox
+    /// names what the model was shown. See
+    /// [`Capability::layer`](crate::agent_loop::capabilities::Capability::layer).
     pub facts: crate::sessions::runners::loading::AgentFacts,
     /// This run's model's context window, when its card declares one.
     ///

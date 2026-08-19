@@ -494,10 +494,10 @@ impl Capability for RuntimeCapability {
     /// the whole offer order was arranged around, and a call reaching it meant
     /// "let the sandbox try". Here the sandbox is a `setup` layer instead, so
     /// the toolbox answers those calls on the agent's own task and none of them
-    /// is offered around at all. A capability that went on claiming them would
+    /// becomes a command at all. A capability that went on claiming them would
     /// be claiming calls it no longer answers, and worse: it sorts last, so
-    /// every one of them would already have been offered to the capabilities
-    /// that own a name, and the only calls left for it are the ones the toolbox
+    /// every name another capability claims has already been resolved by that
+    /// capability's layer, and the only calls left for it are the ones the toolbox
     /// is about to handle without asking.
     ///
     /// So there is nothing here, and nothing claimed by
@@ -523,12 +523,12 @@ impl Capability for RuntimeCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, call, facts, tool};
+    use super::super::testing::{advertised_by, facts, someone_elses};
     use super::*;
     use crate::agent_loop::AskAnswer;
     use crate::agent_loop::capabilities::testing::{loading, spec};
     use crate::agent_loop::capabilities::{Capabilities, SessionReply, TurnEvent};
-    use crate::sessions::runners::message::{ChildMsg, Command};
+    use crate::sessions::runners::message::ChildMsg;
 
     /// **The change the move made.** Its session-side twin claimed every tool
     /// call, because the sandbox was dispatched through the offer order. Here
@@ -538,12 +538,6 @@ mod tests {
     #[test]
     fn it_claims_nothing_at_all() {
         let c = RuntimeCapability::default();
-        let bash = call("bash");
-        let plugin_tool = call("some_plugin_tool");
-        let command = Command {
-            name: "fork".into(),
-            args: String::new(),
-        };
         let child = ChildMsg::Ready {
             child: crate::sessions::runners::ids::RunnerId::new_v4(),
         };
@@ -553,10 +547,11 @@ mod tests {
         }];
         let reply = SessionReply::Done { call: "t1".into() };
 
+        assert!(
+            c.command(&someone_elses()).is_none(),
+            "the runtime capability claimed a command"
+        );
         for msg in [
-            tool(&bash),
-            tool(&plugin_tool),
-            Msg::Command(&command),
             Msg::Turn(TurnEvent::Ended),
             Msg::Answer(&answers),
             Msg::Child(&child),

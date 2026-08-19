@@ -50,11 +50,12 @@
 //! So the queue decides *whether* a park is abandoned and *what the model is
 //! told*; this decides nothing and only stops holding what is no longer held.
 
-use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError, TurnEvent};
-use crate::agent_loop::toolbox::claiming;
+use super::{
+    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SetupError, TurnEvent,
+};
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use crate::sessions::runners::message::ToolCall;
 use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,14 @@ result is what the rest of the run sees; make it self-contained.";
 
 /// The tool this capability answers for.
 pub const TOOL: &str = "ask_user";
+
+/// What the model asked this capability to do.
+pub enum Command {
+    /// `ask_user`, with the question still in the arguments it arrived in: a
+    /// muted agent refuses without reading them, and reading them is the
+    /// decision rather than the routing.
+    Ask { input: Value },
+}
 
 /// Why this agent may not ask, when it may not.
 ///
@@ -210,19 +219,18 @@ impl AskUserCapability {
     }
 
     /// The model called `ask_user`.
-    fn asked(&self, call: &ToolCall) -> Decision {
+    fn asked(&self, call: &str, input: &Value) -> Decision {
         if let Some(mute) = self.mute {
             // Journals nothing: a refusal is not a fact about the agent.
-            return Decision::reply(&call.id, mute.refusal());
+            return Decision::reply(call, mute.refusal());
         }
-        let question = call
-            .input
+        let question = input
             .get("question")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
         Decision::record(vec![CapEvent::AskUser(Event::Asked {
-            call: call.id.clone(),
+            call: call.to_string(),
             question: question.clone(),
         })])
         // The question has to reach the agent's log or it never reaches the
@@ -230,12 +238,12 @@ impl AskUserCapability {
         // own events append nothing readable.
         .then(Act::Record(Box::new(LifecycleEvent::AskRecorded(
             AskLifecycle {
-                tool_call_id: Some(call.id.clone()),
+                tool_call_id: Some(call.to_string()),
                 question: question.clone(),
             },
         ))))
         .then(Act::Park {
-            call: call.id.clone(),
+            call: call.to_string(),
             note: question,
         })
     }
@@ -278,19 +286,21 @@ impl AskUserCapability {
 impl AskUserCapability {
     /// Nothing when muted, which is the whole of "a muted agent has no
     /// `ask_user`".
-    fn specs(&self) -> Vec<ToolSpec> {
+    fn claims(&self) -> Vec<ClaimedTool> {
         if self.mute.is_some() {
             return Vec::new();
         }
-        vec![ToolSpec {
-            name: TOOL.to_string(),
-            description: "Pause and ask the user a clarifying question before continuing, when \
+        vec![ClaimedTool::new(
+            ToolSpec {
+                name: TOOL.to_string(),
+                description:
+                    "Pause and ask the user a clarifying question before continuing, when \
                 their intent is ambiguous or a decision needs their input. Optional -- for an \
                 ordinary reply, just answer normally instead of calling this. Omit `choices` for \
                 an open question; supply `choices` to suggest answers, and set `multiple` when \
                 several may be picked at once."
-                .to_string(),
-            input_schema: json!({
+                        .to_string(),
+                input_schema: json!({
                 "type": "object",
                 "required": ["question"],
                 "properties": {
@@ -312,8 +322,10 @@ impl AskUserCapability {
                             without `choices`."
                     }
                 }
-            }),
-        }]
+                }),
+            },
+            |input, to| CapCommand::AskUser(Command::Ask { input }, to),
+        )]
     }
 }
 
@@ -349,14 +361,21 @@ impl Capability for AskUserCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(), mailbox)
+        claiming(inner, self.claims(), mailbox)
+    }
+
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::AskUser(cmd, to) = cmd else {
+            return None;
+        };
+        let Command::Ask { input } = cmd;
+        Some(self.asked(&to.call, input))
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool { call, .. } if call.name == TOOL => Some(self.asked(call)),
             Msg::Answer(answers) => self.answered(answers),
             // The park did not survive; see the module doc for why this is
             // `Began` and not `Ended`.
@@ -365,9 +384,7 @@ impl Capability for AskUserCapability {
             }
             // Nothing to re-ask: this capability's park is answered by a person,
             // not by the session, so a load leaves it exactly where it was.
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
+            Msg::Turn(_)
             | Msg::Child(_)
             | Msg::Reply(_)
             | Msg::Woke { .. }
@@ -404,17 +421,21 @@ impl Capability for AskUserCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{FakeCapability, facts, tool};
+    use super::super::testing::{FakeCapability, facts};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{advertised_by, equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{
+        advertised_by, answering, equipped, loading, spec, specs_of,
+    };
 
-    fn ask(id: &str, question: &str) -> ToolCall {
-        ToolCall {
-            id: id.into(),
-            name: TOOL.into(),
-            input: json!({ "question": question }),
-        }
+    /// The command the `ask_user` layer builds for a question.
+    fn ask(id: &str, question: &str) -> CapCommand {
+        CapCommand::AskUser(
+            Command::Ask {
+                input: json!({ "question": question }),
+            },
+            answering(id),
+        )
     }
 
     fn answer(id: &str, text: &str) -> AskAnswer {
@@ -436,7 +457,7 @@ mod tests {
     fn parked(questions: &[(&str, &str)]) -> AskUserCapability {
         let mut c = AskUserCapability::new();
         for (id, q) in questions {
-            let d = c.handle(&tool(&ask(id, q))).expect("mine");
+            let d = c.command(&ask(id, q)).expect("mine");
             fold(&mut c, &d);
         }
         c
@@ -478,33 +499,32 @@ mod tests {
         // And a call that arrives anyway is refused in words rather than
         // declined — see the test below for what declining would cost.
         let said = refusal(
-            &c.handle(&tool(&ask("t1", "which?")))
+            &c.command(&ask("t1", "which?"))
                 .expect("mine even when muted"),
         );
         assert!(said.contains("routine"), "{said}");
         assert!(c.pending.is_empty(), "a refused ask parks nothing");
     }
 
-    /// **A muted agent that asks anyway must be told no.** Declining the call
-    /// hands it to the next capability, and the last one is the open-namespace
-    /// sandbox that claims every name — so the model would be answered by the
-    /// sandbox and never learn why its question went nowhere.
+    /// **A muted agent that asks anyway must be told no.** Declining its own
+    /// command leaves nothing to answer it — the actor fails the call with a
+    /// bug's diagnostic instead of the sentence saying why the question went
+    /// nowhere.
+    ///
+    /// The fake beside it is the open-namespace capability that used to be able
+    /// to swallow this. It cannot any more: a command names its capability, so
+    /// which one answers is no longer a race the last claimant can win. What is
+    /// still this capability's to get right is claiming its own.
     #[test]
-    fn a_muted_ask_is_claimed_rather_than_left_to_the_sandbox() {
+    fn a_muted_ask_is_claimed_rather_than_declined() {
         for c in [
             AskUserCapability::unattended(),
             AskUserCapability::not_interactive(),
         ] {
-            // The fake stands in for the open-namespace capability behind it:
-            // it claims the name too, and it is the one that answers if this
-            // capability declines.
             let caps = Capabilities::new(vec![Box::new(c), Box::new(FakeCapability::new(TOOL))]);
-            let taker = caps
-                .iter()
-                .find_map(|c| c.handle(&tool(&ask("t1", "which?"))).map(|d| (c.name(), d)));
-            let Some(("ask_user", d)) = taker else {
-                panic!("the sandbox layer swallowed the question: {taker:?}");
-            };
+            let d = caps
+                .dispatch(&ask("t1", "which?"))
+                .expect("a muted ask that answers nobody");
             assert!(!refusal(&d).is_empty());
         }
     }
@@ -535,7 +555,7 @@ mod tests {
         assert!(spec.toolbox().is_none());
         assert!(advertised_by(&c, &facts()).is_empty());
         let said = refusal(
-            &c.handle(&tool(&ask("t1", "which?")))
+            &c.command(&ask("t1", "which?"))
                 .expect("mine even when muted"),
         );
         assert!(
@@ -572,7 +592,7 @@ mod tests {
     /// a multi-select asked as a single choice loses every answer but one.
     #[test]
     fn the_advertised_schema_offers_multi_select_and_a_free_text_fallback() {
-        let spec = AskUserCapability::new().specs().remove(0);
+        let spec = specs_of(&AskUserCapability::new(), &facts()).remove(0);
         let props = spec
             .input_schema
             .get("properties")
@@ -602,9 +622,7 @@ mod tests {
     #[test]
     fn an_ask_journals_the_question_and_parks() {
         let mut c = AskUserCapability::new();
-        let d = c
-            .handle(&tool(&ask("call-1", "which database?")))
-            .expect("mine");
+        let d = c.command(&ask("call-1", "which database?")).expect("mine");
 
         let [CapEvent::AskUser(Event::Asked { call, question })] = d.events.as_slice() else {
             panic!("expected one Asked event, got {:?}", d.events);

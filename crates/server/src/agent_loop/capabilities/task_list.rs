@@ -26,16 +26,27 @@
 //! same rendering the tool returns — ids and all, because an agent that reads a
 //! paraphrase of its own list cannot call `task_list` against it afterwards.
 
-use super::{Act, CapEvent, CapSlice, CapView, Capability, Decision, Msg};
+use super::{Act, CapCommand, CapEvent, CapSlice, CapView, Capability, Decision, Mailbox, Msg};
 use crate::agent_loop::task_list::{
-    TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, task_list_tool_spec,
+    TaskListAction, TaskListState, TaskRecord, task_list_tool_spec,
 };
-use crate::agent_loop::toolbox::claiming;
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::AgentFacts;
-use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::{ToolSpec, Toolbox};
+use horsie_agentcore::Toolbox;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
+
+/// What the model asked of the list.
+///
+/// One arm because there is one tool. A second tool would be a second arm,
+/// decided by the layer that claimed its name — never by a match on the name
+/// itself.
+pub enum Command {
+    /// `task_list`, with its action still unparsed: a malformed one is a
+    /// refusal the model has to see, and deciding that is what `handle` is for.
+    Change { input: Value },
+}
 
 /// What this capability records: the list, whole, after a mutation.
 ///
@@ -70,14 +81,14 @@ impl TaskListCapability {
     /// Applied to a clone so the decision is a pure function of what is folded:
     /// on success the clone becomes the event, and on failure nothing was
     /// touched and nothing is journaled.
-    fn called(&self, call: &ToolCall) -> Decision {
-        let action = match TaskListAction::from_input(&call.input) {
+    fn called(&self, call: &str, input: &Value) -> Decision {
+        let action = match TaskListAction::from_input(input) {
             Ok(action) => action,
             // A capability that owns a tool name owns every call to it,
             // including the malformed ones: declining would hand the call to
             // the open-namespace capability behind it, and the model would be
             // answered by the sandbox instead of told what it got wrong.
-            Err(reason) => return Decision::refuse(&call.id, reason),
+            Err(reason) => return Decision::refuse(call, reason),
         };
         let mut next = self.list.clone();
         match next.apply(action) {
@@ -85,19 +96,21 @@ impl TaskListCapability {
                 let text = next.render();
                 Decision::record(vec![CapEvent::TaskList(Event::Changed { snapshot: next })]).then(
                     Act::Answer {
-                        call: call.id.clone(),
+                        call: call.to_string(),
                         text,
                     },
                 )
             }
-            Err(reason) => Decision::refuse(&call.id, reason),
+            Err(reason) => Decision::refuse(call, reason),
         }
     }
 }
 
 impl TaskListCapability {
-    fn specs(&self) -> Vec<ToolSpec> {
-        vec![task_list_tool_spec()]
+    fn claims(&self) -> Vec<ClaimedTool> {
+        vec![ClaimedTool::new(task_list_tool_spec(), |input, to| {
+            CapCommand::TaskList(Command::Change { input }, to)
+        })]
     }
 }
 
@@ -111,27 +124,24 @@ impl Capability for TaskListCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(), mailbox)
+        claiming(inner, self.claims(), mailbox)
     }
 
-    fn handle(&self, msg: &Msg) -> Option<Decision> {
-        match msg {
-            Msg::Tool { call, .. } if call.name == TASK_LIST_TOOL => Some(self.called(call)),
-            // Nothing else is this one's: the list changes only when the model
-            // changes it, so a turn boundary, an answer, a child and a load all
-            // leave it exactly where it was.
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded
-            | Msg::Loaded => None,
-        }
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::TaskList(cmd, to) = cmd else {
+            return None;
+        };
+        let Command::Change { input } = cmd;
+        Some(self.called(&to.call, input))
+    }
+
+    /// Nothing here is this one's: the list changes only when the model changes
+    /// it, so a turn boundary, an answer, a child and a load all leave it
+    /// exactly where it was.
+    fn handle(&self, _msg: &Msg) -> Option<Decision> {
+        None
     }
 
     fn apply(&mut self, event: &CapEvent) {
@@ -164,14 +174,17 @@ impl Capability for TaskListCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, call, facts, tool};
+    use super::super::testing::{advertised_by, answering, facts, someone_elses};
     use super::*;
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
+    use crate::agent_loop::task_list::TASK_LIST_TOOL;
 
     fn called(cap: &TaskListCapability, input: serde_json::Value) -> Decision {
-        let mut c = call(TASK_LIST_TOOL);
-        c.input = input;
-        cap.handle(&tool(&c)).expect("the task list owns its tool")
+        cap.command(&CapCommand::TaskList(
+            Command::Change { input },
+            answering("t1"),
+        ))
+        .expect("the task list owns its command")
     }
 
     /// Fold a decision's events back in, the way the actor does, so a test can
@@ -281,12 +294,13 @@ mod tests {
         assert!(answer(&listed).contains("[ ] 1. a"));
     }
 
-    /// It claims its own tool and nothing else — every other message belongs to
-    /// some other capability, and claiming one would stop the offer scan.
+    /// It claims its own command and nothing else — every other message belongs
+    /// to some other capability, and claiming a lifecycle one would stop the
+    /// offer scan.
     #[test]
-    fn it_claims_nothing_but_its_own_tool() {
+    fn it_claims_nothing_but_its_own_command() {
         let cap = TaskListCapability::new();
-        assert!(cap.handle(&tool(&call("bash"))).is_none());
+        assert!(cap.command(&someone_elses()).is_none());
         assert!(cap.handle(&Msg::Loaded).is_none());
         assert!(cap.handle(&Msg::Answer(&[])).is_none());
         for boundary in [

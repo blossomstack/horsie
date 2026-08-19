@@ -1,13 +1,17 @@
 //! The layers an agent's own tools are added through.
 //!
 //! A capability that has tools wraps the toolbox: it answers the names it
-//! claims by `ask`ing the owning
-//! [`AgentActor`](crate::agent_loop::AgentActor), so the state behind those
-//! tools stays durable — journaled and replayed like any other agent state —
-//! instead of living in whatever process the runtime happens to be. Everything
-//! a layer does not claim goes straight through to the layer beneath it and
-//! ultimately to the sandbox, which is what keeps an ordinary `bash` call as
-//! cheap as it was.
+//! claims by sending the owning
+//! [`AgentActor`](crate::agent_loop::AgentActor) one of its own commands, so
+//! the state behind those tools stays durable — journaled and replayed like any
+//! other agent state — instead of living in whatever process the runtime
+//! happens to be. Everything a layer does not claim goes straight through to
+//! the layer beneath it and ultimately to the sandbox, which is what keeps an
+//! ordinary `bash` call as cheap as it was.
+//!
+//! **A name is resolved here and nowhere else.** The layer that claims one says
+//! what it becomes, so what reaches the actor is a command that names its own
+//! capability. Downstream of this file nothing matches a tool name at all.
 //!
 //! # One layer each, and why that is the simplification
 //!
@@ -23,74 +27,81 @@
 //! claims it.
 
 use crate::agent_loop::agent_actor::AgentCommand;
+use crate::agent_loop::capabilities::{Answering, CapCommand, Mailbox, ToolReply};
 use async_trait::async_trait;
-use horsie_agentcore::{ToolOutcome, ToolSpec, Toolbox};
+use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::Value;
 use std::sync::Arc;
 
-/// The agent's own mailbox, in the shape a toolbox layer can call.
+/// The agent's own mailbox, in the shape a capability's layer can reach it.
 ///
-/// Built once per run and shared by every layer, because what a capability
-/// needs from the actor is exactly what a toolbox offers: a name, an input and
-/// a call id in, an outcome out. Handing this to
+/// Built once per run and shared by every layer. Handing this to
 /// [`Capability::layer`](crate::agent_loop::capabilities::Capability::layer)
 /// rather than the actor's address is what lets a capability compose its layer
 /// without knowing the actor's command enum — and what lets a test compose one
 /// with no actor at all.
-///
-/// It advertises nothing itself. A layer that claims a name is what makes the
-/// model able to reach this.
 pub(super) struct AgentMailbox {
-    /// What this run found, sent on with every call. The specs the layers
-    /// advertise were built from it, so a capability refusing an argument on
-    /// the mailbox refuses against the same list the model was shown.
-    pub(super) facts: Arc<crate::sessions::runners::loading::AgentFacts>,
     pub(super) actor: horsie_actor::ActorRef<AgentCommand>,
 }
 
 #[async_trait]
-impl Toolbox for AgentMailbox {
-    fn specs(&self) -> Vec<ToolSpec> {
-        Vec::new()
-    }
-
-    async fn execute(
+impl Mailbox for AgentMailbox {
+    /// The command is built from the reply channel here, at the one place that
+    /// has one — which is also the only place that knows the answer is an
+    /// [`AgentCommand`] at all.
+    async fn send(
         &self,
-        name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
-        use horsie_agentcore::ToolCallError;
-        let call = crate::sessions::runners::message::ToolCall {
-            id: tool_call_id.to_string(),
-            name: name.to_string(),
-            input,
-        };
-        let facts = Arc::clone(&self.facts);
+        make: Box<dyn FnOnce(ToolReply) -> CapCommand + Send>,
+    ) -> Result<ToolOutcome, ToolCallError> {
         self.actor
-            .ask(|reply| AgentCommand::CapabilityCall { call, facts, reply })
+            .ask(|reply| AgentCommand::Capability(make(reply)))
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
+    }
+}
+
+/// One tool a capability claims: what the model is shown, and what a call to it
+/// becomes.
+///
+/// The two are declared together because they are one decision. A name and its
+/// command are the only place they ever meet: past here the name is gone, and a
+/// capability is handed the arm it built rather than a string to match.
+pub(crate) struct ClaimedTool {
+    spec: ToolSpec,
+    into_command: Arc<dyn Fn(Value, Answering) -> CapCommand + Send + Sync>,
+}
+
+impl ClaimedTool {
+    /// Advertise `spec`, and turn a call to it into the command `into_command`
+    /// builds.
+    pub(crate) fn new(
+        spec: ToolSpec,
+        into_command: impl Fn(Value, Answering) -> CapCommand + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            spec,
+            into_command: Arc::new(into_command),
+        }
     }
 }
 
 /// One capability's layer: the names it claims, and everything else passed
 /// through.
 ///
-/// `specs` is what this capability advertised for this run, captured when the
-/// run started. A call for one of those names goes to the mailbox, where the
-/// capability's state is and where it can journal what it did; a call for
-/// anything else goes straight to the layer beneath without a mailbox round
-/// trip.
+/// The claims are what this capability advertised for this run, captured when
+/// the run started. A call for one of those names goes to the mailbox as this
+/// capability's own command, where its state is and where it can journal what
+/// it did; a call for anything else goes straight to the layer beneath without
+/// a mailbox round trip.
 struct ClaimedTools {
     inner: Arc<dyn Toolbox>,
-    specs: Vec<ToolSpec>,
-    mailbox: Arc<dyn Toolbox>,
+    claims: Vec<ClaimedTool>,
+    mailbox: Arc<dyn Mailbox>,
 }
 
 impl ClaimedTools {
-    fn claims(&self, name: &str) -> bool {
-        self.specs.iter().any(|s| s.name == name)
+    fn claimed(&self, name: &str) -> Option<&ClaimedTool> {
+        self.claims.iter().find(|t| t.spec.name == name)
     }
 }
 
@@ -102,12 +113,12 @@ impl Toolbox for ClaimedTools {
     /// claimant's spec, and a name claimed twice is advertised once — by
     /// whichever layer will actually answer it.
     fn specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.specs.clone();
+        let mut specs: Vec<ToolSpec> = self.claims.iter().map(|t| t.spec.clone()).collect();
         specs.extend(
             self.inner
                 .specs()
                 .into_iter()
-                .filter(|s| !self.claims(&s.name)),
+                .filter(|s| self.claimed(&s.name).is_none()),
         );
         specs
     }
@@ -117,15 +128,21 @@ impl Toolbox for ClaimedTools {
         name: &str,
         input: Value,
         tool_call_id: &str,
-    ) -> Result<ToolOutcome, horsie_agentcore::ToolCallError> {
-        match self.claims(name) {
-            true => self.mailbox.execute(name, input, tool_call_id).await,
-            false => self.inner.execute(name, input, tool_call_id).await,
-        }
+    ) -> Result<ToolOutcome, ToolCallError> {
+        let Some(tool) = self.claimed(name) else {
+            return self.inner.execute(name, input, tool_call_id).await;
+        };
+        let into_command = Arc::clone(&tool.into_command);
+        let call = tool_call_id.to_string();
+        self.mailbox
+            .send(Box::new(move |reply| {
+                into_command(input, Answering { call, reply })
+            }))
+            .await
     }
 }
 
-/// Wrap `inner` in a layer that answers `specs` on the agent's mailbox.
+/// Wrap `inner` in a layer that answers `claims` on the agent's mailbox.
 ///
 /// `inner` untouched when there is nothing to claim, so a capability whose
 /// advertisement is conditional — a muted `ask_user`, a `spawn_agent` past its
@@ -133,15 +150,15 @@ impl Toolbox for ClaimedTools {
 #[must_use]
 pub(crate) fn claiming(
     inner: Arc<dyn Toolbox>,
-    specs: Vec<ToolSpec>,
-    mailbox: &Arc<dyn Toolbox>,
+    claims: Vec<ClaimedTool>,
+    mailbox: &Arc<dyn Mailbox>,
 ) -> Arc<dyn Toolbox> {
-    if specs.is_empty() {
+    if claims.is_empty() {
         return inner;
     }
     Arc::new(ClaimedTools {
         inner,
-        specs,
+        claims,
         mailbox: Arc::clone(mailbox),
     })
 }

@@ -1,10 +1,16 @@
 //! `/fork` and `/summary-n-fork`: branching a conversation.
 //!
 //! The one capability with no tool. A fork is asked for by a person typing a
-//! built-in, never by a model calling something, so it claims a
-//! [`Msg::Command`] and advertises nothing — a tool for it would offer the
-//! model a button it has no business pressing, so [`Capability::layer`] is left
-//! at its default and wraps the toolbox in nothing at all.
+//! built-in, never by a model calling something, so its [`Command`] is the one
+//! nothing advertises — a tool for it would offer the model a button it has no
+//! business pressing, so [`Capability::layer`] is left at its default and wraps
+//! the toolbox in nothing at all.
+//!
+//! It is also the one command with no run waiting on it, which is why
+//! [`CapCommand::Fork`] carries no
+//! [`Answering`](super::Answering). A person typing a built-in is not a
+//! dangling `tool_use`, and the two answers below are keyed by the only stable
+//! names there are rather than by a `tool_use` id.
 //!
 //! What it creates is a [`RunnerKind::Conversation`], not a kind of its own: a
 //! fork *is* a conversation, one that carries a branch point. That collapses
@@ -34,11 +40,13 @@
 //! [`RunnerId`] for everything after — which is also the dedupe key the session
 //! recognises a replayed [`SessionRequest::StartRunner`] by.
 
-use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest};
+use super::{
+    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest,
+};
 use crate::sessions::forks::ForkMode;
 use crate::sessions::runners::action::{Branch, RunnerArgs};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
-use crate::sessions::runners::message::{ChildMsg, Command};
+use crate::sessions::runners::message::ChildMsg;
 use crate::sessions::spec::AgentSettings;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +55,30 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const FORK_COMMAND: &str = "fork";
 /// The built-in that summarises it first.
 pub const SUMMARY_COMMAND: &str = "summary-n-fork";
+
+/// What a person asked this capability to do.
+///
+/// The mode is decided by whoever parsed the built-in, so the two names are one
+/// arm here rather than two: what differs between `/fork` and
+/// `/summary-n-fork` is only how the new conversation is seeded.
+pub struct Command {
+    pub mode: ForkMode,
+    /// The rest of the line: what the new conversation is for.
+    pub message: String,
+}
+
+impl Command {
+    /// Which built-in this is, for the answer to a `/fork` with nothing to do —
+    /// which is made before anything is minted, so the name is the only key
+    /// there is.
+    #[must_use]
+    fn name(&self) -> &'static str {
+        match self.mode {
+            ForkMode::Copy => FORK_COMMAND,
+            ForkMode::Summary => SUMMARY_COMMAND,
+        }
+    }
+}
 
 /// One agent's branches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,25 +154,20 @@ impl ForkCapability {
     }
 
     /// Somebody typed a built-in.
-    fn commanded(&self, c: &Command) -> Option<Decision> {
-        let mode = match c.name.as_str() {
-            FORK_COMMAND => ForkMode::Copy,
-            SUMMARY_COMMAND => ForkMode::Summary,
-            _ => return None,
-        };
-        let message = c.args.trim();
+    fn commanded(&self, c: &Command) -> Decision {
+        let message = c.message.trim();
         // A fork with nothing to do is the one refusal this capability makes on
         // its own: it would branch a whole conversation and then sit idle, and
         // the person would have to notice that themselves. Nothing is minted
-        // yet, so the command's own name is what the answer is keyed by.
+        // yet, so the built-in's own name is what the answer is keyed by.
         if message.is_empty() {
-            return Some(Decision::reply(
-                &format!("/{}", c.name),
+            return Decision::reply(
+                &format!("/{}", c.name()),
                 format!(
                     "/{} needs a message saying what the new conversation should do",
-                    c.name
+                    c.name()
                 ),
-            ));
+            );
         }
         // The fork's agent is minted here, beside the runner id, because a fork
         // has to be addressable before its agent exists: the answer to `/fork`
@@ -152,16 +179,14 @@ impl ForkCapability {
             fork: RunnerId::new_v4(),
             agent: AgentId::new_v4(),
             message: message.to_string(),
-            mode,
+            mode: c.mode,
         };
         let call = pending.fork.to_string();
-        Some(
-            Decision::record(vec![CapEvent::Fork(Event::Requested {
-                call: call.clone(),
-                pending: pending.clone(),
-            })])
-            .then(Act::Ask(self.ask(&call, &pending))),
-        )
+        Decision::record(vec![CapEvent::Fork(Event::Requested {
+            call: call.clone(),
+            pending: pending.clone(),
+        })])
+        .then(Act::Ask(self.ask(&call, &pending)))
     }
 
     /// The request a [`Pending`] names.
@@ -283,9 +308,15 @@ impl Capability for ForkCapability {
     // means "this agent is a fork", and the one that owns the tool the
     // paragraph tells it to call.
 
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::Fork(cmd) = cmd else {
+            return None;
+        };
+        Some(self.commanded(cmd))
+    }
+
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Command(c) => self.commanded(c),
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
             // The crash window: a branch journaled and never answered is
@@ -294,11 +325,7 @@ impl Capability for ForkCapability {
             // A fork owes nobody a result, so it never holds a conclusion — see
             // the module doc. The agent that branched is free to finish while
             // its branch runs on.
-            Msg::Tool { .. }
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded => None,
+            Msg::Turn(_) | Msg::Answer(_) | Msg::Woke { .. } | Msg::Concluded => None,
         }
     }
 
@@ -338,19 +365,21 @@ impl Capability for ForkCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{advertised_by, facts, settings, tool};
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts, settings, someone_elses};
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
-    use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome, ToolCall};
+    use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome};
 
     fn cap() -> ForkCapability {
         ForkCapability::new(AgentId::new_v4(), settings())
     }
 
-    fn command(name: &str, args: &str) -> Command {
-        Command {
-            name: name.into(),
-            args: args.into(),
-        }
+    /// Type the built-in, the way whoever parsed the line would hand it over.
+    fn typed(c: &ForkCapability, mode: ForkMode, message: &str) -> Decision {
+        c.command(&CapCommand::Fork(Command {
+            mode,
+            message: message.into(),
+        }))
+        .expect("mine")
     }
 
     fn fold(c: &mut ForkCapability, d: &Decision) {
@@ -361,10 +390,8 @@ mod tests {
 
     /// Branch, and let the session say yes — the only way there is to a seed in
     /// flight.
-    fn forked(c: &mut ForkCapability, name: &str) -> RunnerId {
-        let d = c
-            .handle(&Msg::Command(&command(name, "look into it")))
-            .expect("mine");
+    fn forked(c: &mut ForkCapability, mode: ForkMode) -> RunnerId {
+        let d = typed(c, mode, "look into it");
         fold(c, &d);
         let [Act::Ask(SessionRequest::StartRunner { id, .. })] = d.acts.as_slice() else {
             panic!("expected an ask, got {:?}", d.acts);
@@ -385,12 +412,7 @@ mod tests {
     #[test]
     fn forking_asks_for_a_conversation_branched_from_this_agent() {
         let mut c = cap();
-        let d = c
-            .handle(&Msg::Command(&command(
-                FORK_COMMAND,
-                "  look into the flake  ",
-            )))
-            .expect("mine");
+        let d = typed(&c, ForkMode::Copy, "  look into the flake  ");
 
         let [CapEvent::Fork(Event::Requested { call, pending })] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
@@ -450,12 +472,7 @@ mod tests {
     /// one handler serves both and the mode is the whole difference.
     #[test]
     fn summary_n_fork_seeds_with_a_summary() {
-        let d = cap()
-            .handle(&Msg::Command(&command(
-                SUMMARY_COMMAND,
-                "carry on elsewhere",
-            )))
-            .expect("mine");
+        let d = typed(&cap(), ForkMode::Summary, "carry on elsewhere");
         let [Act::Ask(SessionRequest::StartRunner { args, .. })] = d.acts.as_slice() else {
             panic!("expected an ask, got {:?}", d.acts);
         };
@@ -469,9 +486,7 @@ mod tests {
     /// nothing to do would branch a conversation and then sit there.
     #[test]
     fn an_empty_message_is_refused_and_journals_nothing() {
-        let d = cap()
-            .handle(&Msg::Command(&command(FORK_COMMAND, "   ")))
-            .expect("mine");
+        let d = typed(&cap(), ForkMode::Copy, "   ");
         assert!(
             d.events.is_empty(),
             "a refusal is not a fact about the agent"
@@ -495,9 +510,7 @@ mod tests {
     #[test]
     fn a_refusal_from_the_session_reaches_the_person_and_retracts_the_intent() {
         let mut c = cap();
-        let d = c
-            .handle(&Msg::Command(&command(FORK_COMMAND, "look into it")))
-            .expect("mine");
+        let d = typed(&c, ForkMode::Copy, "look into it");
         fold(&mut c, &d);
         let [Act::Ask(SessionRequest::StartRunner { call, .. })] = d.acts.as_slice() else {
             panic!("expected an ask, got {:?}", d.acts);
@@ -528,9 +541,7 @@ mod tests {
     fn a_branch_the_session_never_answered_is_asked_again_on_load() {
         let mut c = cap();
         let source = c.agent;
-        let d = c
-            .handle(&Msg::Command(&command(FORK_COMMAND, "look into it")))
-            .expect("mine");
+        let d = typed(&c, ForkMode::Copy, "look into it");
         fold(&mut c, &d);
         let [Act::Ask(SessionRequest::StartRunner { call, id, args, .. })] = d.acts.as_slice()
         else {
@@ -581,7 +592,7 @@ mod tests {
     #[test]
     fn a_branch_the_session_answered_is_not_asked_again() {
         let mut c = cap();
-        let _ = forked(&mut c, FORK_COMMAND);
+        let _ = forked(&mut c, ForkMode::Copy);
         assert!(
             c.handle(&Msg::Loaded).is_none(),
             "the session already created this fork; asking again duplicates it"
@@ -607,7 +618,7 @@ mod tests {
     #[test]
     fn a_seed_that_lands_clears_the_pending_entry() {
         let mut c = cap();
-        let fork = forked(&mut c, FORK_COMMAND);
+        let fork = forked(&mut c, ForkMode::Copy);
         assert!(c.seeding.contains(&fork));
 
         let d = c
@@ -623,7 +634,7 @@ mod tests {
     #[test]
     fn a_seed_that_fails_is_recorded_and_delivers_nothing() {
         let mut c = cap();
-        let fork = forked(&mut c, FORK_COMMAND);
+        let fork = forked(&mut c, ForkMode::Copy);
         let d = c
             .handle(&Msg::Child(&ChildMsg::Failed {
                 child: fork,
@@ -657,7 +668,7 @@ mod tests {
     #[test]
     fn an_outcome_is_never_a_forks_business() {
         let mut c = cap();
-        let fork = forked(&mut c, FORK_COMMAND);
+        let fork = forked(&mut c, ForkMode::Copy);
         assert!(
             c.handle(&Msg::Child(&ChildMsg::Outcome {
                 child: fork,
@@ -677,7 +688,7 @@ mod tests {
     #[test]
     fn a_fork_in_flight_does_not_hold_the_conclusion() {
         let mut c = cap();
-        let _ = forked(&mut c, FORK_COMMAND);
+        let _ = forked(&mut c, ForkMode::Copy);
         assert!(!c.seeding.is_empty());
         for boundary in [
             TurnEvent::Began,
@@ -705,7 +716,7 @@ mod tests {
     #[test]
     fn a_seed_in_flight_survives_a_slice_round_trip() {
         let mut c = cap();
-        let fork = forked(&mut c, FORK_COMMAND);
+        let fork = forked(&mut c, ForkMode::Copy);
         let source = c.agent;
         let caps = Capabilities::new(vec![Box::new(c)]);
 
@@ -725,20 +736,12 @@ mod tests {
         );
     }
 
-    /// Another built-in — `/compact` — belongs to a different capability, so
-    /// the offer has to pass through this one.
+    /// Another capability's command is not this one's, and neither is an
+    /// answer: a fork's park is the session's to end, and there is none.
     #[test]
     fn another_message_is_not_mine() {
         let c = cap();
-        assert!(c.handle(&Msg::Command(&command("compact", ""))).is_none());
-        assert!(
-            c.handle(&tool(&ToolCall {
-                id: "t1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({}),
-            }))
-            .is_none()
-        );
+        assert!(c.command(&someone_elses()).is_none());
         assert!(c.handle(&Msg::Answer(&[])).is_none());
     }
 }

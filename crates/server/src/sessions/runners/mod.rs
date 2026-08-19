@@ -631,7 +631,7 @@ impl RunnerState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{advertised, call, facts, tool};
+    use crate::agent_loop::capabilities::testing::{advertised, claimed_by, facts};
 
     fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
         Assembly {
@@ -679,8 +679,8 @@ mod tests {
     /// Every runner that owns an agent can delegate. That uniformity is the
     /// whole point: a subagent spawning a subagent, and a step invoking a
     /// workflow, are the same capability in a different holder.
-    #[test]
-    fn every_agent_owning_runner_can_delegate() {
+    #[tokio::test]
+    async fn every_agent_owning_runner_can_delegate() {
         let s = empty_settings();
         for kind in [
             RunnerKind::Conversation,
@@ -690,12 +690,11 @@ mod tests {
             let caps = assemble(kind, &opts(&s));
             assert!(caps.has("sub_agent"), "{kind:?} cannot spawn");
             assert!(caps.has("workflow"), "{kind:?} cannot invoke a workflow");
-            // And the runtime does not swallow the named tool on the way past.
-            let taken = caps
-                .iter()
-                .find_map(|c| c.handle(&tool(&call("spawn_agent"))).map(|_| c.name()));
+            // And the runtime does not swallow the named tool on the way past:
+            // the layer that claims it decides whose command it becomes, so
+            // this is asked of the composed toolbox rather than of the list.
             assert_eq!(
-                taken,
+                claimed_by(&caps, &facts(), "spawn_agent").await,
                 Some("sub_agent"),
                 "{kind:?} left spawn_agent unclaimed or misrouted"
             );
@@ -709,8 +708,8 @@ mod tests {
     ///
     /// Asserted on what is *advertised*, not on what is held: a tool the model
     /// is never shown may as well not exist.
-    #[test]
-    fn every_agent_owning_runner_gets_a_task_list_and_timers() {
+    #[tokio::test]
+    async fn every_agent_owning_runner_gets_a_task_list_and_timers() {
         let s = empty_settings();
         for kind in [
             RunnerKind::Conversation,
@@ -731,20 +730,13 @@ mod tests {
             }
             // And the open-namespace capability does not swallow the call on
             // its way past, which is what the fixed-name end of the list is for.
-            let taken = caps.iter().find_map(|c| {
-                c.handle(&tool(&call(crate::agent_loop::TASK_LIST_TOOL)))
-                    .map(|_| c.name())
-            });
             assert_eq!(
-                taken,
+                claimed_by(&caps, &facts(), crate::agent_loop::TASK_LIST_TOOL).await,
                 Some("task_list"),
                 "{kind:?} left task_list unclaimed or misrouted"
             );
-            let woke = caps
-                .iter()
-                .find_map(|c| c.handle(&tool(&call("set_timer"))).map(|_| c.name()));
             assert_eq!(
-                woke,
+                claimed_by(&caps, &facts(), "set_timer").await,
                 Some("timers"),
                 "{kind:?} left set_timer unclaimed or misrouted"
             );

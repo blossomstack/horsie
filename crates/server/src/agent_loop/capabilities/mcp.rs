@@ -117,7 +117,7 @@ impl Capability for McpCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, call, facts, tool};
+    use super::super::testing::{advertised_by, facts, someone_elses};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{loading, spec};
@@ -165,8 +165,7 @@ mod tests {
     #[test]
     fn it_claims_no_tool_name_through_the_mailbox() {
         let c = McpCapability::new(vec!["github".into()]);
-        assert!(c.handle(&tool(&call("mcp__github__list_issues"))).is_none());
-        assert!(c.handle(&tool(&call("bash"))).is_none());
+        assert!(c.command(&someone_elses()).is_none());
         assert!(
             advertised_by(&c, &facts()).is_empty(),
             "the tools are advertised by the toolbox that will run them"

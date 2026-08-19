@@ -30,14 +30,15 @@
 //! that was missing.
 
 use super::{
-    Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, TurnEvent,
+    Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, SessionReply,
+    SessionRequest, TurnEvent,
 };
 use crate::agent_loop::Incoming;
-use crate::agent_loop::toolbox::claiming;
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
 use crate::sessions::runners::loading::AgentFacts;
-use crate::sessions::runners::message::{ChildMsg, ChildOutcome, ToolCall, WorkflowOutcome};
+use crate::sessions::runners::message::{ChildMsg, ChildOutcome, WorkflowOutcome};
 use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
@@ -49,6 +50,15 @@ use std::sync::Arc;
 pub const INVOKE_TOOL: &str = "invoke_workflow";
 /// The tool that reads back what is still running.
 pub const STATUS_TOOL: &str = "workflow_status";
+
+/// What the model asked this capability to do.
+pub enum Command {
+    /// `invoke_workflow`.
+    Invoke { input: Value },
+    /// `workflow_status`. No input: reading back what is in flight takes no
+    /// arguments.
+    Status,
+}
 
 /// One agent's workflow runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -120,8 +130,8 @@ impl WorkflowCapability {
     }
 
     /// The model called `invoke_workflow`.
-    fn invoke(&self, call: &ToolCall) -> Decision {
-        let req: Request = match serde_json::from_value(call.input.clone()) {
+    fn invoke(&self, call: &str, input: &Value) -> Decision {
+        let req: Request = match serde_json::from_value(input.clone()) {
             Ok(req) => req,
             // A capability that owns a tool name owns every call to it,
             // including the malformed ones. Declining would hand a mistyped
@@ -130,7 +140,7 @@ impl WorkflowCapability {
             // instead of corrected.
             Err(e) => {
                 return Decision::reply(
-                    &call.id,
+                    call,
                     format!("`{INVOKE_TOOL}` was called with arguments it cannot read: {e}"),
                 );
             }
@@ -145,14 +155,14 @@ impl WorkflowCapability {
         };
         let note = format!("starting workflow {}", pending.workflow);
         Decision::record(vec![CapEvent::Workflow(Event::Requested {
-            call: call.id.clone(),
+            call: call.to_string(),
             pending: pending.clone(),
         })])
-        .then(Act::Ask(ask(&call.id, &pending)))
+        .then(Act::Ask(ask(call, &pending)))
         // Parked, not answered: the session's answer is what this call's result
         // is made of, and it arrives on another message.
         .then(Act::Park {
-            call: call.id.clone(),
+            call: call.to_string(),
             note,
         })
     }
@@ -332,40 +342,47 @@ fn result(call: &str, output: String, is_error: bool) -> Act {
 impl WorkflowCapability {
     /// Both tools, advertised here rather than pushed as a toolbox layer — see
     /// the module doc for why that is what made advertising them honest.
-    fn specs(&self) -> Vec<ToolSpec> {
+    fn claims(&self) -> Vec<ClaimedTool> {
         vec![
-            ToolSpec {
-                name: INVOKE_TOOL.to_string(),
-                description: "Start a run of a workflow already defined on this server. Returns \
+            ClaimedTool::new(
+                ToolSpec {
+                    name: INVOKE_TOOL.to_string(),
+                    description:
+                        "Start a run of a workflow already defined on this server. Returns \
                     immediately; the run's final output, or its failure, is automatically \
                     delivered back to you as a message. Carry on with independent work meanwhile, \
                     and use workflow_status only when asked for progress or when a result seems \
                     lost — never as a poll."
-                    .to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["workflow", "input"],
-                    "properties": {
-                        "workflow": {
-                            "type": "string",
-                            "description": "The name of the workflow to run."
-                        },
-                        "input": {
-                            "type": "string",
-                            "description": "The run's input, complete and self-contained: a run \
-                                does not see this conversation."
+                            .to_string(),
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["workflow", "input"],
+                        "properties": {
+                            "workflow": {
+                                "type": "string",
+                                "description": "The name of the workflow to run."
+                            },
+                            "input": {
+                                "type": "string",
+                                "description": "The run's input, complete and self-contained: a \
+                                    run does not see this conversation."
+                            }
                         }
-                    }
-                }),
-            },
-            ToolSpec {
-                name: STATUS_TOOL.to_string(),
-                description: "List the workflow runs you started that are still in flight. Do \
-                    not poll or call this tool repeatedly: a run's output and its failures are \
-                    automatically delivered to you as messages."
-                    .to_string(),
-                input_schema: json!({ "type": "object", "properties": {} }),
-            },
+                    }),
+                },
+                |input, to| CapCommand::Workflow(Command::Invoke { input }, to),
+            ),
+            ClaimedTool::new(
+                ToolSpec {
+                    name: STATUS_TOOL.to_string(),
+                    description: "List the workflow runs you started that are still in flight. Do \
+                        not poll or call this tool repeatedly: a run's output and its failures are \
+                        automatically delivered to you as messages."
+                        .to_string(),
+                    input_schema: json!({ "type": "object", "properties": {} }),
+                },
+                |_input, to| CapCommand::Workflow(Command::Status, to),
+            ),
         ]
     }
 }
@@ -380,19 +397,25 @@ impl Capability for WorkflowCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(), mailbox)
+        claiming(inner, self.claims(), mailbox)
+    }
+
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::Workflow(cmd, to) = cmd else {
+            return None;
+        };
+        Some(match cmd {
+            Command::Invoke { input } => self.invoke(&to.call, input),
+            // A read, so it journals nothing: an event for it would grow the
+            // log every time the model looked.
+            Command::Status => Decision::reply(&to.call, self.render_status()),
+        })
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool { call, .. } if call.name == INVOKE_TOOL => Some(self.invoke(call)),
-            // A read, so it journals nothing: an event for it would grow the
-            // log every time the model looked.
-            Msg::Tool { call, .. } if call.name == STATUS_TOOL => {
-                Some(Decision::reply(&call.id, self.render_status()))
-            }
             Msg::Reply(reply) => self.replied(reply),
             Msg::Child(m) => self.child(m),
             // The crash window: a run journaled and never answered is re-asked
@@ -406,12 +429,7 @@ impl Capability for WorkflowCapability {
                     note: format!("{} workflow run(s) still in flight", self.outstanding.len()),
                 }))
             }
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Woke { .. }
-            | Msg::Concluded => None,
+            Msg::Turn(_) | Msg::Answer(_) | Msg::Woke { .. } | Msg::Concluded => None,
         }
     }
 
@@ -450,22 +468,18 @@ impl Capability for WorkflowCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{advertised_by, facts, tool};
+    use crate::agent_loop::capabilities::testing::{
+        advertised_by, answering, facts, someone_elses,
+    };
     use crate::sessions::runners::message::SubAgentOutcome;
 
-    fn call(name: &str, input: Value) -> ToolCall {
-        ToolCall {
-            id: "t1".into(),
-            name: name.into(),
-            input,
-        }
+    /// An invocation as the layer that claims `invoke_workflow` builds it.
+    fn invoke(input: Value) -> CapCommand {
+        CapCommand::Workflow(Command::Invoke { input }, answering("t1"))
     }
 
-    fn invoke_call() -> ToolCall {
-        call(
-            INVOKE_TOOL,
-            json!({"workflow": "release", "input": "cut 1.2.0"}),
-        )
+    fn invoke_call() -> CapCommand {
+        invoke(json!({"workflow": "release", "input": "cut 1.2.0"}))
     }
 
     fn fold(c: &mut WorkflowCapability, d: &Decision) {
@@ -477,7 +491,7 @@ mod tests {
     /// Invoke, and let the session say yes — the only way there is to a run in
     /// flight.
     fn invoked(c: &mut WorkflowCapability) -> RunnerId {
-        let d = c.handle(&tool(&invoke_call())).expect("mine");
+        let d = c.command(&invoke_call()).expect("mine");
         fold(c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { id, .. }),
@@ -501,7 +515,7 @@ mod tests {
     #[test]
     fn an_invocation_journals_and_asks_for_the_same_run() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&tool(&invoke_call())).expect("mine");
+        let d = c.command(&invoke_call()).expect("mine");
 
         let [CapEvent::Workflow(Event::Requested { call, pending })] = d.events.as_slice() else {
             panic!("expected one Requested event, got {:?}", d.events);
@@ -544,7 +558,7 @@ mod tests {
     #[test]
     fn a_malformed_invocation_is_refused_in_words_and_journals_nothing() {
         let d = WorkflowCapability::default()
-            .handle(&tool(&call(INVOKE_TOOL, json!({"workflow": "nope"}))))
+            .command(&invoke(json!({"workflow": "nope"})))
             .expect("the name is mine, so the mistake is mine to answer");
         assert!(
             d.events.is_empty(),
@@ -577,7 +591,7 @@ mod tests {
     #[test]
     fn a_refusal_from_the_session_becomes_the_parked_calls_result() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&tool(&invoke_call())).expect("mine");
+        let d = c.command(&invoke_call()).expect("mine");
         fold(&mut c, &d);
 
         let d = c
@@ -605,7 +619,7 @@ mod tests {
     #[test]
     fn a_run_the_session_never_answered_is_asked_again_on_load() {
         let mut c = WorkflowCapability::default();
-        let d = c.handle(&tool(&invoke_call())).expect("mine");
+        let d = c.command(&invoke_call()).expect("mine");
         fold(&mut c, &d);
         let [
             Act::Ask(SessionRequest::StartRunner { call, id, .. }),
@@ -834,7 +848,7 @@ mod tests {
         let mut c = WorkflowCapability::default();
         let child = invoked(&mut c);
         let d = c
-            .handle(&tool(&call(STATUS_TOOL, json!({}))))
+            .command(&CapCommand::Workflow(Command::Status, answering("t1")))
             .expect("mine");
         assert!(d.events.is_empty());
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
@@ -844,7 +858,7 @@ mod tests {
 
         c.apply(&CapEvent::Workflow(Event::Reported { child }));
         let d = c
-            .handle(&tool(&call(STATUS_TOOL, json!({}))))
+            .command(&CapCommand::Workflow(Command::Status, answering("t1")))
             .expect("mine");
         let [Act::Answer { text, .. }] = d.acts.as_slice() else {
             panic!("expected one answer, got {:?}", d.acts);
@@ -887,14 +901,7 @@ mod tests {
     #[test]
     fn another_message_is_not_mine() {
         let c = WorkflowCapability::default();
-        assert!(c.handle(&tool(&call("bash", json!({})))).is_none());
-        assert!(
-            c.handle(&Msg::Command(&crate::sessions::runners::message::Command {
-                name: "fork".into(),
-                args: String::new(),
-            }))
-            .is_none()
-        );
+        assert!(c.command(&someone_elses()).is_none());
         assert!(c.handle(&Msg::Answer(&[])).is_none());
     }
 }

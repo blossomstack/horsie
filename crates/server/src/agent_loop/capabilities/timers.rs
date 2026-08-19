@@ -33,15 +33,15 @@
 //! mints a uuid: `fire_at_unix_ms` is computed here, in the decision, and
 //! travels on the event.
 
-use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, TurnEvent};
+use super::{Act, CapCommand, CapEvent, CapSlice, Capability, Decision, Mailbox, Msg, TurnEvent};
 use crate::agent_loop::Incoming;
 use crate::agent_loop::timers::{
-    CancelSelector, TimerId, TimerKind, TimerRecord, timer_tool_specs,
+    CancelSelector, TimerId, TimerKind, TimerRecord, cancel_timer_spec, list_timers_spec,
+    set_timer_spec,
 };
-use crate::agent_loop::toolbox::claiming;
+use crate::agent_loop::toolbox::{ClaimedTool, claiming};
 use crate::sessions::runners::loading::AgentFacts;
-use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::{ToolSpec, Toolbox};
+use horsie_agentcore::Toolbox;
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -61,6 +61,20 @@ pub const SET_TOOL: &str = "set_timer";
 pub const LIST_TOOL: &str = "list_timers";
 /// The tool that removes one, or all of them.
 pub const CANCEL_TOOL: &str = "cancel_timer";
+
+/// What the model asked this capability to do.
+///
+/// One arm per tool, decided by the layer that claimed the name. The three used
+/// to be told apart by a name match here, and the name is what no longer
+/// travels.
+pub enum Command {
+    /// `set_timer`.
+    Arm { input: Value },
+    /// `list_timers`. No input: reading them back takes no arguments.
+    List,
+    /// `cancel_timer`.
+    Cancel { input: Value },
+}
 
 /// What this capability records.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,42 +113,39 @@ impl TimersCapability {
     ///
     /// The fire time is stamped here, once, and travels on the event: a fold
     /// that recomputed it would move every timer forward on every replay.
-    fn arm(&self, call: &ToolCall) -> Decision {
-        let kind = match call.input.get("kind").and_then(Value::as_str) {
+    fn arm(&self, call: &str, input: &Value) -> Decision {
+        let kind = match input.get("kind").and_then(Value::as_str) {
             Some("one_shot") => TimerKind::OneShot,
             Some("recurring") => TimerKind::Recurring,
             Some(_) | None => {
                 return Decision::refuse(
-                    &call.id,
+                    call,
                     format!("{SET_TOOL}.kind must be 'one_shot' or 'recurring'"),
                 );
             }
         };
-        let Some(after_secs) = call
-            .input
+        let Some(after_secs) = input
             .get("after_secs")
             .and_then(Value::as_u64)
             .filter(|n| *n >= 1)
         else {
             return Decision::refuse(
-                &call.id,
+                call,
                 format!("{SET_TOOL}.after_secs must be an integer >= 1"),
             );
         };
-        let Some(message) = call
-            .input
+        let Some(message) = input
             .get("message")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
         else {
             return Decision::refuse(
-                &call.id,
+                call,
                 format!("{SET_TOOL}.message must be a non-empty string"),
             );
         };
-        let label = call
-            .input
+        let label = input
             .get("label")
             .and_then(Value::as_str)
             .unwrap_or("")
@@ -148,7 +159,7 @@ impl TimersCapability {
         );
         let id = record.id.clone();
         Decision::record(vec![CapEvent::Timer(Event::Armed { record })])
-            .then(answer(&call.id, &json!({ "timer_id": id.0 })))
+            .then(answer(call, &json!({ "timer_id": id.0 })))
             .then(Act::Wake {
                 id: id.0,
                 after_secs,
@@ -156,10 +167,10 @@ impl TimersCapability {
     }
 
     /// The model called `list_timers`.
-    fn list(&self, call: &ToolCall) -> Decision {
+    fn list(&self, call: &str) -> Decision {
         let now = now_ms();
         let views: Vec<_> = self.armed.iter().map(|t| t.view(now)).collect();
-        Decision::default().then(answer(&call.id, &views))
+        Decision::default().then(answer(call, &views))
     }
 
     /// The model called `cancel_timer`.
@@ -167,20 +178,17 @@ impl TimersCapability {
     /// Cancelling nothing journals nothing and is still an answer: a model that
     /// names a timer that has already fired has not made an error worth
     /// flagging, and the empty list says so.
-    fn cancel(&self, call: &ToolCall) -> Decision {
-        let selector = if call.input.get("all").and_then(Value::as_bool) == Some(true) {
+    fn cancel(&self, call: &str, input: &Value) -> Decision {
+        let selector = if input.get("all").and_then(Value::as_bool) == Some(true) {
             CancelSelector::All
-        } else if let Some(id) = call.input.get("id").and_then(Value::as_str) {
+        } else if let Some(id) = input.get("id").and_then(Value::as_str) {
             CancelSelector::One(TimerId(id.to_string()))
         } else {
-            return Decision::refuse(
-                &call.id,
-                format!("{CANCEL_TOOL} requires 'id' or 'all': true"),
-            );
+            return Decision::refuse(call, format!("{CANCEL_TOOL} requires 'id' or 'all': true"));
         };
         let ids = self.select(&selector);
         let names: Vec<&str> = ids.iter().map(|i| i.0.as_str()).collect();
-        let answered = Decision::default().then(answer(&call.id, &json!({ "cancelled": names })));
+        let answered = Decision::default().then(answer(call, &json!({ "cancelled": names })));
         match ids.is_empty() {
             true => answered,
             false => Decision {
@@ -280,8 +288,19 @@ fn answer<T: Serialize>(call: &str, value: &T) -> Act {
 }
 
 impl TimersCapability {
-    fn specs(&self) -> Vec<ToolSpec> {
-        timer_tool_specs()
+    /// The three tools, each paired with the command a call to it becomes.
+    fn claims(&self) -> Vec<ClaimedTool> {
+        vec![
+            ClaimedTool::new(set_timer_spec(), |input, to| {
+                CapCommand::Timers(Command::Arm { input }, to)
+            }),
+            ClaimedTool::new(list_timers_spec(), |_input, to| {
+                CapCommand::Timers(Command::List, to)
+            }),
+            ClaimedTool::new(cancel_timer_spec(), |input, to| {
+                CapCommand::Timers(Command::Cancel { input }, to)
+            }),
+        ]
     }
 }
 
@@ -295,16 +314,24 @@ impl Capability for TimersCapability {
         &self,
         inner: Arc<dyn Toolbox>,
         _facts: &AgentFacts,
-        mailbox: &Arc<dyn Toolbox>,
+        mailbox: &Arc<dyn Mailbox>,
     ) -> Arc<dyn Toolbox> {
-        claiming(inner, self.specs(), mailbox)
+        claiming(inner, self.claims(), mailbox)
+    }
+
+    fn command(&self, cmd: &CapCommand) -> Option<Decision> {
+        let CapCommand::Timers(cmd, to) = cmd else {
+            return None;
+        };
+        Some(match cmd {
+            Command::Arm { input } => self.arm(&to.call, input),
+            Command::List => self.list(&to.call),
+            Command::Cancel { input } => self.cancel(&to.call, input),
+        })
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
-            Msg::Tool { call, .. } if call.name == SET_TOOL => Some(self.arm(call)),
-            Msg::Tool { call, .. } if call.name == LIST_TOOL => Some(self.list(call)),
-            Msg::Tool { call, .. } if call.name == CANCEL_TOOL => Some(self.cancel(call)),
             Msg::Woke { id } => self.woke(id),
             Msg::Loaded => self.reloaded(),
             // Invariant 6, for the one thing an agent holds that owes it
@@ -325,13 +352,7 @@ impl Capability for TimersCapability {
                     ids: self.select(&CancelSelector::All),
                 })]))
             }
-            Msg::Tool { .. }
-            | Msg::Command(_)
-            | Msg::Turn(_)
-            | Msg::Answer(_)
-            | Msg::Child(_)
-            | Msg::Reply(_)
-            | Msg::Concluded => None,
+            Msg::Turn(_) | Msg::Answer(_) | Msg::Child(_) | Msg::Reply(_) | Msg::Concluded => None,
         }
     }
 
@@ -387,14 +408,21 @@ impl Capability for TimersCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{advertised_by, call, facts, tool};
+    use super::super::testing::{advertised_by, answering, facts, someone_elses};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
 
-    fn called(cap: &TimersCapability, name: &str, input: Value) -> Decision {
-        let mut c = call(name);
-        c.input = input;
-        cap.handle(&tool(&c)).expect("timers own their tools")
+    fn called(cap: &TimersCapability, cmd: Command) -> Decision {
+        cap.command(&CapCommand::Timers(cmd, answering("t1")))
+            .expect("timers own their commands")
+    }
+
+    fn set(cap: &TimersCapability, input: Value) -> Decision {
+        called(cap, Command::Arm { input })
+    }
+
+    fn cancel(cap: &TimersCapability, input: Value) -> Decision {
+        called(cap, Command::Cancel { input })
     }
 
     fn fold(cap: &mut TimersCapability, decision: &Decision) {
@@ -451,7 +479,7 @@ mod tests {
     /// Arm one and fold it, the way the actor does.
     fn armed_one(input: Value) -> TimersCapability {
         let mut cap = TimersCapability::new();
-        let decision = called(&cap, SET_TOOL, input);
+        let decision = set(&cap, input);
         fold(&mut cap, &decision);
         cap
     }
@@ -470,7 +498,7 @@ mod tests {
     #[test]
     fn arming_journals_the_record_and_asks_to_be_woken() {
         let cap = TimersCapability::new();
-        let decision = called(&cap, SET_TOOL, one_shot(3600));
+        let decision = set(&cap, one_shot(3600));
         let Some(CapEvent::Timer(Event::Armed { record })) = decision.events.first() else {
             panic!("expected an armed event, got {:?}", decision.events);
         };
@@ -493,7 +521,7 @@ mod tests {
             json!({"kind": "one_shot", "after_secs": 0, "message": "x"}),
             json!({"kind": "one_shot", "after_secs": 10}),
         ] {
-            let decision = called(&cap, SET_TOOL, input.clone());
+            let decision = set(&cap, input.clone());
             assert!(decision.events.is_empty(), "{input} armed something");
             assert!(
                 decision
@@ -558,7 +586,7 @@ mod tests {
     fn a_wake_for_a_cancelled_timer_is_not_claimed() {
         let mut cap = armed_one(one_shot(60));
         let id = cap.armed()[0].id.0.clone();
-        let cancelled = called(&cap, CANCEL_TOOL, json!({"id": id}));
+        let cancelled = cancel(&cap, json!({"id": id}));
         assert_eq!(answered(&cancelled)["cancelled"], json!([id.as_str()]));
         fold(&mut cap, &cancelled);
         assert!(cap.armed().is_empty());
@@ -573,16 +601,16 @@ mod tests {
     #[test]
     fn cancel_all_removes_every_timer_and_cancelling_nothing_journals_nothing() {
         let mut cap = armed_one(one_shot(60));
-        let second = called(&cap, SET_TOOL, recurring(60));
+        let second = set(&cap, recurring(60));
         fold(&mut cap, &second);
         assert_eq!(cap.armed().len(), 2);
 
-        let all = called(&cap, CANCEL_TOOL, json!({"all": true}));
+        let all = cancel(&cap, json!({"all": true}));
         assert_eq!(all.events.len(), 1);
         fold(&mut cap, &all);
         assert!(cap.armed().is_empty());
 
-        let again = called(&cap, CANCEL_TOOL, json!({"all": true}));
+        let again = cancel(&cap, json!({"all": true}));
         assert!(again.events.is_empty(), "cancelling nothing is not a fact");
         assert_eq!(answered(&again)["cancelled"], json!([]));
     }
@@ -592,7 +620,7 @@ mod tests {
     #[test]
     fn listing_reports_what_is_armed_and_journals_nothing() {
         let cap = armed_one(recurring(3600));
-        let listed = called(&cap, LIST_TOOL, json!({}));
+        let listed = called(&cap, Command::List);
         assert!(listed.events.is_empty());
         let views = answered(&listed);
         assert_eq!(views[0]["label"], "nightly");
@@ -674,11 +702,11 @@ mod tests {
         );
     }
 
-    /// It claims its own three tools and nothing else.
+    /// It claims its own three commands and nothing else.
     #[test]
-    fn it_claims_nothing_but_its_own_tools() {
+    fn it_claims_nothing_but_its_own_commands() {
         let cap = armed_one(one_shot(60));
-        assert!(cap.handle(&tool(&call("bash"))).is_none());
+        assert!(cap.command(&someone_elses()).is_none());
         assert!(cap.handle(&Msg::Answer(&[])).is_none());
         assert!(cap.handle(&Msg::Woke { id: "someone-else" }).is_none());
     }
