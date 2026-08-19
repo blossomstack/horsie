@@ -810,9 +810,12 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        // The main agent by name. A halt keys on the agent it is halting, and
+        // the nil uuid this used to send named nobody — so the turn ran on.
+        let main = main_agent(&session).await;
         session
             .tell(SessionCommand::Hooks(HookCommand::Halt {
-                key: crate::sessions::runners::AgentId(Uuid::nil()),
+                key: main,
                 reason: "the repo is locked".into(),
             }))
             .await
