@@ -471,7 +471,7 @@ impl SessionActor {
         let agent_ctx = AgentRuntimeContext {
             context_provider: provider.clone(),
             revision,
-            parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),
+            parent: StopHookParent::wrap(self.me(ctx), plan.agent, provider.clone()),
             journal_id,
             // Computed from the state this spawn was decided against, never
             // remembered: an agent built after the runtime landed starts ready,

@@ -43,6 +43,7 @@ use crate::agent_loop::{
     SharedContext, ToolboxFactory, compaction_window, scan_workspace,
 };
 use crate::runtime_manager::{NARRATION_BUFFER, RuntimeError};
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::runners::loading::AgentRole;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::session_actor::AgentKey;

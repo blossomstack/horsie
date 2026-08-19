@@ -564,7 +564,7 @@ impl HookRouting {
                 // rather than into the session's log. An agent that has already
                 // gone is not an error: the records describe a call it made
                 // before it left, and there is nothing left to tell.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(&key) {
                     let _ = agent.actor.tell(AgentCommand::HooksRan { records }).await;
                 }
                 CommandEffect::none()
@@ -577,8 +577,7 @@ impl HookRouting {
                 // `ContinueAfterStop` below no-ops on the same condition.
                 let live = actor
                     .agents
-                    .as_ref()
-                    .and_then(|a| a.get(key))
+                    .get(&key)
                     .filter(|_| state.status == SessionStatus::Running)
                     .cloned();
                 let Some(agent) = live else {
@@ -627,7 +626,7 @@ impl HookRouting {
                 // One more thing addressed to the agent, queued like the rest:
                 // the turn it continues is over by the time this lands, so the
                 // agent's own boundary drain is what starts the next one.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(&key) {
                     let _ = agent
                         .actor
                         .tell(AgentCommand::Enqueue {

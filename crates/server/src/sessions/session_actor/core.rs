@@ -168,7 +168,7 @@ impl SessionActor {
     ) {
         for event in events {
             for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
-                let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+                let Some(agent) = self.agents.get(&key).cloned() else {
                     tracing::warn!(
                         session = %self.id,
                         ?key,
@@ -192,7 +192,7 @@ impl SessionActor {
         key: AgentKey,
         event: horsie_agentcore::LifecycleEvent,
     ) {
-        let agent = self.agents.as_ref().and_then(|a| a.get(key)).cloned();
+        let agent = self.agents.get(&key).cloned();
         if let Some(agent) = agent {
             let _ = agent
                 .actor
