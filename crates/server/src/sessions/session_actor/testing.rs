@@ -13,9 +13,9 @@
 
 #![allow(dead_code)]
 
-use super::{ReadCommand, TurnCommand};
+use super::ReadCommand;
 use super::{
-    context::{TestKind, SessionContextProvider},
+    context::SessionContextProvider,
     *,
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
@@ -35,8 +35,15 @@ pub(super) fn fold(events: Vec<SessionEvent>) -> SessionState {
 /// What this actor's orchestrator decides for a state. `drain` used to be a
 /// method here; the decision moved to the orchestrator and the actor only
 /// performs it, so these tests assert on the decision.
-pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
-    actor.next_actions(state)
+pub(super) fn decisions(
+    actor: &SessionActor,
+    state: &SessionState,
+) -> Vec<crate::sessions::runners::action::Action> {
+    actor
+        .next_actions(state)
+        .into_iter()
+        .map(|(_runner, action)| action)
+        .collect()
 }
 
 pub(super) fn agent_settings_fixture() -> AgentSettings {
@@ -805,20 +812,27 @@ impl horsie_actor::Journal for CountingJournal {
 }
 
 pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
+    let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     session
         .ask(|reply| {
-            SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
-                agent: crate::sessions::runners::ids::AgentId::new_v4(),
-                label: label.into(),
-                task: task.into(),
-                agent_type: None,
+            SessionCommand::StartRunner {
+                id: runner,
+                kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                    label: label.into(),
+                    task: task.into(),
+                    agent_type: None,
+                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                }),
+                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
-        .unwrap()
+        .unwrap();
+    runner.as_uuid()
 }
 
 /// How each turn in one agent's log ended, in order.
@@ -1149,11 +1163,11 @@ pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
 pub(super) async fn send(session: &SessionRef, text: &str) {
     session
         .ask(|reply| {
-            SessionCommand::Turn(TurnCommand::UserMessage {
+            SessionCommand::UserMessage {
                 agent_id: None,
                 text: text.into(),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
@@ -1449,14 +1463,19 @@ pub(super) async fn spawn_typed(
 ) -> Result<Uuid, String> {
     session
         .ask(|reply| {
-            SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
-                agent: crate::sessions::runners::ids::AgentId::new_v4(),
-                label: "review".into(),
-                task: "look at the diff".into(),
-                agent_type: agent_type.map(str::to_string),
+            SessionCommand::StartRunner {
+                id: crate::sessions::runners::ids::RunnerId::new_v4(),
+                kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                    label: "review".into(),
+                    task: "look at the diff".into(),
+                    agent_type: agent_type.map(str::to_string),
+                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                }),
+                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
