@@ -167,7 +167,7 @@ impl SessionActor {
         state: &SessionState,
     ) {
         for event in events {
-            for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
+            for (key, payload) in crate::sessions::runners::lifecycle_routing::route(event, state) {
                 let Some(agent) = self.agents.get(&key).cloned() else {
                     tracing::warn!(
                         session = %self.id,
