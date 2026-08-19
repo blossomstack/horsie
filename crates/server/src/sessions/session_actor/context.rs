@@ -151,7 +151,8 @@ impl SessionAgentKind {
 /// is the session's own, and the three the kind decides — the key, the id, and
 /// whether it narrates — must not be able to disagree with the provider's.
 pub(super) fn loading_for(
-    kind: SessionAgentKind,
+    agent: crate::sessions::runners::ids::AgentId,
+    role: crate::sessions::runners::loading::AgentRole,
     session: SessionRef,
     session_id: Uuid,
     deps: LoadingDeps,
@@ -159,9 +160,11 @@ pub(super) fn loading_for(
     Loading {
         session,
         session_id,
-        key: kind.agent_key(),
-        agent: kind.agent_id(session_id),
-        narrate: kind.broadcasts(),
+        role,
+        agent,
+        // Workers are quiet by design, so their setup narrates nothing. A
+        // conversation and a step both have someone watching.
+        narrate: !matches!(role, crate::sessions::runners::loading::AgentRole::Sub),
         runtimes: deps.runtimes,
         registry: deps.registry,
         mcp: deps.mcp,
@@ -340,7 +343,7 @@ impl SessionContextProvider {
         let (narrate, task) = self
             .loading
             .narrate
-            .then(|| narration_pump(&self.loading.session, self.loading.key))
+            .then(|| narration_pump(&self.loading.session, self.loading.agent))
             .unzip();
         let acquired = self.loading.runtimes.get(narrate).await;
         // Joined rather than detached. The acquisition dropped the sender on

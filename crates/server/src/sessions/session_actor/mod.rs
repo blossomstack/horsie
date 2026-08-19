@@ -403,12 +403,12 @@ impl SessionActor {
         };
         // Its name under this session, and the id it is addressed by.
         let name = journal_id.to_string();
-        let key = plan.kind.agent_key();
         // Built once, here, rather than per turn: it owns the cache of the
         // client this agent's last load acquired, which `cancel_agent` and the
         // `Stop` hooks both read.
         let loading = context::loading_for(
-            plan.kind,
+            plan.agent,
+            plan.role,
             self.me(ctx),
             self.id,
             context::LoadingDeps {
@@ -498,39 +498,6 @@ impl SessionActor {
         Some(resident)
     }
 
-    /// The session's primary agent, spawned once at load.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState) {
-        let Some(settings) = self.spec().agent_settings().cloned() else {
-            // Only an agent session has a main agent; `adopt` gates this call
-            // on the kind.
-            return;
-        };
-        // The session's own conversation: it can ask, name itself and branch.
-        let equipment = crate::sessions::runners::assemble(
-            crate::sessions::runners::RunnerKind::Conversation,
-            &crate::sessions::runners::Assembly {
-                settings: &settings,
-                // The main agent journals under the session's own id — its
-                // transcript *is* the session's — so that is the id it is
-                // known by here too.
-                agent: crate::sessions::runners::AgentId(self.id),
-                depth: 0,
-                unattended: self.spec().is_unattended(),
-                fork: None,
-                agent_type: None,
-            },
-        );
-        self.spawn_agent(
-            ctx,
-            state,
-            AgentPlan {
-                kind: SessionAgentKind::Main,
-                settings,
-                equipment,
-                agent_type: None,
-            },
-        );
-    }
 
     /// Resolve an agent selector to its actor: `None`/`"main"` for the primary
     /// agent, else the id of a step or a subagent. A cold node — one the

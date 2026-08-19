@@ -34,7 +34,6 @@
 use super::ids::AgentId;
 use crate::agent_loop::{McpToolboxes, SharedContext, WorkspaceContext};
 use crate::sessions::addressing::SessionRef;
-use crate::sessions::session_actor::AgentKey;
 use crate::sessions::spec::AgentSettings;
 use horsie_agentcore::{LlmProvider, Toolbox};
 use horsie_runtime_host::RuntimeClient;
@@ -234,10 +233,11 @@ impl AgentRole {
 pub struct Loading {
     pub session: SessionRef,
     pub session_id: Uuid,
-    /// Who is being equipped: for progress narration, for the hook sink, and
-    /// for scoping the runtime client.
-    pub key: AgentKey,
-    /// The same agent in the runners' vocabulary.
+    /// What is being equipped, for the decisions that are not identity: the
+    /// prompt suffix, which lifecycle entry opens the log, and whether the
+    /// runtime client is scoped.
+    pub role: AgentRole,
+    /// Who is being equipped.
     pub agent: AgentId,
     /// Subagents are quiet by design, so their setup narrates nothing.
     pub narrate: bool,
@@ -261,7 +261,7 @@ impl Loading {
         if self.narrate {
             crate::sessions::session_actor::context::emit_progress(
                 &self.session,
-                self.key,
+                self.agent,
                 stage,
                 detail,
             )
