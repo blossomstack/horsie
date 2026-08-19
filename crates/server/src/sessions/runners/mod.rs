@@ -25,7 +25,6 @@
 //! 3. A runner impl holds no fields. Everything it knows is in the state
 //!    handed to it — a field would not survive a reload, and worse, would
 //!    silently differ from what the log says.
-#![allow(dead_code)] // Phase A: built and tested here, wired into the actor in Phase B.
 
 pub mod action;
 pub mod conversation;

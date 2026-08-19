@@ -22,6 +22,10 @@
 //! assembles a turn on the *agent's* task rather than on this mailbox, which is
 //! what keeps a thirty-second toolbox build from blocking a cancel.
 
+use crate::sessions::runners::action::Action;
+use crate::sessions::runners::ids::{AgentId, RunnerId};
+use crate::sessions::runners::message::ChildOutcome;
+use crate::sessions::runners::{Runner, SessionView};
 use horsie_actor::ReplyTo;
 mod component;
 pub(crate) mod context;
@@ -906,6 +910,67 @@ impl SessionActor {
     /// a subagent parent strands the moment no further subagent outcome can
     /// arrive (every node terminal), since an outcome was previously the only
     /// flush trigger.
+    /// What a runner may know about the session around it.
+    ///
+    /// Built per runner because `depth` is a walk up that runner's own parent
+    /// chain; the other two are the session's and read the same for everybody.
+    fn view(&self, state: &SessionState, runner: RunnerId) -> SessionView {
+        SessionView {
+            runtime_ready: state.runtime_ready(),
+            depth: state.depth_of(runner),
+            active_agents: state.active_agents(),
+        }
+    }
+
+    /// Whether any runner has work in flight, so the session must not unload.
+    /// This is what keeps a forty-minute tool call from being unloaded out from
+    /// under itself.
+    fn busy(&self, state: &SessionState) -> bool {
+        state.runners.values().any(|r| r.state.busy())
+    }
+
+    /// Everything every runner wants started, given the state as it now is.
+    ///
+    /// A concatenation, not a negotiation: a runner returns only work it owns,
+    /// so there is nothing to reconcile. The runtime gate that used to stand in
+    /// front of this moved into [`RunnerState::actions`], where the one runner
+    /// exempt from it — the sandbox itself — says so rather than being special
+    /// cased by the caller.
+    fn next_actions(&self, state: &SessionState) -> Vec<(RunnerId, Action)> {
+        state
+            .runners
+            .iter()
+            .flat_map(|(id, rec)| {
+                let view = self.view(state, *id);
+                rec.state
+                    .actions(&view)
+                    .into_iter()
+                    .map(move |action| (*id, action))
+            })
+            .collect()
+    }
+
+    /// Every finished child whose creator has not been told yet.
+    ///
+    /// The scan the two-batch delivery rests on: a runner that is terminal and
+    /// has a parent offers its `outcome()` to that parent's capabilities, and
+    /// the capability's own `outstanding` is what decides whether the report is
+    /// still owed. So there is no `notified` flag to disagree with — a crash
+    /// between telling and persisting replays as a report still outstanding,
+    /// and the next boundary finds it here again.
+    fn owed(&self, state: &SessionState) -> Vec<(RunnerId, AgentId, ChildOutcome)> {
+        state
+            .runners
+            .iter()
+            .filter(|(_, rec)| rec.status.is_terminal())
+            .filter_map(|(id, rec)| {
+                let parent = rec.parent?;
+                let outcome = rec.state.outcome()?;
+                Some((*id, parent, outcome))
+            })
+            .collect()
+    }
+
     /// Whether any component has work in flight, so the session must not
     /// unload. This is what keeps a forty-minute tool call from being unloaded
     /// out from under itself.
@@ -1104,8 +1169,8 @@ impl SessionActor {
 #[async_trait]
 impl EventSourcedActor for SessionActor {
     type Command = SessionInbox;
-    type Event = SessionDomainEvent;
-    type State = SessionState;
+    type Event = crate::sessions::runners::state::SessionEvent;
+    type State = crate::sessions::runners::SessionState;
 
     fn persistence_id(&self) -> PersistenceId {
         Self::persistence_id_for(self.id)
