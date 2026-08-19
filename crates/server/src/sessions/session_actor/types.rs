@@ -108,143 +108,9 @@ pub enum SessionCommand {
     AgentOutcome(AgentOutcome),
 }
 
-/// Getting and releasing this session's sandbox.
-#[derive(Serialize, Deserialize)]
-pub enum LifecycleCommand {
-    /// Build this session's runtime.
-    ///
-    /// Sent once, by the supervisor, as part of creating the session — and
-    /// again by the session itself when it loads to find a create that the
-    /// process died inside. It is idempotent against a runtime that already
-    /// exists: a session that is past provisioning ignores it, which is what
-    /// keeps "provisioned exactly once" true without any bookkeeping beyond the
-    /// status the journal already carries.
-    Provision,
-    /// Internal: the detached create has word of the runtime it asked for —
-    /// "the machine is booting" — before it has an outcome. The vendor's own
-    /// sentence, carried unedited, because it is what the user is shown.
-    NarrateProvisioning { detail: String },
-    /// Internal: the detached create finished. Carries the vendor's own error
-    /// rather than a summary, because that string is what the user is shown.
-    FinishProvisioning {
-        error: Option<String>,
-        terminal: bool,
-    },
-    /// The supervisor wants to unload this session. Answers `false` if a run
-    /// started in the meantime, in which case nothing has changed and the idle
-    /// clock simply restarts.
-    PrepareOffload { reply: ReplyTo<bool> },
-    /// Delete: cancel, tell the vendor, and stop.
-    Delete { reply: ReplyTo<()> },
-}
 
-/// The conversation.
-#[derive(Serialize, Deserialize)]
-pub enum TurnCommand {
-    /// A message for one of this session's agents. Always accepted: the agent
-    /// queues it durably and answers it at its next turn, so there is no
-    /// rejection path and no `409`.
-    ///
-    /// The session's part is only to resolve `agent_id` — spawning a cold agent
-    /// if need be — and to title an unnamed session from its first message. The
-    /// message itself never touches session state: it is addressed to an agent,
-    /// and that is where it is stored.
-    UserMessage {
-        agent_id: Option<String>,
-        text: String,
-        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
-    },
-    /// Cancel one agent's turn in flight. Queued messages are *not* discarded —
-    /// stop means "not this turn", not "throw away what I asked for".
-    ///
-    /// Addressed, never session-wide: a session hosts several conversations at
-    /// once and each has its own turn, so "stop the session" named no single
-    /// thing to cancel. `agent_id` is `"main"` or an agent's uuid, the same
-    /// vocabulary every other agent-scoped request speaks.
-    ///
-    /// `Err` is for an id that names no agent here. An agent that is simply not
-    /// working is `Ok`: nothing to stop is not a failure, and a client racing a
-    /// turn's own end would otherwise see an error for winning the race.
-    Stop {
-        agent_id: String,
-        reply: ReplyTo<Result<(), String>>,
-    },
-    /// Answer every question one agent is parked on, at once. Routed, not
-    /// decided: the agent owns what it asked and validates the set.
-    Answer {
-        agent_id: Option<String>,
-        answers: Vec<AskAnswer>,
-        reply: ReplyTo<Result<(), AnswerError>>,
-    },
-}
 
-/// The workflow graph.
-#[derive(Serialize, Deserialize)]
-pub enum RunCommand {
-    /// Let the orchestrator start whatever it wants started. Sent to a run at
-    /// load so a pending one begins, and after a retry.
-    Advance,
-    /// Re-run one execution from the run log.
-    RetryStep {
-        index: u32,
-        reply: ReplyTo<Result<(), String>>,
-    },
-    /// Read this session's workflow run, if it is one.
-    State {
-        reply: ReplyTo<Option<crate::sessions::workflow::WorkflowRunState>>,
-    },
-    /// Recovery found a step the process died inside. Suspends the run, which is
-    /// the state a retry can move.
-    ReconcileInterrupted,
-}
 
-/// The tree of delegated work.
-#[derive(Serialize, Deserialize)]
-pub enum SubAgentCommand {
-    /// The `spawn_agent` tool: start a subagent under `caller`.
-    Spawn {
-        caller: SubAgentParent,
-        /// The worker this spawn is for, minted by the capability that asked.
-        ///
-        /// The session's id for it, not a second one beside it: a capability
-        /// journals its request *before* sending it, so a crash in that window
-        /// replays the same request with the same id — and an id the session
-        /// chose for itself could not tell that repeat from a new spawn. The
-        /// handler recognises a worker it already has and answers with it.
-        agent: AgentId,
-        label: String,
-        task: String,
-        /// A plugin-declared agent type, already checked against the catalogue
-        /// by the tool that advertised it. The session journals the name and
-        /// never resolves it: what an agent type *is* belongs to the plugin
-        /// library as of the moment the subagent runs, not the moment it was
-        /// asked for.
-        agent_type: Option<String>,
-        reply: ReplyTo<Result<Uuid, String>>,
-    },
-    /// Internal: the spawn's `SubAgentSpawned` write came back — only now
-    /// does the child actor exist (persist-then-spawn). A failed write spawns
-    /// nothing and the tool gets the error.
-    FinishSpawn {
-        id: Uuid,
-        task: String,
-        agent_type: Option<String>,
-        reply: ReplyTo<Result<Uuid, String>>,
-        persisted: Result<(), horsie_actor::JournalError>,
-    },
-    /// The `subagent_status` tool: one node, or the caller's whole subtree.
-    Status {
-        caller: SubAgentParent,
-        /// The agent that called the tool, in the runners' flat id space.
-        agent: AgentId,
-        id: Option<Uuid>,
-        reply: ReplyTo<Result<String, String>>,
-    },
-    /// Internal: post-recovery reconciliation of subagents the process died
-    /// under (tree nodes still `Running`). Their runs are over; the parents
-    /// are owed the failure like any other terminal result.
-    Reconcile,
-}
 
 /// What accepting a message produced.
 ///
@@ -271,62 +137,6 @@ impl MessageAccepted {
     }
 }
 
-/// Branching a conversation into a second one inside this session.
-///
-/// A fork is a conversation, not delegated work: nothing here reports a result
-/// to anybody, and the only reply any of it carries is the fork's own id, which
-/// is what a client redirects to.
-#[derive(Serialize, Deserialize)]
-pub enum ForkCommand {
-    /// `/fork` or `/summary-n-fork`: branch `parent`, and queue `message` in the
-    /// new fork so it has something to do when its seed lands.
-    Create {
-        parent: ForkParent,
-        mode: ForkMode,
-        message: String,
-        reply: ReplyTo<Result<Uuid, String>>,
-    },
-    /// Internal: the `ForkCreated` write came back — only now does the fork's
-    /// actor exist (persist-then-spawn, exactly as a subagent spawn does). A
-    /// failed write spawns nothing and the caller gets the error.
-    FinishCreate {
-        id: Uuid,
-        reply: ReplyTo<Result<Uuid, String>>,
-        persisted: Result<(), horsie_actor::JournalError>,
-    },
-    /// Internal: the detached seeding task wrote the fork's initial state, so
-    /// the fork may run and the message waiting in its queue is released.
-    Seeded { id: Uuid },
-    /// Internal: the source agent's `/summary-n-fork` turn produced the summary
-    /// these forks were waiting on.
-    ///
-    /// A list because forks queued into one turn share a branch point, so one
-    /// provider call serves all of them.
-    Summarised {
-        forks: Vec<Uuid>,
-        result: Result<String, String>,
-    },
-    /// Internal: the detached seeding task could not. Carries the reason
-    /// verbatim, because that string is what the user is shown.
-    SeedFailed { id: Uuid, error: String },
-    /// A fork's own `set_session_title` call. Renames the fork, never the
-    /// session — the model should not have to know which kind of conversation
-    /// it is in to name it.
-    SetTitle {
-        id: Uuid,
-        /// The agent that called the tool, in the runners' flat id space.
-        agent: AgentId,
-        title: String,
-        reply: ReplyTo<Result<String, String>>,
-    },
-    /// Someone asked for this fork to go. Nothing ever removes one on its own.
-    Delete {
-        id: Uuid,
-        reply: ReplyTo<Result<(), String>>,
-    },
-    /// Internal: recovery found forks a dead process abandoned mid-seed.
-    ReseedInterrupted,
-}
 
 /// Questions answered from the resident actor's memory. None of these touches
 /// the journal, so opening a session to look at it costs no sandbox.
@@ -358,6 +168,13 @@ pub enum ReadCommand {
     Snapshot { reply: ReplyTo<SessionSnapshot> },
     /// Read this session's aggregated usage.
     UsageStats { reply: ReplyTo<SessionUsageStats> },
+    /// Read this session's workflow run, if it is one.
+    ///
+    /// A read rather than a `Run` command: a run's log is journal data on the
+    /// runner, and asking for it wakes nothing.
+    RunState {
+        reply: ReplyTo<Option<crate::sessions::workflow::WorkflowRunState>>,
+    },
 }
 
 /// What plugin hooks did. Pure routing: nothing here is persisted by the

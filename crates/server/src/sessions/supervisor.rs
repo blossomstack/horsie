@@ -711,9 +711,12 @@ impl EventSourcedActor for SessionSupervisor {
                             spec: Box::new(spec.clone()),
                         }))
                         .await;
-                    let _ = session
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
-                        .await;
+                    // No `Provision` command any more: the session's runtime
+                    // runner is `Pending` the moment its spec is folded, and
+                    // asks for its own sandbox at the first boundary. That is
+                    // what gives provisioning an answer at recovery too — a
+                    // session whose sandbox died between the ask and the answer
+                    // used to sit `Pending` with nothing to restart it.
                 }
                 let _ = reply.send(id.clone());
                 // Not a guess: a fresh session is provisioning, and says so
@@ -789,10 +792,10 @@ impl EventSourcedActor for SessionSupervisor {
                     // own state, and the supervisor's copy is a projection.
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Fork(ForkCommand::Delete {
-                                id: fork,
+                            .tell(SessionCommand::DeleteRunner {
+                                id: crate::sessions::runners::ids::RunnerId(fork),
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
@@ -843,9 +846,9 @@ impl EventSourcedActor for SessionSupervisor {
                 if let Some(session) = self.session(ctx, state, &id) {
                     let (tx, rx) = oneshot::channel();
                     if session
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
+                        .tell(SessionCommand::Delete {
                             reply: ReplyTo::from_sender(tx),
-                        }))
+                        })
                         .await
                         .is_ok()
                     {
@@ -934,7 +937,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
-                            .tell(SessionCommand::Run(RunCommand::State {
+                            .tell(SessionCommand::Read(ReadCommand::RunState {
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
@@ -1091,9 +1094,7 @@ impl EventSourcedActor for SessionSupervisor {
                     if let Some(session) = self.resident(ctx, &id) {
                         let _ = session
                             .ask(|reply| {
-                                SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload {
-                                    reply,
-                                })
+                                SessionCommand::PrepareOffload { reply }
                             })
                             .await;
                     }

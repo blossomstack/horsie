@@ -90,6 +90,10 @@ impl Reads {
                 let _ = reply.send(reads::usage_stats(state));
                 CommandEffect::none()
             }
+            ReadCommand::RunState { reply } => {
+                let _ = reply.send(reads::run_state(state));
+                CommandEffect::none()
+            }
         }
     }
 
