@@ -195,6 +195,10 @@ impl State {
 }
 
 impl Runner for State {
+    fn started_event(&self) -> Option<RunnerEvent> {
+        Some(RunnerEvent::Conversation(Event::Started))
+    }
+
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
         if self.started {
             return Vec::new();

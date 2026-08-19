@@ -646,10 +646,13 @@ impl SessionActor {
                 equipment,
                 settings,
                 first,
-            } => self
+            } => match self
                 .start_agent(runner, agent, equipment, *settings, first, state, ctx)
                 .await
-                .map_or_else(Vec::new, |e| vec![e]),
+            {
+                Some(_) => self.start_events(runner, agent, state),
+                None => Vec::new(),
+            },
             Action::CreateChild {
                 id,
                 kind,
@@ -713,6 +716,30 @@ impl SessionActor {
                 .await;
         }
         Some(SessionEvent::AgentStarted { runner, agent })
+    }
+
+    /// The pair of events one started agent produces.
+    ///
+    /// Two, not one, and both are needed: `AgentStarted` is the session's — it
+    /// is what makes `state.agents[&agent]` resolve — and the runner's own
+    /// `Started` is what stops `actions()` asking again at the next boundary.
+    fn start_events(
+        &self,
+        runner: RunnerId,
+        agent: AgentId,
+        state: &RunnerSessionState,
+    ) -> Vec<SessionEvent> {
+        let mut events = vec![SessionEvent::AgentStarted { runner, agent }];
+        if let Some(record) = state.record(runner)
+            && let Some(event) = record.state.started_event()
+        {
+            events.push(SessionEvent::Runner {
+                id: runner,
+                event: Box::new(event),
+                at_ms: now_ms(),
+            });
+        }
+        events
     }
 
     /// Create a child runner, durable before its agent exists.

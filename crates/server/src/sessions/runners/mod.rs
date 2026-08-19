@@ -142,6 +142,19 @@ pub trait Runner {
     /// implies is where the bugs live.
     fn actions(&self, view: &SessionView) -> Vec<Action>;
 
+    /// What records that one of my agents has been started.
+    ///
+    /// The session emits this when it performs [`Action::StartAgent`], because
+    /// starting is the session's act — a runner only asks. Without it `started`
+    /// stays false and `actions()` asks again at every boundary, which
+    /// double-starts the agent on every recovery: the exact failure
+    /// `Runner::actions`'s idempotence is supposed to make impossible.
+    ///
+    /// `None` from the one runner that owns no agents.
+    fn started_event(&self) -> Option<RunnerEvent> {
+        None
+    }
+
     /// My ending, translated into the vocabulary of whoever created me.
     ///
     /// `None` while I am still going, and *always* `None` for a conversation:
@@ -538,6 +551,10 @@ impl Runner for RunnerState {
 
     fn outcome(&self) -> Option<ChildOutcome> {
         dispatch!(self, outcome)
+    }
+
+    fn started_event(&self) -> Option<RunnerEvent> {
+        dispatch!(self, started_event)
     }
 
     fn busy(&self) -> bool {
