@@ -98,7 +98,7 @@ pub enum FirstInput {
 /// step's is derived from the run — which is exactly why this is a field on two
 /// of the three arms rather than an equality between [`RunnerId`] and
 /// [`AgentId`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunnerArgs {
     SubAgent {
         agent: AgentId,
@@ -132,7 +132,7 @@ pub enum RunnerArgs {
 ///
 /// [`Self::Graph`] is what makes an ad-hoc workflow expressible: a graph built
 /// at runtime needs no name and no lookup, and nothing else has to change.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSource {
     Named(String),
     Graph(std::sync::Arc<crate::sessions::workflow::WorkflowRunSpec>),

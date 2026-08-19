@@ -1297,36 +1297,27 @@ impl SessionActor {
 
     /// One of this session's agents drained its queue into a turn.
     ///
-    /// The session used to know this because it was the thing that started the
-    /// turn. It is told now, and what it records depends only on which agent it
-    /// was: the session's own status for the main agent, a tree node going back
-    /// to work for a subagent. A step announces itself through `StepStarted`
-    /// when the run picks it, so there is nothing to add here.
+    /// Handed to the runner that owns it, like every other lifecycle moment.
+    /// The three-way match this replaces — the session's own status, a tree
+    /// node going back to work, a fork's own status — was three ways of saying
+    /// "whoever owns this agent should record that it started", and the owner
+    /// is now a lookup.
     async fn on_agent_started(
         &mut self,
-        state: &SessionState,
-        who: Uuid,
-    ) -> CommandEffect<SessionDomainEvent> {
-        if who == self.id {
-            return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
-        }
-        if state.subagents.node(who).is_some() {
-            return CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
-                at_ms: now_ms(),
-                id: who,
-            }]);
-        }
-        // A fork's own status, and only its own: the session's belongs to the
-        // main agent, and a fork answering a question is not the session
-        // working.
-        if state.forks.contains(who) {
-            return CommandEffect::persist(vec![SessionDomainEvent::ForkStatusChanged {
-                at_ms: now_ms(),
-                id: who,
-                status: AgentStatus::Running,
-            }]);
-        }
-        CommandEffect::none()
+        state: &RunnerSessionState,
+        who: AgentId,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(runner) = state.runner_of(who) else {
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            return CommandEffect::none();
+        };
+        let events = self.wrap(runner, lifecycle.on_agent_started(who));
+        CommandEffect::persist(events)
     }
 
     /// Whether this session's agents may start a turn at all: it has a runtime,
