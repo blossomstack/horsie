@@ -653,7 +653,7 @@ mod tests {
     async fn the_same_request_twice_starts_one_child() {
         let gate = BlockingProvider::new();
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
-        let parent = SessionParent::new(session.clone(), AgentKey::Main);
+        let parent = SessionParent::new(session.clone(), crate::sessions::runners::AgentId(Uuid::nil()));
         let worker = crate::sessions::runners::ids::AgentId::new_v4();
         let request = SessionRequest::StartRunner {
             call: "call-1".to_string(),
@@ -819,7 +819,7 @@ mod tests {
         }
         session
             .tell(SessionCommand::Hooks(HookCommand::Halt {
-                key: AgentKey::Main,
+                key: crate::sessions::runners::AgentId(Uuid::nil()),
                 reason: "the repo is locked".into(),
             }))
             .await
@@ -914,7 +914,7 @@ mod tests {
 
         session
             .tell(SessionCommand::Hooks(HookCommand::Ran {
-                key: AgentKey::Sub(sub),
+                key: crate::sessions::runners::AgentId(sub),
                 records: vec![hook_record("guard", "tc1")],
             }))
             .await

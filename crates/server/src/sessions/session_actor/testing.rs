@@ -510,17 +510,17 @@ pub(super) async fn wait_for_run(
 ) -> crate::sessions::workflow::WorkflowRunState {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if let Some(run) = state.run.as_ref()
-            && pred(run)
+        if let Some(run) = crate::sessions::runners::reads::run_state(&state)
+            && pred(&run)
         {
-            return run.clone();
+            return run;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let state = crate::sessions::events::fold_session_state(journal, session_id).await;
     panic!(
         "run never satisfied the predicate: {:?}",
-        state.run.as_ref()
+        crate::sessions::runners::reads::run_state(&state)
     );
 }
 
@@ -579,11 +579,11 @@ pub(super) const ASK_CALL_ID: &str = "a-1";
 pub(super) async fn wait_for_tree(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
-    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
+    pred: impl Fn(&[crate::sessions::session_actor::AgentEntry]) -> bool,
 ) {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(&state.subagents) {
+        if pred(&crate::sessions::runners::reads::agent_roster(&state)) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1478,7 +1478,8 @@ pub(super) fn typed_provider(
         loading: test_loading(f, session, id, kind),
         equipment: test_equipment(kind, &settings, false, Some("code-reviewer".to_string())),
         settings,
-        kind,
+        role: kind.role(),
+        agent: kind.agent(),
         agent_type: Some("code-reviewer".to_string()),
         plugins: Vec::new(),
     }
