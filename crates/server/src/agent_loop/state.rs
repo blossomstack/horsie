@@ -177,13 +177,6 @@ pub enum AgentDomainEvent {
     Nudged {
         at_ms: u64,
     },
-    /// The task list changed (create/insert/update_status). Carries the full
-    /// resulting state, not a delta — mirrors `MessageComplete`/`ToolComplete`,
-    /// so replay never needs to re-derive or re-validate a past mutation.
-    TaskListChanged {
-        snapshot: crate::agent_loop::task_list::TaskListState,
-        at_ms: u64,
-    },
     /// Something that happened to the session, recorded here so there is one
     /// ordered record for a client to read rather than a second stream to
     /// reconcile against this one.
@@ -347,10 +340,6 @@ pub struct AgentState {
     /// already recorded; see `TurnEnd::Interrupted`.
     #[serde(default)]
     pub turn_in_flight: bool,
-    /// The agent's task list — durable so it survives an actor restart exactly
-    /// like timers do; see `crate::agent_loop::task_list`.
-    #[serde(default)]
-    pub task_list: crate::agent_loop::task_list::TaskListState,
     /// Cumulative token usage across every completed run — durable agent state,
     /// folded from `RunComplete`. `u64` so a long session's re-sent-context input
     /// total can't overflow the per-turn `u32` wire counters. Answers the
@@ -578,7 +567,6 @@ impl AgentState {
                 .collect(),
             next_seq: at_seq,
             context_tokens: self.context_tokens,
-            task_list: self.task_list.clone(),
             inbox: Vec::new(),
             asks: Vec::new(),
             nudges: 0,
@@ -731,10 +719,31 @@ impl AgentState {
             .collect()
     }
 
+    /// The tasks this agent's task list holds, read back out of the capability
+    /// that owns it.
+    ///
+    /// Typed rather than downcast: [`CapSlice`] is an enum, so the arm *is* the
+    /// question. Empty for an agent equipped without a task list, which is a
+    /// real state now that it is a capability rather than a field every agent
+    /// had whether or not anything could reach it.
+    #[must_use]
+    fn tasks(&self) -> Vec<crate::agent_loop::task_list::TaskRecord> {
+        self.capabilities
+            .slices()
+            .into_iter()
+            .find_map(|slice| {
+                let crate::agent_loop::capabilities::CapSlice::TaskList(list) = slice else {
+                    return None;
+                };
+                Some(list.tasks().to_vec())
+            })
+            .unwrap_or_default()
+    }
+
     /// This agent's current values, for the agent document.
     pub fn state_view(&self) -> AgentStateView {
         AgentStateView {
-            tasks: self.task_list.tasks().to_vec(),
+            tasks: self.tasks(),
             usage_total: self.usage_total,
             last_turn_usage: self.last_turn_usage.clone(),
             context_tokens: self.context_tokens,
@@ -1004,7 +1013,6 @@ impl AgentState {
                 state.nudges = state.nudges.saturating_add(1);
                 state.turn_in_flight = false;
             }
-            AgentDomainEvent::TaskListChanged { snapshot, .. } => state.task_list = snapshot,
             AgentDomainEvent::RunComplete {
                 usage,
                 context_tokens,
@@ -2025,37 +2033,39 @@ mod tests {
         assert!(state.timers.is_empty());
     }
 
+    /// The agent document's task list is served over HTTP and drawn by the web
+    /// UI, and once the list belongs to a capability the only honest way to
+    /// read it is back out of that capability — typed, through `CapSlice`. A
+    /// shadow copy kept on `AgentState` by the fold would be the leak this
+    /// whole design removes, and it would go stale the first time a capability
+    /// was equipped without one.
     #[test]
-    fn task_list_events_fold_into_state() {
+    fn the_state_view_reads_the_task_list_back_out_of_the_capability() {
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, task_list};
         let mut state = AgentActor::initial_state();
-        assert_eq!(state.task_list.render(), "No tasks.");
+        assert!(
+            state.state_view().tasks.is_empty(),
+            "an agent with no task list capability shows none"
+        );
 
-        let mut snapshot = state.task_list.clone();
-        snapshot
-            .apply(crate::agent_loop::task_list::TaskListAction::Create {
-                tasks: vec!["a".to_string(), "b".to_string()],
-            })
-            .unwrap();
+        let mut list = crate::agent_loop::task_list::TaskListState::default();
+        list.apply(crate::agent_loop::task_list::TaskListAction::Create {
+            tasks: vec!["a".to_string(), "b".to_string()],
+        })
+        .unwrap();
+        state.capabilities =
+            Capabilities::new(vec![Box::new(task_list::TaskListCapability::new())]);
         state = AgentActor::apply_event(
             state,
-            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
+            AgentDomainEvent::Capability(CapEvent::TaskList(task_list::Event::Changed {
+                snapshot: list,
+            })),
         );
-        assert!(state.task_list.render().contains("[ ] 1. a"));
 
-        // A later snapshot replaces the whole state -- folding is a plain
-        // assignment, not a merge.
-        let mut snapshot = state.task_list.clone();
-        snapshot
-            .apply(crate::agent_loop::task_list::TaskListAction::UpdateStatus {
-                ids: vec![1],
-                status: crate::agent_loop::task_list::TaskStatus::Completed,
-            })
-            .unwrap();
-        state = AgentActor::apply_event(
-            state,
-            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
-        );
-        assert!(state.task_list.render().contains("Tasks (1/2 done)"));
+        let view = state.state_view();
+        assert_eq!(view.tasks.len(), 2);
+        assert_eq!(view.tasks[0].content, "a");
+        assert_eq!(view.tasks[1].id, 2);
     }
 
     fn with_messages(ids: &[&str]) -> AgentState {

@@ -7,9 +7,9 @@
 //! happens to be. Everything they do not claim goes straight through, which is
 //! what keeps an ordinary `bash` call as cheap as it was.
 //!
-//! Three of them rather than one because they are equipped independently: an
-//! agent has timers and a task list always, and capabilities only when its
-//! runner gave it some.
+//! Two of them rather than one because they are equipped independently: an
+//! agent has timers always, and capabilities only when its runner gave it
+//! some.
 
 use crate::agent_loop::agent_actor::AgentCommand;
 use async_trait::async_trait;
@@ -169,44 +169,5 @@ impl Toolbox for CapabilityToolbox {
             .ask(|reply| AgentCommand::CapabilityCall { call, facts, reply })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
-    }
-}
-
-/// Wraps an agent's toolbox, adding the always-available `task_list` tool. It
-/// executes by `ask`ing the owning [`AgentActor`] (never forwarded to the
-/// sandboxed runtime), so its state is durable -- journaled and replayed
-/// exactly like timers (see `crate::agent_loop::task_list`).
-pub(super) struct TaskListToolbox {
-    pub(super) inner: Arc<dyn Toolbox>,
-    pub(super) actor: ActorRef<AgentCommand>,
-}
-
-#[async_trait]
-impl Toolbox for TaskListToolbox {
-    fn specs(&self) -> Vec<horsie_agentcore::ToolSpec> {
-        let mut specs = self.inner.specs();
-        specs.push(crate::agent_loop::task_list::task_list_tool_spec());
-        specs
-    }
-
-    async fn execute(
-        &self,
-        name: &str,
-        input: Value,
-        tool_call_id: &str,
-    ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
-        use horsie_agentcore::ToolCallError;
-        if name != crate::agent_loop::task_list::TASK_LIST_TOOL {
-            return self.inner.execute(name, input, tool_call_id).await;
-        }
-        let action = crate::agent_loop::task_list::TaskListAction::from_input(&input)?;
-        let result = self
-            .actor
-            .ask(|reply| AgentCommand::TaskListOp { action, reply })
-            .await
-            .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
-        result
-            .map(|text| ToolOutcome::Result(Value::String(text)))
-            .map_err(ToolCallError::InvalidInput)
     }
 }

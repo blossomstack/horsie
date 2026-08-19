@@ -12,7 +12,7 @@ use crate::agent_loop::state::{
     AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome,
     coarse_appends_an_entry, coarse_event,
 };
-use crate::agent_loop::toolbox::{CapabilityToolbox, TaskListToolbox, TimerToolbox};
+use crate::agent_loop::toolbox::{CapabilityToolbox, TimerToolbox};
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
@@ -153,13 +153,6 @@ pub enum AgentCommand {
     /// Internal: a timer's sleep elapsed.
     TimerFired {
         id: crate::agent_loop::timers::TimerId,
-    },
-    /// Apply a `task_list` mutation (or just render `list`); durable like
-    /// timers. Replies with the rendered list, or an error message if the
-    /// action was rejected (unknown id, out-of-range position, ...).
-    TaskListOp {
-        action: crate::agent_loop::task_list::TaskListAction,
-        reply: ReplyTo<Result<String, String>>,
     },
     /// The session answered something a capability asked it for.
     ///
@@ -904,13 +897,6 @@ impl AgentActor {
             // this actor and are never sent to the sandboxed runtime.
             let toolbox: Arc<dyn Toolbox> = Arc::new(TimerToolbox {
                 inner: contexts.toolbox,
-                actor: self_ref.clone(),
-            });
-            // `task_list` is always available, like `skill`/`inspect_workspace` --
-            // it's a working-memory aid every agent can reach for, not a permission
-            // that needs gating per agent.
-            let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
-                inner: toolbox,
                 actor: self_ref.clone(),
             });
             // Outermost, so a capability wins a name against the sandbox — the
@@ -1672,23 +1658,6 @@ impl EventSourcedActor for AgentActor {
             }
             AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
             AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
-            AgentCommand::TaskListOp { action, reply } => {
-                let mut next = state.task_list.clone();
-                match next.apply(action) {
-                    Ok(()) => {
-                        let text = next.render();
-                        let _ = reply.send(Ok(text));
-                        CommandEffect::persist(vec![AgentDomainEvent::TaskListChanged {
-                            snapshot: next,
-                            at_ms: now_ms(),
-                        }])
-                    }
-                    Err(msg) => {
-                        let _ = reply.send(Err(msg));
-                        CommandEffect::none()
-                    }
-                }
-            }
             AgentCommand::SessionReplied { reply } => {
                 let Some(performed) = Self::consult(state, &Msg::Reply(&reply)) else {
                     // Every request carries the call that prompted it, and the

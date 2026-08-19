@@ -7,10 +7,15 @@
 //!
 //! The distinction this module exists for: **state surviving is not the same as
 //! the model knowing it survived.** `task_list`, `set_timer` and `ask_user` all
-//! keep durable state in [`AgentState`], and every one of them is invisible to
-//! the model except through the tool calls in the history that a compaction
-//! summarises away. Without this an agent wakes up holding three open tasks and
-//! two armed timers, with no idea it has any.
+//! keep durable state, and every one of them is invisible to the model except
+//! through the tool calls in the history that a compaction summarises away.
+//! Without this an agent wakes up holding three open tasks and two armed
+//! timers, with no idea it has any.
+//!
+//! A capability answers for its own share, through
+//! [`Capability::carried_state`](crate::agent_loop::capabilities::Capability::carried_state):
+//! its state is opaque behind `CapSlice`, so nothing here could know which part
+//! of it has an id in it. What is left below is what the actor itself holds.
 //!
 //! Deliberately *not* here: the working directory and environment overrides.
 //! Those live in the runtime, keyed by agent id, so reading them would mean a
@@ -31,9 +36,10 @@ use std::collections::BTreeMap;
 pub fn render_carried_state(state: &AgentState) -> String {
     let mut sections: Vec<String> = Vec::new();
 
-    if !state.task_list.tasks().is_empty() {
-        sections.push(state.task_list.render());
-    }
+    // Whatever each capability says it would lose. Asked of the capability
+    // rather than read off a field, because a capability's state is opaque
+    // behind `CapSlice` and nothing above it knows what has an id in it.
+    sections.extend(state.capabilities.carried_state());
 
     if !state.timers.is_empty() {
         let mut block = String::from("Armed timers:");
@@ -277,22 +283,13 @@ mod tests {
         state.next_seq += 1;
     }
 
-    fn with_tasks(state: &mut AgentState, tasks: &[&str]) {
-        state
-            .task_list
-            .apply(crate::agent_loop::task_list::TaskListAction::Create {
-                tasks: tasks.iter().map(|t| (*t).to_string()).collect(),
-            })
-            .expect("the fixture's task list is valid");
-    }
-
     /// The test the whole module exists for. A summariser is given deliberately
     /// vague prose to produce; every id and label below must still appear
     /// literally, because they came from state and never went near it.
     #[test]
     fn carried_state_names_every_task_timer_and_ask_verbatim() {
         let mut state = AgentState::default();
-        with_tasks(&mut state, &["migrate the journal", "delete the importer"]);
+        with_task_list_capability(&mut state, &["migrate the journal", "delete the importer"]);
         state.timers.push(TimerRecord {
             id: crate::agent_loop::timers::TimerId("timer-7".into()),
             label: "nightly".into(),
@@ -328,6 +325,48 @@ mod tests {
         // numbers rather than as positions in prose.
         assert!(rendered.contains("1. migrate the journal"));
         assert!(rendered.contains("2. delete the importer"));
+    }
+
+    /// Equip an agent with a task list already holding these.
+    ///
+    /// Built by folding the capability's own event, so the fixture cannot
+    /// disagree with what a real mutation would have left behind.
+    fn with_task_list_capability(state: &mut AgentState, tasks: &[&str]) {
+        use crate::agent_loop::capabilities::{CapEvent, Capabilities, task_list};
+        let mut list = crate::agent_loop::task_list::TaskListState::default();
+        list.apply(crate::agent_loop::task_list::TaskListAction::Create {
+            tasks: tasks.iter().map(|t| (*t).to_string()).collect(),
+        })
+        .expect("the fixture's task list is valid");
+        let mut caps = Capabilities::new(vec![Box::new(task_list::TaskListCapability::new())]);
+        caps.apply(&CapEvent::TaskList(task_list::Event::Changed {
+            snapshot: list,
+        }));
+        state.capabilities = caps;
+    }
+
+    /// A capability's state is opaque behind `CapSlice`, so a compaction can
+    /// only carry what the capability itself says is worth carrying. Without
+    /// that the task list is durable and invisible: the agent keeps its plan
+    /// and loses every idea that it has one.
+    #[test]
+    fn a_task_list_held_by_a_capability_is_carried() {
+        let mut state = AgentState::default();
+        with_task_list_capability(&mut state, &["migrate the journal"]);
+        let rendered = render_carried_state(&state);
+        assert!(
+            rendered.contains("1. migrate the journal"),
+            "the capability's task list was not carried:\n{rendered}"
+        );
+    }
+
+    /// And an agent equipped with an empty one still carries nothing, so the
+    /// boundary message does not gain a paragraph of boilerplate.
+    #[test]
+    fn an_empty_task_list_capability_carries_nothing() {
+        let mut state = AgentState::default();
+        with_task_list_capability(&mut state, &[]);
+        assert_eq!(render_carried_state(&state), "");
     }
 
     // --- PreCompact refusal ------------------------------------------------

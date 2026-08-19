@@ -63,6 +63,7 @@ pub mod memory;
 pub mod runtime;
 pub mod step_result;
 pub mod sub_agent;
+pub mod task_list;
 pub mod title;
 pub mod workflow;
 
@@ -465,6 +466,19 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
         let _ = event;
     }
 
+    /// A fact this capability would lose to a compaction unless it is carried
+    /// across verbatim. `None` when there is nothing to carry.
+    ///
+    /// Durable state is not the same as the model knowing it is durable: a task
+    /// list and an armed timer both survive a compaction, and every trace of
+    /// either in the transcript is a tool call the summariser replaces with
+    /// prose. So whatever has an id in it says so here, and is rendered into
+    /// the boundary message untouched — see
+    /// [`crate::agent_loop::carried_state`].
+    fn carried_state(&self) -> Option<String> {
+        None
+    }
+
     /// Me, in the form the journal stores.
     fn save(&self) -> CapSlice;
 }
@@ -485,6 +499,7 @@ pub enum CapSlice {
     Runtime(runtime::RuntimeCapability),
     StepResult(step_result::StepResultCapability),
     SubAgent(sub_agent::SubAgentCapability),
+    TaskList(task_list::TaskListCapability),
     Title(title::TitleCapability),
     Workflow(workflow::WorkflowCapability),
     /// A capability with no behaviour of its own, so the round-trip and
@@ -506,6 +521,7 @@ impl From<CapSlice> for Box<dyn Capability> {
             CapSlice::Runtime(c) => Box::new(c),
             CapSlice::StepResult(c) => Box::new(c),
             CapSlice::SubAgent(c) => Box::new(c),
+            CapSlice::TaskList(c) => Box::new(c),
             CapSlice::Title(c) => Box::new(c),
             CapSlice::Workflow(c) => Box::new(c),
             #[cfg(test)]
@@ -528,6 +544,7 @@ pub enum CapEvent {
     Runtime(runtime::Event),
     StepResult(step_result::Event),
     SubAgent(sub_agent::Event),
+    TaskList(task_list::Event),
     Title(title::Event),
     Workflow(workflow::Event),
     #[cfg(test)]
@@ -568,6 +585,24 @@ impl Capabilities {
 
     pub fn iter(&self) -> std::slice::Iter<'_, Box<dyn Capability>> {
         self.0.iter()
+    }
+
+    /// Every capability in the form the journal stores it, in offer order.
+    ///
+    /// How a typed fact is read back out of a list that is otherwise opaque:
+    /// [`CapSlice`] is an enum, so a reader wanting the task list matches its
+    /// arm rather than downcasting a `dyn Capability`. The alternative — the
+    /// fold keeping a copy on `AgentState` for readers — is the leak this whole
+    /// design removes.
+    #[must_use]
+    pub fn slices(&self) -> Vec<CapSlice> {
+        self.0.iter().map(|c| c.save()).collect()
+    }
+
+    /// Everything this agent would lose to a compaction, in offer order.
+    #[must_use]
+    pub fn carried_state(&self) -> Vec<String> {
+        self.0.iter().filter_map(|c| c.carried_state()).collect()
     }
 
     #[must_use]

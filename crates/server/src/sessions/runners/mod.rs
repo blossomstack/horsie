@@ -354,7 +354,8 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     use crate::agent_loop::capabilities::{
         ask_user::AskUserCapability, control_plane::ControlPlaneCapability, fork::ForkCapability,
         mcp::McpCapability, memory::MemoryCapability, runtime::RuntimeCapability,
-        sub_agent::SubAgentCapability, title::TitleCapability, workflow::WorkflowCapability,
+        sub_agent::SubAgentCapability, task_list::TaskListCapability, title::TitleCapability,
+        workflow::WorkflowCapability,
     };
     let s = opts.settings;
     let mut caps = Capabilities::default();
@@ -369,6 +370,10 @@ pub fn assemble(kind: RunnerKind, opts: &Assembly<'_>) -> Capabilities {
     // makes nesting uniform rather than a privilege of the main agent.
     caps.push(SubAgentCapability::new(s.clone(), opts.depth));
     caps.push(WorkflowCapability::default());
+    // Unconditional, and it was unconditional before it was a capability: a
+    // task list is a way of working rather than a permission, so every agent
+    // that exists has one.
+    caps.push(TaskListCapability::new());
 
     match kind {
         // A conversation can ask, name itself, and branch.
@@ -692,6 +697,41 @@ mod tests {
                 taken,
                 Some("sub_agent"),
                 "{kind:?} left spawn_agent unclaimed or misrouted"
+            );
+        }
+    }
+
+    /// Every agent that exists has a task list and can set a timer. They are a
+    /// way of working rather than a permission, and they were unconditional
+    /// before they were capabilities — so a runner kind that forgot to equip
+    /// one would silently take a tool away from every agent it starts.
+    ///
+    /// Asserted on what is *advertised*, not on what is held: a tool the model
+    /// is never shown may as well not exist.
+    #[test]
+    fn every_agent_owning_runner_gets_a_task_list() {
+        let s = empty_settings();
+        for kind in [
+            RunnerKind::Conversation,
+            RunnerKind::SubAgent,
+            RunnerKind::Workflow,
+        ] {
+            let caps = assemble(kind, &opts(&s));
+            let names: Vec<String> = caps.tools(&facts()).into_iter().map(|t| t.name).collect();
+            assert!(
+                names.iter().any(|n| n == crate::agent_loop::TASK_LIST_TOOL),
+                "{kind:?} advertises no task_list: {names:?}"
+            );
+            // And the open-namespace capability does not swallow the call on
+            // its way past, which is what the fixed-name end of the list is for.
+            let taken = caps.iter().find_map(|c| {
+                c.handle(&tool(&call(crate::agent_loop::TASK_LIST_TOOL)))
+                    .map(|_| c.name())
+            });
+            assert_eq!(
+                taken,
+                Some("task_list"),
+                "{kind:?} left task_list unclaimed or misrouted"
             );
         }
     }

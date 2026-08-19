@@ -2,17 +2,19 @@
 //! multi-step plan (create a list, insert tasks at a position, mark one or
 //! more tasks' status).
 //!
-//! [`TaskListState`] is durable agent state — journaled via
-//! `AgentDomainEvent::TaskListChanged` and folded into `AgentState`, exactly
-//! like [`crate::agent_loop::timers::TimerRecord`] — so it survives an actor restart. The
-//! tool executes by `ask`ing the owning `AgentActor` (see `TaskListToolbox` in
-//! `agent_actor.rs`), never forwarded to the sandboxed runtime. This module
-//! only holds the data model and the pure state-transition/parsing logic; the
-//! actor wiring (command, event, journal fold) lives in `agent_actor.rs`.
+//! The data model, the parsing and the rendering, and nothing else. Which agent
+//! holds a list, how a mutation is journaled and how the tool is answered are
+//! all [`crate::agent_loop::capabilities::task_list`]'s — the same split every
+//! capability has, so a change to how tasks are stored cannot reach into how
+//! they are dispatched.
+//!
+//! Parse and apply errors are plain strings because both end up as the same
+//! thing: an error result handed back to the model, which reads the sentence
+//! and nothing else about the type.
 //!
 //! See `docs/superpowers/specs/2026-07-20-task-list-tool-design.md`.
 
-use horsie_agentcore::{ToolCallError, ToolSpec};
+use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -44,10 +46,10 @@ pub struct TaskRecord {
     pub status: TaskStatus,
 }
 
-/// Durable per-agent task list. Journaled whole (not as deltas) on every
-/// mutation, mirroring how `MessageComplete`/`ToolComplete` events carry full
-/// content rather than diffs — replay never needs to re-derive or re-validate
-/// a past mutation.
+/// One agent's task list. Journaled whole (not as deltas) on every mutation,
+/// mirroring how `MessageComplete`/`ToolComplete` events carry full content
+/// rather than diffs — replay never needs to re-derive or re-validate a past
+/// mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskListState {
     tasks: Vec<TaskRecord>,
@@ -153,8 +155,7 @@ impl TaskListState {
     }
 }
 
-/// One `task_list` tool call, already validated into a typed shape. Carried
-/// over the actor boundary as `AgentCommand::TaskListOp`'s payload.
+/// One `task_list` tool call, already validated into a typed shape.
 #[derive(Debug, Clone)]
 pub enum TaskListAction {
     Create {
@@ -172,11 +173,11 @@ pub enum TaskListAction {
 }
 
 impl TaskListAction {
-    pub fn from_input(input: &Value) -> Result<Self, ToolCallError> {
+    pub fn from_input(input: &Value) -> Result<Self, String> {
         let action = input
             .get("action")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolCallError::InvalidInput("missing 'action'".to_string()))?;
+            .ok_or_else(|| "missing 'action'".to_string())?;
         match action {
             "create" => Ok(Self::Create {
                 tasks: task_texts(input)?,
@@ -193,65 +194,57 @@ impl TaskListAction {
                 status: parse_status(input)?,
             }),
             "list" => Ok(Self::List),
-            other => Err(ToolCallError::InvalidInput(format!(
+            other => Err(format!(
                 "unknown action '{other}'; expected create, insert, update_status, or list"
-            ))),
+            )),
         }
     }
 }
 
-fn task_texts(input: &Value) -> Result<Vec<String>, ToolCallError> {
+fn task_texts(input: &Value) -> Result<Vec<String>, String> {
     let tasks = input
         .get("tasks")
         .and_then(Value::as_array)
-        .ok_or_else(|| ToolCallError::InvalidInput("missing 'tasks'".to_string()))?;
+        .ok_or_else(|| "missing 'tasks'".to_string())?;
     if tasks.is_empty() {
-        return Err(ToolCallError::InvalidInput(
-            "'tasks' must not be empty".to_string(),
-        ));
+        return Err("'tasks' must not be empty".to_string());
     }
     tasks
         .iter()
         .map(|v| {
-            v.as_str().map(str::to_string).ok_or_else(|| {
-                ToolCallError::InvalidInput("'tasks' entries must be strings".to_string())
-            })
+            v.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "'tasks' entries must be strings".to_string())
         })
         .collect()
 }
 
-fn task_ids(input: &Value) -> Result<Vec<u32>, ToolCallError> {
+fn task_ids(input: &Value) -> Result<Vec<u32>, String> {
     let ids = input
         .get("ids")
         .and_then(Value::as_array)
-        .ok_or_else(|| ToolCallError::InvalidInput("missing 'ids'".to_string()))?;
+        .ok_or_else(|| "missing 'ids'".to_string())?;
     if ids.is_empty() {
-        return Err(ToolCallError::InvalidInput(
-            "'ids' must not be empty".to_string(),
-        ));
+        return Err("'ids' must not be empty".to_string());
     }
     ids.iter()
         .map(|v| {
             v.as_u64()
                 .and_then(|n| u32::try_from(n).ok())
-                .ok_or_else(|| {
-                    ToolCallError::InvalidInput(
-                        "'ids' entries must be non-negative integers".to_string(),
-                    )
-                })
+                .ok_or_else(|| "'ids' entries must be non-negative integers".to_string())
         })
         .collect()
 }
 
-fn parse_status(input: &Value) -> Result<TaskStatus, ToolCallError> {
+fn parse_status(input: &Value) -> Result<TaskStatus, String> {
     match input.get("status").and_then(Value::as_str) {
         Some("pending") => Ok(TaskStatus::Pending),
         Some("in_progress") => Ok(TaskStatus::InProgress),
         Some("completed") => Ok(TaskStatus::Completed),
-        Some(other) => Err(ToolCallError::InvalidInput(format!(
+        Some(other) => Err(format!(
             "unknown status '{other}'; expected pending, in_progress, or completed"
-        ))),
-        None => Err(ToolCallError::InvalidInput("missing 'status'".to_string())),
+        )),
+        None => Err("missing 'status'".to_string()),
     }
 }
 
@@ -317,7 +310,7 @@ mod tests {
             .unwrap();
     }
 
-    fn parse(json: Value) -> Result<TaskListAction, ToolCallError> {
+    fn parse(json: Value) -> Result<TaskListAction, String> {
         TaskListAction::from_input(&json)
     }
 
@@ -334,7 +327,7 @@ mod tests {
     #[test]
     fn create_rejects_empty_tasks() {
         let err = parse(json!({"action": "create", "tasks": []})).unwrap_err();
-        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(err.contains("must not be empty"), "{err}");
     }
 
     #[test]
@@ -492,7 +485,7 @@ mod tests {
     #[test]
     fn update_status_rejects_missing_status() {
         let err = parse(json!({"action": "update_status", "ids": [1]})).unwrap_err();
-        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(err.contains("missing 'status'"), "{err}");
     }
 
     #[test]
@@ -511,13 +504,13 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let err = parse(json!({"action": "delete_everything"})).unwrap_err();
-        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(err.contains("unknown action"), "{err}");
     }
 
     #[test]
     fn missing_action_errors() {
         let err = parse(json!({})).unwrap_err();
-        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(err.contains("missing 'action'"), "{err}");
     }
 
     #[test]
