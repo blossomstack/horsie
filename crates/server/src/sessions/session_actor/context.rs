@@ -12,10 +12,10 @@
 //! [`Capabilities`] are built by whoever spawns it and handed over,
 //! [`SessionContextProvider::provide`] hands them a [`Loading`] and returns
 //! what they filled in. That is the shape a runner needs — it holds its own
-//! list and equips the agents it starts — and [`SessionAgentKind`] is left
+//! list and equips the agents it starts — and [`TestKind`] is left
 //! deciding only who this agent *is*.
 
-use super::{AgentKey, CoreCommand, SessionCommand};
+use super::{CoreCommand, SessionCommand};
 use crate::{
     agent_loop::{
         ContextError, ContextProvider, Contexts, StartTurn, TurnPreparation,
@@ -54,7 +54,7 @@ use uuid::Uuid;
 /// ordered against whatever else the session is doing.
 pub(crate) async fn emit_progress(
     session: &SessionRef,
-    key: AgentKey,
+    key: crate::sessions::runners::ids::AgentId,
     stage: &str,
     detail: Option<String>,
 ) {
@@ -78,7 +78,7 @@ pub(crate) async fn emit_progress(
 /// ends when the sink is dropped, which the acquisition does on its way out.
 fn narration_pump(
     session: &SessionRef,
-    key: AgentKey,
+    key: crate::sessions::runners::ids::AgentId,
 ) -> (
     crate::runtime_manager::NarrationSink,
     tokio::task::JoinHandle<()>,
@@ -96,62 +96,14 @@ fn narration_pump(
 /// The baseline system prompt given to every session agent.
 const SESSION_AGENT_PROMPT: &str = include_str!("system_prompt.md");
 
-/// Which of a session's agents a [`SessionContextProvider`] serves.
-///
-/// It no longer decides what the agent is equipped with — the capability list
-/// does — so what is left is addressing: the key the session registers this
-/// agent under, the id it journals under, and whether it narrates its own
-/// setup. Temporary, and deliberately so: it duplicates
-/// [`RunnerKind`](crate::sessions::runners::RunnerKind) plus an id, and the
-/// change that gives the session real runners deletes it.
-#[derive(Clone, Copy)]
-pub(super) enum SessionAgentKind {
-    Main,
-    Sub(Uuid),
-    Step(Uuid),
-    /// A fork of a conversation. Its own kind, not `Sub`: it owes nobody a
-    /// result, it can ask the user, and it names itself.
-    Fork(Uuid),
-}
-
-impl SessionAgentKind {
-    /// The key this agent is registered under on the session. One vocabulary:
-    /// what the provider knows itself as is what the session looks it up by.
-    pub(super) fn agent_key(&self) -> AgentKey {
-        match self {
-            Self::Main => AgentKey::Main,
-            Self::Sub(id) => AgentKey::Sub(*id),
-            Self::Step(id) => AgentKey::Step(*id),
-            Self::Fork(id) => AgentKey::Fork(*id),
-        }
-    }
-
-    /// Whether this agent narrates its own setup. Everything a person opens a
-    /// session to watch does; a subagent is quiet by design, and its progress
-    /// reaches the reader as the parent's `SubAgent` entry instead.
-    fn broadcasts(&self) -> bool {
-        matches!(self, Self::Main | Self::Step(_) | Self::Fork(_))
-    }
-
-    /// The same agent in the runners' vocabulary.
-    ///
-    /// The main agent journals under the session's own id — its transcript
-    /// *is* the session's — so that is the id it is known by here too.
-    fn agent_id(&self, session_id: Uuid) -> crate::sessions::runners::AgentId {
-        crate::sessions::runners::AgentId(match self {
-            Self::Main => session_id,
-            Self::Sub(id) | Self::Step(id) | Self::Fork(id) => *id,
-        })
-    }
-}
-
 /// The session's half of a load, for one of its agents.
 ///
 /// Here rather than at each construction site because every field but the kind
 /// is the session's own, and the three the kind decides — the key, the id, and
 /// whether it narrates — must not be able to disagree with the provider's.
 pub(super) fn loading_for(
-    kind: SessionAgentKind,
+    agent: crate::sessions::runners::ids::AgentId,
+    role: crate::sessions::runners::loading::AgentRole,
     session: SessionRef,
     session_id: Uuid,
     deps: LoadingDeps,
@@ -159,9 +111,11 @@ pub(super) fn loading_for(
     Loading {
         session,
         session_id,
-        key: kind.agent_key(),
-        agent: kind.agent_id(session_id),
-        narrate: kind.broadcasts(),
+        role,
+        agent,
+        // Workers are quiet by design, so their setup narrates nothing. A
+        // conversation and a step both have someone watching.
+        narrate: !matches!(role, crate::sessions::runners::loading::AgentRole::Sub),
         runtimes: deps.runtimes,
         registry: deps.registry,
         mcp: deps.mcp,
@@ -190,15 +144,18 @@ pub(super) struct LoadingDeps {
 /// The runtime client an agent runs with. Subagents share the session's
 /// sandbox but never its cwd/env bucket: the runtime keys that state by
 /// agent id, so each subagent acts under its own identity.
-pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
-    match kind {
-        SessionAgentKind::Main => client,
-        // Steps share the run's sandbox — that is the point — but never its
-        // cwd/env bucket: the runtime keys that state by agent id, so each acts
-        // under its own identity, exactly as a subagent does.
-        SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-            client.with_agent_id(id.to_string())
-        }
+pub(super) fn scoped_client(
+    agent: crate::sessions::runners::ids::AgentId,
+    role: crate::sessions::runners::loading::AgentRole,
+    client: RuntimeClient,
+) -> RuntimeClient {
+    // Steps and forks share the sandbox — that is the point — but never its
+    // cwd/env bucket: the runtime keys that state by agent id, so each acts
+    // under its own identity, exactly as a subagent does. Only the root
+    // conversation is unscoped.
+    match role.scoped() {
+        false => client,
+        true => client.with_agent_id(agent.to_string()),
     }
 }
 
@@ -237,7 +194,10 @@ pub(super) struct SessionContextProvider {
     /// `submit_result`, whether it may ask) be equipped without this file
     /// knowing steps exist.
     pub(super) equipment: Capabilities,
-    pub(super) kind: SessionAgentKind,
+    /// What this agent is, for the decisions that are not identity.
+    pub(super) role: crate::sessions::runners::loading::AgentRole,
+    /// Who it is.
+    pub(super) agent: crate::sessions::runners::ids::AgentId,
     /// The plugin-declared agent type this agent runs as, for a subagent that
     /// was spawned with one. The *name* only — the definition is resolved from
     /// the library scan on every `provide()`, so a subagent that outlives its
@@ -340,7 +300,7 @@ impl SessionContextProvider {
         let (narrate, task) = self
             .loading
             .narrate
-            .then(|| narration_pump(&self.loading.session, self.loading.key))
+            .then(|| narration_pump(&self.loading.session, self.loading.agent))
             .unzip();
         let acquired = self.loading.runtimes.get(narrate).await;
         // Joined rather than detached. The acquisition dropped the sender on
@@ -359,7 +319,7 @@ impl SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
-        Ok(scoped_client(&self.kind, client))
+        Ok(scoped_client(self.agent, self.role, client))
     }
 
     /// Expand `/name` or `@name`, if this prompt is one.
@@ -560,12 +520,14 @@ impl ContextProvider for SessionContextProvider {
             // `SessionStart`, because this call was not gated on the kind at
             // all — a subagent is not a session, and the two events carry
             // different matcher domains.
-            let event = match self.kind {
-                SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStart(SubagentStartInput {
-                    agent_id: id.to_string(),
-                    agent_type: self.agent_type(),
-                }),
-                SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
+            let event = match self.role {
+                crate::sessions::runners::loading::AgentRole::Sub => {
+                    ServerHookEvent::SubagentStart(SubagentStartInput {
+                        agent_id: self.agent.to_string(),
+                        agent_type: self.agent_type(),
+                    })
+                }
+                _ => {
                     ServerHookEvent::SessionStart(SessionStartInput { source })
                 }
             };
@@ -692,28 +654,29 @@ mod tests {
     #[tokio::test]
     async fn control_tools_reach_only_a_conversation_that_asked_for_them() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
-        let build = |kind: SessionAgentKind, control_plane: Option<bool>| {
+        let build = |kind: TestKind, control_plane: Option<bool>| {
             let mut settings = agent_settings_fixture();
             settings.control_plane = control_plane;
             SessionContextProvider {
                 loading: test_loading(&f, &session, id, kind),
                 equipment: test_equipment(kind, &settings, false, None),
                 settings,
-                kind,
+                role: kind.role(),
+                agent: kind.agent(),
                 agent_type: None,
                 plugins: Vec::new(),
             }
         };
 
         assert!(
-            !build(SessionAgentKind::Main, None)
+            !build(TestKind::Main, None)
                 .equipment
                 .has("control_plane"),
             "a preset that never asked must not get them"
         );
         for kind in [
-            SessionAgentKind::Main,
-            SessionAgentKind::Fork(Uuid::new_v4()),
+            TestKind::Main,
+            TestKind::Fork(Uuid::new_v4()),
         ] {
             assert!(
                 build(kind, Some(true)).equipment.has("control_plane"),
@@ -721,8 +684,8 @@ mod tests {
             );
         }
         for kind in [
-            SessionAgentKind::Sub(Uuid::new_v4()),
-            SessionAgentKind::Step(Uuid::new_v4()),
+            TestKind::Sub(Uuid::new_v4()),
+            TestKind::Step(Uuid::new_v4()),
         ] {
             assert!(
                 !build(kind, Some(true)).equipment.has("control_plane"),
@@ -772,12 +735,13 @@ mod tests {
     #[tokio::test]
     async fn the_scanned_agent_types_reach_the_spawn_tools_description() {
         let (f, session, id) = agent_harness().await;
-        let kind = SessionAgentKind::Main;
+        let kind = TestKind::Main;
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -798,16 +762,17 @@ mod tests {
     async fn subagent_toolbox_strips_session_metadata_tools() {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
 
-        let build = |kind: SessionAgentKind| SessionContextProvider {
+        let build = |kind: TestKind| SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
 
-        let main_provider = build(SessionAgentKind::Main);
+        let main_provider = build(TestKind::Main);
         let main = main_provider.provide().await.unwrap();
         let main_tools = offered(&main_provider, &main);
         for t in [
@@ -820,7 +785,7 @@ mod tests {
         }
 
         let sub_id = Uuid::new_v4();
-        let sub_provider = build(SessionAgentKind::Sub(sub_id));
+        let sub_provider = build(TestKind::Sub(sub_id));
         let sub = sub_provider.provide().await.unwrap();
         let sub_tools = offered(&sub_provider, &sub);
         for t in ["spawn_agent", "subagent_status"] {
@@ -848,10 +813,11 @@ mod tests {
         let mut settings = agent_settings_fixture();
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
-            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
-            equipment: test_equipment(SessionAgentKind::Main, &settings, false, None),
+            loading: test_loading(&f, &session, id, TestKind::Main),
+            equipment: test_equipment(TestKind::Main, &settings, false, None),
             settings,
-            kind: SessionAgentKind::Main,
+            role: TestKind::Main.role(),
+            agent: TestKind::Main.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -871,15 +837,16 @@ mod tests {
         // too -- the base prompt tells the model the tool exists.
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
-            loading: test_loading(&f, &session, id, SessionAgentKind::Main),
+            loading: test_loading(&f, &session, id, TestKind::Main),
             equipment: test_equipment(
-                SessionAgentKind::Main,
+                TestKind::Main,
                 &agent_settings_fixture(),
                 unattended,
                 None,
             ),
             settings: agent_settings_fixture(),
-            kind: SessionAgentKind::Main,
+            role: TestKind::Main.role(),
+            agent: TestKind::Main.agent(),
             agent_type: None,
             plugins: Vec::new(),
         };
@@ -913,11 +880,12 @@ mod tests {
             horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );
-        let main = scoped_client(&SessionAgentKind::Main, client.clone());
+        let main = scoped_client(TestKind::Main.agent(), TestKind::Main.role(), client.clone());
         assert_eq!(main.agent_id(), "session-id");
 
         let sub_id = Uuid::new_v4();
-        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
+        let kind = TestKind::Sub(sub_id);
+        let sub = scoped_client(kind.agent(), kind.role(), client);
         assert_eq!(sub.agent_id(), sub_id.to_string());
     }
 
@@ -1186,7 +1154,7 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
         let (f, session, id) = agent_harness().await;
-        let kind = SessionAgentKind::Sub(Uuid::new_v4());
+        let kind = TestKind::Sub(Uuid::new_v4());
         let provider = SessionContextProvider {
             loading: test_loading(&f, &session, id, kind),
             equipment: test_equipment(
@@ -1196,7 +1164,8 @@ mod tests {
                 Some("uninstalled-agent".to_string()),
             ),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: Some("uninstalled-agent".to_string()),
             plugins: Vec::new(),
         };
@@ -1362,7 +1331,7 @@ mod tests {
 
     /// A context provider over a vendor that has to boot something, reporting
     /// into a session that keeps whatever it is told.
-    fn booting_provider(seen: &Reported, kind: SessionAgentKind) -> SessionContextProvider {
+    fn booting_provider(seen: &Reported, kind: TestKind) -> SessionContextProvider {
         let mut vendors = std::collections::HashMap::new();
         vendors.insert(
             "mock".to_string(),
@@ -1380,7 +1349,8 @@ mod tests {
             None,
         );
         let loading = loading_for(
-            kind,
+            kind.agent(),
+            kind.role(),
             session,
             id,
             LoadingDeps {
@@ -1402,7 +1372,8 @@ mod tests {
             loading,
             equipment: test_equipment(kind, &agent_settings_fixture(), false, None),
             settings: agent_settings_fixture(),
-            kind,
+            role: kind.role(),
+            agent: kind.agent(),
             agent_type: None,
             plugins: Vec::new(),
         }
@@ -1430,7 +1401,7 @@ mod tests {
     #[tokio::test]
     async fn a_vendors_account_of_an_acquisition_reaches_the_agents_log() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Main);
+        let provider = booting_provider(&seen, TestKind::Main);
         provider.runtime_client().await.expect("acquire");
 
         assert_eq!(
@@ -1492,7 +1463,7 @@ mod tests {
     #[tokio::test]
     async fn a_subagent_narrates_nothing() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let provider = booting_provider(&seen, SessionAgentKind::Sub(Uuid::new_v4()));
+        let provider = booting_provider(&seen, TestKind::Sub(Uuid::new_v4()));
         provider.runtime_client().await.expect("acquire");
         // Long enough for a line to have arrived if one were ever sent.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

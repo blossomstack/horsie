@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Deepest node the tree may hold. A node *at* this depth cannot spawn.
-pub const MAX_SUBAGENT_DEPTH: u32 = 4;
+pub use crate::sessions::runners::MAX_SUBAGENT_DEPTH;
 
 /// Cap on concurrently-active subagents when the session's settings name none.
 pub const DEFAULT_MAX_CONCURRENT_SUBAGENTS: u32 = 8;
@@ -22,7 +22,7 @@ pub const INTERRUPTED_ERROR: &str = "interrupted by restart";
 /// a *model*: the parent reads it as the result of the child it is waiting on,
 /// and "interrupted by restart" would have it reason about a crash that never
 /// happened.
-pub const STOPPED_ERROR: &str = "stopped before it finished";
+pub use crate::sessions::runners::message::STOPPED_ERROR;
 
 /// Largest result (output or error) injected into a parent's context or
 /// rendered by `subagent_status` — the same bound the runtime puts on a

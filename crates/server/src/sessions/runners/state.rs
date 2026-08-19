@@ -118,6 +118,35 @@ impl SessionState {
 
     /// Every agent this session hosts, with the runner that owns it. The read
     /// side's one entry point, so no reader re-derives ownership.
+    /// Whether the sandbox exists yet. The one gate in front of every runner's
+    /// `actions`, and a read of the runtime runner rather than a second flag
+    /// beside it.
+    ///
+    /// A session with no runtime runner at all is *not* ready: that is a
+    /// session whose `RecordSpec` has not been folded yet, and starting work on
+    /// it would be starting work with nowhere to run it.
+    #[must_use]
+    pub fn runtime_ready(&self) -> bool {
+        self.runners
+            .values()
+            .any(|r| matches!(&r.state, RunnerState::Runtime(rt) if rt.ready()))
+    }
+
+    /// How many of this session's runners have an agent working right now.
+    ///
+    /// The session's number rather than a per-runner one, because the cap it
+    /// feeds is a property of the sandbox they all share.
+    #[must_use]
+    pub fn active_agents(&self) -> u32 {
+        u32::try_from(
+            self.runners
+                .values()
+                .filter(|r| r.status == RunnerStatus::Running)
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
     pub fn all_agents(&self) -> impl Iterator<Item = (AgentId, RunnerId)> + '_ {
         self.agents.iter().map(|(a, r)| (*a, *r))
     }

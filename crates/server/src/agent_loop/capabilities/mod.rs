@@ -802,7 +802,6 @@ pub mod testing {
     #[must_use]
     pub fn loading() -> Loading {
         use crate::sessions::addressing::SessionRef;
-        use crate::sessions::session_actor::AgentKey;
         use horsie_actor::{ActorSystem, InMemoryJournal};
         use std::sync::{Arc, Mutex, RwLock};
 
@@ -828,7 +827,7 @@ pub mod testing {
         Loading {
             session,
             session_id,
-            key: AgentKey::Main,
+            role: crate::sessions::runners::loading::AgentRole::Root,
             agent: AgentId::new_v4(),
             narrate: false,
             runtimes,

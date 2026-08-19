@@ -23,7 +23,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, ReadCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{SessionRevisions, UserMessageError};
@@ -582,7 +582,7 @@ impl SessionSupervisor {
                 continue;
             };
             match session
-                .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
+                .ask(|reply| SessionCommand::PrepareOffload { reply })
                 .await
             {
                 Ok(true) => {
@@ -711,9 +711,12 @@ impl EventSourcedActor for SessionSupervisor {
                             spec: Box::new(spec.clone()),
                         }))
                         .await;
-                    let _ = session
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
-                        .await;
+                    // No `Provision` command any more: the session's runtime
+                    // runner is `Pending` the moment its spec is folded, and
+                    // asks for its own sandbox at the first boundary. That is
+                    // what gives provisioning an answer at recovery too — a
+                    // session whose sandbox died between the ask and the answer
+                    // used to sit `Pending` with nothing to restart it.
                 }
                 let _ = reply.send(id.clone());
                 // Not a guess: a fresh session is provisioning, and says so
@@ -770,11 +773,11 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                            .tell(SessionCommand::UserMessage {
                                 agent_id,
                                 text,
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
@@ -789,10 +792,10 @@ impl EventSourcedActor for SessionSupervisor {
                     // own state, and the supervisor's copy is a projection.
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Fork(ForkCommand::Delete {
-                                id: fork,
+                            .tell(SessionCommand::DeleteRunner {
+                                id: crate::sessions::runners::ids::RunnerId(fork),
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
@@ -810,10 +813,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         if session
-                            .tell(SessionCommand::Turn(TurnCommand::Stop {
+                            .tell(SessionCommand::Stop {
                                 agent_id,
                                 reply: ReplyTo::from_sender(tx),
-                            }))
+                            })
                             .await
                             .is_err()
                         {
@@ -843,9 +846,9 @@ impl EventSourcedActor for SessionSupervisor {
                 if let Some(session) = self.session(ctx, state, &id) {
                     let (tx, rx) = oneshot::channel();
                     if session
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Delete {
+                        .tell(SessionCommand::Delete {
                             reply: ReplyTo::from_sender(tx),
-                        }))
+                        })
                         .await
                         .is_ok()
                     {
@@ -934,7 +937,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
-                            .tell(SessionCommand::Run(RunCommand::State {
+                            .tell(SessionCommand::Read(ReadCommand::RunState {
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
@@ -953,10 +956,10 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => {
                         let (tx, rx) = oneshot::channel();
                         let _ = session
-                            .tell(SessionCommand::Run(RunCommand::RetryStep {
-                                index,
+                            .tell(SessionCommand::RetryStep {
+                                index: index as usize,
                                 reply: ReplyTo::from_sender(tx),
-                            }))
+                            })
                             .await;
                         tokio::spawn(async move {
                             let _ = reply.send(rx.await.ok());
@@ -980,11 +983,11 @@ impl EventSourcedActor for SessionSupervisor {
                     }
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Turn(TurnCommand::Answer {
+                            .tell(SessionCommand::Answer {
                                 agent_id,
                                 answers,
                                 reply,
-                            }))
+                            })
                             .await;
                     }
                 }
@@ -1091,9 +1094,7 @@ impl EventSourcedActor for SessionSupervisor {
                     if let Some(session) = self.resident(ctx, &id) {
                         let _ = session
                             .ask(|reply| {
-                                SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload {
-                                    reply,
-                                })
+                                SessionCommand::PrepareOffload { reply }
                             })
                             .await;
                     }
@@ -1250,7 +1251,7 @@ mod tests {
     use crate::sessions::addressing::SupervisorShard;
     use crate::sessions::clock::TestClock;
     use crate::sessions::session_actor::SessionActor;
-    use crate::sessions::session_actor::SessionDomainEvent;
+    use crate::sessions::session_actor::SessionEvent;
     use crate::sessions::spec::AgentSettings;
     use horsie_actor::Journal;
 
@@ -1930,7 +1931,7 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                &[serde_json::to_vec(&SessionEvent::Renamed { name: "asked".into() }).unwrap()],
                 at,
             )
             .await

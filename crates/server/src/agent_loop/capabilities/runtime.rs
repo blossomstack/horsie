@@ -45,8 +45,9 @@ use crate::agent_loop::{
     SharedContext, ToolboxFactory, compaction_window, scan_workspace,
 };
 use crate::runtime_manager::{NARRATION_BUFFER, RuntimeError};
+use crate::sessions::runners::ids::AgentId;
+use crate::sessions::runners::loading::AgentRole;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
-use crate::sessions::session_actor::AgentKey;
 use crate::sessions::session_actor::hooks::SessionHookSink;
 use horsie_agentcore::Toolbox;
 use horsie_models::runtime::McpServerFailure;
@@ -123,7 +124,7 @@ impl RuntimeCapability {
                 self.fatal(other.to_string())
             }
         })?;
-        Ok(scoped(loading.key, client))
+        Ok(scoped(loading.agent, loading.role, client))
     }
 
     /// Install this agent's own plugin bundles into its own tree on the runtime.
@@ -322,12 +323,10 @@ pub const GONE_PREFIX: &str = "the runtime is gone: ";
 /// sandbox but never its cwd/env bucket: the runtime keys that state by agent
 /// id, so each acts under its own identity. A step and a fork are the same —
 /// they share the run's sandbox, which is the point, and nothing else.
-fn scoped(key: AgentKey, client: RuntimeClient) -> RuntimeClient {
-    match key {
-        AgentKey::Main => client,
-        AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => {
-            client.with_agent_id(id.to_string())
-        }
+fn scoped(agent: AgentId, role: AgentRole, client: RuntimeClient) -> RuntimeClient {
+    match role.scoped() {
+        false => client,
+        true => client.with_agent_id(agent.to_string()),
     }
 }
 
@@ -348,7 +347,7 @@ impl RuntimeCapability {
         // visible to the user rather than silent.
         let client = client.with_hook_sink(Arc::new(SessionHookSink::new(
             loading.session.clone(),
-            loading.key,
+            loading.agent,
         )));
         // Cached *after* the sink is attached, not before: `Stop` runs its hooks
         // through this handle once the turn is over, and a sink-less clone would
@@ -431,7 +430,7 @@ impl RuntimeCapability {
         // `sub_agent`, which answers for *spawning* one and is not equipped at
         // all when the cap is zero; this capability is the one that resolved
         // the definition, and the only one every subagent has.
-        if matches!(loading.key, AgentKey::Sub(_)) {
+        if matches!(loading.role, AgentRole::Sub) {
             spec.say(
                 "subagent_role",
                 match &plugin_agent {
@@ -539,15 +538,15 @@ mod tests {
                 session.to_string(),
             )
         };
-        for key in [AgentKey::Sub(id), AgentKey::Step(id), AgentKey::Fork(id)] {
+        for role in [AgentRole::Sub, AgentRole::Step, AgentRole::Fork] {
             assert_eq!(
-                scoped(key, client()).agent_id(),
+                scoped(AgentId(id), role, client()).agent_id(),
                 id.to_string(),
-                "{key:?} did not scope its client"
+                "{role:?} did not scope its client"
             );
         }
         assert_eq!(
-            scoped(AgentKey::Main, client()).agent_id(),
+            scoped(AgentId::new_v4(), AgentRole::Root, client()).agent_id(),
             session.to_string(),
             "the main agent is the runtime's own identity"
         );

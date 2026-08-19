@@ -98,7 +98,7 @@ pub enum FirstInput {
 /// step's is derived from the run — which is exactly why this is a field on two
 /// of the three arms rather than an equality between [`RunnerId`] and
 /// [`AgentId`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RunnerArgs {
     SubAgent {
         agent: AgentId,
@@ -132,10 +132,30 @@ pub enum RunnerArgs {
 ///
 /// [`Self::Graph`] is what makes an ad-hoc workflow expressible: a graph built
 /// at runtime needs no name and no lookup, and nothing else has to change.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkflowSource {
     Named(String),
     Graph(std::sync::Arc<crate::sessions::workflow::WorkflowRunSpec>),
+}
+
+/// How a fork's history was seeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkMode {
+    /// `/fork` — the source's log, copied and scrubbed.
+    Copy,
+    /// `/summary-n-fork` — a summary of the source, produced out of band.
+    Summary,
+}
+
+impl ForkMode {
+    /// The wire spelling, and what a lifecycle entry carries.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Summary => "summary",
+        }
+    }
 }
 
 /// A fork's branch point.
@@ -145,5 +165,5 @@ pub struct Branch {
     pub source: AgentId,
     /// The source's log sequence at the cut.
     pub source_seq: u64,
-    pub mode: crate::sessions::forks::ForkMode,
+    pub mode: ForkMode,
 }

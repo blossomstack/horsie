@@ -13,9 +13,9 @@
 
 #![allow(dead_code)]
 
-use super::{ReadCommand, SubAgentCommand, TurnCommand};
+use super::ReadCommand;
 use super::{
-    context::{SessionAgentKind, SessionContextProvider},
+    context::SessionContextProvider,
     *,
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
@@ -26,7 +26,7 @@ use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
 use std::sync::{Mutex, PoisonError};
 
-pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
+pub(super) fn fold(events: Vec<SessionEvent>) -> SessionState {
     events
         .into_iter()
         .fold(SessionState::default(), SessionActor::apply_event)
@@ -35,8 +35,15 @@ pub(super) fn fold(events: Vec<SessionDomainEvent>) -> SessionState {
 /// What this actor's orchestrator decides for a state. `drain` used to be a
 /// method here; the decision moved to the orchestrator and the actor only
 /// performs it, so these tests assert on the decision.
-pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<AgentAction> {
-    actor.next_actions(state)
+pub(super) fn decisions(
+    actor: &SessionActor,
+    state: &SessionState,
+) -> Vec<crate::sessions::runners::action::Action> {
+    actor
+        .next_actions(state)
+        .into_iter()
+        .map(|(_runner, action)| action)
+        .collect()
 }
 
 pub(super) fn agent_settings_fixture() -> AgentSettings {
@@ -510,17 +517,17 @@ pub(super) async fn wait_for_run(
 ) -> crate::sessions::workflow::WorkflowRunState {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if let Some(run) = state.run.as_ref()
-            && pred(run)
+        if let Some(run) = crate::sessions::runners::reads::run_state(&state)
+            && pred(&run)
         {
-            return run.clone();
+            return run;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let state = crate::sessions::events::fold_session_state(journal, session_id).await;
     panic!(
         "run never satisfied the predicate: {:?}",
-        state.run.as_ref()
+        crate::sessions::runners::reads::run_state(&state)
     );
 }
 
@@ -579,11 +586,11 @@ pub(super) const ASK_CALL_ID: &str = "a-1";
 pub(super) async fn wait_for_tree(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
-    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
+    pred: impl Fn(&[crate::sessions::session_actor::AgentEntry]) -> bool,
 ) {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(&state.subagents) {
+        if pred(&crate::sessions::runners::reads::agent_roster(&state)) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -606,7 +613,7 @@ pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
     spec: SessionSpec,
-    events: &[SessionDomainEvent],
+    events: &[SessionEvent],
 ) -> SessionRef {
     f.node.restart().await;
     let journal = f.journal();
@@ -615,7 +622,7 @@ pub(crate) async fn seed_session(
     let mut encoded = Vec::new();
     if at == 0 {
         encoded.push(
-            serde_json::to_vec(&SessionDomainEvent::SpecRecorded {
+            serde_json::to_vec(&SessionEvent::SpecRecorded {
                 spec: Box::new(spec.clone()),
             })
             .unwrap(),
@@ -646,8 +653,8 @@ pub(super) async fn wait_for_events(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     what: &str,
-    pred: impl Fn(&[SessionDomainEvent]) -> bool,
-) -> Vec<SessionDomainEvent> {
+    pred: impl Fn(&[SessionEvent]) -> bool,
+) -> Vec<SessionEvent> {
     for _ in 0..200 {
         let events = crate::sessions::events::session_events(journal, session_id).await;
         if pred(&events) {
@@ -805,20 +812,27 @@ impl horsie_actor::Journal for CountingJournal {
 }
 
 pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
+    let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     session
         .ask(|reply| {
-            SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
-                agent: crate::sessions::runners::ids::AgentId::new_v4(),
-                label: label.into(),
-                task: task.into(),
-                agent_type: None,
+            SessionCommand::StartRunner {
+                id: runner,
+                kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                    label: label.into(),
+                    task: task.into(),
+                    agent_type: None,
+                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                }),
+                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
-        .unwrap()
+        .unwrap();
+    runner.as_uuid()
 }
 
 /// How each turn in one agent's log ended, in order.
@@ -1149,11 +1163,11 @@ pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
 pub(super) async fn send(session: &SessionRef, text: &str) {
     session
         .ask(|reply| {
-            SessionCommand::Turn(TurnCommand::UserMessage {
+            SessionCommand::UserMessage {
                 agent_id: None,
                 text: text.into(),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
@@ -1257,6 +1271,48 @@ pub(super) async fn catalog_harness_with(
     (f, session, id)
 }
 
+/// The four kinds of agent a session used to have a *type* for.
+///
+/// Test-only, and deliberately not production. `TestKind` was deleted
+/// because the runner tree answers "what is this agent" by lookup — but a test
+/// still has to *build* one of each by hand, and naming the four cases here
+/// keeps that possible without putting the concept back in the actor.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum TestKind {
+    Main,
+    Fork(Uuid),
+    Sub(Uuid),
+    Step(Uuid),
+}
+
+impl TestKind {
+    pub(super) fn agent(self) -> crate::sessions::runners::AgentId {
+        crate::sessions::runners::AgentId(match self {
+            Self::Main => Uuid::nil(),
+            Self::Fork(id) | Self::Sub(id) | Self::Step(id) => id,
+        })
+    }
+
+    pub(super) fn role(self) -> crate::sessions::runners::loading::AgentRole {
+        use crate::sessions::runners::loading::AgentRole;
+        match self {
+            Self::Main => AgentRole::Root,
+            Self::Fork(_) => AgentRole::Fork,
+            Self::Sub(_) => AgentRole::Sub,
+            Self::Step(_) => AgentRole::Step,
+        }
+    }
+
+    pub(super) fn runner_kind(self) -> crate::sessions::runners::RunnerKind {
+        use crate::sessions::runners::RunnerKind;
+        match self {
+            Self::Main | Self::Fork(_) => RunnerKind::Conversation,
+            Self::Sub(_) => RunnerKind::SubAgent,
+            Self::Step(_) => RunnerKind::Workflow,
+        }
+    }
+}
+
 /// The session half of a load, for a provider a test builds by hand.
 ///
 /// One helper rather than a literal per test: the three fields a kind decides —
@@ -1267,10 +1323,11 @@ pub(super) fn test_loading(
     f: &ActorFixture,
     session: &SessionRef,
     id: Uuid,
-    kind: SessionAgentKind,
+    kind: TestKind,
 ) -> crate::sessions::runners::loading::Loading {
     super::context::loading_for(
-        kind,
+        kind.agent(),
+        kind.role(),
         session.clone(),
         id,
         super::context::LoadingDeps {
@@ -1298,7 +1355,7 @@ pub(super) fn test_loading(
 /// arms in one place, and it has to stay in step with them: a step here gets
 /// the extras a step gets, with the empty result schema the tests use.
 pub(super) fn test_equipment(
-    kind: SessionAgentKind,
+    kind: TestKind,
     settings: &crate::sessions::spec::AgentSettings,
     unattended: bool,
     agent_type: Option<String>,
@@ -1309,26 +1366,19 @@ pub(super) fn test_equipment(
     use crate::sessions::runners::{AgentId, Assembly, RunnerId, RunnerKind, assemble};
     let opts = Assembly {
         settings,
-        agent: AgentId(match kind {
-            SessionAgentKind::Main => Uuid::nil(),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                id
-            }
-        }),
+        agent: kind.agent(),
         depth: 0,
         unattended,
         fork: match kind {
-            SessionAgentKind::Fork(id) => Some(RunnerId(id)),
-            SessionAgentKind::Main | SessionAgentKind::Sub(_) | SessionAgentKind::Step(_) => None,
+            TestKind::Fork(id) => Some(RunnerId(id)),
+            TestKind::Main | TestKind::Sub(_) | TestKind::Step(_) => None,
         },
         agent_type,
     };
     match kind {
-        SessionAgentKind::Main | SessionAgentKind::Fork(_) => {
-            assemble(RunnerKind::Conversation, &opts)
-        }
-        SessionAgentKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
-        SessionAgentKind::Step(_) => {
+        TestKind::Main | TestKind::Fork(_) => assemble(RunnerKind::Conversation, &opts),
+        TestKind::Sub(_) => assemble(RunnerKind::SubAgent, &opts),
+        TestKind::Step(_) => {
             let mut caps = assemble(RunnerKind::Workflow, &opts);
             caps.push(Capability::StepResult(StepResultCapability::new(
                 Vec::new(),
@@ -1347,15 +1397,16 @@ pub(super) fn catalog_provider(
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
-        loading: test_loading(f, session, id, SessionAgentKind::Main),
+        loading: test_loading(f, session, id, TestKind::Main),
         equipment: test_equipment(
-            SessionAgentKind::Main,
+            TestKind::Main,
             &agent_settings_fixture(),
             false,
             None,
         ),
         settings: agent_settings_fixture(),
-        kind: SessionAgentKind::Main,
+        role: TestKind::Main.role(),
+        agent: TestKind::Main.agent(),
         agent_type: None,
         plugins: Vec::new(),
     }
@@ -1415,19 +1466,26 @@ pub(super) async fn spawn_typed(
     session: &SessionRef,
     agent_type: Option<&str>,
 ) -> Result<Uuid, String> {
+    let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     session
         .ask(|reply| {
-            SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
-                agent: crate::sessions::runners::ids::AgentId::new_v4(),
-                label: "review".into(),
-                task: "look at the diff".into(),
-                agent_type: agent_type.map(str::to_string),
+            SessionCommand::StartRunner {
+                id: runner,
+                kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
+                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                    label: "review".into(),
+                    task: "look at the diff".into(),
+                    agent_type: agent_type.map(str::to_string),
+                    settings: Box::new(crate::sessions::runners::empty_settings()),
+                }),
+                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
                 reply,
-            })
+            }
         })
         .await
         .unwrap()
+        .map(|()| runner.as_uuid())
 }
 
 /// A provider for one subagent of `agent_harness`'s session, optionally
@@ -1441,12 +1499,13 @@ pub(super) fn typed_provider(
 ) -> SessionContextProvider {
     let mut settings = agent_settings_fixture();
     settings.allowed_tools = allowed_tools;
-    let kind = SessionAgentKind::Sub(sub);
+    let kind = TestKind::Sub(sub);
     SessionContextProvider {
         loading: test_loading(f, session, id, kind),
         equipment: test_equipment(kind, &settings, false, Some("code-reviewer".to_string())),
         settings,
-        kind,
+        role: kind.role(),
+        agent: kind.agent(),
         agent_type: Some("code-reviewer".to_string()),
         plugins: Vec::new(),
     }

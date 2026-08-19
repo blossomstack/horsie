@@ -18,52 +18,57 @@
 //! [`turns`] the conversation, [`run`] the workflow graph, [`subagent`] the tree
 //! of delegated work, [`reads`] the questions that wake nothing, [`hooks`] what
 //! plugins did, [`core`] the session's own bookkeeping — over the vocabulary in
-//! [`types`], to the shape in [`component`]. [`context`] is not one of them: it
-//! assembles a turn on the *agent's* task rather than on this mailbox, which is
-//! what keeps a thirty-second toolbox build from blocking a cancel.
+//! [`types`]. [`context`] is not one of them: it assembles a turn on the
+//! *agent's* task rather than on this mailbox, which is what keeps a
+//! thirty-second toolbox build from blocking a cancel.
+//!
+//! What is *not* here any more is a component per kind of agent. A session
+//! hosts runners; which runner owns an agent is `state.agents[&id]`, and the
+//! same lookup answers what used to need three registries probed in a
+//! load-bearing order.
 
+use crate::runtime_manager::RuntimeError;
+use crate::sessions::UserMessageError;
+use crate::sessions::runners::action::Action;
+use crate::sessions::runners::ids::{AgentId, RunnerId};
+use crate::sessions::runners::loading::AgentRole;
+use crate::sessions::runners::message::ChildOutcome;
+use crate::sessions::runners::state::SessionState as RunnerSessionState;
+use crate::sessions::runners::{Emit, Runner, RunnerEvent, SessionView};
 use horsie_actor::ReplyTo;
-mod component;
 pub(crate) mod context;
 mod core;
-mod fork;
 /// Visible to the crate for [`hooks::SessionHookSink`] alone: the runtime
 /// capability attaches it to the client it acquires, and the sink routes into
 /// this actor's mailbox, so it cannot live anywhere else.
 pub(crate) mod hooks;
-mod lifecycle;
 mod reads;
-mod run;
-mod subagent;
-mod turns;
 mod types;
 
 pub use types::*;
 
-use component::Component;
+/// The session's state and its journal, both the runner tree's now. Re-exported
+/// here because every sibling in this module reaches them through
+/// `session_actor`, and a session's state is what this actor *is*.
+pub use crate::sessions::runners::SessionState;
+pub use crate::sessions::runners::state::SessionEvent;
+
+
 use core::SessionCore;
-use fork::ForkedAgents;
 use hooks::{HookRouting, StopHookParent};
-use lifecycle::RuntimeLifecycle;
 use reads::Reads;
-use run::WorkflowRun;
-use subagent::SubAgents;
-use turns::Turns;
 
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
-    orchestrator::{AgentAction, Delivery},
-    spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
-    subagents::{SubAgentParent, TreeOwner},
+    spec::{ServerDeps, SessionKind, SessionSpec, SessionStatus},
     supervisor::{ForkRow, SessionSupervisorCommand},
-    workflow::WorkflowRunState,
 };
 use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
-use context::{SessionAgentKind, SessionContextProvider};
+use context::SessionContextProvider;
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
 use horsie_models::now_ms;
 use std::{
@@ -96,98 +101,18 @@ struct ResidentAgent {
     provider: Arc<SessionContextProvider>,
 }
 
-/// The agent actors a session hosts.
-///
-/// An enum rather than an `Option` plus a map: a session's topology is decided
-/// at creation and never changes, and a workflow run has no main agent at all.
-enum SessionAgents {
-    Interactive {
-        main: ResidentAgent,
-        subs: HashMap<Uuid, ResidentAgent>,
-    },
-    /// A workflow run: step agents and their subagents, all keyed by id. There
-    /// is no main agent — the definition, not a person, decides who runs.
-    Workflow { live: HashMap<Uuid, ResidentAgent> },
-}
-
-impl SessionAgents {
-    fn interactive(main: ResidentAgent) -> Self {
-        Self::Interactive {
-            main,
-            subs: HashMap::new(),
-        }
-    }
-
-    fn workflow() -> Self {
-        Self::Workflow {
-            live: HashMap::new(),
-        }
-    }
-
-    /// The session's primary agent, for the kinds that have one.
-    fn main(&self) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { main, .. } => Some(main),
-            Self::Workflow { .. } => None,
-        }
-    }
-
-    fn sub(&self, id: Uuid) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.get(&id),
-            Self::Workflow { live } => live.get(&id),
-        }
-    }
-
-    /// The agent registered under `key`, if it is still resident.
-    fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
-        match key {
-            AgentKey::Main => self.main(),
-            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.sub(id),
-        }
-    }
-
-    fn insert_sub(&mut self, id: Uuid, agent: ResidentAgent) {
-        match self {
-            Self::Interactive { subs, .. } => {
-                subs.insert(id, agent);
-            }
-            Self::Workflow { live } => {
-                live.insert(id, agent);
-            }
-        }
-    }
-
-    /// Forget one agent, handing it back so the caller can stop it. Only a
-    /// fork's delete uses this: every other agent lives as long as the session
-    /// is loaded, and nothing else removes one on request.
-    fn remove_sub(&mut self, id: Uuid) -> Option<ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.remove(&id),
-            Self::Workflow { live } => live.remove(&id),
-        }
-    }
-
-    /// Every agent, emptying the set. Used when the session unloads.
-    fn drain_all(&mut self) -> Vec<ResidentAgent> {
-        match self {
-            Self::Interactive { main, subs } => {
-                let mut out: Vec<_> = subs.drain().map(|(_, a)| a).collect();
-                out.push(main.clone());
-                out
-            }
-            Self::Workflow { live } => live.drain().map(|(_, a)| a).collect(),
-        }
-    }
-}
-
 /// Everything that differs between the three kinds of agent a session spawns.
 ///
 /// The rest — the runtime provider, the plugin library, the MCP and memory
 /// services, the session's own mailbox — is identical for all three and lives on
 /// the actor, which is why one spawner can serve them all.
 struct AgentPlan {
-    kind: SessionAgentKind,
+    /// Who is being started. One id, in the runners' flat space.
+    agent: AgentId,
+    /// What it is, for the four things that are not identity: whether its
+    /// runtime client is scoped, its prompt suffix, which lifecycle entry
+    /// opens its log, and whether setup narrates.
+    role: AgentRole,
     /// Whose settings this agent runs under: the session's, or a step's own
     /// preset. This is also where its model and thinking effort come from.
     settings: crate::sessions::spec::AgentSettings,
@@ -232,7 +157,23 @@ pub struct SessionActor {
     /// know what it is — which is why the topology inside is a value rather
     /// than a second `Option`: a session's shape is decided at creation and
     /// never changes.
-    agents: Option<SessionAgents>,
+    /// The agent actors this session hosts, resident while this actor is
+    /// loaded.
+    ///
+    /// One flat map, because one flat id space. Which runner owns an agent is
+    /// `state.agents[&id]`, and the topology the old enum encoded — a workflow
+    /// run has no main agent — is now just which runner is the root.
+    agents: HashMap<AgentId, ResidentAgent>,
+    /// Runners this actor has already emitted a `RunnerCreated` for, but whose
+    /// persist may not have folded yet.
+    ///
+    /// The folded state is the real record and survives a reload; this covers
+    /// only the window between answering the caller and the journal landing.
+    /// A capability re-asking after a crash names the child it already
+    /// journaled, so on a *reload* the state answers — but two asks inside one
+    /// process can both see a state that has not folded the first yet, and that
+    /// is what doubles the fleet.
+    created: std::collections::HashSet<RunnerId>,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
@@ -255,7 +196,8 @@ impl SessionActor {
             users,
             services: None,
             supervisor,
-            agents: None,
+            agents: HashMap::new(),
+            created: std::collections::HashSet::new(),
             last_reported: None,
             last_reported_forks: Vec::new(),
         }
@@ -337,37 +279,24 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
     ) {
         self.spec = Some(spec);
-        match &self.spec().kind {
-            SessionKind::Workflow { .. } => {
-                // A run has no main agent. Step actors, like subagent actors,
-                // stay cold: they spawn on demand for a history read, a retry,
-                // or the next step a boundary picks.
-                self.agents = Some(SessionAgents::workflow());
-            }
-            SessionKind::Agent { .. } => self.spawn_main_agent(ctx, state),
-        }
-        // Each component repairs itself. A self-send rather than direct work,
-        // because neither caller may write here — recovery must not persist at
-        // all, and `RecordSpec` is already returning an effect of its own — so
-        // anything that needs to journal arrives as an ordinary command, down
-        // the same path a live one would take.
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
-        let repairs: Vec<SessionCommand> = [
-            RuntimeLifecycle::on_load(&cx, state),
-            SubAgents::on_load(&cx, state),
-            WorkflowRun::on_load(&cx, state),
-            Turns::on_load(&cx, state),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let me = self.me(ctx);
-        for cmd in repairs {
-            let _ = me.tell(cmd).await;
-        }
+        // Nothing is spawned here and no component is asked to repair itself.
+        // `Runner::actions` is pure and idempotent and is called at every
+        // boundary, so creation and recovery take the same path: a runner that
+        // needs its agent started asks for it whether that state arrived a
+        // millisecond ago or from a journal replayed after a restart.
+        //
+        // The four `on_load` repairs this replaces existed because the old
+        // shape had no such path — a `run()` that fired once needed a second
+        // entry for recovery, and the suppression that implies is where the
+        // bugs lived.
+        //
+        // One case `actions()` genuinely cannot see: an agent that was
+        // `started` when the process died. Nothing in the fold distinguishes
+        // it from one still working, because it *is* still marked working. The
+        // agent itself closes that — it journals its own interruption at its
+        // own recovery — so what the session owes is only to bring it back,
+        // which `reach` does on the first message addressed to it.
+        let _ = self.me(ctx).tell(SessionCommand::Core(CoreCommand::Advance)).await;
         // Loading is not a transition, but it is the first moment anyone can
         // learn this status: a page already watching hears nothing otherwise.
         //
@@ -407,24 +336,7 @@ impl SessionActor {
     /// nothing, so a sidebar that could not read this from the registry could
     /// not show forks at all without waking every session that has one.
     async fn report_forks(&mut self, state: &SessionState) {
-        if state.forks.is_empty() && self.last_reported_forks.is_empty() {
-            return;
-        }
-        let forks: Vec<ForkRow> = state
-            .forks
-            .iter()
-            .map(|(id, rec)| ForkRow {
-                id: *id,
-                parent: match rec.parent {
-                    crate::sessions::forks::ForkParent::Main => None,
-                    crate::sessions::forks::ForkParent::Fork(pid) => Some(pid),
-                },
-                title: rec.title.clone(),
-                status: rec.status,
-                created_at_ms: rec.created_at_ms,
-                last_activity_ms: rec.last_activity_ms,
-            })
-            .collect();
+        let forks = crate::sessions::runners::reads::fork_rows(state);
         if forks == self.last_reported_forks {
             return;
         }
@@ -439,15 +351,16 @@ impl SessionActor {
     }
 
     async fn report_status(&mut self, state: &SessionState) {
-        if self.last_reported.as_ref() == Some(&state.status) {
+        let status = crate::sessions::runners::reads::session_status(state);
+        if self.last_reported.as_ref() == Some(&status) {
             return;
         }
-        self.last_reported = Some(state.status.clone());
+        self.last_reported = Some(status.clone());
         let _ = self
             .supervisor
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
-                status: state.status.clone(),
+                status,
             })
             .await;
     }
@@ -478,25 +391,25 @@ impl SessionActor {
         // the agent, so every move of its counter has to reach whichever node
         // is answering readers of it — routinely a different one, since a
         // session and its supervisor are placed independently.
-        let (journal_id, revision) = match plan.kind {
-            SessionAgentKind::Main => (self.id, revisions.publishing(MAIN_AGENT_ID)),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                (id, revisions.publishing(&id.to_string()))
+        // Every agent journals under its own id, including the root
+        // conversation's — its transcript is no longer the session's. `main`
+        // survives as a *revision channel name* only, because
+        // `AwaitAgentRevision` keys its long poll on that exact string.
+        let journal_id = plan.agent.as_uuid();
+        let revision = match plan.role {
+            AgentRole::Root => revisions.publishing(MAIN_AGENT_ID),
+            AgentRole::Fork | AgentRole::Sub | AgentRole::Step => {
+                revisions.publishing(&journal_id.to_string())
             }
         };
         // Its name under this session, and the id it is addressed by.
-        let name = match plan.kind {
-            SessionAgentKind::Main => MAIN_AGENT_ID.to_string(),
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                id.to_string()
-            }
-        };
-        let key = plan.kind.agent_key();
+        let name = journal_id.to_string();
         // Built once, here, rather than per turn: it owns the cache of the
         // client this agent's last load acquired, which `cancel_agent` and the
         // `Stop` hooks both read.
         let loading = context::loading_for(
-            plan.kind,
+            plan.agent,
+            plan.role,
             self.me(ctx),
             self.id,
             context::LoadingDeps {
@@ -507,7 +420,14 @@ impl SessionActor {
                     // acquisition below will fail on rather than silently
                     // addressing some other sandbox.
                     state
-                        .provisioned_at_ms
+                        .runners
+                        .values()
+                        .find_map(|r| match &r.state {
+                            crate::sessions::runners::RunnerState::Runtime(rt) => {
+                                rt.provisioned_at_ms
+                            }
+                            _ => None,
+                        })
                         .map(|at| at.to_string())
                         .unwrap_or_default(),
                     // A create is still outstanding. The journal is the only thing
@@ -515,7 +435,10 @@ impl SessionActor {
                     // reported the object yet is indistinguishable from one with
                     // nothing there, and the difference is between waiting for a
                     // runtime and declaring it gone.
-                    matches!(state.status, SessionStatus::Provisioning),
+                    matches!(
+                        crate::sessions::runners::reads::session_status(state),
+                        SessionStatus::Provisioning
+                    ),
                     self.spec().vendor.clone(),
                     self.spec().clone(),
                 ),
@@ -535,7 +458,8 @@ impl SessionActor {
         let provider = Arc::new(SessionContextProvider {
             loading,
             equipment: plan.equipment,
-            kind: plan.kind,
+            role: plan.role,
+            agent: plan.agent,
             agent_type: plan.agent_type,
             plugins: self.spec().plugins.clone(),
             settings: plan.settings.clone(),
@@ -549,7 +473,7 @@ impl SessionActor {
         params.interactive = true;
         // A step is the only agent that owes a structured result, and the only
         // one for which a turn ending with plain text is not an answer.
-        params.requires_result = matches!(plan.kind, SessionAgentKind::Step(_));
+        params.requires_result = matches!(plan.role, AgentRole::Step);
         params.capabilities = capabilities;
         params.thinking_effort = plan
             .settings
@@ -559,7 +483,7 @@ impl SessionActor {
         let agent_ctx = AgentRuntimeContext {
             context_provider: provider.clone(),
             revision,
-            parent: StopHookParent::wrap(self.me(ctx), key, provider.clone()),
+            parent: StopHookParent::wrap(self.me(ctx), plan.agent, provider.clone()),
             journal_id,
             // Computed from the state this spawn was decided against, never
             // remembered: an agent built after the runtime landed starts ready,
@@ -580,52 +504,12 @@ impl SessionActor {
             }
         };
         let resident = ResidentAgent { actor, provider };
-        match plan.kind {
-            SessionAgentKind::Main => {
-                self.agents = Some(SessionAgents::interactive(resident.clone()));
-            }
-            SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                if let Some(agents) = self.agents.as_mut() {
-                    agents.insert_sub(id, resident.clone());
-                }
-            }
-        }
+        // One map, one key. Which runner this agent belongs to is the session
+        // state's business, not this map's.
+        self.agents.insert(plan.agent, resident.clone());
         Some(resident)
     }
 
-    /// The session's primary agent, spawned once at load.
-    fn spawn_main_agent(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState) {
-        let Some(settings) = self.spec().agent_settings().cloned() else {
-            // Only an agent session has a main agent; `adopt` gates this call
-            // on the kind.
-            return;
-        };
-        // The session's own conversation: it can ask, name itself and branch.
-        let equipment = crate::sessions::runners::assemble(
-            crate::sessions::runners::RunnerKind::Conversation,
-            &crate::sessions::runners::Assembly {
-                settings: &settings,
-                // The main agent journals under the session's own id — its
-                // transcript *is* the session's — so that is the id it is
-                // known by here too.
-                agent: crate::sessions::runners::AgentId(self.id),
-                depth: 0,
-                unattended: self.spec().is_unattended(),
-                fork: None,
-                agent_type: None,
-            },
-        );
-        self.spawn_agent(
-            ctx,
-            state,
-            AgentPlan {
-                kind: SessionAgentKind::Main,
-                settings,
-                equipment,
-                agent_type: None,
-            },
-        );
-    }
 
     /// Resolve an agent selector to its actor: `None`/`"main"` for the primary
     /// agent, else the id of a step or a subagent. A cold node — one the
@@ -633,128 +517,6 @@ impl SessionActor {
     /// spawned on demand, so reading a finished agent works exactly like
     /// reading a live one.
     ///
-    /// A run has no primary agent, so an unaddressed selector means the step in
-    /// flight there. Without that, everything a caller can leave unaddressed —
-    /// an answer above all — resolved to nothing on a run and silently did
-    /// nothing.
-    fn resolve_agent(
-        &mut self,
-        state: &SessionState,
-        ctx: &ActorContext<SessionInbox>,
-        agent_id: Option<&str>,
-    ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
-        match agent_id {
-            None | Some(MAIN_AGENT_ID) => {
-                match state.run.as_ref().and_then(WorkflowRunState::current_agent) {
-                    // At most one step runs at a time, and the definition chose
-                    // it, so there is nothing else an unaddressed request on a
-                    // run could mean.
-                    Some(step) => self.resolve_step(state, ctx, step),
-                    None => self.agent().map(|actor| (AgentKey::Main, actor)),
-                }
-            }
-            Some(raw) => {
-                let id = Uuid::parse_str(raw).ok()?;
-                if let Some(resolved) = self.resolve_step(state, ctx, id) {
-                    return Some(resolved);
-                }
-                // Before the roster is consulted, because the roster cannot
-                // say what *kind* of agent an id names — forks and subagents
-                // share one map. Answering `Sub` for a fork made a fork of a
-                // fork read as a fork of a subagent, and be refused.
-                if state.forks.contains(id) {
-                    return self
-                        .spawn_fork_actor(ctx, state, id)
-                        .map(|actor| (AgentKey::Fork(id), actor));
-                }
-                if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
-                    return Some((AgentKey::Sub(id), agent.actor.clone()));
-                }
-                // The type comes off the record, not from the caller: a cold
-                // node woken to answer a read must run as what it was spawned as.
-                let agent_type = state.subagents.node(id)?.agent_type.clone();
-                Some((
-                    AgentKey::Sub(id),
-                    self.spawn_sub_agent_actor(ctx, state, id, agent_type)?,
-                ))
-            }
-        }
-    }
-
-    /// One of a run's step agents, spawned if it is not resident. `None` when
-    /// this session is not a run, or when the id names no execution in its log.
-    ///
-    /// The log, not the roster, is what identifies a step: a run's step
-    /// subagents are registered in the same roster, so residency alone cannot
-    /// tell the two apart. Spawning on demand is what keeps a finished run's
-    /// step transcripts readable — the roster is empty after a reload, and
-    /// every agent-scoped read comes through here.
-    fn resolve_step(
-        &mut self,
-        state: &SessionState,
-        ctx: &ActorContext<SessionInbox>,
-        id: Uuid,
-    ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
-        let run = state.run.as_ref()?;
-        let index = run.index_of_agent(id)?;
-        if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
-            return Some((AgentKey::Step(id), agent.actor.clone()));
-        }
-        let step = run.get(index)?.step.clone();
-        Some((
-            AgentKey::Step(id),
-            self.spawn_step_agent(ctx, state, id, &step)?,
-        ))
-    }
-
-    fn agent(&self) -> Option<ActorRef<AgentCommand>> {
-        self.agents
-            .as_ref()
-            .and_then(SessionAgents::main)
-            .map(|a| a.actor.clone())
-    }
-
-    /// The settings an agent runs under, resolved from what this session is
-    /// and where the agent sits in it: the main agent and forks use the agent
-    /// session's settings, a step uses its own preset, and a subagent inherits
-    /// its tree's root. `None` when the key names no agent this session hosts.
-    pub(super) fn effective_settings(
-        &self,
-        state: &SessionState,
-        key: AgentKey,
-    ) -> Option<&AgentSettings> {
-        match key {
-            AgentKey::Main | AgentKey::Fork(_) => self.spec().agent_settings(),
-            AgentKey::Step(id) => {
-                let run = self.spec().workflow_run()?;
-                let execution = state.run.as_ref()?.index_of_agent(id)?;
-                let name = &state.run.as_ref()?.get(execution)?.step;
-                run.step(name).map(|step| &step.settings)
-            }
-            AgentKey::Sub(id) => match state.subagents.owner_of(id)? {
-                TreeOwner::Main => self.spec().agent_settings(),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
-        }
-    }
-
-    /// The settings a subagent *spawn* runs under: the caller's own, so a
-    /// step's spawns inherit the step's settings and its cap. Resolved from
-    /// the caller's tree root, exactly as [`Self::effective_settings`] reads a
-    /// cold node.
-    pub(super) fn effective_settings_for_parent(
-        &self,
-        state: &SessionState,
-        caller: SubAgentParent,
-    ) -> Option<&AgentSettings> {
-        match caller {
-            SubAgentParent::Main => match state.root_owner() {
-                TreeOwner::Main => self.effective_settings(state, AgentKey::Main),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
-            SubAgentParent::SubAgent(id) => self.effective_settings(state, AgentKey::Sub(id)),
-        }
-    }
 
     /// Cancel one agent's run and wait for it to actually be over.
     ///
@@ -766,8 +528,8 @@ impl SessionActor {
     ///
     /// Waiting matters: the caller is about to record a turn boundary, and a run
     /// still winding down can still append to the agent journal.
-    async fn cancel_agent(&mut self, key: AgentKey) {
-        let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+    async fn cancel_agent(&mut self, agent: AgentId) {
+        let Some(agent) = self.agents.get(&agent).cloned() else {
             return;
         };
         if let Some(client) = agent.provider.cached_client() {
@@ -788,173 +550,576 @@ impl SessionActor {
         }
     }
 
-    /// Cancel whatever this session is running: the step in flight for a run,
-    /// the main agent otherwise. A run used to be skipped here entirely, so
-    /// deleting one mid-step left its sandbox call running.
-    async fn cancel_in_flight(&mut self, state: &SessionState) {
-        let step = state
-            .run
-            .as_ref()
-            .and_then(|r| r.current().and_then(|i| r.get(i)))
-            .map(|s| s.agent);
-        match step {
-            Some(agent) => self.cancel_agent(AgentKey::Step(agent)).await,
-            None => self.cancel_agent(AgentKey::Main).await,
+    /// Cancel every agent this session has working.
+    ///
+    /// Every one, not just the root's: a run used to be skipped here entirely,
+    /// so deleting one mid-step left its sandbox call running. With one flat
+    /// map there is no kind to skip — whoever is resident is cancelled.
+    async fn cancel_in_flight(&mut self, _state: &RunnerSessionState) {
+        for agent in self.agents.keys().copied().collect::<Vec<_>>() {
+            self.cancel_agent(agent).await;
         }
     }
 
-    /// Carry out one orchestrator decision and return the events that record it.
+    /// The runners a session is created with: its root, then its sandbox.
     ///
-    /// No turn ever begins here any more: an agent owns its queue and decides
-    /// when that queue becomes a turn. What is left is delivery — putting a
-    /// finished child's result where the agent that asked for it will find it.
+    /// **Order is load-bearing.** `SessionState::apply` makes the *first*
+    /// runner created the root, so the conversation or the run must be
+    /// journaled before the runtime — otherwise the sandbox becomes the
+    /// session's status, and a session reads `Provisioning` for ever.
+    ///
+    /// `SessionKind` shrinks to exactly this one job: deciding which runner is
+    /// the root.
+    fn birth_runners(&self, spec: &SessionSpec) -> Vec<SessionEvent> {
+        use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
+        use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+        let at_ms = now_ms();
+        let root = RunnerId::new_v4();
+        let (kind, args) = match &spec.kind {
+            SessionKind::Agent { .. } => (
+                RunnerKind::Conversation,
+                RunnerArgs::Conversation {
+                    agent: AgentId::new_v4(),
+                    seed: None,
+                    message: String::new(),
+                    settings: Box::new(
+                        spec.agent_settings()
+                            .cloned()
+                            .unwrap_or_else(crate::sessions::runners::empty_settings),
+                    ),
+                },
+            ),
+            SessionKind::Workflow { .. } => {
+                let Some(run) = spec.workflow_run() else {
+                    tracing::error!(session = %self.id, "a workflow session with no graph");
+                    return Vec::new();
+                };
+                (
+                    RunnerKind::Workflow,
+                    RunnerArgs::Workflow {
+                        source: WorkflowSource::Graph(run.clone()),
+                        input: run.input.clone(),
+                    },
+                )
+            }
+        };
+        let caps = crate::sessions::runners::assemble(
+            kind,
+            &crate::sessions::runners::Assembly {
+                settings: &spec
+                    .agent_settings()
+                    .cloned()
+                    .unwrap_or_else(crate::sessions::runners::empty_settings),
+                agent: AgentId::new_v4(),
+                depth: 0,
+                unattended: spec.is_unattended(),
+                fork: None,
+                agent_type: None,
+            },
+        );
+        let Ok(state) = crate::sessions::runners::birth::born(args, caps, root) else {
+            return Vec::new();
+        };
+        vec![
+            SessionEvent::RunnerCreated {
+                id: root,
+                kind,
+                parent: None,
+                state: Box::new(state),
+                at_ms,
+            },
+            SessionEvent::RunnerCreated {
+                id: RunnerId::new_v4(),
+                kind: RunnerKind::Runtime,
+                parent: None,
+                state: Box::new(crate::sessions::runners::birth::runtime_born()),
+                at_ms,
+            },
+        ]
+    }
+
+    /// Carry out one runner's decision and return the events that record it.
+    ///
+    /// No turn ever begins here: an agent owns its queue and decides when that
+    /// queue becomes a turn. What is left is the work only the session can do —
+    /// starting an agent, creating a child, delivering a report, acquiring the
+    /// sandbox.
     async fn perform(
         &mut self,
-        action: AgentAction,
-        state: &SessionState,
+        runner: RunnerId,
+        action: Action,
+        state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
-    ) -> Vec<SessionDomainEvent> {
+    ) -> Vec<SessionEvent> {
         match action {
-            AgentAction::Deliver(delivery) => self.deliver(delivery, state, ctx).await,
-            AgentAction::StartStep(step) => self.start_step(step, state, ctx).await,
-            AgentAction::Finish { output } => self.finish_run(output).await,
-            AgentAction::Fail { error } => self.fail_run(error).await,
+            Action::StartAgent {
+                agent,
+                equipment,
+                settings,
+                first,
+            } => match self
+                .start_agent(runner, agent, equipment, *settings, first, state, ctx)
+                .await
+            {
+                Some(_) => self.start_events(runner, agent, state),
+                None => Vec::new(),
+            },
+            Action::CreateChild {
+                id,
+                kind,
+                args,
+                parent,
+            } => self.create_child(id, kind, args, parent, state, ctx).await,
+            Action::Deliver { to, from, part } => self.deliver(to, from, *part, state, ctx).await,
+            Action::Cancel { agent } => {
+                self.cancel_agent(agent).await;
+                Vec::new()
+            }
+            Action::Provision => self.provision(runner, ctx).await,
+            // Answered on the call that is waiting, never journaled: a refusal
+            // is not something that happened to this session.
+            Action::Reply { text } => {
+                tracing::debug!(session = %self.id, %runner, text, "a runner answered a caller");
+                Vec::new()
+            }
         }
     }
 
-    /// Put a finished subagent's result in the queue of the agent that is owed
-    /// it, and record that it has been sent.
+    /// Start one agent for a runner, and register it.
     ///
-    /// Tell-then-persist: a crash between the enqueue and this write leaves the
-    /// result still owed, so the next boundary re-delivers it. Delivery is
-    /// at-least-once in that window (the parent may see a result twice), never
-    /// lost — `spawn_agent`'s stricter persist-then-spawn is the deliberate
-    /// exception, because an untracked agent is worse than a duplicate.
+    /// The single spawner. `AgentRole` decides the four things the old
+    /// `AgentKey` decided besides identity — whether the runtime client is
+    /// scoped, the prompt suffix, which lifecycle entry opens the log, and
+    /// whether setup narrates.
+    async fn start_agent(
+        &mut self,
+        runner: RunnerId,
+        agent: AgentId,
+        equipment: crate::agent_loop::capabilities::Capabilities,
+        settings: crate::sessions::spec::AgentSettings,
+        first: crate::sessions::runners::action::FirstInput,
+        state: &RunnerSessionState,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> Option<SessionEvent> {
+        let record = state.record(runner)?;
+        let role = AgentRole::of(record.kind, runner == state.root);
+        let resident = self.spawn_agent(
+            ctx,
+            state,
+            AgentPlan {
+                agent,
+                role,
+                settings,
+                equipment,
+                agent_type: None,
+            },
+        )?;
+        if let crate::sessions::runners::action::FirstInput::Text(text) = first {
+            let _ = resident
+                .actor
+                .tell(AgentCommand::Enqueue {
+                    item: Incoming::User {
+                        id: Uuid::new_v4().to_string(),
+                        text,
+                    },
+                    ack: None,
+                })
+                .await;
+        }
+        Some(SessionEvent::AgentStarted { runner, agent })
+    }
+
+    /// The pair of events one started agent produces.
     ///
-    /// Skipped, not failed, when the agent cannot be reached: the result stays
+    /// Two, not one, and both are needed: `AgentStarted` is the session's — it
+    /// is what makes `state.agents[&agent]` resolve — and the runner's own
+    /// `Started` is what stops `actions()` asking again at the next boundary.
+    fn start_events(
+        &self,
+        runner: RunnerId,
+        agent: AgentId,
+        state: &RunnerSessionState,
+    ) -> Vec<SessionEvent> {
+        let mut events = vec![SessionEvent::AgentStarted { runner, agent }];
+        if let Some(record) = state.record(runner)
+            && let Some(event) = record.state.started_event()
+        {
+            events.push(SessionEvent::Runner {
+                id: runner,
+                event: Box::new(event),
+                at_ms: now_ms(),
+            });
+        }
+        events
+    }
+
+    /// Create a child runner, durable before its agent exists.
+    ///
+    /// Persist-then-spawn: a crash between the two replays as no child at all,
+    /// which is strictly better than an agent nothing tracks. The id is the
+    /// capability's, not the session's, so the event it journaled and the
+    /// action it returned name the same child.
+    async fn create_child(
+        &mut self,
+        id: RunnerId,
+        kind: crate::sessions::runners::ids::RunnerKind,
+        args: crate::sessions::runners::action::RunnerArgs,
+        parent: AgentId,
+        state: &RunnerSessionState,
+        _ctx: &ActorContext<SessionInbox>,
+    ) -> Vec<SessionEvent> {
+        use crate::sessions::runners::action::RunnerArgs;
+        // The child's settings travel on the args, because the asker fixed
+        // them: a worker inherits its caller's, a fork the conversation's. A
+        // run carries none — each step resolves its own preset, which is what
+        // lets step 1 run on a large model and step 2 on a small one.
+        let (settings, agent, agent_type) = match &args {
+            RunnerArgs::SubAgent {
+                agent,
+                settings,
+                agent_type,
+                ..
+            } => ((**settings).clone(), *agent, agent_type.clone()),
+            RunnerArgs::Conversation {
+                agent, settings, ..
+            } => ((**settings).clone(), *agent, None),
+            // A run carries none: each step resolves its own preset. What it
+            // is equipped with meanwhile is the asker's, which is what an
+            // invoked run inherits until its first step overrides it.
+            RunnerArgs::Workflow { .. } => {
+                let Some(settings) = crate::sessions::runners::reads::settings_of(state, parent)
+                else {
+                    tracing::warn!(session = %self.id, %parent, "a run was asked for by an agent with no settings");
+                    return Vec::new();
+                };
+                (settings.clone(), parent, None)
+            }
+        };
+        let caps = crate::sessions::runners::assemble(
+            kind,
+            &crate::sessions::runners::Assembly {
+                settings: &settings,
+                agent,
+                depth: 0,
+                unattended: false,
+                fork: None,
+                agent_type,
+            },
+        );
+        match crate::sessions::runners::birth::born(args, caps, id) {
+            Ok(state) => vec![SessionEvent::RunnerCreated {
+                id,
+                kind,
+                parent: Some(parent),
+                state: Box::new(state),
+                at_ms: now_ms(),
+            }],
+            Err(error) => {
+                tracing::warn!(session = %self.id, runner = %id, error, "a child could not be created");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Acquire the sandbox this session runs in.
+    ///
+    /// Asked for by the runtime runner the moment it is `Pending`, which is
+    /// what gives provisioning an answer at recovery: before, it was driven by
+    /// a lifecycle command sent exactly once, so a session whose sandbox died
+    /// between the ask and the answer sat `Pending` with nothing to restart it.
+    ///
+    /// The gate that used to live here — "only from the three states that mean
+    /// no runtime has ever been confirmed" — is the runner's own `actions()`
+    /// now, which asks only from `Pending` and a non-terminal `Failed`.
+    async fn provision(
+        &mut self,
+        runner: RunnerId,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> Vec<SessionEvent> {
+        use crate::sessions::runners::runtime;
+        let runtimes = self.deps().runtimes.clone();
+        let session = self.id.to_string();
+        let vendor = self.spec().vendor.clone();
+        let spec = self.spec().clone();
+        let me = self.me(ctx);
+        // Minted here and journaled below in the same breath, so the sandbox
+        // this create starts and the entry that records it agree on one name.
+        // Reading the clock twice would give the spawned task an identity the
+        // journal never saw.
+        let at_ms = now_ms();
+        let incarnation = at_ms.to_string();
+        // Off the mailbox: a real create runs for minutes, and this actor has
+        // to keep answering reads, stops and deletes throughout. The status the
+        // runner just folded is what holds the turn back meanwhile.
+        tokio::spawn(async move {
+            let (error, terminal, detail) = match runtimes
+                .create(&session, &incarnation, &vendor, &spec)
+                .await
+            {
+                Ok(detail) => (None, false, detail),
+                // Exactly the split `get` makes: only a live vendor refusing to
+                // produce the runtime is terminal. An offline vendor or a failed
+                // token mint is a bad moment, not a dead session.
+                Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
+                    (Some(e.to_string()), false, None)
+                }
+            };
+            // Before the outcome, and separately from it: the vendor described
+            // the runtime it accepted, and that sentence belongs to the wait
+            // rather than to how the wait ended.
+            if let Some(detail) = detail {
+                let _ = me
+                    .tell(SessionCommand::Core(CoreCommand::RuntimeEvent {
+                        runner,
+                        event: runtime::Event::Progress { detail },
+                    }))
+                    .await;
+            }
+            let event = match error {
+                None => runtime::Event::Succeeded { at_ms },
+                Some(error) => runtime::Event::Failed { error, terminal },
+            };
+            let _ = me
+                .tell(SessionCommand::Core(CoreCommand::RuntimeEvent {
+                    runner,
+                    event,
+                }))
+                .await;
+        });
+        vec![SessionEvent::Runner {
+            id: runner,
+            event: Box::new(RunnerEvent::Runtime(runtime::Event::Started)),
+            at_ms,
+        }]
+    }
+
+    /// Put a finished child's report in the queue of the agent owed it.
+    ///
+    /// Tell-then-persist: a crash between the enqueue and the acknowledgement
+    /// leaves the report still owed, so the next boundary re-delivers it.
+    /// At-least-once in that window, never lost — `create_child`'s stricter
+    /// persist-then-spawn is the deliberate exception, because an untracked
+    /// agent is worse than a duplicate.
+    ///
+    /// Skipped, not failed, when the agent cannot be reached: the report stays
     /// owed and the next boundary tries again.
     async fn deliver(
         &mut self,
-        delivery: Delivery,
-        state: &SessionState,
+        to: AgentId,
+        from: RunnerId,
+        part: horsie_models::agent::SubAgentResultPart,
+        state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
-    ) -> Vec<SessionDomainEvent> {
-        let Delivery { to, child, part } = delivery;
+    ) -> Vec<SessionEvent> {
         let Some(agent) = self.reach(to, state, ctx) else {
             return Vec::new();
         };
-        if agent
+        let _ = agent
             .tell(AgentCommand::Enqueue {
                 item: Incoming::SubAgent {
-                    id: child.to_string(),
+                    id: from.to_string(),
                     part: Box::new(part),
                 },
                 ack: None,
             })
-            .await
-            .is_err()
-        {
-            return Vec::new();
-        }
-        vec![SessionDomainEvent::SubAgentNotified {
-            at_ms: now_ms(),
-            id: child,
-        }]
+            .await;
+        // The acknowledgement is the *capability's*, not the session's: the
+        // parent's `SubAgentCapability` folds `Reported` and drops the child
+        // from `outstanding`. One fact, one writer.
+        Vec::new()
     }
 
-    /// The mailbox of one of this session's agents, spawning a cold subagent's
-    /// actor on demand. `None` when nothing under that key exists.
+    /// The mailbox of one of this session's agents, spawning a cold one on
+    /// demand. `None` when no runner owns that id.
+    ///
+    /// The three-registry probe this replaces answered "what kind of agent is
+    /// this uuid" by trying the run log, then the fork roster, then the
+    /// subagent forest — an order that was load-bearing, and getting it wrong
+    /// made a fork of a fork read as a fork of a subagent.
     fn reach(
         &mut self,
-        key: AgentKey,
-        state: &SessionState,
+        agent: AgentId,
+        state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
     ) -> Option<ActorRef<AgentCommand>> {
-        if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
-            return Some(agent.actor.clone());
+        if let Some(resident) = self.agents.get(&agent) {
+            return Some(resident.actor.clone());
         }
-        match key {
-            // A cold node reached for the first time since load. The type comes
-            // off the record, not from the caller: a node woken to receive a
-            // result must run as what it was spawned as.
-            AgentKey::Sub(id) => {
-                let agent_type = state.subagents.node(id)?.agent_type.clone();
-                self.spawn_sub_agent_actor(ctx, state, id, agent_type)
-            }
-            // A step's actor spawns on demand from the run log, the same way a
-            // cold subagent's does: a boundary can owe a result to a step whose
-            // actor has since been unloaded.
-            AgentKey::Step(id) => self.resolve_step(state, ctx, id).map(|(_, actor)| actor),
-            // A cold fork, woken to be read or messaged. Nothing comes off a
-            // record here the way a subagent's type does: a fork runs under
-            // the session's own settings, like the conversation it branched
-            // from.
-            AgentKey::Fork(id) => state
-                .forks
-                .contains(id)
-                .then(|| self.spawn_fork_actor(ctx, state, id))?,
-            // Spawned at load, so it is either resident or this session is a run
-            // and has none.
-            AgentKey::Main => None,
-        }
+        let runner = state.runner_of(agent)?;
+        let record = state.record(runner)?;
+        let settings = record.state.settings(agent)?.clone();
+        let role = AgentRole::of(record.kind, runner == state.root);
+        let equipment = record.state.capabilities()?.clone();
+        self.spawn_agent(
+            ctx,
+            state,
+            AgentPlan {
+                agent,
+                role,
+                settings,
+                equipment,
+                agent_type: None,
+            },
+        )
+        .map(|r| r.actor)
     }
-
-    /// Everything the orchestrator wants started at this turn boundary,
-    /// performed in order, each seeing the state the previous one produced.
+    /// What a runner may know about the session around it.
     ///
-    /// Every turn boundary routes through here — without that, a result owed to
-    /// a subagent parent strands the moment no further subagent outcome can
-    /// arrive (every node terminal), since an outcome was previously the only
-    /// flush trigger.
-    /// Whether any component has work in flight, so the session must not
-    /// unload. This is what keeps a forty-minute tool call from being unloaded
-    /// out from under itself.
-    fn busy(&self, state: &SessionState) -> bool {
-        RuntimeLifecycle::busy(state)
-            || Turns::busy(state)
-            || WorkflowRun::busy(state)
-            || SubAgents::busy(state)
-    }
-
-    /// Everything every component wants started, given the state as it now is.
-    ///
-    /// A concatenation, not a negotiation: each component returns only work it
-    /// owns, so there is nothing to reconcile. Subagent wakes go first — a
-    /// parent waiting on its children is work already in flight, and the next
-    /// turn or step can wait a boundary.
-    fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // Nothing starts before the runtime it would run on exists. One gate,
-        // checked once, for every component.
-        if !RuntimeLifecycle::ready(state) {
-            return Vec::new();
+    /// Built per runner because `depth` is a walk up that runner's own parent
+    /// chain; the other two are the session's and read the same for everybody.
+    fn view(&self, state: &RunnerSessionState, runner: RunnerId) -> SessionView {
+        SessionView {
+            runtime_ready: state.runtime_ready(),
+            depth: state.depth_of(runner),
+            active_agents: state.active_agents(),
         }
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
-        [
-            SubAgents::actions(&cx, state),
-            Turns::actions(&cx, state),
-            WorkflowRun::actions(&cx, state),
-        ]
-        .concat()
     }
 
+    /// Whether any runner has work in flight, so the session must not unload.
+    /// This is what keeps a forty-minute tool call from being unloaded out from
+    /// under itself.
+    fn busy(&self, state: &RunnerSessionState) -> bool {
+        state.runners.values().any(|r| r.state.busy())
+    }
+
+    /// Everything every runner wants started, given the state as it now is.
+    ///
+    /// A concatenation, not a negotiation: a runner returns only work it owns,
+    /// so there is nothing to reconcile. The runtime gate that used to stand in
+    /// front of this moved into `RunnerState::actions`, where the one runner
+    /// exempt from it — the sandbox itself — says so rather than being special
+    /// cased by its caller.
+    fn next_actions(&self, state: &RunnerSessionState) -> Vec<(RunnerId, Action)> {
+        state
+            .runners
+            .iter()
+            .flat_map(|(id, rec)| {
+                let view = self.view(state, *id);
+                rec.state
+                    .actions(&view)
+                    .into_iter()
+                    .map(move |action| (*id, action))
+            })
+            .collect()
+    }
+
+    /// Every finished child whose creator has not been told yet.
+    ///
+    /// The scan the two-batch delivery rests on: a runner that is terminal and
+    /// has a parent offers its `outcome()` to that parent's capabilities, and
+    /// the capability's own `outstanding` decides whether the report is still
+    /// owed. So there is no `notified` flag to disagree with it — a crash
+    /// between telling and persisting replays as a report still outstanding,
+    /// and the next boundary finds it here again.
+    ///
+    /// `is_terminal`, not `== Done`: a worker that *failed* is owed a report
+    /// too, and a `Done`-only scan would leave its parent waiting for ever.
+    fn owed(&self, state: &RunnerSessionState) -> Vec<(RunnerId, AgentId, ChildOutcome)> {
+        state
+            .runners
+            .iter()
+            .filter(|(_, rec)| rec.status.is_terminal())
+            .filter_map(|(id, rec)| {
+                let parent = rec.parent?;
+                let outcome = rec.state.outcome()?;
+                Some((*id, parent, outcome))
+            })
+            .collect()
+    }
+
+    /// A runner's events, addressed and stamped.
+    ///
+    /// `at_ms` is read here — one of the few places it may be — because it is a
+    /// fact about the journal entry rather than about what was decided. A
+    /// decision is made once and folded any number of times, so a clock inside
+    /// a fold would give a replay different timestamps from the live run.
+    fn wrap(&self, runner: RunnerId, emit: Emit) -> Vec<SessionEvent> {
+        let at_ms = now_ms();
+        emit.events
+            .into_iter()
+            .map(|event| SessionEvent::Runner {
+                id: runner,
+                event: Box::new(event),
+                at_ms,
+            })
+            .collect()
+    }
+
+    /// Everything startable at this boundary, performed in order, each seeing
+    /// the state the previous one produced.
+    ///
+    /// Deliveries first: a parent waiting on its children is work already in
+    /// flight, and a next turn can wait a boundary. This is also the re-drive
+    /// point that makes delivery at-least-once — a report the last process told
+    /// but never acknowledged is still `owed` here.
     async fn flush_then_drain(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
-    ) -> Vec<SessionDomainEvent> {
+    ) -> Vec<SessionEvent> {
         let mut events = Vec::new();
         let mut next = state.clone();
-        for action in self.next_actions(&next) {
-            let produced = self.perform(action, &next, ctx).await;
+        for (child, parent, outcome) in self.owed(&next) {
+            let produced = self.offer_to_parent(child, parent, &outcome, &next).await;
             for e in &produced {
-                next = Self::apply_event(next, e.clone());
+                next.apply(e);
+            }
+            events.extend(produced);
+        }
+        for (runner, action) in self.next_actions(&next) {
+            let produced = self.perform(runner, action, &next, ctx).await;
+            for e in &produced {
+                next.apply(e);
             }
             events.extend(produced);
         }
         events
+    }
+
+    /// Offer a finished child's outcome to the capabilities of the agent that
+    /// created it.
+    ///
+    /// Gated by the capability's own `outstanding`, not by an owner lookup this
+    /// actor performs: a child a capability did not create falls through as
+    /// `None` rather than being mishandled, which is what stops two
+    /// capabilities plausibly claiming one report.
+    async fn offer_to_parent(
+        &mut self,
+        child: RunnerId,
+        parent: AgentId,
+        outcome: &ChildOutcome,
+        state: &RunnerSessionState,
+    ) -> Vec<SessionEvent> {
+        let Some(runner) = state.runner_of(parent) else {
+            return Vec::new();
+        };
+        let Some(record) = state.record(runner) else {
+            return Vec::new();
+        };
+        let Some(caps) = record.state.capabilities() else {
+            return Vec::new();
+        };
+        let msg = crate::agent_loop::capabilities::Msg::Child(
+            &crate::sessions::runners::message::ChildMsg::Outcome {
+                child,
+                outcome: outcome.clone(),
+            },
+        );
+        let Some(decision) = caps.offer(&msg) else {
+            return Vec::new();
+        };
+        self.wrap(
+            runner,
+            Emit {
+                events: decision
+                    .events
+                    .into_iter()
+                    .map(RunnerEvent::Capability)
+                    .collect(),
+                actions: Vec::new(),
+            },
+        )
     }
 
     /// Persist `events`, having first let the boundary they create start
@@ -967,14 +1132,14 @@ impl SessionActor {
     /// parent stranding when no further outcome can arrive.
     async fn persist_and_advance(
         &mut self,
-        state: &SessionState,
-        mut events: Vec<SessionDomainEvent>,
+        state: &RunnerSessionState,
+        mut events: Vec<SessionEvent>,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
-        let next = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
+    ) -> CommandEffect<SessionEvent> {
+        let mut next = state.clone();
+        for e in &events {
+            next.apply(e);
+        }
         events.extend(self.flush_then_drain(&next, ctx).await);
         CommandEffect::persist(events)
     }
@@ -987,112 +1152,353 @@ impl SessionActor {
     /// agent sent it. Answering the two non-ending reports first is what lets
     /// each of those three read the outcome as a turn that ended, rather than
     /// re-answering variants that mean the same thing to all of them.
+    /// Put a person's message in an agent's queue.
+    ///
+    /// The session's part is only to resolve the addressee — spawning a cold
+    /// agent if need be — and to title an unnamed session from its first
+    /// message. The message itself never touches session state: it is addressed
+    /// to an agent, and that is where it is stored.
+    ///
+    /// `/fork` is deliberately not intercepted here any more. It is a
+    /// `Command` its agent's `ForkCapability` claims, which is what lets the
+    /// branch point be the *asking agent's* log sequence — a fact this actor
+    /// cannot see.
+    async fn on_user_message(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: Option<String>,
+        text: String,
+        reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        if let SessionStatus::Unrecoverable { reason } =
+            crate::sessions::runners::reads::session_status(state)
+        {
+            let _ = reply.send(Err(UserMessageError::Unrecoverable(reason)));
+            return CommandEffect::none();
+        }
+        let Some(agent_id) = crate::sessions::runners::reads::resolve(state, agent_id.as_deref())
+        else {
+            // A run has no root conversation, so an unaddressed message there
+            // reaches nobody. Naming a step is fine — that agent exists and can
+            // be spoken to like any other.
+            let _ = reply.send(Err(UserMessageError::NotFound));
+            return CommandEffect::none();
+        };
+        let Some(agent) = self.reach(agent_id, state, ctx) else {
+            let _ = reply.send(Err(UserMessageError::NotFound));
+            return CommandEffect::none();
+        };
+        // An unnamed session is titled from its first message, once. The rule is
+        // `SessionCore`'s — a session's name is its own bookkeeping, not the
+        // turn's — so this only says when to apply it.
+        self.title_from_first_message(&text).await;
+
+        let id = Uuid::new_v4().to_string();
+        // A built-in is resolved here, before anything treats the text as a
+        // prompt: `/compact` asks the server to do something and must never
+        // reach `expand_invocation`, a template, or the model. Consulted ahead
+        // of the plugin catalogue, so an installed bundle cannot take over a
+        // control the product owns.
+        let item = match horsie_support::plugin::commands::parse_invocation(text.trim(), '/')
+            .and_then(|(name, args)| {
+                horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
+            }) {
+            Some((builtin, args)) if builtin.name == "compact" => Incoming::Compact {
+                id: id.clone(),
+                instructions: (!args.trim().is_empty()).then(|| args.trim().to_string()),
+            },
+            // Every other built-in, present and future. Reaching here means the
+            // table names something this match does not handle, which is a bug
+            // rather than a message: sending it on as a prompt would show the
+            // user's `/thing` to the model as if it were prose.
+            Some((builtin, _)) => {
+                tracing::error!(builtin = builtin.name, "unhandled builtin command");
+                Incoming::User {
+                    id: id.clone(),
+                    text: text.clone(),
+                }
+            }
+            None => Incoming::User {
+                id: id.clone(),
+                text: text.clone(),
+            },
+        };
+        let (tx, rx) = oneshot::channel();
+        let accepted = id.clone();
+        tokio::spawn(async move {
+            let answer = match rx.await {
+                Ok(Ok(())) => Ok(MessageAccepted::queued(accepted)),
+                // Never written, so it is not owed an answer, and the caller
+                // must not be told it was accepted.
+                Ok(Err(e)) => Err(UserMessageError::Rejected(format!("persist message: {e}"))),
+                Err(_) => Err(UserMessageError::NotFound),
+            };
+            let _ = reply.send(answer);
+        });
+        if agent
+            .tell(AgentCommand::Enqueue {
+                item,
+                ack: Some(ReplyTo::from_sender(tx)),
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(session = %self.id, "message could not reach the agent");
+        }
+        // A person acting is the boundary that flushes results owed to parents.
+        // Those strand once every child is terminal — no further outcome will
+        // arrive to trigger the flush — so the next thing the user does has to
+        // be what delivers them.
+        //
+        // It is also what re-asks for a sandbox after a failed create: the
+        // runtime runner is `Failed { terminal: false }`, and its `actions()`
+        // asks again. No `Provision` command, and so no second path.
+        self.persist_and_advance(state, Vec::new(), ctx).await
+    }
+
+    /// Cancel one agent's turn in flight.
+    ///
+    /// The gate is what matters: stopping something that was not working is
+    /// nothing, never a failure. A boundary journaled over an agent that had
+    /// already ended rewrites history — it moves an idle conversation backwards,
+    /// or concludes a step the run has already routed past — and a stop is the
+    /// easiest way to arrive twice, because a person can press it while the
+    /// ending is in flight.
+    async fn on_stop(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: &str,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(agent) = crate::sessions::runners::reads::resolve(state, Some(agent_id)) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(runner) = state.runner_of(agent) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            let _ = reply.send(Err(format!("no such agent: {agent_id}")));
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            let _ = reply.send(Ok(()));
+            return CommandEffect::none();
+        };
+        self.cancel_agent(agent).await;
+        let _ = reply.send(Ok(()));
+        let emit = lifecycle.on_agent_stopped(agent);
+        let events = self.wrap(runner, emit);
+        self.persist_and_advance(state, events, ctx).await
+    }
+
+    /// Hand a person's answers to the agent that asked.
+    ///
+    /// Routed, never decided: the questions live in the asking agent's own
+    /// journal, and the capability that recorded them is what validates the set.
+    async fn on_answer(
+        &mut self,
+        state: &RunnerSessionState,
+        agent_id: Option<&str>,
+        answers: Vec<AskAnswer>,
+        reply: ReplyTo<Result<(), AnswerError>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(agent) = crate::sessions::runners::reads::resolve(state, agent_id)
+            .and_then(|id| self.reach(id, state, ctx))
+        else {
+            let _ = reply.send(Err(AnswerError::NothingPending));
+            return CommandEffect::none();
+        };
+        if agent
+            .tell(AgentCommand::Answer { answers, reply })
+            .await
+            .is_err()
+        {
+            tracing::warn!(session = %self.id, "answers could not reach the agent");
+        }
+        CommandEffect::none()
+    }
+
+    /// A person removed a runner. Nothing removes one on its own.
+    async fn on_delete_runner(
+        &mut self,
+        state: &RunnerSessionState,
+        id: RunnerId,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(record) = state.record(id) else {
+            let _ = reply.send(Err(format!("no such runner: {id}")));
+            return CommandEffect::none();
+        };
+        // Its agents go with it, so they are stopped before the record that
+        // named them is gone.
+        for agent in record.state.rows().iter().filter_map(|r| r.id.parse().ok()) {
+            self.cancel_agent(AgentId(agent)).await;
+            if let Some(resident) = self.agents.remove(&AgentId(agent)) {
+                let _ = resident.actor.tell(AgentCommand::Shutdown).await;
+            }
+        }
+        let _ = reply.send(Ok(()));
+        self.persist_and_advance(state, vec![SessionEvent::RunnerDeleted { id }], ctx)
+            .await
+    }
+
+    /// A person asked a workflow step to run again.
+    async fn on_retry_step(
+        &mut self,
+        state: &RunnerSessionState,
+        index: usize,
+        reply: ReplyTo<Result<(), String>>,
+        ctx: &ActorContext<SessionInbox>,
+    ) -> CommandEffect<SessionEvent> {
+        let root = state.root;
+        let Some(record) = state.record(root) else {
+            let _ = reply.send(Err("this session is not a run".to_string()));
+            return CommandEffect::none();
+        };
+        let crate::sessions::runners::RunnerState::Workflow(run) = &record.state else {
+            let _ = reply.send(Err("this session is not a run".to_string()));
+            return CommandEffect::none();
+        };
+        match run.retry(u32::try_from(index).unwrap_or(u32::MAX)) {
+            Ok(emit) => {
+                let _ = reply.send(Ok(()));
+                let events = self.wrap(root, emit);
+                self.persist_and_advance(state, events, ctx).await
+            }
+            Err(e) => {
+                let _ = reply.send(Err(e));
+                CommandEffect::none()
+            }
+        }
+    }
+
+    /// Hand one agent's ending to the runner that owns it.
+    ///
+    /// Still routed by *identity* rather than by variant — the same `Concluded`
+    /// means "the turn is over", "this step's output picks the next step", or
+    /// "tell the parent its child is done". What has gone is the *probe*: which
+    /// of those it means used to be inferred by trying the run log, then the
+    /// fork roster, then the subagent forest, in an order the code itself
+    /// recorded as load-bearing. It is one lookup now.
     async fn on_agent_outcome(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         outcome: AgentOutcome,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
             // Usage is banked for every agent alike, and always: the tokens
-            // were spent whatever became of the turn that spent them. The main
-            // agent banks under a fixed name because its journal is keyed by
-            // the session id; every other agent banks under its own.
+            // were spent whatever became of the turn that spent them. Keyed by
+            // model rather than by agent, because the per-agent breakdown
+            // belongs to the runner that owns it.
             Err((agent, NotAnEnd::Usage(usage_total))) => {
-                let agent_id = match agent == self.id {
-                    true => MAIN_AGENT_ID.to_string(),
-                    false => agent.to_string(),
-                };
-                return CommandEffect::persist(vec![SessionDomainEvent::UsageRecorded {
-                    at_ms: now_ms(),
-                    agent_id,
-                    usage_total,
+                let model = crate::sessions::runners::reads::settings_of(state, AgentId(agent))
+                    .map_or_else(String::new, |s| s.model.clone());
+                return CommandEffect::persist(vec![SessionEvent::UsageBanked {
+                    model,
+                    spent: usage_total,
                 }]);
             }
             Err((agent, NotAnEnd::Started)) => {
-                return self.on_agent_started(state, agent).await;
+                return self.on_agent_started(state, AgentId(agent)).await;
             }
             // A summary taken for somebody else. Not this agent's turn ending —
-            // it may still be running — so it is answered here and the routing
-            // below never sees it.
-            Err((_, NotAnEnd::ForkSummary { forks, result })) => {
-                return ForkedAgents::handle(
-                    self,
-                    state,
-                    ForkCommand::Summarised { forks, result },
-                    ctx,
-                )
-                .await;
+            // it may still be running — so the fork capability answers it and
+            // the routing below never sees it.
+            Err((agent, NotAnEnd::ForkSummary { forks, result })) => {
+                return self.on_fork_summary(state, AgentId(agent), forks, result).await;
             }
         };
-        // In a run, an outcome is a step's or one of a step's subagents'.
-        if let Some(run) = state.run.as_ref() {
-            return match run.index_of_agent(who) {
-                Some(index) => self.on_step_outcome(state, index, end, ctx).await,
-                None => self.on_sub_agent_outcome(state, who, end, ctx).await,
-            };
-        }
-        if who == self.id {
-            return self.on_main_outcome(state, end, ctx).await;
-        }
-        // Before the subagent forest, because a fork is not in it: asked last,
-        // every one of a fork's turns would be dropped as an outcome from an
-        // agent nothing recognises.
-        if state.forks.contains(who) {
-            return self.on_fork_outcome(state, who, end, ctx).await;
-        }
-        self.on_sub_agent_outcome(state, who, end, ctx).await
+        let who = AgentId(who);
+        let Some(runner) = state.runner_of(who) else {
+            tracing::warn!(session = %self.id, agent = %who, "an outcome from an agent no runner owns");
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            return CommandEffect::none();
+        };
+        let emit = lifecycle.on_agent_ended(who, &end);
+        let events = self.wrap(runner, emit);
+        self.persist_and_advance(state, events, ctx).await
+    }
+
+    /// A `/summary-n-fork` summary, offered to the capabilities of the agent it
+    /// was taken from.
+    ///
+    /// The forks waiting on it are the fork capability's own business — it
+    /// recorded them when it asked — so this is a plain offer rather than a
+    /// command the session understands.
+    async fn on_fork_summary(
+        &mut self,
+        state: &RunnerSessionState,
+        agent: AgentId,
+        forks: Vec<Uuid>,
+        result: Result<String, String>,
+    ) -> CommandEffect<SessionEvent> {
+        let _ = state;
+        // Not yet routed: `Msg` has no summary arm, so there is nothing for the
+        // fork capability to claim. Loud rather than silent — a dropped summary
+        // leaves every fork that queued into this turn waiting for a seed that
+        // will never come, and a silent `none()` here would read as "handled".
+        tracing::error!(
+            session = %self.id,
+            %agent,
+            forks = forks.len(),
+            ok = result.is_ok(),
+            "a fork summary has nowhere to go: ForkCapability cannot yet be offered one"
+        );
+        CommandEffect::none()
     }
 
     /// One of this session's agents drained its queue into a turn.
     ///
-    /// The session used to know this because it was the thing that started the
-    /// turn. It is told now, and what it records depends only on which agent it
-    /// was: the session's own status for the main agent, a tree node going back
-    /// to work for a subagent. A step announces itself through `StepStarted`
-    /// when the run picks it, so there is nothing to add here.
+    /// Handed to the runner that owns it, like every other lifecycle moment.
+    /// The three-way match this replaces — the session's own status, a tree
+    /// node going back to work, a fork's own status — was three ways of saying
+    /// "whoever owns this agent should record that it started", and the owner
+    /// is now a lookup.
     async fn on_agent_started(
         &mut self,
-        state: &SessionState,
-        who: Uuid,
-    ) -> CommandEffect<SessionDomainEvent> {
-        if who == self.id {
-            return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
-        }
-        if state.subagents.node(who).is_some() {
-            return CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
-                at_ms: now_ms(),
-                id: who,
-            }]);
-        }
-        // A fork's own status, and only its own: the session's belongs to the
-        // main agent, and a fork answering a question is not the session
-        // working.
-        if state.forks.contains(who) {
-            return CommandEffect::persist(vec![SessionDomainEvent::ForkStatusChanged {
-                at_ms: now_ms(),
-                id: who,
-                status: AgentStatus::Running,
-            }]);
-        }
-        CommandEffect::none()
+        state: &RunnerSessionState,
+        who: AgentId,
+    ) -> CommandEffect<SessionEvent> {
+        let Some(runner) = state.runner_of(who) else {
+            return CommandEffect::none();
+        };
+        let Some(record) = state.record(runner) else {
+            return CommandEffect::none();
+        };
+        let Some(lifecycle) = record.state.lifecycle() else {
+            return CommandEffect::none();
+        };
+        let events = self.wrap(runner, lifecycle.on_agent_started(who));
+        CommandEffect::persist(events)
     }
 
     /// Whether this session's agents may start a turn at all: it has a runtime,
     /// and it is not terminal. The whole of what an agent's own drain gate
     /// cannot answer for itself.
-    fn runnable(state: &SessionState) -> bool {
-        RuntimeLifecycle::ready(state)
-            && !matches!(state.status, SessionStatus::Unrecoverable { .. })
+    fn runnable(state: &RunnerSessionState) -> bool {
+        state.runtime_ready()
+            && !matches!(
+                crate::sessions::runners::reads::session_status(state),
+                SessionStatus::Unrecoverable { .. }
+            )
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.
     async fn stop_agents(&mut self) {
-        let Some(mut agents) = self.agents.take() else {
-            return;
-        };
-        for agent in agents.drain_all() {
+        for (_, agent) in std::mem::take(&mut self.agents) {
             // Cancel first: a stopped mailbox makes the run task's next persist
             // fail, but an in-flight tool call would run to completion first.
             let _ = agent.actor.tell(AgentCommand::Cancel { ack: None }).await;
@@ -1104,53 +1510,25 @@ impl SessionActor {
 #[async_trait]
 impl EventSourcedActor for SessionActor {
     type Command = SessionInbox;
-    type Event = SessionDomainEvent;
-    type State = SessionState;
+    type Event = SessionEvent;
+    type State = RunnerSessionState;
 
     fn persistence_id(&self) -> PersistenceId {
         Self::persistence_id_for(self.id)
     }
 
-    fn initial_state() -> SessionState {
-        SessionState::default()
+    fn initial_state() -> RunnerSessionState {
+        RunnerSessionState::default()
     }
 
-    fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
-        match event {
-            SessionDomainEvent::ProvisioningStarted { .. }
-            | SessionDomainEvent::ProvisioningProgress { .. }
-            | SessionDomainEvent::ProvisioningSucceeded { .. }
-            | SessionDomainEvent::ProvisioningFailed { .. } => {
-                RuntimeLifecycle::apply(&mut state, &event)
-            }
-            SessionDomainEvent::TurnBegan { .. }
-            | SessionDomainEvent::AskRecorded { .. }
-            | SessionDomainEvent::TurnEnded { .. }
-            | SessionDomainEvent::TurnFailed { .. }
-            | SessionDomainEvent::TurnStopped { .. }
-            | SessionDomainEvent::TurnInterrupted { .. }
-            | SessionDomainEvent::SessionFailed { .. } => Turns::apply(&mut state, &event),
-            SessionDomainEvent::StepStarted { .. }
-            | SessionDomainEvent::StepConcluded { .. }
-            | SessionDomainEvent::StepFailed { .. }
-            | SessionDomainEvent::StepCancelled { .. }
-            | SessionDomainEvent::RunFinished { .. }
-            | SessionDomainEvent::RunFailed { .. } => WorkflowRun::apply(&mut state, &event),
-            SessionDomainEvent::SubAgentSpawned { .. }
-            | SessionDomainEvent::SubAgentRunning { .. }
-            | SessionDomainEvent::SubAgentCompleted { .. }
-            | SessionDomainEvent::SubAgentFailed { .. }
-            | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
-            SessionDomainEvent::ForkCreated { .. }
-            | SessionDomainEvent::ForkSeeded { .. }
-            | SessionDomainEvent::ForkTitled { .. }
-            | SessionDomainEvent::ForkStatusChanged { .. }
-            | SessionDomainEvent::ForkTurnEnded { .. }
-            | SessionDomainEvent::ForkDeleted { .. } => ForkedAgents::apply(&mut state, &event),
-            SessionDomainEvent::UsageRecorded { .. }
-            | SessionDomainEvent::SpecRecorded { .. }
-            | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
-        }
+    /// One writer, and it is the state's own.
+    ///
+    /// The twenty-arm match this replaces routed each event to the component
+    /// that understood it. A runner's event is addressed to its runner, and
+    /// everything else is the session's own — so there is nothing here to keep
+    /// in step with a component list.
+    fn apply_event(mut state: RunnerSessionState, event: SessionEvent) -> RunnerSessionState {
+        state.apply(&event);
         state
     }
 
@@ -1161,7 +1539,7 @@ impl EventSourcedActor for SessionActor {
     /// And report the status the batch left behind. Here rather than at each
     /// transition because here the write is already durable: the supervisor's
     /// copy can lag the journal, never lead it.
-    async fn on_events_persisted(&mut self, events: &[SessionDomainEvent], state: &SessionState) {
+    async fn on_events_persisted(&mut self, events: &[SessionEvent], state: &RunnerSessionState) {
         self.record_lifecycle(events, state).await;
         self.report_forks(state).await;
         self.report_status(state).await;
@@ -1172,21 +1550,76 @@ impl EventSourcedActor for SessionActor {
     /// below is the command it was wrapped around.
     async fn handle_command(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         cmd: SessionInbox,
         ctx: &mut ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd.cmd {
-            SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
-            SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
-            SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
-            SessionCommand::SubAgent(c) => SubAgents::handle(self, state, c, ctx).await,
-            SessionCommand::Fork(c) => ForkedAgents::handle(self, state, c, ctx).await,
+            SessionCommand::StartRunner {
+                id,
+                kind,
+                args,
+                parent,
+                reply,
+            } => {
+                // Deduped on the capability-minted id, atomically with the
+                // persist: a capability re-asking after a crash names the child
+                // it already journaled, and a check at the sink would race.
+                if state.record(id).is_some() || !self.created.insert(id) {
+                    let _ = reply.send(Ok(()));
+                    return CommandEffect::none();
+                }
+                let events = self.create_child(id, kind, *args, parent, state, ctx).await;
+                let _ = reply.send(match events.is_empty() {
+                    true => Err("the runner could not be created".to_string()),
+                    false => Ok(()),
+                });
+                self.persist_and_advance(state, events, ctx).await
+            }
+            SessionCommand::UserMessage {
+                agent_id,
+                text,
+                reply,
+            } => {
+                self.on_user_message(state, agent_id, text, reply, ctx)
+                    .await
+            }
+            SessionCommand::Stop { agent_id, reply } => {
+                self.on_stop(state, &agent_id, reply, ctx).await
+            }
+            SessionCommand::Answer {
+                agent_id,
+                answers,
+                reply,
+            } => {
+                self.on_answer(state, agent_id.as_deref(), answers, reply, ctx)
+                    .await
+            }
+            SessionCommand::DeleteRunner { id, reply } => {
+                self.on_delete_runner(state, id, reply, ctx).await
+            }
+            SessionCommand::RetryStep { index, reply } => {
+                self.on_retry_step(state, index, reply, ctx).await
+            }
+            SessionCommand::PrepareOffload { reply } => {
+                let busy = self.busy(state);
+                let _ = reply.send(!busy);
+                if !busy {
+                    self.stop_agents().await;
+                }
+                CommandEffect::none()
+            }
+            SessionCommand::Delete { reply } => {
+                self.cancel_in_flight(state).await;
+                self.stop_agents().await;
+                let _ = reply.send(());
+                CommandEffect::none()
+            }
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             SessionCommand::Hooks(c) => HookRouting::handle(self, state, c, ctx).await,
             SessionCommand::Core(c) => SessionCore::handle(self, state, c, ctx).await,
             // The one command routed by identity rather than by variant: which
-            // agent sent the outcome decides which component answers it.
+            // agent sent the outcome decides which runner answers it.
             SessionCommand::AgentOutcome(outcome) => {
                 self.on_agent_outcome(state, outcome, ctx).await
             }
@@ -1203,7 +1636,7 @@ impl EventSourcedActor for SessionActor {
     /// everything else may take it for granted.
     async fn on_recovery_complete(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         ctx: &mut ActorContext<SessionInbox>,
     ) {
         self.services = resolve(&self.users, &self.account).await;

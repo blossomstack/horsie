@@ -6,8 +6,7 @@
 //! none of them.
 
 use super::CoreCommand;
-use super::component::Component;
-use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
+use super::{CommandEffect, SessionActor, SessionEvent, SessionState};
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::title::normalize_session_title;
 use crate::sessions::addressing::SessionInbox;
@@ -40,7 +39,7 @@ impl SessionCore {
         state: &SessionState,
         cmd: CoreCommand,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd {
             CoreCommand::SetTitle { title, reply, .. } => {
                 let result = match normalize_session_title(&title) {
@@ -50,7 +49,7 @@ impl SessionCore {
                 // Journal the name this session now answers to, but only if it
                 // actually took: a rejected title must not be recorded as one.
                 let effect = match result.as_ref() {
-                    Ok(name) => CommandEffect::persist(vec![SessionDomainEvent::Renamed {
+                    Ok(name) => CommandEffect::persist(vec![SessionEvent::Renamed {
                         name: name.clone(),
                     }]),
                     Err(_) => CommandEffect::none(),
@@ -58,9 +57,22 @@ impl SessionCore {
                 let _ = reply.send(result);
                 effect
             }
+            // The one boundary nothing else reaches. Everything it starts is
+            // whatever `Runner::actions` asked for, which is the same call a
+            // live boundary makes — so there is no recovery-only path here to
+            // drift from the ordinary one.
+            CoreCommand::RuntimeEvent { runner, event } => {
+                let events = vec![SessionEvent::Runner {
+                    id: runner,
+                    event: Box::new(crate::sessions::runners::RunnerEvent::Runtime(event)),
+                    at_ms: now_ms(),
+                }];
+                actor.persist_and_advance(state, events, ctx).await
+            }
+            CoreCommand::Advance => actor.persist_and_advance(state, Vec::new(), ctx).await,
             CoreCommand::TitleSet { name } => {
                 actor.spec_mut().name = Some(name.clone());
-                CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
+                CommandEffect::persist(vec![SessionEvent::Renamed { name }])
             }
             CoreCommand::RecordSpec { spec } => {
                 // Idempotent, because a log that already says what this session
@@ -75,7 +87,9 @@ impl SessionCore {
                 // cannot — a session created a moment ago, whose log is empty
                 // and whose agents nothing else would ever start.
                 actor.adopt((*spec).clone(), state, ctx).await;
-                CommandEffect::persist(vec![SessionDomainEvent::SpecRecorded { spec }])
+                let mut events = vec![SessionEvent::SpecRecorded { spec: spec.clone() }];
+                events.extend(actor.birth_runners(&spec));
+                CommandEffect::persist(events)
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
@@ -159,12 +173,12 @@ impl SessionActor {
     /// rather than by where it itself sat.
     pub(super) async fn record_lifecycle(
         &mut self,
-        events: &[SessionDomainEvent],
+        events: &[SessionEvent],
         state: &SessionState,
     ) {
         for event in events {
-            for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
-                let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+            for (key, payload) in crate::sessions::runners::lifecycle_routing::route(event, state) {
+                let Some(agent) = self.agents.get(&key).cloned() else {
                     tracing::warn!(
                         session = %self.id,
                         ?key,
@@ -185,10 +199,10 @@ impl SessionActor {
     /// Record one lifecycle entry on a named agent, when it is resident.
     pub(super) async fn record_on(
         &mut self,
-        key: AgentKey,
+        key: crate::sessions::runners::ids::AgentId,
         event: horsie_agentcore::LifecycleEvent,
     ) {
-        let agent = self.agents.as_ref().and_then(|a| a.get(key)).cloned();
+        let agent = self.agents.get(&key).cloned();
         if let Some(agent) = agent {
             let _ = agent
                 .actor
@@ -201,42 +215,6 @@ impl SessionActor {
     }
 }
 
-impl Component for SessionCore {
-    /// Banked usage. Core-owned because all three agent-owning components
-    /// record into it and the total belongs to none of them.
-    ///
-    /// Pure, and an associated function rather than a method: replay runs with
-    /// no instance in scope, which is what makes a recovered session and a live
-    /// one follow the same path.
-    // The fallthrough is unreachable by construction: `SessionActor::apply_event`
-    // matches every variant explicitly and routes each to exactly one component,
-    // so a newly added event fails to compile *there* — which is where it should
-    // be classified — rather than silently reaching the wrong fold here.
-    #[allow(clippy::wildcard_enum_match_arm)]
-    fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
-        match event.clone() {
-            SessionDomainEvent::UsageRecorded {
-                agent_id,
-                usage_total,
-                ..
-            } => {
-                state.agent_usage.insert(agent_id, usage_total);
-            }
-            SessionDomainEvent::SpecRecorded { spec } => {
-                state.spec = Some(*spec);
-            }
-            SessionDomainEvent::Renamed { name } => {
-                // Only the name moves. A rename must not resurrect a spec that
-                // was never recorded, or a session would start believing in a
-                // default it was never created with.
-                if let Some(spec) = state.spec.as_mut() {
-                    spec.name = Some(name);
-                }
-            }
-            other => unreachable!("SessionCore was handed {other:?}"),
-        }
-    }
-}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -263,7 +241,7 @@ mod tests {
         let mut state = SessionState::default();
         while let Some(raw) = events.next().await {
             let (_, payload) = raw.unwrap();
-            let event: SessionDomainEvent = serde_json::from_slice(&payload).unwrap();
+            let event: SessionEvent = serde_json::from_slice(&payload).unwrap();
             state = <SessionActor as horsie_actor::EventSourcedActor>::apply_event(state, event);
         }
         state.spec

@@ -25,9 +25,9 @@
 //! 3. A runner impl holds no fields. Everything it knows is in the state
 //!    handed to it — a field would not survive a reload, and worse, would
 //!    silently differ from what the log says.
-#![allow(dead_code)] // Phase A: built and tested here, wired into the actor in Phase B.
 
 pub mod action;
+pub mod birth;
 pub mod conversation;
 pub mod ids;
 pub mod lifecycle_routing;
@@ -51,6 +51,12 @@ use action::Action;
 use message::ChildOutcome;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Deepest node the runner tree may hold. A node *at* this depth cannot spawn.
+///
+/// One number across the combined tree, which is what a subagent-only depth
+/// could not express once a workflow step could spawn too.
+pub const MAX_SUBAGENT_DEPTH: u32 = 4;
 
 /// What a runner decided: events for its own slice, actions for the session.
 ///
@@ -136,6 +142,19 @@ pub trait Runner {
     /// would need a second entry for recovery, and the suppression that
     /// implies is where the bugs live.
     fn actions(&self, view: &SessionView) -> Vec<Action>;
+
+    /// What records that one of my agents has been started.
+    ///
+    /// The session emits this when it performs [`Action::StartAgent`], because
+    /// starting is the session's act — a runner only asks. Without it `started`
+    /// stays false and `actions()` asks again at every boundary, which
+    /// double-starts the agent on every recovery: the exact failure
+    /// `Runner::actions`'s idempotence is supposed to make impossible.
+    ///
+    /// `None` from the one runner that owns no agents.
+    fn started_event(&self) -> Option<RunnerEvent> {
+        None
+    }
 
     /// My ending, translated into the vocabulary of whoever created me.
     ///
@@ -315,7 +334,7 @@ pub trait Runner {
 /// agent role: a workflow owns several step agents over time, but they are all
 /// step agents. A runner's state, its agent role and its outcome vocabulary
 /// are one triple.
-pub trait AgentLifecycle {
+pub trait AgentLifecycle: Send + Sync {
     fn on_agent_started(&self, agent: AgentId) -> Emit;
 
     /// The method that separates the runners: the same ending is a result for
@@ -455,7 +474,6 @@ pub struct Assembly<'a> {
 /// not be able to build one by accident. The two runners that need a `Default`
 /// state need it only so `RunnerState::empty_for` can build one, which is
 /// itself test scaffolding.
-#[cfg(test)]
 #[must_use]
 pub(crate) fn empty_settings() -> crate::sessions::spec::AgentSettings {
     crate::sessions::spec::AgentSettings {
@@ -539,6 +557,10 @@ impl Runner for RunnerState {
 
     fn outcome(&self) -> Option<ChildOutcome> {
         dispatch!(self, outcome)
+    }
+
+    fn started_event(&self) -> Option<RunnerEvent> {
+        dispatch!(self, started_event)
     }
 
     fn busy(&self) -> bool {

@@ -12,19 +12,17 @@
 //! on purpose, because a server event misfiled as a tool one is halted twice.
 
 use super::{
-    AgentKey, CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState,
-    context::{SessionAgentKind, SessionContextProvider},
+    CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
+    SessionEvent, SessionState,
+    context::SessionContextProvider,
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::RunnerId;
-use crate::sessions::session_actor::types::SubAgentCommand;
-use crate::sessions::spec::SessionStatus;
-use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
@@ -46,12 +44,12 @@ pub(super) struct SessionParent {
     /// Which agent reports through this sink. Only requests need it — a
     /// subagent's parent has to be named, and the caller is the one thing a
     /// capability cannot say about itself.
-    key: AgentKey,
+    agent: AgentId,
 }
 
 impl SessionParent {
-    pub(super) fn new(target: SessionRef, key: AgentKey) -> Self {
-        Self { target, key }
+    pub(super) fn new(target: SessionRef, agent: AgentId) -> Self {
+        Self { target, agent }
     }
 
     /// Create a child runner by the command the session already has for it.
@@ -75,31 +73,29 @@ impl SessionParent {
             call: call.clone(),
             reason,
         };
-        let caller = match self.key {
-            AgentKey::Main => SubAgentParent::Main,
-            AgentKey::Sub(id) => SubAgentParent::SubAgent(id),
-            // A step and a fork each root a subagent tree of their own, so a
-            // spawn from one is that tree's `Main`.
-            AgentKey::Step(_) | AgentKey::Fork(_) => SubAgentParent::Main,
-        };
         match args {
             RunnerArgs::SubAgent {
                 agent,
                 label,
                 task,
                 agent_type,
-                ..
+                settings,
             } => match self
                 .target
                 .ask(|reply| {
-                    SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                        caller,
-                        agent,
-                        label,
-                        task,
-                        agent_type,
+                    SessionCommand::StartRunner {
+                        id,
+                        kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+                        args: Box::new(RunnerArgs::SubAgent {
+                            agent,
+                            label,
+                            task,
+                            agent_type,
+                            settings,
+                        }),
+                        parent: self.agent,
                         reply,
-                    })
+                    }
                 })
                 .await
             {
@@ -147,27 +143,19 @@ impl AgentOutcomeSink for SessionParent {
         }
         match request {
             SessionRequest::SetTitle { title, .. } => {
-                // Which title depends on who asked, and the request cannot
-                // say: a fork naming itself and a conversation naming the
-                // session are the same tool call. `key` is the only thing that
-                // knows, which is why this sink carries it. Routing both to
-                // `Core` would let a fork rename the whole session.
+                // Which conversation gets renamed is decided by the session,
+                // from the runner this agent belongs to — a fork names itself,
+                // the root names the session. One command, and the caller's id
+                // is the whole of what it needs to say: routing here would put
+                // the answer in a sink that cannot see the tree.
                 match self
                     .target
-                    .ask(|reply| match self.key {
-                        AgentKey::Fork(id) => SessionCommand::Fork(super::ForkCommand::SetTitle {
-                            id,
-                            agent: crate::sessions::runners::ids::AgentId::default(),
+                    .ask(|reply| {
+                        SessionCommand::Core(super::CoreCommand::SetTitle {
+                            agent: self.agent,
                             title: title.clone(),
                             reply,
-                        }),
-                        AgentKey::Main | AgentKey::Sub(_) | AgentKey::Step(_) => {
-                            SessionCommand::Core(super::CoreCommand::SetTitle {
-                                agent: crate::sessions::runners::ids::AgentId::default(),
-                                title: title.clone(),
-                                reply,
-                            })
-                        }
+                        })
                     })
                     .await
                 {
@@ -199,12 +187,12 @@ pub(crate) struct SessionHookSink {
     /// Which agent's transcript these records belong in. A subagent's hooks are
     /// its own; without this they would all pile into one log with no way to
     /// tell whose call they guarded.
-    key: AgentKey,
+    agent: AgentId,
 }
 
 impl SessionHookSink {
-    pub(crate) fn new(target: SessionRef, key: AgentKey) -> Self {
-        Self { target, key }
+    pub(crate) fn new(target: SessionRef, agent: AgentId) -> Self {
+        Self { target, agent }
     }
 }
 
@@ -226,7 +214,7 @@ impl horsie_runtime_host::HookSink for SessionHookSink {
         let _ = self
             .target
             .tell(SessionCommand::Hooks(HookCommand::Ran {
-                key: self.key,
+                key: self.agent,
                 records: hooks,
             }))
             .await;
@@ -236,7 +224,7 @@ impl horsie_runtime_host::HookSink for SessionHookSink {
             let _ = self
                 .target
                 .tell(SessionCommand::Hooks(HookCommand::Halt {
-                    key: self.key,
+                    key: self.agent,
                     reason,
                 }))
                 .await;
@@ -261,7 +249,7 @@ pub(super) const MAX_STOP_CONTINUATIONS: usize = 3;
 pub(super) struct StopHookParent {
     inner: Arc<dyn AgentOutcomeSink>,
     session: SessionRef,
-    key: AgentKey,
+    agent: AgentId,
     /// The provider whose `provide()` cached this agent's client. `Stop` never
     /// acquires a runtime of its own: a turn that already concluded must not be
     /// able to fail on provisioning, and there is nothing to guard if no runtime
@@ -278,13 +266,13 @@ impl StopHookParent {
     /// wrapped so this agent's `Stop` hooks run first.
     pub(super) fn wrap(
         session: SessionRef,
-        key: AgentKey,
+        agent: AgentId,
         provider: Arc<SessionContextProvider>,
     ) -> Arc<dyn AgentOutcomeSink> {
         Arc::new(Self {
-            inner: Arc::new(SessionParent::new(session.clone(), key)),
+            inner: Arc::new(SessionParent::new(session.clone(), agent)),
             session,
-            key,
+            agent,
             provider,
             continuations: Arc::new(AtomicUsize::new(0)),
         })
@@ -328,22 +316,22 @@ impl AgentOutcomeSink for StopHookParent {
         // A subagent's turn ending is a `SubagentStop`, not a `Stop`. This sink
         // decorates every agent a session hosts, and until it was gated on the
         // kind a session with four subagents fired `Stop` five times.
-        let event = match self.provider.kind {
-            SessionAgentKind::Sub(id) => ServerHookEvent::SubagentStop(SubagentStopInput {
-                agent_id: id.to_string(),
-                agent_type: self.provider.agent_type(),
-                last_assistant_message,
-                stop_hook_active,
-            }),
-            // A step keeps `Stop`: it fires `SessionStart` and roots its own
-            // subagent tree, so answering `SubagentStop` would contradict its
-            // own start.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                ServerHookEvent::Stop(StopInput {
+        let event = match self.provider.role {
+            crate::sessions::runners::loading::AgentRole::Sub => {
+                ServerHookEvent::SubagentStop(SubagentStopInput {
+                    agent_id: self.provider.agent.to_string(),
+                    agent_type: self.provider.agent_type(),
                     last_assistant_message,
                     stop_hook_active,
                 })
             }
+            // A step keeps `Stop`: it fires `SessionStart` and roots its own
+            // subagent tree, so answering `SubagentStop` would contradict its
+            // own start.
+            _ => ServerHookEvent::Stop(StopInput {
+                last_assistant_message,
+                stop_hook_active,
+            }),
         };
         let records = client.run_hooks(event).await.unwrap_or_default();
 
@@ -368,7 +356,7 @@ impl AgentOutcomeSink for StopHookParent {
                 let _ = self
                     .session
                     .tell(SessionCommand::Hooks(HookCommand::ContinueAfterStop {
-                        key: self.key,
+                        key: self.agent,
                         reason,
                     }))
                     .await;
@@ -380,7 +368,7 @@ impl AgentOutcomeSink for StopHookParent {
                 let _ = self
                     .session
                     .tell(SessionCommand::Hooks(HookCommand::Ran {
-                        key: self.key,
+                        key: self.agent,
                         records: cap_reached(records),
                     }))
                     .await;
@@ -557,14 +545,14 @@ impl HookRouting {
         state: &SessionState,
         cmd: HookCommand,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
+    ) -> CommandEffect<SessionEvent> {
         match cmd {
             HookCommand::Ran { key, records } => {
                 // The agent owns its own transcript, so the records go to it
                 // rather than into the session's log. An agent that has already
                 // gone is not an error: the records describe a call it made
                 // before it left, and there is nothing left to tell.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(&key) {
                     let _ = agent.actor.tell(AgentCommand::HooksRan { records }).await;
                 }
                 CommandEffect::none()
@@ -577,9 +565,8 @@ impl HookRouting {
                 // `ContinueAfterStop` below no-ops on the same condition.
                 let live = actor
                     .agents
-                    .as_ref()
-                    .and_then(|a| a.get(key))
-                    .filter(|_| state.status == SessionStatus::Running)
+                    .get(&key)
+                    .filter(|_| state.status() == crate::sessions::runners::ids::RunnerStatus::Running)
                     .cloned();
                 let Some(agent) = live else {
                     tracing::warn!(
@@ -608,10 +595,7 @@ impl HookRouting {
                     .on_agent_outcome(
                         state,
                         AgentOutcome::Failed {
-                            agent: match key {
-                                AgentKey::Main => actor.id,
-                                AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => id,
-                            },
+                            agent: key.as_uuid(),
                             error: reason,
                             // Not recoverable and not terminal: re-running the same
                             // turn would meet the same hook, but the session is
@@ -627,7 +611,7 @@ impl HookRouting {
                 // One more thing addressed to the agent, queued like the rest:
                 // the turn it continues is over by the time this lands, so the
                 // agent's own boundary drain is what starts the next one.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(&key) {
                     let _ = agent
                         .actor
                         .tell(AgentCommand::Enqueue {
@@ -669,7 +653,7 @@ mod tests {
     async fn the_same_request_twice_starts_one_child() {
         let gate = BlockingProvider::new();
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
-        let parent = SessionParent::new(session.clone(), AgentKey::Main);
+        let parent = SessionParent::new(session.clone(), crate::sessions::runners::AgentId(Uuid::nil()));
         let worker = crate::sessions::runners::ids::AgentId::new_v4();
         let request = SessionRequest::StartRunner {
             call: "call-1".to_string(),
@@ -689,7 +673,7 @@ mod tests {
             matches!(first, SessionReply::Done { .. }),
             "the first ask must create the child: {first:?}"
         );
-        wait_for_tree(&journal, id, |t| t.node(worker.as_uuid()).is_some()).await;
+        wait_for_tree(&journal, id, |rows| rows.iter().any(|r| r.id == worker.to_string())).await;
 
         let second = parent.request(request).await;
         assert!(
@@ -698,22 +682,27 @@ mod tests {
              when the child is running: {second:?}"
         );
 
-        // Counted in the journal, not in the tree. The tree is a map keyed by
-        // the worker, so a second spawn of the same id overwrites the node and
-        // leaves the count at one — while having journaled the spawn twice,
-        // started a second child actor and queued the task again. What "one
-        // child" means is one `SubAgentSpawned`.
+        // Counted in the journal, not in the roster. The roster is keyed by
+        // the worker, so a second create of the same id overwrites the record
+        // and leaves the count at one — while having journaled the create
+        // twice, started a second child actor and queued the task again. What
+        // "one child" means is one `RunnerCreated` naming a `SubAgent`.
         let spawns = journaled_events(&journal, id)
             .await
             .into_iter()
-            .filter(|e| e.contains("SubAgentSpawned"))
+            .filter(|e| e.contains("RunnerCreated") && e.contains("\"kind\":\"SubAgent\""))
             .count();
         assert_eq!(
             spawns, 1,
             "the repeat spawned a second worker, so a crash doubles the work"
         );
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert_eq!(state.subagents.ids(), vec![worker.as_uuid()]);
+        let workers: Vec<String> = crate::sessions::runners::reads::agent_roster(&state)
+            .into_iter()
+            .filter(|r| r.label.is_some())
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(workers, vec![worker.to_string()]);
     }
 
     /// A blocking `Stop` means *blocked from stopping*: the turn does not
@@ -835,7 +824,7 @@ mod tests {
         }
         session
             .tell(SessionCommand::Hooks(HookCommand::Halt {
-                key: AgentKey::Main,
+                key: crate::sessions::runners::AgentId(Uuid::nil()),
                 reason: "the repo is locked".into(),
             }))
             .await
@@ -923,14 +912,14 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.iter().find(|r| r.id == sub.to_string())
+                .is_some_and(|r| r.status == crate::sessions::session_actor::AgentStatus::Running)
         })
         .await;
 
         session
             .tell(SessionCommand::Hooks(HookCommand::Ran {
-                key: AgentKey::Sub(sub),
+                key: crate::sessions::runners::AgentId(sub),
                 records: vec![hook_record("guard", "tc1")],
             }))
             .await

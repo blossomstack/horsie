@@ -110,6 +110,10 @@ pub enum Event {
 }
 
 impl Runner for State {
+    fn started_event(&self) -> Option<RunnerEvent> {
+        Some(RunnerEvent::SubAgent(Event::Started))
+    }
+
     fn actions(&self, _view: &SessionView) -> Vec<Action> {
         if self.started || self.result.is_some() {
             return Vec::new();
