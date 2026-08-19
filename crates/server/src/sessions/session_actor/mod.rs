@@ -262,36 +262,24 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
     ) {
         self.spec = Some(spec);
-        match &self.spec().kind {
-            // A run has no main agent, and every other agent — a step, a
-            // worker, a fork — stays cold: it spawns on demand for a read, a
-            // retry, or the next thing a boundary picks. The map simply starts
-            // empty, so there is no topology to record here at all.
-            SessionKind::Workflow { .. } => {}
-            SessionKind::Agent { .. } => self.spawn_main_agent(ctx, state),
-        }
-        // Each component repairs itself. A self-send rather than direct work,
-        // because neither caller may write here — recovery must not persist at
-        // all, and `RecordSpec` is already returning an effect of its own — so
-        // anything that needs to journal arrives as an ordinary command, down
-        // the same path a live one would take.
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
-        let repairs: Vec<SessionCommand> = [
-            RuntimeLifecycle::on_load(&cx, state),
-            SubAgents::on_load(&cx, state),
-            WorkflowRun::on_load(&cx, state),
-            Turns::on_load(&cx, state),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        let me = self.me(ctx);
-        for cmd in repairs {
-            let _ = me.tell(cmd).await;
-        }
+        // Nothing is spawned here and no component is asked to repair itself.
+        // `Runner::actions` is pure and idempotent and is called at every
+        // boundary, so creation and recovery take the same path: a runner that
+        // needs its agent started asks for it whether that state arrived a
+        // millisecond ago or from a journal replayed after a restart.
+        //
+        // The four `on_load` repairs this replaces existed because the old
+        // shape had no such path — a `run()` that fired once needed a second
+        // entry for recovery, and the suppression that implies is where the
+        // bugs lived.
+        //
+        // One case `actions()` genuinely cannot see: an agent that was
+        // `started` when the process died. Nothing in the fold distinguishes
+        // it from one still working, because it *is* still marked working. The
+        // agent itself closes that — it journals its own interruption at its
+        // own recovery — so what the session owes is only to bring it back,
+        // which `reach` does on the first message addressed to it.
+        let _ = self.me(ctx).tell(SessionCommand::Core(CoreCommand::Advance)).await;
         // Loading is not a transition, but it is the first moment anyone can
         // learn this status: a page already watching hears nothing otherwise.
         //
@@ -967,21 +955,80 @@ impl SessionActor {
             .collect()
     }
 
+    /// Everything startable at this boundary, performed in order, each seeing
+    /// the state the previous one produced.
+    ///
+    /// Deliveries first: a parent waiting on its children is work already in
+    /// flight, and a next turn can wait a boundary. This is also the re-drive
+    /// point that makes delivery at-least-once — a report the last process told
+    /// but never acknowledged is still `owed` here.
     async fn flush_then_drain(
         &mut self,
-        state: &SessionState,
+        state: &RunnerSessionState,
         ctx: &ActorContext<SessionInbox>,
-    ) -> Vec<SessionDomainEvent> {
+    ) -> Vec<SessionEvent> {
         let mut events = Vec::new();
         let mut next = state.clone();
-        for action in self.next_actions(&next) {
-            let produced = self.perform(action, &next, ctx).await;
+        for (child, parent, outcome) in self.owed(&next) {
+            let produced = self.offer_to_parent(child, parent, &outcome, &next).await;
             for e in &produced {
-                next = Self::apply_event(next, e.clone());
+                next.apply(e);
+            }
+            events.extend(produced);
+        }
+        for (runner, action) in self.next_actions(&next) {
+            let produced = self.perform(runner, action, &next, ctx).await;
+            for e in &produced {
+                next.apply(e);
             }
             events.extend(produced);
         }
         events
+    }
+
+    /// Offer a finished child's outcome to the capabilities of the agent that
+    /// created it.
+    ///
+    /// Gated by the capability's own `outstanding`, not by an owner lookup this
+    /// actor performs: a child a capability did not create falls through as
+    /// `None` rather than being mishandled, which is what stops two
+    /// capabilities plausibly claiming one report.
+    async fn offer_to_parent(
+        &mut self,
+        child: RunnerId,
+        parent: AgentId,
+        outcome: &ChildOutcome,
+        state: &RunnerSessionState,
+    ) -> Vec<SessionEvent> {
+        let Some(runner) = state.runner_of(parent) else {
+            return Vec::new();
+        };
+        let Some(record) = state.record(runner) else {
+            return Vec::new();
+        };
+        let Some(caps) = record.state.capabilities() else {
+            return Vec::new();
+        };
+        let msg = crate::agent_loop::capabilities::Msg::Child(
+            &crate::sessions::runners::message::ChildMsg::Outcome {
+                child,
+                outcome: outcome.clone(),
+            },
+        );
+        let Some(decision) = caps.offer(&msg) else {
+            return Vec::new();
+        };
+        self.wrap(
+            runner,
+            Emit {
+                events: decision
+                    .events
+                    .into_iter()
+                    .map(RunnerEvent::Capability)
+                    .collect(),
+                actions: Vec::new(),
+            },
+        )
     }
 
     /// Persist `events`, having first let the boundary they create start
@@ -994,14 +1041,14 @@ impl SessionActor {
     /// parent stranding when no further outcome can arrive.
     async fn persist_and_advance(
         &mut self,
-        state: &SessionState,
-        mut events: Vec<SessionDomainEvent>,
+        state: &RunnerSessionState,
+        mut events: Vec<SessionEvent>,
         ctx: &ActorContext<SessionInbox>,
-    ) -> CommandEffect<SessionDomainEvent> {
-        let next = events
-            .iter()
-            .cloned()
-            .fold(state.clone(), Self::apply_event);
+    ) -> CommandEffect<SessionEvent> {
+        let mut next = state.clone();
+        for e in &events {
+            next.apply(e);
+        }
         events.extend(self.flush_then_drain(&next, ctx).await);
         CommandEffect::persist(events)
     }

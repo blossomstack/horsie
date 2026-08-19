@@ -57,6 +57,11 @@ impl SessionCore {
                 let _ = reply.send(result);
                 effect
             }
+            // The one boundary nothing else reaches. Everything it starts is
+            // whatever `Runner::actions` asked for, which is the same call a
+            // live boundary makes — so there is no recovery-only path here to
+            // drift from the ordinary one.
+            CoreCommand::Advance => actor.persist_and_advance(state, Vec::new(), ctx).await,
             CoreCommand::TitleSet { name } => {
                 actor.spec_mut().name = Some(name.clone());
                 CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])

@@ -352,6 +352,17 @@ pub enum CoreCommand {
     /// shows; this one is what the running session reads, and a session's own
     /// journal is the truth about that session.
     TitleSet { name: String },
+    /// Internal: drive the boundary, persisting whatever it starts.
+    ///
+    /// Self-sent once at load, because that is the one boundary nothing else
+    /// reaches. `Runner::actions` is idempotent, so this is the same call every
+    /// other boundary makes — but recovery may not persist, and `RecordSpec` is
+    /// already returning an effect of its own, so the drive arrives as an
+    /// ordinary command down the path a live one would take.
+    ///
+    /// Without it a recovered session starts nothing: every runner asks for its
+    /// first agent and no one is listening.
+    Advance,
     /// Internal: write this session's spec into its own log.
     ///
     /// Self-sent by recovery when the log has no spec, which is true exactly
