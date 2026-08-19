@@ -1673,16 +1673,40 @@ impl SessionActor {
         let (who, end) = match TurnEnd::split(outcome) {
             Ok(pair) => pair,
             // Usage is banked for every agent alike, and always: the tokens
-            // were spent whatever became of the turn that spent them. Keyed by
-            // model rather than by agent, because the per-agent breakdown
-            // belongs to the runner that owns it.
+            // were spent whatever became of the turn that spent them.
+            //
+            // Twice over, and that is not a duplicate fact: the by-model
+            // aggregate is what a session-wide read wants, and the runner's own
+            // split by agent is the only source of a step's tokens and of a
+            // conversation's. Both in one batch, so they cannot come apart.
+            //
+            // What is banked is the *delta*. An agent reports its running total
+            // at every turn boundary and both sinks add what they are given, so
+            // handing them the total counts every earlier turn again — a session
+            // with one agent then read higher than that agent. The floor comes
+            // from the runner, which is folded from this same journal, so a
+            // report replayed after a restart adds nothing.
             Err((agent, NotAnEnd::Usage(usage_total))) => {
-                let model = crate::sessions::runners::reads::settings_of(state, AgentId(agent))
+                let agent = AgentId(agent);
+                let Some(runner) = state.runner_of(agent) else {
+                    tracing::warn!(session = %self.id, %agent, "usage from an agent no runner owns");
+                    return CommandEffect::none();
+                };
+                let model = crate::sessions::runners::reads::settings_of(state, agent)
                     .map_or_else(String::new, |s| s.model.clone());
-                return CommandEffect::persist(vec![SessionEvent::UsageBanked {
-                    model,
-                    spent: usage_total,
-                }]);
+                let spent = usage_total.since(&state.banked_for(agent));
+                return CommandEffect::persist(vec![
+                    SessionEvent::Runner {
+                        id: runner,
+                        event: Box::new(crate::sessions::runners::RunnerEvent::Usage {
+                            agent,
+                            model: model.clone(),
+                            spent,
+                        }),
+                        at_ms: now_ms(),
+                    },
+                    SessionEvent::UsageBanked { model, spent },
+                ]);
             }
             Err((agent, NotAnEnd::Started)) => {
                 return self.on_agent_started(state, AgentId(agent)).await;

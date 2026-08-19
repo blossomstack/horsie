@@ -553,6 +553,30 @@ impl UsageTotal {
     /// Combines two agents' cumulative totals into a session-level aggregate.
     /// Only ever sums usage — never a context-size figure, which stays
     /// meaningfully per-agent (see `AgentUsageSnapshot::context_tokens`).
+    /// What is new in this running total since an earlier reading of it.
+    ///
+    /// An agent reports its *cumulative* usage at every turn boundary, while
+    /// every aggregate that receives it adds what it is handed — so what must be
+    /// handed over is the difference. Adding the total itself counts every
+    /// earlier turn again, which is how a session came to read higher than the
+    /// only agent it had.
+    ///
+    /// Saturating, so a floor above the reading yields nothing rather than
+    /// wrapping: the two are then readings of different counters, and there is
+    /// no honest number to report.
+    #[must_use]
+    pub fn since(&self, floor: &UsageTotal) -> UsageTotal {
+        UsageTotal {
+            input_tokens: self.input_tokens.saturating_sub(floor.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(floor.output_tokens),
+            cache_creation_tokens: since_optional(
+                self.cache_creation_tokens,
+                floor.cache_creation_tokens,
+            ),
+            cache_read_tokens: since_optional(self.cache_read_tokens, floor.cache_read_tokens),
+        }
+    }
+
     pub fn combine(&self, other: &UsageTotal) -> UsageTotal {
         UsageTotal {
             input_tokens: self.input_tokens.saturating_add(other.input_tokens),
@@ -564,6 +588,14 @@ impl UsageTotal {
             cache_read_tokens: combine_optional(self.cache_read_tokens, other.cache_read_tokens),
         }
     }
+}
+
+/// Subtracts one `u64` cache total from a later reading of the same one. Stays
+/// `None` only while the later reading has no cache data — a floor that reported
+/// some against a reading that reports none is a floor for a different counter,
+/// and there is no number to hand back.
+fn since_optional(total: Option<u64>, floor: Option<u64>) -> Option<u64> {
+    total.map(|total| total.saturating_sub(floor.unwrap_or(0)))
 }
 
 /// Sums an accumulating `u64` cache total with a per-turn `u32` delta. Stays
@@ -2345,6 +2377,52 @@ mod tests {
         assert_eq!(state.usage_total.input_tokens, 50);
         assert_eq!(state.usage_total.cache_creation_tokens, Some(15));
         assert_eq!(state.usage_total.cache_read_tokens, Some(25));
+    }
+
+    /// **A cumulative report is turned into a delta against what was already
+    /// recorded.** Every aggregate that receives one adds it, so handing over
+    /// the running total counts every earlier turn again.
+    #[test]
+    fn usage_total_since_reports_only_what_is_new() {
+        let floor = UsageTotal {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_tokens: Some(3),
+            cache_read_tokens: None,
+        };
+        let total = UsageTotal {
+            input_tokens: 25,
+            output_tokens: 9,
+            cache_creation_tokens: Some(7),
+            cache_read_tokens: Some(4),
+        };
+        let spent = total.since(&floor);
+        assert_eq!(spent.input_tokens, 15);
+        assert_eq!(spent.output_tokens, 4);
+        assert_eq!(spent.cache_creation_tokens, Some(4));
+        assert_eq!(
+            spent.cache_read_tokens,
+            Some(4),
+            "a counter the floor never reported is new in full"
+        );
+
+        // Nothing happened since the last reading, which is what a report
+        // replayed after a restart looks like. The cache counters stay `Some`:
+        // this agent does report them, and it reports that nothing was new —
+        // which is a different fact from never having reported at all.
+        let nothing = total.since(&total);
+        assert_eq!((nothing.input_tokens, nothing.output_tokens), (0, 0));
+        assert_eq!(nothing.cache_creation_tokens, Some(0));
+
+        // And a floor above the reading yields nothing rather than wrapping:
+        // the two are readings of different counters.
+        let backwards = floor.since(&total);
+        assert_eq!((backwards.input_tokens, backwards.output_tokens), (0, 0));
+        assert_eq!(backwards.cache_creation_tokens, Some(0));
+        assert_eq!(
+            backwards.cache_read_tokens, None,
+            "a counter this reading does not report has no delta to give"
+        );
     }
 
     #[test]

@@ -571,6 +571,36 @@ mod tests {
         );
     }
 
+    /// **A session's total is what its agents spent, not their running total
+    /// added again every turn.**
+    ///
+    /// An agent reports its cumulative usage at each turn boundary and the
+    /// session's aggregate adds what it is handed, so turn two used to bank
+    /// turn one a second time — and a session with exactly one agent read
+    /// higher than that agent, which is a sum that cannot be right whatever the
+    /// numbers are.
+    #[tokio::test]
+    async fn a_second_turn_banks_only_what_it_spent() {
+        use crate::sessions::runners::reads::usage_stats;
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let main = main_agent(&session).await;
+
+        // Two turns, one token in and one out apiece.
+        send(&session, "one").await;
+        send(&session, "two").await;
+        wait_for_state(&journal, id, "two turns of usage", |s| {
+            usage_stats(s).session_total.input_tokens == 2
+        })
+        .await;
+
+        let stats = usage_stats(&folded(&journal, id).await);
+        assert_eq!(
+            stats.agents.get(&main.to_string()).copied(),
+            Some(stats.session_total),
+            "one agent: the session total must equal its own total: {stats:?}"
+        );
+    }
+
     /// The fallback title: the first line, elided to fit. It exists so a
     /// session is never nameless in the list while the agent is still working
     /// out what to call it.

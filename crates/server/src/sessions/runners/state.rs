@@ -8,7 +8,7 @@
 //! session-shaped name.
 
 use super::ids::{AgentId, RunnerId, RunnerKind, RunnerStatus};
-use super::{RunnerEvent, RunnerState};
+use super::{Runner, RunnerEvent, RunnerState};
 use crate::agent_loop::UsageTotal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -110,7 +110,30 @@ impl SessionState {
         depth
     }
 
+    /// What this session has already recorded against one agent.
+    ///
+    /// The floor a cumulative report is turned into a delta against. It is read
+    /// from the runner that owns the agent rather than kept beside the by-model
+    /// aggregate, because that is where per-agent usage lives — and because it
+    /// is folded from this session's own journal, an agent that reports the same
+    /// running total twice across a restart banks nothing the second time.
+    #[must_use]
+    pub fn banked_for(&self, agent: AgentId) -> UsageTotal {
+        self.runner_of(agent)
+            .and_then(|runner| self.record(runner))
+            .into_iter()
+            .flat_map(|record| record.state.usage())
+            .find(|(who, _)| *who == agent)
+            .map(|(_, spent)| spent)
+            .unwrap_or_default()
+    }
+
     /// Bank tokens against the model that spent them.
+    ///
+    /// `spent` is what is new, never a running total: the entry accumulates, so
+    /// a cumulative report added here counts every earlier turn again. Keyed by
+    /// model, several agents share an entry, so there is nothing to overwrite
+    /// instead — the delta has to be taken before it arrives.
     pub fn bank(&mut self, model: String, spent: &UsageTotal) {
         let entry = self.usage.entry(model).or_default();
         *entry = entry.combine(spent);
