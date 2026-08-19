@@ -161,6 +161,51 @@ mod tests {
         assert!(owed_deliveries(&s).is_empty());
     }
 
+    /// Pins the superseded-step rule the comment in [`owed_deliveries`] states:
+    /// a subagent spawned by a step execution reports to *that* execution's
+    /// agent, even after a retry cancelled it and a new execution (with a new
+    /// derived agent id) became the run's current step. The tree records who
+    /// asked; the run's current step is not consulted.
+    #[test]
+    fn a_superseded_steps_child_still_reports_to_the_step_that_asked() {
+        let mut s = SessionState::default();
+        let old_step = Uuid::new_v4();
+        let new_step = Uuid::new_v4();
+        let child = Uuid::new_v4();
+
+        let mut run = crate::sessions::workflow::WorkflowRunState::default();
+        run.apply_started("review".into(), old_step, 1, None, None, "go".into(), 100);
+        // The old execution spawns a helper, then is retried: cancelled, and a
+        // second execution of the same step starts under a fresh agent id.
+        run.apply_cancelled(0, 200);
+        run.apply_started("review".into(), new_step, 2, None, None, "go".into(), 300);
+        s.run = Some(run);
+
+        let tree = s.subagents.tree_mut(TreeOwner::Step(old_step));
+        tree.apply_spawned(
+            child,
+            SubAgentParent::Main,
+            "helper".into(),
+            "t".into(),
+            1,
+            150,
+            None,
+        );
+        tree.apply_completed(child, "late report".into(), 400);
+
+        let actions = owed_deliveries(&s);
+        assert_eq!(actions.len(), 1);
+        let AgentAction::Deliver(d) = &actions[0] else {
+            panic!("expected a delivery");
+        };
+        assert_eq!(
+            d.to,
+            AgentKey::Step(old_step),
+            "the report goes to the execution that spawned the child, not the retry"
+        );
+        assert_eq!(d.child, child);
+    }
+
     #[test]
     fn a_nested_child_is_owed_to_the_subagent_that_spawned_it() {
         let mut s = SessionState::default();

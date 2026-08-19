@@ -11,11 +11,13 @@
 //! entry records where it came from (`from`, `via`).
 
 mod driver;
+mod resolve;
 mod result_schema;
 pub mod spec;
 mod toolbox;
 
 pub use driver::{WorkflowOrchestrator, next_transition};
+pub use resolve::{ResolveError, ResolvedRun, resolve_run_spec, step_settings};
 pub use result_schema::{
     DESCRIPTION_FIELD, OUTCOME_FIELD, SUBMIT_RESULT_TOOL, default_outcomes, outcomes_or_default,
     render_result, result_schema, validate_result,

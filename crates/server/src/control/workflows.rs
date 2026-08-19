@@ -10,11 +10,9 @@ use crate::control::{
 };
 use crate::http::handlers;
 use crate::sessions::builder::build_workflow_spec;
-use crate::sessions::spec::{AgentSettings, SessionStatus};
+use crate::sessions::spec::SessionStatus;
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
-use crate::sessions::workflow::{
-    DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec,
-};
+use crate::sessions::workflow::{ResolveError, resolve_run_spec};
 use crate::users::UserServices;
 use horsie_models::now_ms;
 use horsie_models::workflow::{
@@ -119,123 +117,29 @@ impl Resource for Workflows {
     }
 }
 
-/// One step's agent settings, flattened from its preset at run creation.
-///
-/// Pulled out of `run_workflow` because it is the decision, not the plumbing:
-/// what a step runs *as*. In particular `plugins` is the step's own preset's,
-/// never the run's union — that is what lets two steps of one workflow hold
-/// different skills, and it is worth a test that needs no database behind it.
-fn step_settings(
-    preset: &horsie_models::agents::AgentView,
-    max_iterations: Option<u32>,
-    max_retries: Option<u32>,
-) -> AgentSettings {
-    AgentSettings {
-        model: preset.model.clone(),
-        allowed_tools: None,
-        use_plugins: None,
-        max_iterations,
-        max_retries: max_retries.unwrap_or(0),
-        mcp_servers: preset.mcp_servers.clone(),
-        memory_spaces: preset.memory_spaces.clone(),
-        thinking_effort: preset.thinking_effort.clone(),
-        max_concurrent_subagents: None,
-        instructions: preset.instructions.clone(),
-        auto_compact: preset.auto_compact,
-        // A workflow step is not a main agent, and only a main agent gets the
-        // control-plane tools.
-        control_plane: None,
-        // This step's own bundles, never the run's union. Installed into this
-        // step's own tree on the shared runtime.
-        plugins: preset.plugins.clone(),
-    }
-}
-
 async fn run_workflow(
     services: &UserServices,
     input: RunWorkflow,
 ) -> Result<WorkflowRunResponse, ControlError> {
     let RunWorkflow { name, request: req } = input;
-    if req.input.trim().is_empty() {
-        return Err(ControlError::Invalid(
-            "input must not be empty — it is what the first step is handed".to_string(),
-        ));
-    }
-    let row = services.workflows.row(&name).await?;
-    let view = services
-        .config_store
-        .view()
-        .await
-        .map_err(ControlError::Internal)?;
-
     // Resolve every step's preset once, here. After this the run is
     // self-contained: the driver never reaches a store, and a preset edited
     // mid-run cannot change a step that has not started yet.
-    let mut steps = Vec::with_capacity(row.steps.len());
-    let mut plugins: Vec<String> = Vec::new();
-    for step in &row.steps {
-        let preset = services.agents.get(&step.agent).await.map_err(|_| {
-            ControlError::Invalid(format!(
-                "step '{}': agent preset '{}' no longer exists",
-                step.name, step.agent
-            ))
+    let resolved = resolve_run_spec(services, &name, &req.input)
+        .await
+        .map_err(|e| match e {
+            ResolveError::NotFound(m) => ControlError::NotFound(m),
+            ResolveError::Invalid(m) => ControlError::Invalid(m),
+            ResolveError::Internal(m) => ControlError::Internal(m),
         })?;
-        if !view.models.iter().any(|m| m.alias == preset.model) {
-            return Err(ControlError::Invalid(format!(
-                "step '{}': model '{}' is no longer configured",
-                step.name, preset.model
-            )));
-        }
-        // The union, for the *session*: it is what the command catalogue is
-        // read against, so `/commit` resolves whichever step declared it.
-        //
-        // It is no longer what gets installed. Each step now provisions its own
-        // preset's bundles into its own tree — see `settings.plugins` below —
-        // so a step gets its own skills and not its siblings'. That was #182.
-        for p in &preset.plugins {
-            if !plugins.contains(p) {
-                plugins.push(p.clone());
-            }
-        }
-        steps.push(WorkflowStepSpec {
-            name: step.name.clone(),
-            agent: step.agent.clone(),
-            prompt: step.prompt.clone(),
-            // Defaulted here rather than at read time: the snapshot is what a
-            // run answers from, so it should not have to re-derive anything.
-            outcomes: crate::sessions::workflow::outcomes_or_default(step.outcomes.as_ref()),
-            fields: step.fields.clone().unwrap_or_default(),
-            interactive: step.interactive.unwrap_or(false),
-            transitions: step
-                .transitions
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|t| TransitionSpec {
-                    to: t.to,
-                    when: t.when,
-                })
-                .collect(),
-            settings: step_settings(&preset, step.max_iterations, step.max_retries),
-        });
-    }
-    let run = Arc::new(WorkflowRunSpec {
-        workflow: name.clone(),
-        start: row.start.clone(),
-        steps,
-        input: req.input.clone(),
-        // Snapshotted with the rest: raising a definition's budget must not
-        // change a run already under way.
-        max_steps: row.max_steps.unwrap_or(DEFAULT_MAX_STEPS),
-    });
     // No `AgentSettings` is fabricated for the session: a run's agents are its
     // steps, each with its own settings, and nothing session-shaped needs one.
     let spec = build_workflow_spec(
         &services.environments,
         req.name.or_else(|| Some(name.clone())),
         req.environment,
-        plugins,
-        run,
+        resolved.plugins,
+        resolved.run,
     )
     .await?;
     // Checked on the *resolved* vendor: a named environment carries its own,
@@ -297,54 +201,6 @@ mod tests {
             ["create", "delete", "get", "list", "replace", "run"]
         );
         assert_eq!(Workflows.name(), "workflows");
-    }
-
-    fn preset(name: &str, plugins: &[&str]) -> horsie_models::agents::AgentView {
-        horsie_models::agents::AgentView {
-            name: name.into(),
-            description: String::new(),
-            instructions: None,
-            model: "sonnet".into(),
-            plugins: plugins.iter().map(|p| (*p).to_string()).collect(),
-            mcp_servers: Vec::new(),
-            memory_spaces: Vec::new(),
-            thinking_effort: None,
-            auto_compact: None,
-            control_plane: None,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
-    }
-
-    /// The point of per-agent provisioning, and what #182 tracked as a known
-    /// limitation: two steps of one workflow run with their own skills.
-    ///
-    /// Every step used to be handed the run's union — the bundle manifest was
-    /// written once into the runtime's environment — so a step got its
-    /// siblings' skills as well as its own, and could never be given fewer.
-    #[test]
-    fn each_step_carries_its_own_presets_bundles_and_not_its_siblings() {
-        let reviewer = step_settings(&preset("reviewer", &["superpowers"]), None, None);
-        let writer = step_settings(&preset("writer", &["docs-kit"]), None, None);
-
-        assert_eq!(reviewer.plugins, vec!["superpowers".to_string()]);
-        assert_eq!(writer.plugins, vec!["docs-kit".to_string()]);
-        assert!(
-            !writer.plugins.contains(&"superpowers".to_string()),
-            "a step must not inherit a sibling's bundles"
-        );
-    }
-
-    /// A preset that selects nothing gets nothing — not the union, and not the
-    /// other steps' sets. The empty case is what the account default-enabled
-    /// fallback is resolved against later, per agent.
-    #[test]
-    fn a_step_whose_preset_selects_no_bundles_gets_none() {
-        assert!(
-            step_settings(&preset("plain", &[]), None, None)
-                .plugins
-                .is_empty()
-        );
     }
 
     #[test]
