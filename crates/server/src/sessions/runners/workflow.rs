@@ -227,6 +227,14 @@ pub enum Event {
     Failed {
         error: String,
     },
+    /// The step in flight parked on a question.
+    ///
+    /// A status change and nothing else — the question itself belongs to the
+    /// agent that asked and is answered through it. Without this a run whose
+    /// step is waiting on a person reads `Running`, so nothing tells anyone
+    /// there is an answer owed; `StepConcluded` reasserts `Running`, which is
+    /// what clears it.
+    StepAsked,
     /// This run's output has been offered to the agent that invoked it.
     /// Journaled after the offer — see [`super::subagent::Event::Reported`].
     Reported,
@@ -781,6 +789,7 @@ impl Runner for State {
                 self.status = WorkflowRunStatus::Failed;
                 self.error = Some(error.clone());
             }
+            Event::StepAsked => self.status = WorkflowRunStatus::AwaitingInput,
             Event::Reported => self.reported = true,
         }
     }
@@ -835,30 +844,45 @@ impl AgentLifecycle for State {
                 // one the session hands it when it writes the entry.
                 next.apply(&concluded, 0);
                 match next.decide() {
-                    Next::Finish { output } => vec![
-                        concluded,
-                        RunnerEvent::Workflow(Event::Finished { output }),
-                    ],
+                    Next::Finish { output } => {
+                        vec![concluded, RunnerEvent::Workflow(Event::Finished { output })]
+                    }
                     Next::Fail { error } => {
                         vec![concluded, RunnerEvent::Workflow(Event::Failed { error })]
                     }
                     Next::Start(_) | Next::Wait => vec![concluded],
                 }
             }
-            TurnEnd::Failed { error, terminal: _ } => {
-                vec![RunnerEvent::Workflow(Event::StepFailed {
+            // The run fails with the step. A failed step decides nothing, so
+            // `decide` answers `Wait` for ever after one — the run sat
+            // `Running` with a failed step under it and started nothing again.
+            // Both events, because they are two facts: which execution failed,
+            // and that the run is over.
+            TurnEnd::Failed { error, terminal: _ } => vec![
+                RunnerEvent::Workflow(Event::StepFailed {
                     index,
                     error: error.clone(),
-                })]
-            }
+                }),
+                RunnerEvent::Workflow(Event::Failed {
+                    error: error.clone(),
+                }),
+            ],
             // The step is still running, parked on its question; the answer
             // comes back through the agent that asked and the turn resumes.
-            TurnEnd::Asked
-            // A step waiting on a timer or on subagents has not ended either.
-            | TurnEnd::Parked
-            // The session suspends an interrupted step at load. Recording it
-            // here as well would append a second entry for one execution.
-            | TurnEnd::Interrupted => Vec::new(),
+            // The *run* says so, because a person has to be told an answer is
+            // owed.
+            TurnEnd::Asked => vec![RunnerEvent::Workflow(Event::StepAsked)],
+            // A step waiting on a timer or on subagents has not ended: nothing
+            // is owed from outside, and the thing it is holding will wake it.
+            TurnEnd::Parked => Vec::new(),
+            // The process died inside this step. How far it got is unknowable
+            // and its effect on the shared workspace with it, so the execution
+            // is cancelled and the run suspended — which is the state a retry
+            // can move. Left alone, the entry stayed `Running`, `current()`
+            // never cleared, and the run started nothing ever again.
+            TurnEnd::Interrupted => {
+                vec![RunnerEvent::Workflow(Event::StepCancelled { index })]
+            }
         };
         Emit::record(events)
     }
@@ -1372,10 +1396,13 @@ mod tests {
         );
     }
 
-    /// A failed turn fails its step, and the run then starts nothing: only a
-    /// concluded step routes.
+    /// A failed turn fails its step **and the run**.
+    ///
+    /// Both, because a failed step decides nothing: only a concluded one
+    /// routes, so a run left `Running` under a failed step answers `Wait` for
+    /// ever and starts nothing again — a wedge, not a failure anyone can see.
     #[test]
-    fn a_failed_turn_fails_the_step_and_stops_the_run_advancing() {
+    fn a_failed_turn_fails_the_step_and_the_run_with_it() {
         let mut state = run();
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
@@ -1389,34 +1416,94 @@ mod tests {
                 terminal: false,
             },
         );
-        let [RunnerEvent::Workflow(Event::StepFailed { index, error })] = events.as_slice() else {
-            panic!("expected one StepFailed, got {events:?}");
+        let [
+            RunnerEvent::Workflow(Event::StepFailed { index, error }),
+            RunnerEvent::Workflow(Event::Failed { error: run_error }),
+        ] = events.as_slice()
+        else {
+            panic!("expected the step and the run to fail, got {events:?}");
         };
         assert_eq!(*index, 0);
         assert_eq!(error, "provider 500");
+        assert_eq!(run_error, "provider 500");
         for e in &events {
             state.apply(e, 0);
         }
+        assert_eq!(state.status, WorkflowRunStatus::Failed);
         assert!(state.actions(&view()).is_empty());
     }
 
-    /// The three endings that are not a step ending. A park or an ask that
-    /// wrote a step event would end an execution that is still going; an
-    /// interrupt would append a second entry for one execution, because the
-    /// session already suspends an interrupted step at load.
+    /// A park ends nothing at all: the step is still going, and the thing it is
+    /// holding — a timer, a worker — will wake it. Writing a step event here
+    /// would end an execution that has not finished.
     #[test]
-    fn an_ask_a_park_and_an_interrupt_end_no_step() {
+    fn a_park_ends_no_step() {
         let mut state = run();
         let agent = started_agent(&state);
         let Emit { events, .. } = state.on_agent_started(agent);
         for e in &events {
             state.apply(e, 0);
         }
-        for end in [TurnEnd::Asked, TurnEnd::Parked, TurnEnd::Interrupted] {
-            let Emit { events, actions } = state.on_agent_ended(agent, &end);
-            assert!(events.is_empty(), "{end:?} must record no step event");
-            assert!(actions.is_empty(), "{end:?} must ask for nothing");
+        let Emit { events, actions } = state.on_agent_ended(agent, &TurnEnd::Parked);
+        assert!(events.is_empty(), "a park is not a step ending");
+        assert!(actions.is_empty());
+    }
+
+    /// An ask leaves the execution running and moves the **run** to
+    /// `AwaitingInput`: somebody has to be told an answer is owed, and the run
+    /// is the only thing a session-level reader looks at.
+    #[test]
+    fn an_ask_parks_the_run_without_ending_the_step() {
+        let mut state = run();
+        let agent = started_agent(&state);
+        let Emit { events, .. } = state.on_agent_started(agent);
+        for e in &events {
+            state.apply(e, 0);
         }
+        let Emit { events, .. } = state.on_agent_ended(agent, &TurnEnd::Asked);
+        let [RunnerEvent::Workflow(Event::StepAsked)] = events.as_slice() else {
+            panic!("expected the run to record the ask, got {events:?}");
+        };
+        for e in &events {
+            state.apply(e, 0);
+        }
+        assert_eq!(state.status, WorkflowRunStatus::AwaitingInput);
+        assert_eq!(
+            state.current(),
+            Some(0),
+            "the execution is still the one in flight"
+        );
+        assert!(
+            state.actions(&view()).is_empty(),
+            "and nothing starts until it is answered"
+        );
+    }
+
+    /// An interrupted step is cancelled, which suspends the run.
+    ///
+    /// The entry is mutated, not appended: one execution, one row. Left
+    /// `Running`, `current()` never clears and the run starts nothing ever
+    /// again — which is what a process dying inside a step used to leave
+    /// behind.
+    #[test]
+    fn an_interrupted_step_is_cancelled_and_the_run_suspended() {
+        let mut state = run();
+        let agent = started_agent(&state);
+        let Emit { events, .. } = state.on_agent_started(agent);
+        for e in &events {
+            state.apply(e, 0);
+        }
+        let Emit { events, .. } = state.on_agent_ended(agent, &TurnEnd::Interrupted);
+        let [RunnerEvent::Workflow(Event::StepCancelled { index })] = events.as_slice() else {
+            panic!("expected the execution to be cancelled, got {events:?}");
+        };
+        assert_eq!(*index, 0);
+        for e in &events {
+            state.apply(e, 0);
+        }
+        assert_eq!(state.status, WorkflowRunStatus::Suspended);
+        assert_eq!(state.steps.len(), 1, "one execution, one row");
+        assert!(state.current().is_none(), "so a retry can move the run");
     }
 
     /// An agent belonging to some other runner yields nothing. The match is on
@@ -1786,4 +1873,559 @@ mod tests {
             ordinary
         );
     }
+}
+
+/// The run driven by a real session actor, rather than folded by hand.
+///
+/// A second module because it needs a second world: everything above is the
+/// runner's own fold, asserted against state a test wrote, while everything
+/// here starts a session over a fake runtime and a scripted provider and reads
+/// what the journal ends up holding. Both are about the same feature, which is
+/// why they share a file; only one of them needs a tokio runtime.
+///
+/// These came from `session_actor/run.rs`, which the runner swap deleted along
+/// with the component they were written against. The component is gone; the
+/// behaviour is not, and four of them guard the timers work directly — a step
+/// that parks on a timer must not be nudged, a firing must start a turn, and
+/// submitting must cancel what the step armed.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod actor_tests {
+    use crate::sessions::runners::ids::{RunnerId, RunnerKind};
+    use crate::sessions::runners::state::SessionEvent;
+    use crate::sessions::session_actor::testing::{
+        ASK_CALL_ID, ActorFixture, BlockingProvider, EchoProvider, actor_fixture,
+        actor_fixture_blocking_creates, actor_spec_fixture, answer, asks, concludes,
+        run_spec_fixture, seed_session, spawn_run_with_provider, wait_for_agent, wait_for_run,
+        wait_for_state,
+    };
+    use crate::sessions::session_actor::{ReadCommand, SessionCommand};
+    use crate::sessions::spec::SessionStatus;
+    use crate::sessions::workflow::{StepStatus, WorkflowRunStatus};
+    use horsie_agentcore::LlmProvider;
+    use horsie_agentcore::testkit::{MockProvider, Script};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    /// The step's own agent, which is derived from the runner rather than the
+    /// session now — so a test that plants a step has to name the runner.
+    fn triage_then_repeat() -> Arc<dyn LlmProvider> {
+        MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p0"})))]).then_repeating_with(
+                // Every later step submits too: a step ends by calling
+                // `submit_result`, and a turn of plain text with nothing to
+                // wake it is a mistake the actor nudges.
+                || Ok(concludes(serde_json::json!({"description": "fixed"}))),
+            ),
+        )
+    }
+
+    fn plain_text(text: &'static str) -> horsie_agentcore::CompletionResponse {
+        horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::Text(
+                horsie_agentcore::TextPart {
+                    text: text.to_string(),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::EndTurn,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        }
+    }
+
+    /// A one-shot `set_timer` call, `after_secs` out.
+    fn arms_a_timer(after_secs: u64) -> horsie_agentcore::CompletionResponse {
+        horsie_agentcore::CompletionResponse {
+            parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                horsie_agentcore::ToolCallPart {
+                    id: "t-1".into(),
+                    name: "set_timer".into(),
+                    input: serde_json::json!({
+                        "kind": "one_shot",
+                        "after_secs": after_secs,
+                        "label": "check back",
+                        "message": "see whether CI went green",
+                    }),
+                },
+            )],
+            stop_reason: horsie_agentcore::StopReason::ToolUse,
+            usage: horsie_agentcore::Usage::without_cache(1, 1),
+        }
+    }
+
+    /// Whether a folded agent still holds an armed timer.
+    ///
+    /// Asked of what a compaction must carry across, which is the only
+    /// statement about an armed timer that leaves the feature at all. The
+    /// records themselves are private to `capabilities::timers`, deliberately:
+    /// a caller that can reach one can reach everything beside it, and no
+    /// client draws a timer, so there is nothing here to open the type up for.
+    fn holds_an_armed_timer(state: &crate::agent_loop::AgentState) -> bool {
+        state.timers.carried_state().is_some_and(|block| {
+            block.starts_with(crate::agent_loop::capabilities::timers::CARRIED_HEADER)
+        })
+    }
+
+    /// A run that reached a terminal step with no error says so, and keeps
+    /// saying so once it is cold. `Idle` could not tell it apart from a run
+    /// that stopped part-way and is waiting for someone to retry a step.
+    #[tokio::test]
+    async fn a_completed_run_reports_finished() {
+        let (_f, _session, id, journal) = spawn_run_with_provider(triage_then_repeat()).await;
+        let state = wait_for_state(&journal, id, "the run to finish", |s| {
+            crate::sessions::runners::reads::run_state(s)
+                .is_some_and(|r| r.status == WorkflowRunStatus::Finished)
+        })
+        .await;
+        assert_eq!(
+            crate::sessions::runners::reads::session_status(&state),
+            SessionStatus::Finished,
+            "a run that completed is not merely idle"
+        );
+    }
+
+    /// The whole point: a run starts itself, its first step's output picks the
+    /// branch, and the branch's step ends the run.
+    #[tokio::test]
+    async fn a_run_starts_itself_and_routes_on_its_first_steps_output() {
+        let (_f, _session, id, journal) = spawn_run_with_provider(triage_then_repeat()).await;
+
+        // Nobody sent a message: creating the run is what starts it.
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            visited,
+            vec!["triage", "fix"],
+            "p0 must route to `fix`; triage concluded with {:?}",
+            run.steps[0].output
+        );
+        // The condition that matched is recorded, which is what draws the edge.
+        assert_eq!(run.steps[1].via.as_deref(), Some("outcome in [p0]"));
+        assert_eq!(run.steps[1].from, Some(0));
+        // Each step is its own agent.
+        assert_ne!(run.steps[0].agent, run.steps[1].agent);
+        // The second step was handed the first's output under a header.
+        assert!(
+            run.steps[1].input.contains("## Input from step `triage`"),
+            "{}",
+            run.steps[1].input
+        );
+        assert!(run.steps[1].input.starts_with("Fix it."));
+    }
+
+    /// The `else` branch, and the run's output being the last step's.
+    #[tokio::test]
+    async fn a_non_matching_condition_takes_the_catch_all() {
+        let provider = MockProvider::scripted(
+            Script::of([Ok(concludes(serde_json::json!({"outcome": "p2"})))])
+                .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(visited, vec!["triage", "file"]);
+        assert!(run.steps[1].via.is_none());
+    }
+
+    /// A step ends when it calls `submit_result` — a turn ending is not a step
+    /// ending. When nothing would wake the agent, the model is nudged rather
+    /// than the step failed outright: one forgetful turn should not kill a run
+    /// fifteen steps deep with real changes on the shared workspace.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_with_text_is_nudged_and_then_submits() {
+        let provider = MockProvider::scripted(
+            Script::of([
+                // The step believes it is done but says so in prose.
+                Ok(plain_text("I think that's everything.")),
+                // Nudged, it submits.
+                Ok(concludes(serde_json::json!({"outcome": "p2"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "filed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+        assert_eq!(
+            run.steps[0].status,
+            StepStatus::Concluded,
+            "the nudged step still concluded: {:?}",
+            run.steps[0]
+        );
+        assert_eq!(
+            run.steps[0].output.as_ref().and_then(|o| o.get("outcome")),
+            Some(&serde_json::json!("p2")),
+            "and the result it submitted after the nudge is the one that routed"
+        );
+    }
+
+    /// A step that armed a timer and then stopped talking is *parked*, not
+    /// stuck: the timer will wake it. Nudging here would push a model that
+    /// deliberately suspended itself into submitting a result it does not have
+    /// yet, and failing the step would end a run that was working correctly.
+    #[tokio::test]
+    async fn a_step_that_ends_a_turn_holding_a_timer_is_parked_not_nudged() {
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(arms_a_timer(3600)),
+                // Then it stops talking, holding the timer.
+                Ok(plain_text("I'll pick this up when the timer fires.")),
+            ])
+            // Anything past this is the bug: a parked step must not run again
+            // until its timer fires.
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"outcome": "p0"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+        let step = wait_for_agent(&journal, started.steps[0].agent, |s| s.parked).await;
+        assert_eq!(step.nudges, 0, "a park is not a mistake to be corrected");
+        assert!(holds_an_armed_timer(&step), "and the timer is still armed");
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let run = crate::sessions::runners::reads::run_state(&state).expect("the run exists");
+        assert_eq!(
+            run.steps[0].status,
+            StepStatus::Running,
+            "the step is still running, waiting on its timer"
+        );
+    }
+
+    /// The whole round trip, end to end: the capability asks to be woken, the
+    /// actor lets the time pass, and the wake comes back and *starts a turn*.
+    ///
+    /// The last part is the one nothing else covers. A wake reaches the queue
+    /// as an ordinary queued item, and a queued item that nothing reconsiders
+    /// leaves a parked agent parked for ever — a timer that fires and changes
+    /// nothing, which no unit test of the capability could see.
+    #[tokio::test]
+    async fn a_timer_that_fires_wakes_the_step_and_starts_a_turn() {
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(arms_a_timer(1)),
+                // Then it stops talking and parks on the timer.
+                Ok(plain_text("I'll pick this up when the timer fires.")),
+            ])
+            // Only the wake can reach this, and reaching it is the point.
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"outcome": "p0"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let started = wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+        let agent = started.steps[0].agent;
+        // The fire notice reaches the transcript, which only the wake writes —
+        // the `set_timer` call's own arguments are in this log too, so the
+        // agent's message is not on its own evidence that anything fired.
+        let woken = wait_for_agent(&journal, agent, |s| {
+            s.log.iter().any(|e| {
+                serde_json::to_string(&e.body)
+                    .is_ok_and(|json| json.contains("Timer 'check back' fired (fire #1)"))
+            })
+        })
+        .await;
+        assert!(
+            !holds_an_armed_timer(&woken),
+            "a one-shot that has fired is not still armed"
+        );
+    }
+
+    /// Submitting says the work is done, which makes an armed timer moot. Left
+    /// armed it would fire an hour later into a step the run has long moved
+    /// past, waking an agent with nothing left to do.
+    #[tokio::test]
+    async fn submitting_cancels_the_timers_the_step_had_armed() {
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(arms_a_timer(3600)),
+                Ok(concludes(serde_json::json!({"outcome": "p0"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+        let step = crate::sessions::events::fold_agent_state(&journal, run.steps[0].agent).await;
+        // The timer really was armed — otherwise this test passes by testing
+        // nothing, which is exactly what it did the first time it was written.
+        assert!(
+            step.log.iter().any(|e| matches!(
+                &e.body,
+                horsie_agentcore::AgentLogBody::Llm(m)
+                    if m.parts.iter().any(|p| matches!(
+                        p,
+                        horsie_agentcore::ContentPart::ToolCall(c) if c.name == "set_timer"
+                    ))
+            )),
+            "the step never armed a timer, so cancelling one proves nothing"
+        );
+        assert!(
+            !holds_an_armed_timer(&step),
+            "the concluded step still holds an armed timer"
+        );
+    }
+
+    /// A model that never submits fails its step rather than looping for ever.
+    /// The second nudge forces `submit_result` in `tool_choice`, so reaching
+    /// this means the provider ignored a constraint it is required to honour.
+    #[tokio::test]
+    async fn a_step_that_never_submits_fails_the_run() {
+        let provider = MockProvider::scripted(
+            Script::of([]).then_repeating_with(|| Ok(plain_text("done I think"))),
+        );
+        let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Failed).await;
+        let error = run.error.unwrap_or_default();
+        assert!(
+            error.contains("submit_result"),
+            "the failure has to name what was missing: {error}"
+        );
+    }
+
+    /// Retrying appends an attempt rather than replacing one, so the earlier
+    /// attempt stays readable and the graph can stack them.
+    #[tokio::test]
+    async fn retrying_a_step_appends_an_attempt_on_the_same_edge() {
+        let (_f, session, id, journal) = spawn_run_with_provider(triage_then_repeat()).await;
+        wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+
+        session
+            .ask(|reply| SessionCommand::RetryStep { index: 1, reply })
+            .await
+            .unwrap()
+            .unwrap();
+        let run = wait_for_run(&journal, id, |r| r.steps.len() == 3).await;
+        assert_eq!(run.steps[2].step, "fix");
+        assert_eq!(run.steps[2].attempt, 2, "the retry numbers itself");
+        // It sits where the original sat, so it draws on the same edge.
+        assert_eq!(run.steps[2].from, run.steps[1].from);
+        assert_eq!(run.steps[2].via, run.steps[1].via);
+        // The first attempt is untouched.
+        assert_eq!(run.steps[1].status, StepStatus::Concluded);
+    }
+
+    /// A run has no first message to hold it back — its first step is startable
+    /// the moment the runner exists. So it needs the same wait a conversation
+    /// gets, and for the same reason: the step would ask for a runtime nobody
+    /// had built.
+    #[tokio::test]
+    async fn a_runs_first_step_waits_for_the_create_too() {
+        let f = actor_fixture_blocking_creates().await;
+        f.deps.provider_registry.write().unwrap().insert(
+            "mock".to_string(),
+            crate::sessions::spec::ModelEntry::provider_only(
+                Arc::new(EchoProvider) as Arc<dyn LlmProvider>
+            ),
+        );
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        spec.kind = crate::sessions::spec::SessionKind::Workflow {
+            run: Arc::new(run_spec_fixture("the build is red")),
+        };
+        let journal = f.journal();
+        let _session = f.start(id, spec).await;
+
+        wait_for_state(&journal, id, "a run holding at its create", |s| {
+            crate::sessions::runners::reads::session_status(s) == SessionStatus::Provisioning
+        })
+        .await;
+        let held = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert!(
+            crate::sessions::runners::reads::run_state(&held).is_none_or(|r| r.steps.is_empty()),
+            "no step may start before the runtime it would run on"
+        );
+
+        f.agent.release_creates();
+        wait_for_run(&journal, id, |r| !r.steps.is_empty()).await;
+    }
+
+    /// A step asks, is answered *without* the caller naming it, and the run
+    /// carries on.
+    ///
+    /// Three separate defects met here. A run has no main agent, so an
+    /// unaddressed answer resolved nothing and silently did nothing; the web
+    /// client sent exactly that. And nothing ever cleared `AwaitingInput`, so
+    /// even a delivered answer resumed the step and then stalled the run at the
+    /// step it had just finished.
+    #[tokio::test]
+    async fn a_parked_step_is_answered_unaddressed_and_the_run_carries_on() {
+        let provider = MockProvider::scripted(
+            Script::of([
+                Ok(asks("p0 or p2?")),
+                Ok(concludes(serde_json::json!({"outcome": "p0"}))),
+            ])
+            .then_repeating_with(|| Ok(concludes(serde_json::json!({"description": "fixed"})))),
+        );
+        let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
+
+        let parked = wait_for_run(&journal, id, |r| {
+            r.status == WorkflowRunStatus::AwaitingInput
+        })
+        .await;
+        assert_eq!(
+            parked.steps[0].status,
+            StepStatus::Running,
+            "the step is still running, parked on its question"
+        );
+
+        // Unaddressed, which is the case that used to resolve nothing: a run has
+        // no main agent, so the step in flight is the only thing this can mean.
+        session
+            .ask(|reply| SessionCommand::Answer {
+                agent_id: None,
+                answers: vec![answer(ASK_CALL_ID, "p0")],
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("an unaddressed answer must reach the step in flight");
+
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+        let visited: Vec<&str> = run.steps.iter().map(|s| s.step.as_str()).collect();
+        assert_eq!(
+            visited,
+            vec!["triage", "fix"],
+            "the answer decided the branch"
+        );
+    }
+
+    /// Interrupting a run suspends it. Cancelling the agent was never enough:
+    /// the step's entry stayed `Running`, so `current()` never cleared and
+    /// nothing started ever again — the run wedged while its page read
+    /// "Running".
+    #[tokio::test]
+    async fn interrupting_a_run_cancels_its_step_and_suspends_it() {
+        let provider = BlockingProvider::new();
+        let (_f, session, id, journal) =
+            spawn_run_with_provider(provider.clone() as Arc<dyn LlmProvider>).await;
+
+        let step = wait_for_run(&journal, id, |r| r.current() == Some(0)).await;
+        let agent = step.current_agent().expect("a step in flight has an agent");
+        session
+            .ask(|reply| SessionCommand::Stop {
+                agent_id: agent.to_string(),
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("a step in flight is stoppable");
+
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Suspended).await;
+        assert_eq!(run.steps[0].status, StepStatus::Cancelled);
+        assert!(
+            run.current().is_none(),
+            "nothing is in flight, so a retry can move the run"
+        );
+        provider.release();
+    }
+
+    /// A step the process died inside is suspended at load, not resumed: how far
+    /// it got is unknowable and its effect on the shared workspace with it. The
+    /// guide has always promised this; nothing implemented it, so the entry
+    /// stayed `Running` and the run was unrecoverable except through a retry
+    /// nobody was told to make.
+    #[tokio::test]
+    async fn recovery_suspends_a_run_whose_step_was_interrupted() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let mut spec = actor_spec_fixture();
+        let graph = Arc::new(run_spec_fixture("the build is red"));
+        spec.kind = crate::sessions::spec::SessionKind::Workflow { run: graph.clone() };
+        f.deps
+            .runtimes
+            .create(&id.to_string(), "i1", "mock", &spec)
+            .await
+            .expect("create");
+
+        // A journal that stops mid-step, which is exactly what a crash leaves.
+        // The runner is planted too: a step's agent is derived from the runner
+        // that owns it, so a seeded step has to name one.
+        let journal = f.journal();
+        let run = RunnerId::new_v4();
+        let born = crate::sessions::runners::birth::born(
+            crate::sessions::runners::action::RunnerArgs::Workflow {
+                source: crate::sessions::runners::action::WorkflowSource::Graph(graph),
+                input: "the build is red".into(),
+            },
+            crate::agent_loop::capabilities::Capabilities::default(),
+            run,
+        )
+        .expect("a graph-backed run is born from its args");
+        let _session = seed_session(
+            &f,
+            id,
+            spec,
+            &[
+                SessionEvent::RunnerCreated {
+                    id: run,
+                    kind: RunnerKind::Workflow,
+                    parent: None,
+                    state: Box::new(born),
+                    at_ms: 0,
+                },
+                SessionEvent::Runner {
+                    id: run,
+                    event: Box::new(crate::sessions::runners::RunnerEvent::Workflow(
+                        super::Event::StepStarted {
+                            index: 0,
+                            step: "triage".into(),
+                            agent: super::step_agent_id(run, 0),
+                            attempt: 1,
+                            from: None,
+                            via: None,
+                            input: "Triage it.".into(),
+                        },
+                    )),
+                    at_ms: 0,
+                },
+            ],
+        )
+        .await;
+
+        let run_state =
+            wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Suspended).await;
+        assert_eq!(run_state.steps[0].status, StepStatus::Cancelled);
+        assert_eq!(
+            run_state.steps.len(),
+            1,
+            "recovery starts nothing by itself"
+        );
+    }
+
+    /// A finished run's step transcript survives the session unloading.
+    ///
+    /// Every agent-scoped read resolves through the session's agent map, and a
+    /// reloaded run holds no resident agents — so before a step could be
+    /// spawned on demand, the step page went permanently blank the moment the
+    /// session went idle.
+    #[tokio::test]
+    async fn a_cold_steps_transcript_is_still_readable_after_a_reload() {
+        let (f, _session, id, journal) = spawn_run_with_provider(triage_then_repeat()).await;
+        let run = wait_for_run(&journal, id, |r| r.status == WorkflowRunStatus::Finished).await;
+        let step_agent = run.steps[0].agent;
+
+        // A second actor over the same journal: nothing is resident, which is
+        // every read after an idle offload or a restart.
+        f.node.restart().await;
+        let reloaded = f.node.session(id);
+
+        let log = reloaded
+            .ask(|reply| {
+                SessionCommand::Read(ReadCommand::ReadLog {
+                    agent_id: Some(step_agent.to_string()),
+                    after: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a cold step must resolve to its own agent");
+        assert!(
+            !log.entries.is_empty(),
+            "the step's transcript is what the step page shows"
+        );
+    }
+
+    /// Silences the unused-import warning `ActorFixture` would otherwise raise
+    /// on the two tests that build one by hand.
+    #[allow(dead_code)]
+    fn _uses(_: &ActorFixture) {}
 }

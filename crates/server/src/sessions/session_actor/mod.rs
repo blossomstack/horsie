@@ -53,7 +53,6 @@ pub use types::*;
 pub use crate::sessions::runners::SessionState;
 pub use crate::sessions::runners::state::SessionEvent;
 
-
 use core::SessionCore;
 use hooks::{HookRouting, StopHookParent};
 use reads::Reads;
@@ -89,14 +88,11 @@ pub const MAIN_AGENT_ID: &str = "main";
 /// command is testable with no actor in sight — and so classification happens
 /// before the reply changes hands.
 #[must_use]
-fn fork_command(
-    text: &str,
-) -> Option<(crate::sessions::runners::action::ForkMode, String)> {
+fn fork_command(text: &str) -> Option<(crate::sessions::runners::action::ForkMode, String)> {
     use crate::sessions::runners::action::ForkMode;
-    let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/')
-        .and_then(|(name, args)| {
-            horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
-        })?;
+    let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/').and_then(
+        |(name, args)| horsie_support::plugin::builtins::builtin(name).map(|b| (b, args)),
+    )?;
     let mode = match builtin.name {
         "fork" => ForkMode::Copy,
         "summary-n-fork" => ForkMode::Summary,
@@ -316,9 +312,17 @@ impl SessionActor {
         // `started` when the process died. Nothing in the fold distinguishes
         // it from one still working, because it *is* still marked working. The
         // agent itself closes that — it journals its own interruption at its
-        // own recovery — so what the session owes is only to bring it back,
-        // which `reach` does on the first message addressed to it.
-        let _ = self.me(ctx).tell(SessionCommand::Core(CoreCommand::Advance)).await;
+        // own recovery and reports it — so what the session owes is to bring
+        // it back.
+        //
+        // A conversation's is brought back by the next message addressed to
+        // it. A run's is not — nobody sends a run a message — so the session
+        // says it instead, on the one boundary that is a load. See
+        // [`Self::interrupted_at_load`].
+        let _ = self
+            .me(ctx)
+            .tell(SessionCommand::Core(CoreCommand::Advance))
+            .await;
         // Loading is not a transition, but it is the first moment anyone can
         // learn this status: a page already watching hears nothing otherwise.
         //
@@ -531,7 +535,6 @@ impl SessionActor {
         self.agents.insert(plan.agent, resident.clone());
         Some(resident)
     }
-
 
     /// Resolve an agent selector to its actor: `None`/`"main"` for the primary
     /// agent, else the id of a step or a subagent. A cold node — one the
@@ -1093,7 +1096,9 @@ impl SessionActor {
         let mut events = Vec::new();
         let mut next = state.clone();
         for (child, parent, outcome) in self.owed(&next) {
-            let produced = self.offer_to_parent(child, parent, &outcome, &next, ctx).await;
+            let produced = self
+                .offer_to_parent(child, parent, &outcome, &next, ctx)
+                .await;
             for e in &produced {
                 next.apply(e);
             }
@@ -1361,6 +1366,40 @@ impl SessionActor {
         });
     }
 
+    /// Every runner that was still working when the last process died.
+    ///
+    /// Sound because of *when* it is asked: `Advance` is sent by `adopt` and by
+    /// nothing else, so this runs once per load, before any command — and at
+    /// that moment no agent of this session is resident. A runner that believes
+    /// it is working is therefore working in a process that no longer exists,
+    /// and the runner that owns it says what that means: a conversation records
+    /// an interrupted turn, a run cancels the execution and suspends itself.
+    ///
+    /// The alternative was to let each agent say so at its own recovery, which
+    /// is what the agent does — but only once something wakes it, and nothing
+    /// ever wakes a run's step. That run stayed `Running` on an execution no
+    /// process was running: wedged, and unrecoverable except through a retry
+    /// nobody was told to make.
+    pub(super) fn interrupted_at_load(&self, state: &RunnerSessionState) -> Vec<SessionEvent> {
+        state
+            .runners
+            .iter()
+            .filter_map(|(id, rec)| {
+                let lifecycle = rec.state.lifecycle()?;
+                Runner::busy(&rec.state).then_some(())?;
+                let agent = Runner::primary_agent(&rec.state)?;
+                Some(
+                    self.wrap(
+                        *id,
+                        lifecycle
+                            .on_agent_ended(agent, &crate::sessions::runners::TurnEnd::Interrupted),
+                    ),
+                )
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Cancel one agent's turn in flight.
     ///
     /// The gate is what matters: stopping something that was not working is
@@ -1525,7 +1564,9 @@ impl SessionActor {
             // it may still be running — so the fork capability answers it and
             // the routing below never sees it.
             Err((agent, NotAnEnd::ForkSummary { forks, result })) => {
-                return self.on_fork_summary(state, AgentId(agent), forks, result).await;
+                return self
+                    .on_fork_summary(state, AgentId(agent), forks, result)
+                    .await;
             }
         };
         let who = AgentId(who);

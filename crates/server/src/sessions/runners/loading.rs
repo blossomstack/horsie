@@ -321,7 +321,6 @@ mod tests {
         assert_eq!(AgentRole::of(RunnerKind::Workflow, true), AgentRole::Step);
     }
 
-    use super::*;
     use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec};
 
     /// A toolbox that answers for one name and delegates nothing, so a

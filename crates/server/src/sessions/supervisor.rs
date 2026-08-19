@@ -22,9 +22,7 @@ use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
-use crate::sessions::session_actor::{
-    CoreCommand, ReadCommand,
-};
+use crate::sessions::session_actor::{CoreCommand, ReadCommand};
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{SessionRevisions, UserMessageError};
 use crate::users::{UserRegistry, UserServices, resolve};
@@ -1093,9 +1091,7 @@ impl EventSourcedActor for SessionSupervisor {
                 for id in ids {
                     if let Some(session) = self.resident(ctx, &id) {
                         let _ = session
-                            .ask(|reply| {
-                                SessionCommand::PrepareOffload { reply }
-                            })
+                            .ask(|reply| SessionCommand::PrepareOffload { reply })
                             .await;
                     }
                     self.forget(&id);
@@ -1939,16 +1935,14 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[
-                    serde_json::to_vec(&SessionEvent::Runner {
-                        id: root,
-                        event: Box::new(crate::sessions::runners::RunnerEvent::Conversation(
-                            crate::sessions::runners::conversation::Event::Asked,
-                        )),
-                        at_ms: 0,
-                    })
-                    .unwrap(),
-                ],
+                &[serde_json::to_vec(&SessionEvent::Runner {
+                    id: root,
+                    event: Box::new(crate::sessions::runners::RunnerEvent::Conversation(
+                        crate::sessions::runners::conversation::Event::Asked,
+                    )),
+                    at_ms: 0,
+                })
+                .unwrap()],
                 at,
             )
             .await

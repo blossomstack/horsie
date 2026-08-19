@@ -45,7 +45,10 @@ mod tests {
         let edges = vec![to("fix", &["failed"]), to("ship", &["passed"])];
         let (target, via) = next_transition(&edges, "passed").unwrap();
         assert_eq!(target, "ship");
-        assert!(via.is_some(), "a conditional edge reports which filter matched");
+        assert!(
+            via.is_some(),
+            "a conditional edge reports which filter matched"
+        );
     }
 
     /// An edge with no filter is the catch-all, and a failing condition falls

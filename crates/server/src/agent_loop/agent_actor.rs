@@ -1853,7 +1853,7 @@ impl EventSourcedActor for AgentActor {
                     return CommandEffect::none();
                 };
                 match cap.branched(mode, &message) {
-                    capabilities::fork::Branched::Told { call: _, reason } => {
+                    capabilities::fork::Branched::Told { reason } => {
                         let _ = reply.send(Err(reason));
                         CommandEffect::none()
                     }
@@ -2580,9 +2580,7 @@ impl AgentActor {
             && let Some(seed) = capabilities::fork::child(&state.fork, msg)
         {
             let event = match seed {
-                capabilities::fork::Seed::Landed { fork } => {
-                    AgentDomainEvent::ForkSeeded { fork }
-                }
+                capabilities::fork::Seed::Landed { fork } => AgentDomainEvent::ForkSeeded { fork },
                 capabilities::fork::Seed::Failed { fork, error } => {
                     AgentDomainEvent::ForkSeedFailed { fork, error }
                 }

@@ -342,8 +342,9 @@ fn from_workflow(runner: RunnerId, event: &workflow::Event, state: &SessionState
         },
         // Bookkeeping about the hand-over, not about the run: the output
         // arrives in the invoking agent's own transcript, which is where a
-        // reader sees it.
-        workflow::Event::Reported => return Vec::new(),
+        // reader sees it. A step's question is the same — the agent that asked
+        // holds it, and its own log is where a reader answers from.
+        workflow::Event::Reported | workflow::Event::StepAsked => return Vec::new(),
     };
     let Some(step) = run.steps.get(index as usize) else {
         return Vec::new();
@@ -758,6 +759,7 @@ mod tests {
                 RunnerEvent::Workflow(workflow::Event::Failed { error: "no".into() }),
             ),
             on(world.run, RunnerEvent::Workflow(workflow::Event::Reported)),
+            on(world.run, RunnerEvent::Workflow(workflow::Event::StepAsked)),
             on(
                 world.root,
                 RunnerEvent::Usage {
@@ -813,7 +815,7 @@ mod tests {
                     subagent::Event::Concluded { .. } | subagent::Event::Failed { .. } => false,
                 },
                 RunnerEvent::Workflow(e) => match e {
-                    workflow::Event::Reported => true,
+                    workflow::Event::Reported | workflow::Event::StepAsked => true,
                     workflow::Event::StepStarted { .. }
                     | workflow::Event::StepConcluded { .. }
                     | workflow::Event::StepFailed { .. }

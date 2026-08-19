@@ -527,9 +527,7 @@ impl ContextProvider for SessionContextProvider {
                         agent_type: self.agent_type(),
                     })
                 }
-                _ => {
-                    ServerHookEvent::SessionStart(SessionStartInput { source })
-                }
+                _ => ServerHookEvent::SessionStart(SessionStartInput { source }),
             };
             records.extend(client.run_hooks(event).await.unwrap_or_default());
         }
@@ -669,15 +667,10 @@ mod tests {
         };
 
         assert!(
-            !build(TestKind::Main, None)
-                .equipment
-                .has("control_plane"),
+            !build(TestKind::Main, None).equipment.has("control_plane"),
             "a preset that never asked must not get them"
         );
-        for kind in [
-            TestKind::Main,
-            TestKind::Fork(Uuid::new_v4()),
-        ] {
+        for kind in [TestKind::Main, TestKind::Fork(Uuid::new_v4())] {
             assert!(
                 build(kind, Some(true)).equipment.has("control_plane"),
                 "a conversation that asked for them must have them"
@@ -838,12 +831,7 @@ mod tests {
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
             loading: test_loading(&f, &session, id, TestKind::Main),
-            equipment: test_equipment(
-                TestKind::Main,
-                &agent_settings_fixture(),
-                unattended,
-                None,
-            ),
+            equipment: test_equipment(TestKind::Main, &agent_settings_fixture(), unattended, None),
             settings: agent_settings_fixture(),
             role: TestKind::Main.role(),
             agent: TestKind::Main.agent(),
@@ -880,7 +868,11 @@ mod tests {
             horsie_runtime_host::MockTransport::ok(""),
             "session-id",
         );
-        let main = scoped_client(TestKind::Main.agent(), TestKind::Main.role(), client.clone());
+        let main = scoped_client(
+            TestKind::Main.agent(),
+            TestKind::Main.role(),
+            client.clone(),
+        );
         assert_eq!(main.agent_id(), "session-id");
 
         let sub_id = Uuid::new_v4();

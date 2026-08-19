@@ -49,9 +49,9 @@ impl SessionCore {
                 // Journal the name this session now answers to, but only if it
                 // actually took: a rejected title must not be recorded as one.
                 let effect = match result.as_ref() {
-                    Ok(name) => CommandEffect::persist(vec![SessionEvent::Renamed {
-                        name: name.clone(),
-                    }]),
+                    Ok(name) => {
+                        CommandEffect::persist(vec![SessionEvent::Renamed { name: name.clone() }])
+                    }
                     Err(_) => CommandEffect::none(),
                 };
                 let _ = reply.send(result);
@@ -69,7 +69,13 @@ impl SessionCore {
                 }];
                 actor.persist_and_advance(state, events, ctx).await
             }
-            CoreCommand::Advance => actor.persist_and_advance(state, Vec::new(), ctx).await,
+            CoreCommand::Advance => {
+                // The one boundary that is a *load*: `adopt` sends this and
+                // nothing else does, which is what makes the reconciliation
+                // below sound — see `SessionActor::interrupted_at_load`.
+                let events = actor.interrupted_at_load(state);
+                actor.persist_and_advance(state, events, ctx).await
+            }
             CoreCommand::TitleSet { name } => {
                 actor.spec_mut().name = Some(name.clone());
                 CommandEffect::persist(vec![SessionEvent::Renamed { name }])
@@ -171,11 +177,7 @@ impl SessionActor {
     /// per batch, with the state the *whole* batch folded to. Two of the
     /// routings read that state, so an event is placed by where the batch ended
     /// rather than by where it itself sat.
-    pub(super) async fn record_lifecycle(
-        &mut self,
-        events: &[SessionEvent],
-        state: &SessionState,
-    ) {
+    pub(super) async fn record_lifecycle(&mut self, events: &[SessionEvent], state: &SessionState) {
         for event in events {
             for (key, payload) in crate::sessions::runners::lifecycle_routing::route(event, state) {
                 let Some(agent) = self.agents.get(&key).cloned() else {
@@ -214,7 +216,6 @@ impl SessionActor {
         }
     }
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

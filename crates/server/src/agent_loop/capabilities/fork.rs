@@ -45,13 +45,11 @@
 //!
 //! # Answering a person who typed a slash command
 //!
-//! [`Branched::Told`] and [`Branch::told`] carry a `call`, because everything
-//! else that produces text is a tool result. A built-in has no `tool_use` id, so
-//! the two sentences this capability makes use the only stable keys there are:
-//! the built-in's own name for a refusal made before anything was minted, and
-//! the new conversation's [`RunnerId`] for everything after — which is also the
-//! dedupe key the session recognises a replayed
-//! [`StartRunner`](super::SessionRequest::StartRunner) by.
+//! A person typing `/fork` is waiting on the answer, so both sentences this
+//! capability makes go back to them: the refusal in [`Branched::Told`] answers
+//! immediately, and everything after is keyed by the new conversation's
+//! [`RunnerId`] — which is also the dedupe key the session recognises a
+//! replayed [`StartRunner`](super::SessionRequest::StartRunner) by.
 //!
 //! Neither sentence reaches anybody today. A typed built-in has no run waiting
 //! on it, so the actor records that it had nothing to answer and drops the
@@ -190,9 +188,9 @@ pub struct Pending {
 /// What a typed `/fork` came to.
 #[derive(Debug)]
 pub(crate) enum Branched {
-    /// A fork with nothing to do. Keyed by the built-in's own name, because
-    /// nothing is minted yet.
-    Told { call: String, reason: String },
+    /// A fork with nothing to do. Nothing is minted, so there is nothing to
+    /// key it by — the words go straight back to whoever typed the command.
+    Told { reason: String },
     /// Journal the request and put it to the session.
     Ask { call: String, pending: Pending },
 }
@@ -214,7 +212,6 @@ impl ForkCapability {
         // yet, so the built-in's own name is what the answer is keyed by.
         if message.is_empty() {
             return Branched::Told {
-                call: format!("/{}", built_in(mode)),
                 reason: format!(
                     "/{} needs a message saying what the new conversation should do",
                     built_in(mode)
@@ -575,13 +572,12 @@ mod tests {
         // `Told` carries no `Pending`, so there is nothing for the actor to
         // journal and nothing to put to the session: a refusal is not a fact
         // about the agent, and a refused fork must not reach the session.
-        let Branched::Told { call, reason } = cap().branched(ForkMode::Copy, "   ") else {
+        let Branched::Told { reason } = cap().branched(ForkMode::Copy, "   ") else {
             panic!("expected a refusal, not a branch");
         };
-        assert!(reason.contains("/fork"));
-        assert_eq!(
-            call, "/fork",
-            "a built-in has no tool_use id, so its own name is the key"
+        assert!(
+            reason.contains("/fork"),
+            "the refusal names the command that was typed: {reason}"
         );
     }
 

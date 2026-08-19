@@ -14,10 +14,7 @@
 #![allow(dead_code)]
 
 use super::ReadCommand;
-use super::{
-    context::SessionContextProvider,
-    *,
-};
+use super::{context::SessionContextProvider, *};
 use crate::agent_loop::{ContextProvider, StartTurn};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::spec::SessionSpec;
@@ -64,7 +61,7 @@ pub(super) fn agent_settings_fixture() -> AgentSettings {
     }
 }
 
-pub(super) fn actor_spec_fixture() -> SessionSpec {
+pub(crate) fn actor_spec_fixture() -> SessionSpec {
     use crate::sessions::spec::{SessionKind, WorkspaceDef};
     SessionSpec {
         name: Some("test".into()),
@@ -94,14 +91,14 @@ pub(crate) struct ActorFixture {
     /// The wiring every session here runs on — the same value the account's
     /// bundle was built with, kept to hand for the tests that drive it
     /// directly.
-    pub(super) deps: ServerDeps,
-    pub(super) agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
-    pub(super) node: crate::testing::Deployment,
+    pub(crate) deps: ServerDeps,
+    pub(crate) agent: crate::runtime_vendor::fake::FakeRuntimeVendor,
+    pub(crate) node: crate::testing::Deployment,
 }
 
 impl ActorFixture {
     /// Every actor's log, for a test that reads what was persisted.
-    pub(super) fn journal(&self) -> Arc<dyn horsie_actor::Journal> {
+    pub(crate) fn journal(&self) -> Arc<dyn horsie_actor::Journal> {
         self.node.journal.clone()
     }
 
@@ -110,7 +107,7 @@ impl ActorFixture {
     /// Exactly what the supervisor does on `Create`, and for the same reason: a
     /// session with no log yet cannot know its own spec, and the command that
     /// creates the actor is the only one guaranteed to reach it first.
-    pub(super) async fn start(&self, id: Uuid, spec: SessionSpec) -> SessionRef {
+    pub(crate) async fn start(&self, id: Uuid, spec: SessionSpec) -> SessionRef {
         let session = self.node.session(id);
         let _ = session
             .tell(SessionCommand::Core(CoreCommand::RecordSpec {
@@ -131,7 +128,7 @@ impl ActorFixture {
     }
 }
 
-pub(super) async fn actor_fixture() -> ActorFixture {
+pub(crate) async fn actor_fixture() -> ActorFixture {
     actor_fixture_from(crate::runtime_vendor::fake::FakeRuntimeVendor::builder(
         "mock",
     ))
@@ -140,7 +137,7 @@ pub(super) async fn actor_fixture() -> ActorFixture {
 
 /// The same fixture over a fake told to hold its creates, so a test can put
 /// a message underneath one that is genuinely in flight.
-pub(super) async fn actor_fixture_blocking_creates() -> ActorFixture {
+pub(crate) async fn actor_fixture_blocking_creates() -> ActorFixture {
     actor_fixture_from(
         crate::runtime_vendor::fake::FakeRuntimeVendor::builder("mock").block_creates(),
     )
@@ -230,7 +227,7 @@ pub(super) async fn wait_for_report(
     false
 }
 
-pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
+pub(crate) fn answer(id: &str, text: &str) -> AskAnswer {
     AskAnswer {
         tool_call_id: id.to_string(),
         text: text.to_string(),
@@ -239,18 +236,18 @@ pub(super) fn answer(id: &str, text: &str) -> AskAnswer {
 
 /// An `LlmProvider` that hangs until released, so a test can hold a run
 /// genuinely `Running` for as long as it needs to.
-pub(super) struct BlockingProvider {
+pub(crate) struct BlockingProvider {
     pub(super) gate: tokio::sync::Notify,
 }
 
 impl BlockingProvider {
-    pub(super) fn new() -> Arc<Self> {
+    pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             gate: tokio::sync::Notify::new(),
         })
     }
 
-    pub(super) fn release(&self) {
+    pub(crate) fn release(&self) {
         self.gate.notify_one();
     }
 }
@@ -281,7 +278,7 @@ impl LlmProvider for BlockingProvider {
 }
 
 /// A provider whose every call immediately ends the turn with plain text.
-pub(super) struct EchoProvider;
+pub(crate) struct EchoProvider;
 
 #[async_trait]
 impl LlmProvider for EchoProvider {
@@ -332,7 +329,7 @@ pub(super) async fn spawn_session_with_provider(
 }
 
 /// A two-step run: `triage` branches on its output to `fix` or `file`.
-pub(super) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::WorkflowRunSpec {
+pub(crate) fn run_spec_fixture(input: &str) -> crate::sessions::workflow::WorkflowRunSpec {
     use crate::sessions::workflow::{TransitionSpec, WorkflowRunSpec, WorkflowStepSpec};
     let settings = || agent_settings_fixture();
     WorkflowRunSpec {
@@ -458,7 +455,7 @@ pub(super) fn two_model_run_spec_fixture(
 }
 
 /// A session that is a run of [`run_spec_fixture`], on a scripted provider.
-pub(super) async fn spawn_run_with_provider(
+pub(crate) async fn spawn_run_with_provider(
     provider: Arc<dyn LlmProvider>,
 ) -> (
     ActorFixture,
@@ -490,7 +487,7 @@ pub(super) async fn spawn_run_with_provider(
 ///
 /// A step's timers, asks and nudge budget live on its own journal, so a test
 /// asserting on how a *turn* ended has to wait on this rather than on the run.
-pub(super) async fn wait_for_agent(
+pub(crate) async fn wait_for_agent(
     journal: &Arc<dyn horsie_actor::Journal>,
     agent_id: Uuid,
     pred: impl Fn(&crate::agent_loop::AgentState) -> bool,
@@ -510,7 +507,7 @@ pub(super) async fn wait_for_agent(
 }
 
 /// Poll the folded run until `pred` holds (2s cap).
-pub(super) async fn wait_for_run(
+pub(crate) async fn wait_for_run(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     pred: impl Fn(&crate::sessions::workflow::WorkflowRunState) -> bool,
@@ -536,7 +533,7 @@ pub(super) async fn wait_for_run(
 /// `outcome` and `description` are added when the caller has not named them, so
 /// a test that only cares about routing says `json!({"outcome": "p0"})` and the
 /// payload still passes the step's own validation.
-pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::CompletionResponse {
+pub(crate) fn concludes(output: serde_json::Value) -> horsie_agentcore::CompletionResponse {
     let mut input = output;
     if let Some(object) = input.as_object_mut() {
         object
@@ -563,7 +560,7 @@ pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::Completi
 ///
 /// A step asks with the same tool a conversation does, and parks the same way:
 /// the call ends the run and stays dangling until an answer arrives against it.
-pub(super) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
+pub(crate) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
     horsie_agentcore::CompletionResponse {
         parts: vec![horsie_agentcore::ContentPart::ToolCall(
             horsie_agentcore::ToolCallPart {
@@ -578,7 +575,7 @@ pub(super) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
 }
 
 /// The tool-call id [`asks`] parks on, which is what an answer has to name.
-pub(super) const ASK_CALL_ID: &str = "a-1";
+pub(crate) const ASK_CALL_ID: &str = "a-1";
 
 /// Poll the session's folded state until the tree satisfies `pred` (2s
 /// cap). Subagent progress is journal-first, so the fold is the honest
@@ -669,7 +666,7 @@ pub(super) async fn wait_for_events(
 }
 
 /// Poll the folded session state until it satisfies `pred`.
-pub(super) async fn wait_for_state(
+pub(crate) async fn wait_for_state(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
     what: &str,
@@ -1191,12 +1188,10 @@ pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
 
 pub(super) async fn send(session: &SessionRef, text: &str) {
     session
-        .ask(|reply| {
-            SessionCommand::UserMessage {
-                agent_id: None,
-                text: text.into(),
-                reply,
-            }
+        .ask(|reply| SessionCommand::UserMessage {
+            agent_id: None,
+            text: text.into(),
+            reply,
         })
         .await
         .unwrap()
@@ -1392,7 +1387,7 @@ pub(super) fn test_equipment(
     use crate::agent_loop::capabilities::{
         Capability, ask_user::AskUserCapability, step_result::StepResultCapability,
     };
-    use crate::sessions::runners::{AgentId, Assembly, RunnerId, RunnerKind, assemble};
+    use crate::sessions::runners::{Assembly, RunnerId, RunnerKind, assemble};
     let opts = Assembly {
         settings,
         agent: kind.agent(),
@@ -1427,12 +1422,7 @@ pub(super) fn catalog_provider(
 ) -> SessionContextProvider {
     SessionContextProvider {
         loading: test_loading(f, session, id, TestKind::Main),
-        equipment: test_equipment(
-            TestKind::Main,
-            &agent_settings_fixture(),
-            false,
-            None,
-        ),
+        equipment: test_equipment(TestKind::Main, &agent_settings_fixture(), false, None),
         settings: agent_settings_fixture(),
         role: TestKind::Main.role(),
         agent: TestKind::Main.agent(),
@@ -1497,20 +1487,18 @@ pub(super) async fn spawn_typed(
 ) -> Result<Uuid, String> {
     let runner = crate::sessions::runners::ids::RunnerId::new_v4();
     session
-        .ask(|reply| {
-            SessionCommand::StartRunner {
-                id: runner,
-                kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
-                args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
-                    agent: crate::sessions::runners::ids::AgentId::new_v4(),
-                    label: "review".into(),
-                    task: "look at the diff".into(),
-                    agent_type: agent_type.map(str::to_string),
-                    settings: Box::new(agent_settings_fixture()),
-                }),
-                parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
-                reply,
-            }
+        .ask(|reply| SessionCommand::StartRunner {
+            id: runner,
+            kind: crate::sessions::runners::ids::RunnerKind::SubAgent,
+            args: Box::new(crate::sessions::runners::action::RunnerArgs::SubAgent {
+                agent: crate::sessions::runners::ids::AgentId::new_v4(),
+                label: "review".into(),
+                task: "look at the diff".into(),
+                agent_type: agent_type.map(str::to_string),
+                settings: Box::new(agent_settings_fixture()),
+            }),
+            parent: crate::sessions::runners::ids::AgentId(Uuid::nil()),
+            reply,
         })
         .await
         .unwrap()

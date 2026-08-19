@@ -109,10 +109,6 @@ pub enum SessionCommand {
     AgentOutcome(AgentOutcome),
 }
 
-
-
-
-
 /// What accepting a message produced.
 ///
 /// More than the message's id because one message can do more than queue
@@ -137,7 +133,6 @@ impl MessageAccepted {
         }
     }
 }
-
 
 /// Questions answered from the resident actor's memory. None of these touches
 /// the journal, so opening a session to look at it costs no sandbox.
@@ -501,5 +496,4 @@ mod tests {
             assert_eq!(status.as_wire(), expected);
         }
     }
-
 }

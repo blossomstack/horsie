@@ -12,16 +12,15 @@
 //! on purpose, because a server event misfiled as a tool one is halted twice.
 
 use super::{
-    CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand,
-    SessionEvent, SessionState,
-    context::SessionContextProvider,
+    CANCEL_TIMEOUT, CommandEffect, HookCommand, SessionActor, SessionCommand, SessionEvent,
+    SessionState, context::SessionContextProvider,
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::capabilities::{SessionReply, SessionRequest};
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
-use crate::sessions::runners::ids::AgentId;
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::runners::action::RunnerArgs;
+use crate::sessions::runners::ids::AgentId;
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
@@ -554,7 +553,9 @@ impl HookRouting {
                 let live = actor
                     .agents
                     .get(&key)
-                    .filter(|_| state.status() == crate::sessions::runners::ids::RunnerStatus::Running)
+                    .filter(|_| {
+                        state.status() == crate::sessions::runners::ids::RunnerStatus::Running
+                    })
                     .cloned();
                 let Some(agent) = live else {
                     tracing::warn!(
@@ -641,7 +642,10 @@ mod tests {
     async fn the_same_request_twice_starts_one_child() {
         let gate = BlockingProvider::new();
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
-        let parent = SessionParent::new(session.clone(), crate::sessions::runners::AgentId(Uuid::nil()));
+        let parent = SessionParent::new(
+            session.clone(),
+            crate::sessions::runners::AgentId(Uuid::nil()),
+        );
         let worker = crate::sessions::runners::ids::AgentId::new_v4();
         let request = SessionRequest::StartRunner {
             call: "call-1".to_string(),
@@ -661,7 +665,10 @@ mod tests {
             matches!(first, SessionReply::Done { .. }),
             "the first ask must create the child: {first:?}"
         );
-        wait_for_tree(&journal, id, |rows| rows.iter().any(|r| r.id == worker.to_string())).await;
+        wait_for_tree(&journal, id, |rows| {
+            rows.iter().any(|r| r.id == worker.to_string())
+        })
+        .await;
 
         let second = parent.request(request).await;
         assert!(
@@ -903,7 +910,8 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.iter().find(|r| r.id == sub.to_string())
+            t.iter()
+                .find(|r| r.id == sub.to_string())
                 .is_some_and(|r| r.status == crate::sessions::session_actor::AgentStatus::Running)
         })
         .await;
