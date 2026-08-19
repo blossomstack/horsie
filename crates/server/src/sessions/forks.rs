@@ -24,25 +24,11 @@ pub enum ForkParent {
     Fork(Uuid),
 }
 
-/// How a fork's history was seeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ForkMode {
-    /// `/fork` — the source's log, copied and scrubbed.
-    Copy,
-    /// `/summary-n-fork` — a summary of the source, produced out of band.
-    Summary,
-}
-
-impl ForkMode {
-    /// The wire spelling, and what a lifecycle entry carries.
-    #[must_use]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Copy => "copy",
-            Self::Summary => "summary",
-        }
-    }
-}
+/// How a fork's history was seeded. Defined beside [`Branch`], the runner-side
+/// record that carries it.
+///
+/// [`Branch`]: crate::sessions::runners::action::Branch
+pub use crate::sessions::runners::action::ForkMode;
 
 /// One fork.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

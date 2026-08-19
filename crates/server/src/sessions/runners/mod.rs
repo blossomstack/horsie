@@ -52,6 +52,12 @@ use message::ChildOutcome;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Deepest node the runner tree may hold. A node *at* this depth cannot spawn.
+///
+/// One number across the combined tree, which is what a subagent-only depth
+/// could not express once a workflow step could spawn too.
+pub const MAX_SUBAGENT_DEPTH: u32 = 4;
+
 /// What a runner decided: events for its own slice, actions for the session.
 ///
 /// The same shape a capability's [`capabilities::Decision`] has, one level up —

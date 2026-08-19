@@ -138,6 +138,26 @@ pub enum WorkflowSource {
     Graph(std::sync::Arc<crate::sessions::workflow::WorkflowRunSpec>),
 }
 
+/// How a fork's history was seeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ForkMode {
+    /// `/fork` — the source's log, copied and scrubbed.
+    Copy,
+    /// `/summary-n-fork` — a summary of the source, produced out of band.
+    Summary,
+}
+
+impl ForkMode {
+    /// The wire spelling, and what a lifecycle entry carries.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Summary => "summary",
+        }
+    }
+}
+
 /// A fork's branch point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branch {
@@ -145,5 +165,5 @@ pub struct Branch {
     pub source: AgentId,
     /// The source's log sequence at the cut.
     pub source_seq: u64,
-    pub mode: crate::sessions::forks::ForkMode,
+    pub mode: ForkMode,
 }

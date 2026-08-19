@@ -15,6 +15,15 @@
 //! can answer without asking any capability, so the arm, the pending entry it
 //! was routed by, and the third routing mode they needed are all gone.
 
+/// Error recorded for a child someone stopped.
+///
+/// Its own wording rather than the interrupted one's, because this reaches a
+/// *model*: the parent reads it as the result of the child it is waiting on,
+/// and "interrupted by restart" would have it reason about a crash that never
+/// happened.
+pub const STOPPED_ERROR: &str = "stopped before it finished";
+
+
 use super::ids::{AgentId, RunnerId};
 use serde_json::Value;
 
