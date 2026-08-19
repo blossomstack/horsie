@@ -3,8 +3,8 @@
 //! The one capability with no tool. A fork is asked for by a person typing a
 //! built-in, never by a model calling something, so it claims a
 //! [`Msg::Command`] and advertises nothing — a tool for it would offer the
-//! model a button it has no business pressing, and [`Capability::tools`] is
-//! left at its empty default to say so.
+//! model a button it has no business pressing, so [`Capability::layer`] is left
+//! at its default and wraps the toolbox in nothing at all.
 //!
 //! What it creates is a [`RunnerKind::Conversation`], not a kind of its own: a
 //! fork *is* a conversation, one that carries a branch point. That collapses
@@ -338,7 +338,7 @@ impl Capability for ForkCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{facts, settings, tool};
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts, settings, tool};
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
     use crate::sessions::runners::message::{ChildOutcome, SubAgentOutcome, ToolCall};
 
@@ -696,7 +696,7 @@ mod tests {
     /// let a model branch the conversation it is having.
     #[test]
     fn it_advertises_no_tool() {
-        assert!(cap().tools(&facts()).is_empty());
+        assert!(advertised_by(&cap(), &facts()).is_empty());
     }
 
     /// A seed in flight is what says a fork exists and cannot run yet, so

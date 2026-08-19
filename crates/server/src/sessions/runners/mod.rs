@@ -631,7 +631,7 @@ impl RunnerState {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{call, facts, tool};
+    use crate::agent_loop::capabilities::testing::{advertised, call, facts, tool};
 
     fn opts(settings: &crate::sessions::spec::AgentSettings) -> Assembly<'_> {
         Assembly {
@@ -718,7 +718,7 @@ mod tests {
             RunnerKind::Workflow,
         ] {
             let caps = assemble(kind, &opts(&s));
-            let names: Vec<String> = caps.tools(&facts()).into_iter().map(|t| t.name).collect();
+            let names = advertised(&caps, &facts());
             assert!(
                 names.iter().any(|n| n == crate::agent_loop::TASK_LIST_TOOL),
                 "{kind:?} advertises no task_list: {names:?}"
@@ -786,9 +786,7 @@ mod tests {
             )
         };
         let ask = capabilities::ask_user::TOOL.to_string();
-        let names = |caps: Capabilities| -> Vec<String> {
-            caps.tools(&facts()).into_iter().map(|t| t.name).collect()
-        };
+        let names = |caps: Capabilities| -> Vec<String> { advertised(&caps, &facts()) };
         assert!(
             unattended(true).has("ask_user"),
             "somebody must answer for it"

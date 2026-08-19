@@ -53,6 +53,7 @@
 use super::{
     Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, TurnEvent,
 };
+use crate::agent_loop::toolbox::claiming;
 use crate::agent_loop::{AgentCatalog, Incoming};
 use crate::sessions::runners::action::RunnerArgs;
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
@@ -60,11 +61,12 @@ use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::{ChildMsg, ChildOutcome, SubAgentOutcome, ToolCall};
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::subagents::MAX_SUBAGENT_DEPTH;
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The tool that delegates.
 pub const SPAWN_TOOL: &str = "spawn_agent";
@@ -439,29 +441,26 @@ fn result(call: &str, output: String, is_error: bool) -> Act {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for SubAgentCapability {
-    fn name(&self) -> &'static str {
-        "sub_agent"
-    }
-
-    /// Both tools, advertised here rather than pushed as a toolbox layer.
+impl SubAgentCapability {
+    /// Both tools, claimed by this capability's own layer rather than pushed as
+    /// a layer in `setup`.
     ///
-    /// That is the change the move made: a layer runs on the agent's task,
-    /// where there is no mailbox to journal an intent on and no way to park the
-    /// call while the session answers. A tool named here is dispatched through
-    /// [`Capability::handle`], which can do both.
+    /// That is the change the move made: a layer pushed there runs on the
+    /// agent's task, where there is no mailbox to journal an intent on and no
+    /// way to park the call while the session answers. A name claimed here is
+    /// dispatched through [`Capability::handle`], which can do both.
     ///
     /// A budget the model can only ever be refused by advertises nothing. A
     /// tool like that is worse than no tool: it spends prompt on a capability
     /// that does not exist and invites a retry loop against a fixed number.
     ///
     /// The facts are what carry the agent catalogue, and this is the only reason
-    /// [`Capability::tools`] takes them: the types a session can spawn are found
+    /// [`Capability::layer`] takes them: the types a session can spawn are found
     /// by the workspace scan, which runs in a capability that sorts *after* this
-    /// one. A model not shown the list can only guess at a name, and every guess
-    /// is refused.
-    fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
+    /// one — so the layers are composed on the run's task, after `provide`, and
+    /// this list is built there. A model not shown it can only guess at a name,
+    /// and every guess is refused.
+    fn specs(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
         if self.child_settings.max_subagents() == 0 || self.depth >= MAX_SUBAGENT_DEPTH {
             return Vec::new();
         }
@@ -537,6 +536,22 @@ impl Capability for SubAgentCapability {
             },
         ]
     }
+}
+
+#[async_trait::async_trait]
+impl Capability for SubAgentCapability {
+    fn name(&self) -> &'static str {
+        "sub_agent"
+    }
+
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(facts), mailbox)
+    }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
         match msg {
@@ -603,7 +618,7 @@ impl Capability for SubAgentCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{FakeCapability, facts, tool};
+    use super::super::testing::{FakeCapability, advertised_by, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::settings;
@@ -653,7 +668,7 @@ mod tests {
 
     /// What the model is shown for `spawn_agent` under these facts.
     fn spawn_spec(c: &SubAgentCapability, facts: &AgentFacts) -> ToolSpec {
-        c.tools(facts)
+        c.specs(facts)
             .into_iter()
             .find(|t| t.name == SPAWN_TOOL)
             .expect("spawn_agent is advertised")
@@ -1212,17 +1227,13 @@ mod tests {
         assert!(!text.contains(&child.to_string()));
     }
 
-    /// Both tools, advertised through `tools()` rather than a toolbox layer —
-    /// which is what routes the call to the mailbox, where the intent can be
-    /// journaled and the call parked.
+    /// Both tools, claimed by this capability's own layer — which is what
+    /// routes the call to the mailbox, where the intent can be journaled and the
+    /// call parked.
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            cap()
-                .tools(&facts())
-                .into_iter()
-                .map(|t| t.name)
-                .collect::<Vec<_>>(),
+            advertised_by(&cap(), &facts()),
             vec![SPAWN_TOOL, STATUS_TOOL]
         );
     }
@@ -1344,11 +1355,13 @@ mod tests {
     fn a_spent_budget_advertises_nothing() {
         let mut zero = settings();
         zero.max_concurrent_subagents = Some(0);
-        assert!(SubAgentCapability::new(zero, 0).tools(&facts()).is_empty());
+        assert!(advertised_by(&SubAgentCapability::new(zero, 0), &facts()).is_empty());
         assert!(
-            SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH)
-                .tools(&facts())
-                .is_empty()
+            advertised_by(
+                &SubAgentCapability::new(settings(), MAX_SUBAGENT_DEPTH),
+                &facts()
+            )
+            .is_empty()
         );
     }
 

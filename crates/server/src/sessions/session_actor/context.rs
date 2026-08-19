@@ -738,20 +738,27 @@ mod tests {
     /// for on the mailbox, which the agent actor advertises beside them. A test
     /// reading only the toolbox would pass with `ask_user` missing entirely.
     fn offered(provider: &SessionContextProvider, contexts: &Contexts) -> Vec<String> {
-        let mut names: Vec<String> = contexts
-            .toolbox
+        run_toolbox(provider, contexts)
             .specs()
             .into_iter()
             .map(|s| s.name)
-            .collect();
-        names.extend(
-            provider
-                .equipment
-                .tools(&contexts.facts)
-                .into_iter()
-                .map(|t| t.name),
-        );
-        names
+            .collect()
+    }
+
+    /// The toolbox this run would hand the model: the sandbox `provide`
+    /// composed, wrapped in each capability's own layer.
+    ///
+    /// Built the way the agent actor builds it, so what these tests read is
+    /// what the model is shown rather than a second list assembled beside it.
+    fn run_toolbox(
+        provider: &SessionContextProvider,
+        contexts: &Contexts,
+    ) -> Arc<dyn horsie_agentcore::Toolbox> {
+        crate::agent_loop::capabilities::testing::composed(
+            &provider.equipment,
+            Arc::clone(&contexts.toolbox),
+            &contexts.facts,
+        )
     }
 
     /// **What `provide` must carry out of the spec, and used to drop.**
@@ -775,9 +782,8 @@ mod tests {
             plugins: Vec::new(),
         };
         let contexts = provider.provide().await.expect("contexts");
-        let spawn = provider
-            .equipment
-            .tools(&contexts.facts)
+        let spawn = run_toolbox(&provider, &contexts)
+            .specs()
             .into_iter()
             .find(|t| t.name == "spawn_agent")
             .expect("spawn_agent is advertised");

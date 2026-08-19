@@ -25,7 +25,7 @@
 //! answered by the toolbox built out of [`AgentSpec::mcp`], which runs on the
 //! agent's task, so routing it to this mailbox would only park a call that has
 //! nothing to journal and nobody to answer it. So [`Capability::handle`]
-//! returns `None` and [`Capability::tools`] stays empty, and the tools are
+//! returns `None` and [`Capability::layer`] claims nothing, and the tools are
 //! advertised by the toolbox that will actually run them.
 
 use super::{CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
@@ -117,7 +117,7 @@ impl Capability for McpCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{call, facts, tool};
+    use super::super::testing::{advertised_by, call, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{loading, spec};
@@ -168,7 +168,7 @@ mod tests {
         assert!(c.handle(&tool(&call("mcp__github__list_issues"))).is_none());
         assert!(c.handle(&tool(&call("bash"))).is_none());
         assert!(
-            c.tools(&facts()).is_empty(),
+            advertised_by(&c, &facts()).is_empty(),
             "the tools are advertised by the toolbox that will run them"
         );
     }

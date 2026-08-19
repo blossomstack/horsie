@@ -8,15 +8,15 @@
 //! Sorting last is also what makes it the *innermost* toolbox: it is the base
 //! every other capability decorates, and the only one that wraps nothing.
 //!
-//! # Setup-only: the sandbox is a layer, never a `tools()` entry
+//! # Setup-only: the sandbox is a `setup` layer, never a claimed name
 //!
 //! This capability advertises no tool and claims no message. The sandbox
 //! reaches the model as a [`AgentSpec::wrap`] layer, which runs on the agent's
-//! own task — and that is the whole reason it is not
-//! [`Capability::tools`](super::Capability::tools). A name listed there is
+//! own task — and that is the whole reason it is not claimed by
+//! [`Capability::layer`](super::Capability::layer). A name claimed there is
 //! dispatched through the actor's mailbox so it can park and journal, which is
 //! right for `ask_user` and wrong twice over here: the sandbox namespace cannot
-//! be enumerated, so there is no list to advertise, and round-tripping the
+//! be enumerated, so there is no list to claim, and round-tripping the
 //! mailbox for every `bash` call would put the actor's inbox in the path of
 //! every shell command an agent runs.
 //!
@@ -500,9 +500,9 @@ impl Capability for RuntimeCapability {
     /// that own a name, and the only calls left for it are the ones the toolbox
     /// is about to handle without asking.
     ///
-    /// So there is nothing here, and nothing in
-    /// [`Capability::tools`](super::Capability::tools) either — see the module
-    /// doc for why the base toolbox must not be advertised there.
+    /// So there is nothing here, and nothing claimed by
+    /// [`Capability::layer`](super::Capability::layer) either — see the module
+    /// doc for why the base toolbox must not be claimed there.
     fn handle(&self, _msg: &Msg) -> Option<Decision> {
         None
     }
@@ -523,7 +523,7 @@ impl Capability for RuntimeCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{call, facts, tool};
+    use super::super::testing::{advertised_by, call, facts, tool};
     use super::*;
     use crate::agent_loop::AskAnswer;
     use crate::agent_loop::capabilities::testing::{loading, spec};
@@ -576,7 +576,7 @@ mod tests {
     /// call should go.
     #[test]
     fn the_base_toolbox_is_a_layer_and_not_an_advertised_tool() {
-        assert!(RuntimeCapability::default().tools(&facts()).is_empty());
+        assert!(advertised_by(&RuntimeCapability::default(), &facts()).is_empty());
     }
 
     /// A sandbox that cannot be acquired stops the turn. Every other capability

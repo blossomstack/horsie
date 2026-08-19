@@ -12,7 +12,7 @@ use crate::agent_loop::state::{
     AgentDomainEvent, AgentState, AgentStateView, AgentUsageSnapshot, ReadOutcome,
     coarse_appends_an_entry, coarse_event,
 };
-use crate::agent_loop::toolbox::CapabilityToolbox;
+use crate::agent_loop::toolbox::AgentMailbox;
 use crate::sessions::workflow::SUBMIT_RESULT_TOOL;
 use async_trait::async_trait;
 use horsie_actor::{
@@ -883,23 +883,24 @@ impl AgentActor {
                     return;
                 }
             };
-            // Outermost, so a capability wins a name against the sandbox — the
-            // same order the offer scan uses, read from the other end.
+            // Each capability wraps the sandbox in its own layer, first one
+            // outermost — the same order the offer scan uses, read from the
+            // other end, so a name resolves to the same capability whether it is
+            // being advertised or answered.
             //
-            // The specs are computed *here*, after `provide`, because that is
-            // the first moment the facts exist: `sub_agent` lists the installed
-            // agent types, and the scan that found them is the runtime
-            // capability's `setup`, which `provide` has just run. Computed on
-            // the mailbox instead, the model would be shown a `spawn_agent` that
-            // names no types at all. The same facts go to the toolbox, so the
-            // call a capability is later offered carries the list it advertised.
+            // Layered *here*, after `provide`, because that is the first moment
+            // the facts exist: `sub_agent` lists the installed agent types, and
+            // the scan that found them is the runtime capability's `setup`,
+            // which `provide` has just run. Composed on the mailbox instead, the
+            // model would be shown a `spawn_agent` that names no types at all.
+            // The same facts go into the mailbox toolbox, so the call a
+            // capability is later offered carries the list it advertised.
             let facts = Arc::new(contexts.facts);
-            let toolbox: Arc<dyn Toolbox> = Arc::new(CapabilityToolbox {
-                inner: contexts.toolbox,
-                specs: capabilities.tools(&facts),
-                facts,
+            let mailbox: Arc<dyn Toolbox> = Arc::new(AgentMailbox {
+                facts: Arc::clone(&facts),
                 actor: self_ref.clone(),
             });
+            let toolbox = capabilities.layer(contexts.toolbox, &facts, &mailbox);
             let system_prompt = contexts
                 .system_prompt
                 .or(configured_prompt)
@@ -3801,16 +3802,17 @@ mod capability_tests {
         }
     }
 
-    fn layer(specs: Vec<ToolSpec>) -> CapabilityToolbox {
-        CapabilityToolbox {
-            inner: Arc::new(Sandbox),
-            specs,
+    /// One capability's layer over the sandbox, dispatching through a real
+    /// mailbox — the actor behind it fails the test if it is ever reached.
+    fn layer(specs: Vec<ToolSpec>) -> Arc<dyn Toolbox> {
+        let mailbox: Arc<dyn Toolbox> = Arc::new(AgentMailbox {
             facts: Arc::new(crate::sessions::runners::loading::AgentFacts::default()),
             actor: crate::testing::spawn_detached(
                 &ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 NeverAsked,
             ),
-        }
+        });
+        crate::agent_loop::toolbox::claiming(Arc::new(Sandbox), specs, &mailbox)
     }
 
     fn spec(name: &str) -> ToolSpec {
@@ -3821,8 +3823,9 @@ mod capability_tests {
         }
     }
 
-    /// The layer advertises what the capabilities answer for *alongside* the
-    /// sandbox's own tools, rather than replacing them.
+    /// The layer advertises what the capability answers for *alongside* the
+    /// sandbox's own tools, rather than replacing them — and its own first,
+    /// because it is the outer one and would win a name against them.
     #[tokio::test]
     async fn the_layer_advertises_capabilities_beside_the_sandbox() {
         let names: Vec<String> = layer(vec![spec("ask_user")])
@@ -3830,7 +3833,7 @@ mod capability_tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names, vec!["bash", "ask_user"]);
+        assert_eq!(names, vec!["ask_user", "bash"]);
     }
 
     /// An ordinary sandbox call goes straight through. The mailbox is not a

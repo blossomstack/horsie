@@ -38,12 +38,14 @@ use crate::agent_loop::Incoming;
 use crate::agent_loop::timers::{
     CancelSelector, TimerId, TimerKind, TimerRecord, timer_tool_specs,
 };
+use crate::agent_loop::toolbox::claiming;
 use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::now_ms;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// The tool that arms one.
@@ -270,14 +272,25 @@ fn answer<T: Serialize>(call: &str, value: &T) -> Act {
     }
 }
 
+impl TimersCapability {
+    fn specs(&self) -> Vec<ToolSpec> {
+        timer_tool_specs()
+    }
+}
+
 #[async_trait::async_trait]
 impl Capability for TimersCapability {
     fn name(&self) -> &'static str {
         "timers"
     }
 
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
-        timer_tool_specs()
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -367,7 +380,7 @@ impl Capability for TimersCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{call, facts, tool};
+    use super::super::testing::{advertised_by, call, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
 
@@ -438,12 +451,10 @@ mod tests {
 
     #[test]
     fn it_advertises_the_three_timer_tools() {
-        let names: Vec<String> = TimersCapability::new()
-            .tools(&facts())
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        assert_eq!(names, vec![SET_TOOL, LIST_TOOL, CANCEL_TOOL]);
+        assert_eq!(
+            advertised_by(&TimersCapability::new(), &facts()),
+            vec![SET_TOOL, LIST_TOOL, CANCEL_TOOL]
+        );
     }
 
     /// Arming journals the record with its fire time already stamped, answers

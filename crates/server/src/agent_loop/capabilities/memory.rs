@@ -16,8 +16,8 @@
 //! layer this pushes in [`Capability::setup`] answers those calls on the
 //! agent's task, and routing them to this mailbox would only stop a tool that
 //! already works. So [`Capability::handle`] returns `None` and
-//! [`Capability::tools`] stays empty, and [`crate::memory::MemoryToolbox`] goes
-//! on advertising the five itself.
+//! [`Capability::layer`] claims nothing, and [`crate::memory::MemoryToolbox`]
+//! goes on advertising the five itself.
 //!
 //! [`TOOLS`] survives the move anyway, because it is what the tests check the
 //! equipped layer against — a sixth tool the toolbox grows and this list does
@@ -130,7 +130,7 @@ impl Capability for MemoryCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{call, facts, tool};
+    use super::super::testing::{advertised_by, call, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
     use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
@@ -202,7 +202,7 @@ mod tests {
         }
         assert!(c.handle(&tool(&call("bash"))).is_none());
         assert!(
-            c.tools(&facts()).is_empty(),
+            advertised_by(&c, &facts()).is_empty(),
             "the five are advertised by the toolbox that will run them"
         );
     }

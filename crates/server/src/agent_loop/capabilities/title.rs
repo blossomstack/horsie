@@ -29,13 +29,15 @@
 use super::{
     Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, SetupError,
 };
+use crate::agent_loop::toolbox::claiming;
 use crate::sessions::runners::ids::RunnerId;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Appended to a fork's system prompt.
 ///
@@ -244,6 +246,33 @@ impl TitleCapability {
     }
 }
 
+impl TitleCapability {
+    /// Claimed by this capability's own layer, which dispatches to the mailbox:
+    /// answering the call means asking the session and waiting for a reply, and
+    /// a layer pushed in `setup` runs on the agent's task where there is
+    /// nothing to ask with.
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec {
+            name: TOOL.to_string(),
+            description: "Rename this session at any point with a concise, specific, \
+                single-line title. The latest successful call wins."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "required": ["title"],
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": SESSION_TITLE_MAX_CHARS,
+                        "description": "A concise single-line session title, at most 60 characters. The latest successful call renames the session."
+                    }
+                }
+            }),
+        }]
+    }
+}
+
 #[async_trait::async_trait]
 impl Capability for TitleCapability {
     fn name(&self) -> &'static str {
@@ -269,29 +298,13 @@ impl Capability for TitleCapability {
         Ok(())
     }
 
-    /// Through `tools()` rather than a toolbox layer: the call has to reach
-    /// this actor's mailbox, because answering it means asking the session and
-    /// waiting for a reply, and a layer runs on the agent's task where there is
-    /// nothing to ask with.
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
-        vec![ToolSpec {
-            name: TOOL.to_string(),
-            description: "Rename this session at any point with a concise, specific, \
-                single-line title. The latest successful call wins."
-                .to_string(),
-            input_schema: json!({
-                "type": "object",
-                "required": ["title"],
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": SESSION_TITLE_MAX_CHARS,
-                        "description": "A concise single-line session title, at most 60 characters. The latest successful call renames the session."
-                    }
-                }
-            }),
-        }]
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -350,7 +363,9 @@ impl Capability for TitleCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{equipped, facts, loading, spec, tool};
+    use crate::agent_loop::capabilities::testing::{
+        advertised_by, equipped, facts, loading, spec, tool,
+    };
 
     fn set(id: &str, title: &str) -> ToolCall {
         ToolCall {
@@ -565,9 +580,9 @@ mod tests {
     /// `set_session_title` whichever kind of conversation it is in, and the
     /// session is what decides which conversation that renames.
     ///
-    /// Through `tools()` rather than a toolbox layer, which is the change the
-    /// move made: a layer runs on the agent's task, where there is nothing to
-    /// ask the session with.
+    /// Through its own layer, which dispatches to the mailbox, rather than a
+    /// layer pushed in `setup`: one of those runs on the agent's task, where
+    /// there is nothing to ask the session with.
     #[tokio::test]
     async fn either_variant_advertises_the_tool_without_equipping_a_layer() {
         for cap in [
@@ -578,13 +593,7 @@ mod tests {
             cap.setup(&loading(), &mut spec)
                 .await
                 .expect("nothing to acquire");
-            assert_eq!(
-                cap.tools(&facts())
-                    .into_iter()
-                    .map(|t| t.name)
-                    .collect::<Vec<_>>(),
-                vec![TOOL]
-            );
+            assert_eq!(advertised_by(&cap, &facts()), vec![TOOL]);
             assert_eq!(
                 equipped(spec),
                 Vec::<String>::new(),
@@ -597,7 +606,7 @@ mod tests {
     /// limit the validation above actually enforces.
     #[test]
     fn the_advertised_schema_quotes_the_limit_it_enforces() {
-        let spec = TitleCapability::new().tools(&facts()).remove(0);
+        let spec = TitleCapability::new().specs().remove(0);
         assert_eq!(spec.name, TOOL);
         assert_eq!(
             spec.input_schema["properties"]["title"]["maxLength"],

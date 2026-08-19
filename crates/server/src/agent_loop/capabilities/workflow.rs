@@ -25,22 +25,25 @@
 //! Its session-side twin equipped nothing, because `invoke_workflow` had no
 //! toolbox behind it and advertising a tool before there is one to execute is
 //! how a model learns to call something that answers "no such tool". That is
-//! no longer true: a tool named in [`Capability::tools`] is dispatched through
-//! [`Capability::handle`] on this actor, which is the half that was missing.
+//! no longer true: a tool this capability's [`Capability::layer`] claims is
+//! dispatched through [`Capability::handle`] on this actor, which is the half
+//! that was missing.
 
 use super::{
     Act, CapEvent, CapSlice, Capability, Decision, Msg, SessionReply, SessionRequest, TurnEvent,
 };
 use crate::agent_loop::Incoming;
+use crate::agent_loop::toolbox::claiming;
 use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
 use crate::sessions::runners::ids::{RunnerId, RunnerKind};
 use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::{ChildMsg, ChildOutcome, ToolCall, WorkflowOutcome};
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::agent::{SubAgentResultPart, ToolResultInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The tool that starts a run.
 pub const INVOKE_TOOL: &str = "invoke_workflow";
@@ -326,15 +329,10 @@ fn result(call: &str, output: String, is_error: bool) -> Act {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for WorkflowCapability {
-    fn name(&self) -> &'static str {
-        "workflow"
-    }
-
+impl WorkflowCapability {
     /// Both tools, advertised here rather than pushed as a toolbox layer — see
     /// the module doc for why that is what made advertising them honest.
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
+    fn specs(&self) -> Vec<ToolSpec> {
         vec![
             ToolSpec {
                 name: INVOKE_TOOL.to_string(),
@@ -369,6 +367,22 @@ impl Capability for WorkflowCapability {
                 input_schema: json!({ "type": "object", "properties": {} }),
             },
         ]
+    }
+}
+
+#[async_trait::async_trait]
+impl Capability for WorkflowCapability {
+    fn name(&self) -> &'static str {
+        "workflow"
+    }
+
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -436,7 +450,7 @@ impl Capability for WorkflowCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{facts, tool};
+    use crate::agent_loop::capabilities::testing::{advertised_by, facts, tool};
     use crate::sessions::runners::message::SubAgentOutcome;
 
     fn call(name: &str, input: Value) -> ToolCall {
@@ -838,16 +852,13 @@ mod tests {
         assert!(!text.contains(&child.to_string()));
     }
 
-    /// Both tools, advertised through `tools()` — which is what routes the call
-    /// to the mailbox, where the intent can be journaled and the call parked.
+    /// Both tools, claimed by this capability's own layer — which is what
+    /// routes the call to the mailbox, where the intent can be journaled and the
+    /// call parked.
     #[test]
     fn it_advertises_both_tools() {
         assert_eq!(
-            WorkflowCapability::default()
-                .tools(&facts())
-                .into_iter()
-                .map(|t| t.name)
-                .collect::<Vec<_>>(),
+            advertised_by(&WorkflowCapability::default(), &facts()),
             vec![INVOKE_TOOL, STATUS_TOOL]
         );
     }

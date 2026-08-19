@@ -425,7 +425,7 @@ impl AgentLifecycle for State {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::facts;
+    use crate::agent_loop::capabilities::testing::{advertised, facts};
     use crate::agent_loop::capabilities::title::TitleCapability;
     use crate::sessions::forks::ForkMode;
 
@@ -566,13 +566,8 @@ mod tests {
         let Action::StartAgent { equipment, .. } = &actions[0] else {
             panic!("expected a start, got {:?}", actions[0]);
         };
-        let tools: Vec<String> = equipment
-            .tools(&facts())
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
         assert_eq!(
-            tools,
+            advertised(equipment, &facts()),
             vec![crate::agent_loop::capabilities::title::TOOL],
             "the capability it holds is what its agent runs with"
         );

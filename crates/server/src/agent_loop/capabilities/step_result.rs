@@ -23,12 +23,14 @@
 //! twice by two different owners.
 
 use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError};
+use crate::agent_loop::toolbox::claiming;
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
 use crate::sessions::workflow::{SUBMIT_RESULT_TOOL, result_schema, validate_result};
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use horsie_models::workflow::{StepField, StepOutcome};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Appended to a workflow step's system prompt: what a step is, how it ends,
 /// and that its result is what decides where the run goes next. Deliberately
@@ -101,23 +103,7 @@ impl StepResultCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for StepResultCapability {
-    fn name(&self) -> &'static str {
-        "step_result"
-    }
-
-    /// The paragraph that says what a step is, and nothing else.
-    ///
-    /// The tool itself is advertised through [`Capability::tools`] rather than
-    /// equipped as a toolbox layer, which is the change the move made: a layer
-    /// runs on the agent's task, where there is no mailbox to journal the
-    /// submitted output on and nothing that could conclude the step.
-    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
-        spec.say("step_result", STEP_PROMPT_SUFFIX);
-        Ok(())
-    }
-
+impl StepResultCapability {
     /// The step's own result tool, built from the schema it declared.
     ///
     /// This is the whole of what makes one step's equipment differ from the
@@ -131,12 +117,40 @@ impl Capability for StepResultCapability {
     /// its tool and the answer that comes back, and a second advertisement of
     /// the same tool from over here would offer a question nothing could route
     /// the answer to.
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
+    fn specs(&self) -> Vec<ToolSpec> {
         vec![ToolSpec {
             name: SUBMIT_RESULT_TOOL.to_string(),
             description: TOOL_DESCRIPTION.to_string(),
             input_schema: result_schema(&self.outcomes, &self.fields),
         }]
+    }
+}
+
+#[async_trait::async_trait]
+impl Capability for StepResultCapability {
+    fn name(&self) -> &'static str {
+        "step_result"
+    }
+
+    /// The paragraph that says what a step is, and nothing else.
+    ///
+    /// The tool itself is claimed by this capability's own
+    /// [`Capability::layer`] rather than pushed as a layer here, which is the
+    /// change the move made: a layer pushed here runs on the agent's task,
+    /// where there is no mailbox to journal the submitted output on and nothing
+    /// that could conclude the step.
+    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+        spec.say("step_result", STEP_PROMPT_SUFFIX);
+        Ok(())
+    }
+
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -170,7 +184,7 @@ impl Capability for StepResultCapability {
 mod tests {
     use super::*;
     use crate::agent_loop::capabilities::testing::{
-        equipped, facts, loading, settings, spec, tool,
+        advertised, equipped, facts, loading, settings, spec, tool,
     };
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
     use horsie_models::workflow::StepFieldType;
@@ -212,7 +226,7 @@ mod tests {
 
     /// The advertised schema, as the model is shown it.
     fn schema(c: &StepResultCapability) -> Value {
-        c.tools(&facts())
+        c.specs()
             .into_iter()
             .find(|s| s.name == SUBMIT_RESULT_TOOL)
             .expect("a step is equipped to submit")
@@ -344,9 +358,9 @@ mod tests {
         assert_eq!(schema["properties"]["files"]["items"]["type"], "string");
     }
 
-    /// Setup is left with the paragraph and nothing else: the tool goes through
-    /// `tools()`, which is what routes the call to this actor's mailbox, where
-    /// the output can be journaled.
+    /// Setup is left with the paragraph and nothing else: the tool is claimed
+    /// by this capability's own layer, which is what routes the call to this
+    /// actor's mailbox, where the output can be journaled.
     #[tokio::test]
     async fn the_step_says_what_it_is_and_equips_no_layer() {
         let mut spec = spec();
@@ -378,7 +392,7 @@ mod tests {
             .expect("nothing fatal");
         assert!(degraded.is_empty());
 
-        let names: Vec<String> = caps.tools(&facts()).into_iter().map(|t| t.name).collect();
+        let names = advertised(&caps, &facts());
         assert!(names.contains(&super::super::ask_user::TOOL.to_string()));
         assert!(names.contains(&SUBMIT_RESULT_TOOL.to_string()));
     }

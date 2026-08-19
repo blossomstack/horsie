@@ -14,8 +14,8 @@
 //! with a value, so it wants none of what this actor's mailbox is for: no park,
 //! no journal entry, no request to the session. The whole capability is
 //! therefore the layer [`Capability::setup`] pushes, which runs on the agent's
-//! own task — [`Capability::tools`] is empty and [`Capability::handle`] claims
-//! nothing.
+//! own task — [`Capability::layer`] claims nothing and so does
+//! [`Capability::handle`].
 //!
 //! That is the one difference from its session-side twin, which had to claim
 //! the `horsie_` prefix to stop the open-namespace capability behind it from
@@ -115,7 +115,9 @@ impl Capability for ControlPlaneCapability {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{call, equipped, facts, loading, spec, tool};
+    use crate::agent_loop::capabilities::testing::{
+        advertised_by, call, equipped, facts, loading, spec, tool,
+    };
 
     /// Holding the capability is what equips the tools and the prompt that
     /// tells the agent they exist — a tool nobody was told about is not used.
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn it_claims_nothing_through_the_mailbox() {
         let c = ControlPlaneCapability;
-        assert!(c.tools(&facts()).is_empty());
+        assert!(advertised_by(&c, &facts()).is_empty());
         for name in ["horsie_sessions", "horsie", "bash"] {
             assert!(
                 c.handle(&tool(&call(name))).is_none(),

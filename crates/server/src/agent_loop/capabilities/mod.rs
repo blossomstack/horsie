@@ -72,9 +72,10 @@ use crate::agent_loop::{AskAnswer, Incoming};
 use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::{ChildMsg, Command, ToolCall};
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::Toolbox;
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Something reaching an agent's capabilities.
 ///
@@ -86,7 +87,7 @@ pub enum Msg<'a> {
     /// A tool the model called, and what the run that called it found.
     ///
     /// The facts ride with the call because they are the same ones the
-    /// advertisement was built from — [`Capability::tools`] is computed on that
+    /// advertisement was built from — [`Capability::layer`] is composed on that
     /// run's task from this very value — so a refusal here names exactly the
     /// catalogue the model was shown. Nothing else carries them: facts exist for
     /// as long as a run does, and a tool call is the only message that is always
@@ -471,23 +472,41 @@ pub trait Capability: std::fmt::Debug + Send + Sync {
     /// Release what `setup` acquired. Runs when the agent is unloaded.
     async fn teardown(&self) {}
 
-    /// The tools this capability answers for, advertised to the model.
+    /// Wrap the agent's toolbox in this capability's own layer.
     ///
-    /// Separate from `setup`'s toolbox layers, and the two are not
-    /// interchangeable: a tool named here is dispatched through [`Self::handle`]
-    /// on the actor, so it can park, journal and ask the session. A layer pushed
-    /// in `setup` runs on the agent's task and can do none of those things,
-    /// which is exactly right for the sandbox and wrong for everything else.
+    /// The default wraps nothing: a capability with no tools returns `inner`
+    /// untouched, so it costs the model's calls no indirection at all.
     ///
-    /// [`AgentFacts`] rather than nothing, because an advertisement can depend on
-    /// what the load found: `sub_agent` lists the installed agent types, and only
-    /// the workspace scan knows them. Facts are why these are computed on the
-    /// run's own task after `provide` rather than on the mailbox before it — a
-    /// capability that sorts ahead of `runtime`, as `sub_agent` must to win the
-    /// `spawn_agent` name, has no scan of its own to read.
-    fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
-        let _ = facts;
-        Vec::new()
+    /// A layer answers the names it claims and passes everything else straight
+    /// through — see [`crate::agent_loop::toolbox::claiming`], which is what
+    /// every capability here builds its layer with. Claimed names reach
+    /// [`Self::handle`] on the actor's mailbox, so a tool can park, journal and
+    /// ask the session; unclaimed ones never touch the mailbox.
+    ///
+    /// **Wrapping order is precedence.** [`Capabilities::layer`] applies the
+    /// list back to front, so the *first* capability ends up outermost and wins
+    /// a name against everything behind it — the same answer the offer scan
+    /// gives, which is why there is now one ordering rather than two that read
+    /// opposite ways.
+    ///
+    /// [`AgentFacts`] rather than nothing, because an advertisement can depend
+    /// on what the load found: `sub_agent` lists the installed agent types, and
+    /// only the workspace scan knows them. Facts are why layers are composed on
+    /// the run's own task after `provide` rather than on the mailbox before it —
+    /// a capability that sorts ahead of `runtime`, as `sub_agent` must to win
+    /// the `spawn_agent` name, has no scan of its own to read.
+    ///
+    /// `mailbox` is the agent's own, in toolbox form. Passed in rather than
+    /// held, because a capability is persisted state and an address is not; it
+    /// is also what lets a test compose a layer with no actor running.
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        let _ = (facts, mailbox);
+        inner
     }
 
     /// `None` means "not mine".
@@ -619,10 +638,10 @@ impl Capabilities {
 
     /// Equip a capability ahead of everything already here.
     ///
-    /// Front rather than back because both orders demand it: the open-namespace
-    /// sandbox sorts last and would otherwise claim the call, and it is also the
-    /// innermost toolbox, which wraps nothing — so a layer pushed behind it
-    /// would be built and then dropped.
+    /// Front rather than back because that is now the only way to win a name:
+    /// first in the list is outermost in the toolbox and first in the offer
+    /// scan, and the open-namespace sandbox sorts last precisely so that
+    /// everything else is ahead of it.
     pub fn push_front(&mut self, cap: impl Capability + 'static) {
         self.0.insert(0, Box::new(cap));
     }
@@ -660,18 +679,26 @@ impl Capabilities {
         self.0.iter().any(|c| c.name() == name)
     }
 
-    /// Every tool this agent advertises, in offer order.
+    /// Wrap this run's toolbox in every capability's layer.
     ///
-    /// The same order tool calls are dispatched in, so a name claimed by two
-    /// capabilities is advertised once by the one that will actually answer it.
+    /// Back to front, so the *first* capability ends up outermost. That is the
+    /// whole ordering rule: whoever wins a name is first in the offer list and
+    /// outermost in the toolbox, and now those are one statement rather than
+    /// two lists to keep in step.
+    ///
+    /// `inner` is the sandbox the setup layers composed, so a capability that
+    /// claims nothing leaves an ordinary `bash` call exactly as cheap as it was.
     #[must_use]
-    pub fn tools(&self, facts: &AgentFacts) -> Vec<ToolSpec> {
-        let mut seen = std::collections::HashSet::new();
+    pub fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
         self.0
             .iter()
-            .flat_map(|c| c.tools(facts))
-            .filter(|t| seen.insert(t.name.clone()))
-            .collect()
+            .rev()
+            .fold(inner, |inner, cap| cap.layer(inner, facts, mailbox))
     }
 
     /// Hand a message to each capability until one takes it.
@@ -793,6 +820,7 @@ pub(crate) fn or_empty(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 pub mod testing {
     use super::*;
+    use horsie_agentcore::ToolSpec;
 
     /// A capability with a name, one tool, and one piece of folded state.
     ///
@@ -802,6 +830,10 @@ pub mod testing {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct FakeCapability {
         pub tool: String,
+        /// What this one's advertisement says, so two fakes claiming the same
+        /// name are still tellable apart — which is the only way to see *which*
+        /// of them the composed toolbox let through.
+        pub description: String,
         /// What broadcasts and events have done to it — the folded state a
         /// `save()` that rebuilt from config would silently drop.
         pub seen: Vec<String>,
@@ -813,8 +845,17 @@ pub mod testing {
         pub fn new(tool: &str) -> Self {
             Self {
                 tool: tool.to_string(),
+                description: String::new(),
                 seen: Vec::new(),
                 watches_turns: false,
+            }
+        }
+
+        /// One that claims `tool` and says so in its own words.
+        pub fn describing(tool: &str, description: &str) -> Self {
+            Self {
+                description: description.to_string(),
+                ..Self::new(tool)
             }
         }
 
@@ -839,12 +880,21 @@ pub mod testing {
             "fake"
         }
 
-        fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
-            vec![ToolSpec {
-                name: self.tool.clone(),
-                description: String::new(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }]
+        fn layer(
+            &self,
+            inner: Arc<dyn Toolbox>,
+            _facts: &AgentFacts,
+            mailbox: &Arc<dyn Toolbox>,
+        ) -> Arc<dyn Toolbox> {
+            crate::agent_loop::toolbox::claiming(
+                inner,
+                vec![ToolSpec {
+                    name: self.tool.clone(),
+                    description: self.description.clone(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+                mailbox,
+            )
         }
 
         fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -1027,6 +1077,61 @@ pub mod testing {
         }
     }
 
+    /// A toolbox that answers nothing, standing in for whatever a real run
+    /// would have wrapped or dispatched to.
+    ///
+    /// Advertising never touches the mailbox and a prompt-only agent wraps no
+    /// sandbox, so both ends of a composition are this in a test — and a test
+    /// composing a layer therefore needs no actor running.
+    #[must_use]
+    pub fn nothing() -> Arc<dyn horsie_agentcore::Toolbox> {
+        Arc::new(horsie_agentcore::EmptyToolbox)
+    }
+
+    /// The toolbox an equipped agent would run with, wrapping `inner`.
+    ///
+    /// What a run builds after `provide`, minus only the mailbox: the layers,
+    /// in the order the agent actor applies them.
+    #[must_use]
+    pub fn composed(
+        caps: &Capabilities,
+        inner: Arc<dyn horsie_agentcore::Toolbox>,
+        facts: &AgentFacts,
+    ) -> Arc<dyn horsie_agentcore::Toolbox> {
+        caps.layer(inner, facts, &nothing())
+    }
+
+    /// What one capability adds to the toolbox it wraps.
+    ///
+    /// Empty for a capability with no tools of its own, which is what "wraps
+    /// nothing" looks like from outside: [`Capability::layer`] hands `inner`
+    /// straight back, so there is no layer at all rather than one that only
+    /// forwards.
+    #[must_use]
+    pub fn advertised_by(cap: &dyn Capability, facts: &AgentFacts) -> Vec<String> {
+        cap.layer(nothing(), facts, &nothing())
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
+    /// What an equipped agent advertises, outermost first.
+    ///
+    /// The question can no longer be put to the list itself: a capability
+    /// contributes a toolbox layer rather than a list of specs, so the answer
+    /// comes from the composed toolbox — the same object the run hands the
+    /// model, which is what makes an assertion here an assertion about what the
+    /// model was actually shown.
+    #[must_use]
+    pub fn advertised(caps: &Capabilities, facts: &AgentFacts) -> Vec<String> {
+        composed(caps, nothing(), facts)
+            .specs()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    }
+
     /// The names the composed toolbox advertises, innermost first.
     ///
     /// What a `setup` test asserts on now that a spec holds real toolboxes
@@ -1045,6 +1150,7 @@ pub mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+    use horsie_agentcore::ToolSpec;
 
     fn caps(list: Vec<FakeCapability>) -> Capabilities {
         Capabilities::new(
@@ -1183,10 +1289,107 @@ mod tests {
         // Both claim the same name; the front one answers.
         assert_eq!(caps.iter().count(), 2);
         assert_eq!(
-            caps.tools(&facts()).len(),
-            1,
+            advertised(&caps, &facts()),
+            vec!["shared"],
             "a name claimed twice is advertised once, by whoever will answer it"
         );
+    }
+
+    /// **Wrapping order is precedence.** The first capability in the list ends
+    /// up outermost, so when two claim one name it is the first one's tool the
+    /// model is shown — and the first one's layer that would answer a call.
+    ///
+    /// This is the ordering the layering exists to collapse: there used to be
+    /// two, one for offering and one for wrapping, and they read opposite ways.
+    /// Folding the list the other way round still compiles, still advertises
+    /// one tool per name, and silently hands every contested name to the wrong
+    /// capability.
+    #[test]
+    fn the_first_capability_in_the_list_wraps_outermost() {
+        let caps = caps(vec![
+            FakeCapability::describing("shared", "the first one's"),
+            FakeCapability::describing("shared", "the second one's"),
+        ]);
+        let empty: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
+        let specs = caps.layer(Arc::clone(&empty), &facts(), &empty).specs();
+        let [spec] = specs.as_slice() else {
+            panic!("one name, advertised once, got {specs:?}");
+        };
+        assert_eq!(
+            spec.description, "the first one's",
+            "the outermost layer is not the first capability"
+        );
+    }
+
+    /// A tool call for a name nobody claims is not the layers' business: it
+    /// goes straight through to whatever the layers wrap, which in a real run
+    /// is the sandbox. Every `bash` call in every session takes this path.
+    #[tokio::test]
+    async fn an_unclaimed_name_passes_straight_through_the_layers() {
+        let caps = caps(vec![
+            FakeCapability::new("first"),
+            FakeCapability::new("second"),
+        ]);
+        let refuses: Arc<dyn Toolbox> = Arc::new(RefusingMailbox);
+        let sandbox: Arc<dyn Toolbox> = Arc::new(Sandbox);
+        let outcome = caps
+            .layer(sandbox, &facts(), &refuses)
+            .execute("bash", serde_json::Value::Null, "t1")
+            .await
+            .expect("the sandbox answers");
+        assert_eq!(
+            outcome,
+            horsie_agentcore::ToolOutcome::Result(serde_json::Value::String(
+                "sandbox ran bash".into()
+            ))
+        );
+    }
+
+    /// A toolbox that answers one name, standing in for the sandbox the layers
+    /// wrap.
+    #[derive(Debug)]
+    struct Sandbox;
+
+    #[async_trait::async_trait]
+    impl Toolbox for Sandbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec {
+                name: "bash".into(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }]
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            _input: serde_json::Value,
+            _id: &str,
+        ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+            Ok(horsie_agentcore::ToolOutcome::Result(
+                serde_json::Value::String(format!("sandbox ran {name}")),
+            ))
+        }
+    }
+
+    /// A mailbox that fails the test if a call reaches it.
+    #[derive(Debug)]
+    struct RefusingMailbox;
+
+    #[async_trait::async_trait]
+    impl Toolbox for RefusingMailbox {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+
+        async fn execute(
+            &self,
+            name: &str,
+            _input: serde_json::Value,
+            _id: &str,
+        ) -> Result<horsie_agentcore::ToolOutcome, horsie_agentcore::ToolCallError> {
+            panic!("`{name}` is nobody's: it must never reach the mailbox");
+        }
     }
 
     /// Nothing equipped is a real state — a capability set can be entirely
@@ -1195,7 +1398,7 @@ mod tests {
     fn an_empty_set_claims_nothing() {
         let caps = Capabilities::default();
         assert!(caps.is_empty());
-        assert!(caps.tools(&facts()).is_empty());
+        assert!(advertised(&caps, &facts()).is_empty());
         assert!(caps.offer(&tool(&call("x"))).is_none());
         assert!(caps.broadcast(&Msg::Turn(TurnEvent::Ended)).acts.is_empty());
     }

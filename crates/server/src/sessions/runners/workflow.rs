@@ -891,7 +891,7 @@ impl AgentLifecycle for State {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::{facts, settings};
+    use crate::agent_loop::capabilities::testing::{advertised, facts, settings};
     use crate::sessions::workflow::{TransitionSpec, WorkflowStepSpec};
     use horsie_models::workflow::{OutcomeFilter, OutcomeIn};
 
@@ -1621,7 +1621,7 @@ mod tests {
             .map(|c| c.save().into())
             .collect();
         assert!(
-            asks.tools(&facts()).is_empty(),
+            advertised(&asks, &facts()).is_empty(),
             "a step that may not ask must be equipped with no ask tool"
         );
     }

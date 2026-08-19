@@ -325,7 +325,7 @@ fn render(output: &serde_json::Value) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::agent_loop::capabilities::testing::facts;
+    use crate::agent_loop::capabilities::testing::{advertised, facts};
     use crate::agent_loop::capabilities::title::TitleCapability;
 
     fn worker() -> State {
@@ -441,13 +441,8 @@ mod tests {
         // under what its parent decided, not under whatever the session's are
         // by the time it wakes.
         assert_eq!(spec.settings.model, state.settings.model);
-        let tools: Vec<String> = equipment
-            .tools(&facts())
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
         assert_eq!(
-            tools,
+            advertised(equipment, &facts()),
             vec![crate::agent_loop::capabilities::title::TOOL],
             "the capability it holds is what its agent runs with"
         );

@@ -20,7 +20,7 @@
 //! declining hands the call to the next capability, and the last of those is the
 //! open-namespace sandbox, which claims every name: the model would be answered
 //! by the sandbox and never learn why its question went nowhere. A muted agent
-//! also advertises no `ask_user` in [`Capability::tools`], so in practice the
+//! also claims no `ask_user` in its [`Capability::layer`], so in practice the
 //! call only arrives from a plugin or a resumed transcript.
 //!
 //! # Abandonment stays in `queued_turn`
@@ -51,14 +51,16 @@
 //! told*; this decides nothing and only stops holding what is no longer held.
 
 use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg, SetupError, TurnEvent};
+use crate::agent_loop::toolbox::claiming;
 use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::runners::loading::{AgentFacts, AgentSpec, Loading};
 use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec};
+use horsie_agentcore::{AskLifecycle, LifecycleEvent, ToolSpec, Toolbox};
 use horsie_models::agent::ToolResultInput;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// Appended to an unattended run's system prompt (a routine). It has no
 /// `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -273,37 +275,10 @@ impl AskUserCapability {
     }
 }
 
-#[async_trait::async_trait]
-impl Capability for AskUserCapability {
-    fn name(&self) -> &'static str {
-        "ask_user"
-    }
-
-    /// A muted agent is equipped with the paragraph instead of the tool.
-    ///
-    /// A tool that is never advertised cannot be called, whereas one that is
-    /// advertised and refused costs the model a turn to discover that — and a
-    /// model that was told the tool exists and finds it missing spends a turn
-    /// working out why.
-    ///
-    /// An unmuted one equips nothing here either: the tool is advertised
-    /// through [`Capability::tools`], which is what routes the call to this
-    /// actor's mailbox, where the park can be journaled. A toolbox layer runs on
-    /// the agent's task and could do neither.
-    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
-        match self.mute {
-            Some(Mute::Unattended) => spec.say("unattended", UNATTENDED_PROMPT_SUFFIX),
-            Some(Mute::NotInteractive) => {
-                spec.say("not_interactive", NOT_INTERACTIVE_PROMPT_SUFFIX);
-            }
-            None => {}
-        }
-        Ok(())
-    }
-
+impl AskUserCapability {
     /// Nothing when muted, which is the whole of "a muted agent has no
     /// `ask_user`".
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
+    fn specs(&self) -> Vec<ToolSpec> {
         if self.mute.is_some() {
             return Vec::new();
         }
@@ -339,6 +314,44 @@ impl Capability for AskUserCapability {
                 }
             }),
         }]
+    }
+}
+
+#[async_trait::async_trait]
+impl Capability for AskUserCapability {
+    fn name(&self) -> &'static str {
+        "ask_user"
+    }
+
+    /// A muted agent is equipped with the paragraph instead of the tool.
+    ///
+    /// A tool that is never advertised cannot be called, whereas one that is
+    /// advertised and refused costs the model a turn to discover that — and a
+    /// model that was told the tool exists and finds it missing spends a turn
+    /// working out why.
+    ///
+    /// An unmuted one equips nothing here either: the tool is claimed by this
+    /// capability's own [`Capability::layer`], which is what routes the call to
+    /// this actor's mailbox, where the park can be journaled. A layer pushed
+    /// here in `setup` runs on the agent's task and could do neither.
+    async fn setup(&self, _loading: &Loading, spec: &mut AgentSpec) -> Result<(), SetupError> {
+        match self.mute {
+            Some(Mute::Unattended) => spec.say("unattended", UNATTENDED_PROMPT_SUFFIX),
+            Some(Mute::NotInteractive) => {
+                spec.say("not_interactive", NOT_INTERACTIVE_PROMPT_SUFFIX);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -394,7 +407,7 @@ mod tests {
     use super::super::testing::{FakeCapability, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::Capabilities;
-    use crate::agent_loop::capabilities::testing::{equipped, loading, spec};
+    use crate::agent_loop::capabilities::testing::{advertised_by, equipped, loading, spec};
 
     fn ask(id: &str, question: &str) -> ToolCall {
         ToolCall {
@@ -458,7 +471,7 @@ mod tests {
         );
         assert!(spec.toolbox().is_none());
         assert!(
-            c.tools(&facts()).is_empty(),
+            advertised_by(&c, &facts()).is_empty(),
             "a muted agent advertises no ask_user"
         );
 
@@ -520,7 +533,7 @@ mod tests {
         // Still equips nothing, exactly as unattended does — and the refusal
         // says the other reason, not this one.
         assert!(spec.toolbox().is_none());
-        assert!(c.tools(&facts()).is_empty());
+        assert!(advertised_by(&c, &facts()).is_empty());
         let said = refusal(
             &c.handle(&tool(&ask("t1", "which?")))
                 .expect("mine even when muted"),
@@ -534,9 +547,9 @@ mod tests {
     /// An attended session does advertise the tool — the counterpart that stops
     /// the unattended test passing for the wrong reason.
     ///
-    /// Through `tools()` rather than a toolbox layer, which is the change the
-    /// move made: a layer runs on the agent's task, where there is no mailbox to
-    /// journal a park on.
+    /// Through its own layer, which dispatches to the mailbox, rather than a
+    /// layer pushed in `setup`: one of those runs on the agent's task, where
+    /// there is no mailbox to journal a park on.
     #[tokio::test]
     async fn an_attended_session_advertises_the_tool_without_equipping_a_layer() {
         let mut spec = spec();
@@ -550,13 +563,7 @@ mod tests {
             Vec::<String>::new(),
             "the tool is dispatched through the mailbox, not through a layer"
         );
-        assert_eq!(
-            c.tools(&facts())
-                .into_iter()
-                .map(|t| t.name)
-                .collect::<Vec<_>>(),
-            vec![TOOL]
-        );
+        assert_eq!(advertised_by(&c, &facts()), vec![TOOL]);
     }
 
     /// The schema has to keep saying that `choices` are suggestions: a model
@@ -565,7 +572,7 @@ mod tests {
     /// a multi-select asked as a single choice loses every answer but one.
     #[test]
     fn the_advertised_schema_offers_multi_select_and_a_free_text_fallback() {
-        let spec = AskUserCapability::new().tools(&facts()).remove(0);
+        let spec = AskUserCapability::new().specs().remove(0);
         let props = spec
             .input_schema
             .get("properties")

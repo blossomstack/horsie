@@ -30,10 +30,12 @@ use super::{Act, CapEvent, CapSlice, Capability, Decision, Msg};
 use crate::agent_loop::task_list::{
     TASK_LIST_TOOL, TaskListAction, TaskListState, TaskRecord, task_list_tool_spec,
 };
+use crate::agent_loop::toolbox::claiming;
 use crate::sessions::runners::loading::AgentFacts;
 use crate::sessions::runners::message::ToolCall;
-use horsie_agentcore::ToolSpec;
+use horsie_agentcore::{ToolSpec, Toolbox};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// What this capability records: the list, whole, after a mutation.
 ///
@@ -93,14 +95,25 @@ impl TaskListCapability {
     }
 }
 
+impl TaskListCapability {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![task_list_tool_spec()]
+    }
+}
+
 #[async_trait::async_trait]
 impl Capability for TaskListCapability {
     fn name(&self) -> &'static str {
         "task_list"
     }
 
-    fn tools(&self, _facts: &AgentFacts) -> Vec<ToolSpec> {
-        vec![task_list_tool_spec()]
+    fn layer(
+        &self,
+        inner: Arc<dyn Toolbox>,
+        _facts: &AgentFacts,
+        mailbox: &Arc<dyn Toolbox>,
+    ) -> Arc<dyn Toolbox> {
+        claiming(inner, self.specs(), mailbox)
     }
 
     fn handle(&self, msg: &Msg) -> Option<Decision> {
@@ -142,7 +155,7 @@ impl Capability for TaskListCapability {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::super::testing::{call, facts, tool};
+    use super::super::testing::{advertised_by, call, facts, tool};
     use super::*;
     use crate::agent_loop::capabilities::{Capabilities, TurnEvent};
 
@@ -180,12 +193,10 @@ mod tests {
 
     #[test]
     fn it_advertises_the_task_list_tool() {
-        let names: Vec<String> = TaskListCapability::new()
-            .tools(&facts())
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-        assert_eq!(names, vec![TASK_LIST_TOOL]);
+        assert_eq!(
+            advertised_by(&TaskListCapability::new(), &facts()),
+            vec![TASK_LIST_TOOL]
+        );
     }
 
     /// A successful action journals the whole list and answers with it
