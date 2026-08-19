@@ -218,6 +218,15 @@ pub enum CoreCommand {
     /// shows; this one is what the running session reads, and a session's own
     /// journal is the truth about that session.
     TitleSet { name: String },
+    /// Internal: the detached create has news about the sandbox.
+    ///
+    /// Addressed to the runtime runner that asked, because a session could hold
+    /// more than one — the runner shape is what makes that expressible, even
+    /// though one is still the rule.
+    RuntimeEvent {
+        runner: crate::sessions::runners::ids::RunnerId,
+        event: crate::sessions::runners::runtime::Event,
+    },
     /// Internal: drive the boundary, persisting whatever it starts.
     ///
     /// Self-sent once at load, because that is the one boundary nothing else

@@ -451,7 +451,6 @@ pub struct Assembly<'a> {
 /// not be able to build one by accident. The two runners that need a `Default`
 /// state need it only so `RunnerState::empty_for` can build one, which is
 /// itself test scaffolding.
-#[cfg(test)]
 #[must_use]
 pub(crate) fn empty_settings() -> crate::sessions::spec::AgentSettings {
     crate::sessions::spec::AgentSettings {

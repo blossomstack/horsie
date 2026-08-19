@@ -27,6 +27,7 @@
 //! same lookup answers what used to need three registries probed in a
 //! load-bearing order.
 
+use crate::runtime_manager::RuntimeError;
 use crate::sessions::UserMessageError;
 use crate::sessions::runners::action::Action;
 use crate::sessions::runners::ids::{AgentId, RunnerId};
@@ -62,7 +63,7 @@ use crate::agent_loop::{
 };
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
-    spec::{ServerDeps, SessionSpec, SessionStatus},
+    spec::{ServerDeps, SessionKind, SessionSpec, SessionStatus},
     supervisor::{ForkRow, SessionSupervisorCommand},
 };
 use crate::users::{UserRegistry, UserServices, resolve};
@@ -549,6 +550,83 @@ impl SessionActor {
         }
     }
 
+    /// The runners a session is created with: its root, then its sandbox.
+    ///
+    /// **Order is load-bearing.** `SessionState::apply` makes the *first*
+    /// runner created the root, so the conversation or the run must be
+    /// journaled before the runtime — otherwise the sandbox becomes the
+    /// session's status, and a session reads `Provisioning` for ever.
+    ///
+    /// `SessionKind` shrinks to exactly this one job: deciding which runner is
+    /// the root.
+    fn birth_runners(&self, spec: &SessionSpec) -> Vec<SessionEvent> {
+        use crate::sessions::runners::action::{RunnerArgs, WorkflowSource};
+        use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
+        let at_ms = now_ms();
+        let root = RunnerId::new_v4();
+        let (kind, args) = match &spec.kind {
+            SessionKind::Agent { .. } => (
+                RunnerKind::Conversation,
+                RunnerArgs::Conversation {
+                    agent: AgentId::new_v4(),
+                    seed: None,
+                    message: String::new(),
+                    settings: Box::new(
+                        spec.agent_settings()
+                            .cloned()
+                            .unwrap_or_else(crate::sessions::runners::empty_settings),
+                    ),
+                },
+            ),
+            SessionKind::Workflow { .. } => {
+                let Some(run) = spec.workflow_run() else {
+                    tracing::error!(session = %self.id, "a workflow session with no graph");
+                    return Vec::new();
+                };
+                (
+                    RunnerKind::Workflow,
+                    RunnerArgs::Workflow {
+                        source: WorkflowSource::Graph(run.clone()),
+                        input: run.input.clone(),
+                    },
+                )
+            }
+        };
+        let caps = crate::sessions::runners::assemble(
+            kind,
+            &crate::sessions::runners::Assembly {
+                settings: &spec
+                    .agent_settings()
+                    .cloned()
+                    .unwrap_or_else(crate::sessions::runners::empty_settings),
+                agent: AgentId::new_v4(),
+                depth: 0,
+                unattended: spec.is_unattended(),
+                fork: None,
+                agent_type: None,
+            },
+        );
+        let Ok(state) = crate::sessions::runners::birth::born(args, caps, root) else {
+            return Vec::new();
+        };
+        vec![
+            SessionEvent::RunnerCreated {
+                id: root,
+                kind,
+                parent: None,
+                state: Box::new(state),
+                at_ms,
+            },
+            SessionEvent::RunnerCreated {
+                id: RunnerId::new_v4(),
+                kind: RunnerKind::Runtime,
+                parent: None,
+                state: Box::new(crate::sessions::runners::birth::runtime_born()),
+                at_ms,
+            },
+        ]
+    }
+
     /// Carry out one runner's decision and return the events that record it.
     ///
     /// No turn ever begins here: an agent owns its queue and decides when that
@@ -583,7 +661,7 @@ impl SessionActor {
                 self.cancel_agent(agent).await;
                 Vec::new()
             }
-            Action::Provision => self.provision(state, ctx).await,
+            Action::Provision => self.provision(runner, ctx).await,
             // Answered on the call that is waiting, never journaled: a refusal
             // is not something that happened to this session.
             Action::Reply { text } => {
@@ -706,17 +784,76 @@ impl SessionActor {
     }
 
     /// Acquire the sandbox this session runs in.
+    ///
+    /// Asked for by the runtime runner the moment it is `Pending`, which is
+    /// what gives provisioning an answer at recovery: before, it was driven by
+    /// a lifecycle command sent exactly once, so a session whose sandbox died
+    /// between the ask and the answer sat `Pending` with nothing to restart it.
+    ///
+    /// The gate that used to live here — "only from the three states that mean
+    /// no runtime has ever been confirmed" — is the runner's own `actions()`
+    /// now, which asks only from `Pending` and a non-terminal `Failed`.
     async fn provision(
         &mut self,
-        _state: &RunnerSessionState,
-        _ctx: &ActorContext<SessionInbox>,
+        runner: RunnerId,
+        ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionEvent> {
-        // The runtime runner asks for this the moment it is `Pending`, which is
-        // what gives provisioning an answer at recovery: before, it was driven
-        // by a lifecycle command and a session whose sandbox died between the
-        // ask and the answer sat `Pending` with nothing to restart it.
-        tracing::debug!(session = %self.id, "the runtime runner asked for a sandbox");
-        Vec::new()
+        use crate::sessions::runners::runtime;
+        let runtimes = self.deps().runtimes.clone();
+        let session = self.id.to_string();
+        let vendor = self.spec().vendor.clone();
+        let spec = self.spec().clone();
+        let me = self.me(ctx);
+        // Minted here and journaled below in the same breath, so the sandbox
+        // this create starts and the entry that records it agree on one name.
+        // Reading the clock twice would give the spawned task an identity the
+        // journal never saw.
+        let at_ms = now_ms();
+        let incarnation = at_ms.to_string();
+        // Off the mailbox: a real create runs for minutes, and this actor has
+        // to keep answering reads, stops and deletes throughout. The status the
+        // runner just folded is what holds the turn back meanwhile.
+        tokio::spawn(async move {
+            let (error, terminal, detail) = match runtimes
+                .create(&session, &incarnation, &vendor, &spec)
+                .await
+            {
+                Ok(detail) => (None, false, detail),
+                // Exactly the split `get` makes: only a live vendor refusing to
+                // produce the runtime is terminal. An offline vendor or a failed
+                // token mint is a bad moment, not a dead session.
+                Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
+                    (Some(e.to_string()), false, None)
+                }
+            };
+            // Before the outcome, and separately from it: the vendor described
+            // the runtime it accepted, and that sentence belongs to the wait
+            // rather than to how the wait ended.
+            if let Some(detail) = detail {
+                let _ = me
+                    .tell(SessionCommand::Core(CoreCommand::RuntimeEvent {
+                        runner,
+                        event: runtime::Event::Progress { detail },
+                    }))
+                    .await;
+            }
+            let event = match error {
+                None => runtime::Event::Succeeded { at_ms },
+                Some(error) => runtime::Event::Failed { error, terminal },
+            };
+            let _ = me
+                .tell(SessionCommand::Core(CoreCommand::RuntimeEvent {
+                    runner,
+                    event,
+                }))
+                .await;
+        });
+        vec![SessionEvent::Runner {
+            id: runner,
+            event: Box::new(RunnerEvent::Runtime(runtime::Event::Started)),
+            at_ms,
+        }]
     }
 
     /// Put a finished child's report in the queue of the agent owed it.

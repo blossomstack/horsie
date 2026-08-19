@@ -61,6 +61,14 @@ impl SessionCore {
             // whatever `Runner::actions` asked for, which is the same call a
             // live boundary makes — so there is no recovery-only path here to
             // drift from the ordinary one.
+            CoreCommand::RuntimeEvent { runner, event } => {
+                let events = vec![SessionEvent::Runner {
+                    id: runner,
+                    event: Box::new(crate::sessions::runners::RunnerEvent::Runtime(event)),
+                    at_ms: now_ms(),
+                }];
+                actor.persist_and_advance(state, events, ctx).await
+            }
             CoreCommand::Advance => actor.persist_and_advance(state, Vec::new(), ctx).await,
             CoreCommand::TitleSet { name } => {
                 actor.spec_mut().name = Some(name.clone());
@@ -79,7 +87,9 @@ impl SessionCore {
                 // cannot — a session created a moment ago, whose log is empty
                 // and whose agents nothing else would ever start.
                 actor.adopt((*spec).clone(), state, ctx).await;
-                CommandEffect::persist(vec![SessionEvent::SpecRecorded { spec }])
+                let mut events = vec![SessionEvent::SpecRecorded { spec: spec.clone() }];
+                events.extend(actor.birth_runners(&spec));
+                CommandEffect::persist(events)
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
