@@ -575,11 +575,17 @@ impl SessionActor {
         use crate::sessions::runners::ids::{AgentId, RunnerId, RunnerKind};
         let at_ms = now_ms();
         let root = RunnerId::new_v4();
+        // Minted once. A conversation's agent is named twice below — by the
+        // args its runner is born from, and by the assembly its capabilities
+        // are equipped against — and two uuids would equip the root agent's
+        // fork and subagent capabilities in the name of an agent that does not
+        // exist. `create_child` reads one id into both for the same reason.
+        let main = AgentId::new_v4();
         let (kind, args) = match &spec.kind {
             SessionKind::Agent { .. } => (
                 RunnerKind::Conversation,
                 RunnerArgs::Conversation {
-                    agent: AgentId::new_v4(),
+                    agent: main,
                     seed: None,
                     message: String::new(),
                     settings: Box::new(
@@ -610,7 +616,7 @@ impl SessionActor {
                     .agent_settings()
                     .cloned()
                     .unwrap_or_else(crate::sessions::runners::empty_settings),
-                agent: AgentId::new_v4(),
+                agent: main,
                 depth: 0,
                 unattended: spec.is_unattended(),
                 fork: None,

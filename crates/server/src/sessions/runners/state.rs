@@ -243,6 +243,18 @@ impl SessionState {
                 if self.runners.is_empty() {
                     self.root = *id;
                 }
+                // The agent a runner is born owning is addressable from that
+                // moment, not from the moment it starts. `spawn_agent` answers
+                // the model with a worker's id before the worker is equipped,
+                // `/fork` answers the person with the branch's, and the very
+                // first message to a new session is addressed to a root
+                // conversation whose agent nothing has started yet — and
+                // nothing ever would, because starting it is what the message
+                // triggers. Registering only on `AgentStarted` made that first
+                // message unroutable, and so made every session unusable.
+                if let Some(agent) = super::Runner::primary_agent(state.as_ref()) {
+                    self.agents.insert(agent, *id);
+                }
                 self.runners.insert(
                     *id,
                     RunnerRecord {
@@ -333,6 +345,31 @@ mod tests {
             kind,
             parent,
             state: Box::new(RunnerState::empty_for(kind)),
+            at_ms: 0,
+        }
+    }
+
+    /// The same, for a runner born owning a named agent — which every
+    /// conversation and every worker is.
+    fn created_owning(
+        id: RunnerId,
+        kind: RunnerKind,
+        parent: Option<AgentId>,
+        agent: AgentId,
+    ) -> SessionEvent {
+        let mut state = RunnerState::empty_for(kind);
+        match &mut state {
+            RunnerState::Conversation(c) => c.agent = agent,
+            RunnerState::SubAgent(w) => w.agent = agent,
+            RunnerState::Workflow(_) | RunnerState::Runtime(_) => {
+                panic!("a run and the sandbox own no agent at birth")
+            }
+        }
+        SessionEvent::RunnerCreated {
+            id,
+            kind,
+            parent,
+            state: Box::new(state),
             at_ms: 0,
         }
     }
@@ -435,21 +472,44 @@ mod tests {
         assert_eq!(s.usage["opus"].output_tokens, 2);
     }
 
-    /// Creation registers no agent: the runner's own first `StartAgent` does
-    /// that. A crash between the two therefore replays as a runner with
-    /// nothing started, which `actions()` restarts — the alternative, an agent
-    /// nothing tracks, is the one this ordering exists to prevent.
+    /// Creation registers the agent the runner is born owning, and starts
+    /// nothing.
+    ///
+    /// The two are different facts and were conflated. `agents` answers *which
+    /// runner owns this id*, which is addressing; `RunnerStatus` and the
+    /// runner's own `started` answer *has it been started*, which is what
+    /// `actions()` reads. Registering only on `AgentStarted` left the first
+    /// message to a new session addressed to an agent no lookup could place —
+    /// and starting that agent is the very thing the message triggers, so it
+    /// was never routable at all.
     #[test]
-    fn creating_a_runner_registers_no_agent() {
+    fn creating_a_runner_registers_its_agent_but_starts_nothing() {
         let mut s = SessionState::default();
         let id = RunnerId::new_v4();
-        s.apply(&created(id, RunnerKind::Conversation, None));
-        assert_eq!(s.runners[&id].status, RunnerStatus::Pending);
-        assert!(s.agents.is_empty());
+        let agent = AgentId::new_v4();
+        s.apply(&created_owning(id, RunnerKind::Conversation, None, agent));
+        assert_eq!(s.runner_of(agent), Some(id), "addressable from birth");
+        assert_eq!(
+            s.runners[&id].status,
+            RunnerStatus::Pending,
+            "and started by nothing"
+        );
         assert_eq!(s.root, id, "the first runner is the root");
     }
 
-    /// The one place `agents` grows, and it moves the runner to Running.
+    /// A run owns no agent until a step of it runs, so its creation registers
+    /// none — which is also why an unaddressed message on a workflow session
+    /// resolves to nothing.
+    #[test]
+    fn creating_a_run_registers_no_agent() {
+        let mut s = SessionState::default();
+        let id = RunnerId::new_v4();
+        s.apply(&created(id, RunnerKind::Workflow, None));
+        assert!(s.agents.is_empty());
+    }
+
+    /// Starting is what moves the runner to Running; the id it names was
+    /// already routable.
     #[test]
     fn a_started_agent_is_routable_and_moves_the_runner() {
         let mut s = SessionState::default();
