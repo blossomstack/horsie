@@ -65,9 +65,9 @@ pub fn render_carried_state(state: &AgentState) -> String {
         sections.push(block);
     }
 
-    let running = running_subagents(state);
+    let running = running_children(state);
     if !running.is_empty() {
-        let mut block = String::from("Subagents still running:");
+        let mut block = String::from("Delegated work still running:");
         for (id, label) in running {
             block.push_str(&format!("\n- {id} ({label})"));
         }
@@ -77,22 +77,27 @@ pub fn render_carried_state(state: &AgentState) -> String {
     sections.join("\n\n")
 }
 
-/// Whether any subagent this agent spawned is still working — that is, whether
-/// a report is still owed to it.
+/// Whether any work this agent delegated — a subagent it spawned, or a
+/// workflow it invoked — is still running; that is, whether a report is still
+/// owed to it.
 ///
-/// The agent's own view, read off its own log: the session records every spawn
-/// and every ending on the *parent*, because the parent is what a person has
-/// open while it waits. So this is not a second copy of the session's tree.
+/// The agent's own view, read off its own log: the session records every
+/// spawn, every invocation and every ending on the *parent*, because the
+/// parent is what a person has open while it waits. So this is not a second
+/// copy of the session's forest — it is the agent actor's own state, which is
+/// what makes it checkable before the agent is allowed to finish.
 #[must_use]
-pub fn has_running_subagents(state: &AgentState) -> bool {
-    !running_subagents(state).is_empty()
+pub fn has_outstanding_children(state: &AgentState) -> bool {
+    !running_children(state).is_empty()
 }
 
-/// Subagents this agent spawned that have not reported a terminal status.
+/// Delegated work that has not reported a terminal status. Invoked workflow
+/// runs ride the same lifecycle vocabulary as subagents, so one read covers
+/// both.
 ///
 /// Read off the log's lifecycle entries rather than from a field, because that
 /// is where the fact lives: the newest entry for an id is its current status.
-fn running_subagents(state: &AgentState) -> Vec<(String, String)> {
+fn running_children(state: &AgentState) -> Vec<(String, String)> {
     let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
     for entry in &state.log {
         if let AgentLogBody::Lifecycle(LifecycleEvent::SubAgent(s)) = &entry.body {
@@ -242,12 +247,12 @@ mod tests {
     #[test]
     fn a_running_subagent_is_owed_and_a_finished_one_is_not() {
         let mut state = AgentState::default();
-        assert!(!has_running_subagents(&state), "nothing spawned yet");
+        assert!(!has_outstanding_children(&state), "nothing spawned yet");
         note_subagent(&mut state, "s1", "research", "running");
-        assert!(has_running_subagents(&state));
+        assert!(has_outstanding_children(&state));
         note_subagent(&mut state, "s1", "research", "completed");
         assert!(
-            !has_running_subagents(&state),
+            !has_outstanding_children(&state),
             "the newest entry for an id is its status"
         );
     }
@@ -260,7 +265,7 @@ mod tests {
         let mut state = AgentState::default();
         note_subagent(&mut state, "s1", "research", "running");
         note_subagent(&mut state, "s1", "research", "failed");
-        assert!(!has_running_subagents(&state));
+        assert!(!has_outstanding_children(&state));
     }
 
     /// Append a subagent-progress entry the way the session would.

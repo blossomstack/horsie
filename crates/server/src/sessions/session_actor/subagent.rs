@@ -197,18 +197,21 @@ impl SessionActor {
                 id,
                 error,
             },
-            // Defensive: a subagent has no ask or timer tools, so neither
-            // outcome should ever occur.
+            // Defensive: a subagent has no ask tool, so this should not occur.
             TurnEnd::Asked => SessionDomainEvent::SubAgentFailed {
                 at_ms: now_ms(),
                 id,
                 error: "subagent asked the user; not supported".to_string(),
             },
-            TurnEnd::Parked => SessionDomainEvent::SubAgentFailed {
-                at_ms: now_ms(),
-                id,
-                error: "subagent parked; timers are not supported in sessions".to_string(),
-            },
+            // Not done, deliberately: the subagent's turn ended while work it
+            // delegated is still running, so its own gate parked it rather
+            // than concluding over an unfinished subtree. The node stays
+            // `Running`; the children's results are what wake it, and its next
+            // conclusion is the report. The boundary still flushes — one of
+            // those children may already be owed to it.
+            TurnEnd::Parked => {
+                return self.persist_and_advance(state, Vec::new(), ctx).await;
+            }
             // A subagent's interruption is repaired from the forest at *session*
             // load, by `SubAgents::on_load`, which is also where the parent is
             // owed the failure. This report cannot arrive first: a subagent
@@ -929,5 +932,128 @@ mod tests {
         let json = serde_json::to_value(&state).unwrap();
         let back: SessionState = serde_json::from_value(json).unwrap();
         assert_eq!(back.forest.sub(id).unwrap().label, "x");
+    }
+
+    /// The outstanding-work gate: a subagent whose turn ends while work it
+    /// delegated is still running parks instead of concluding, and its parent
+    /// hears exactly one report — when the whole subtree is done — rather than
+    /// an early answer followed by corrections.
+    #[tokio::test]
+    async fn a_subagent_parks_over_its_running_child_and_reports_once_when_done() {
+        use std::sync::Arc;
+
+        /// Holds the parent subagent's turn until released (once per turn),
+        /// hangs the grandchild forever, answers everything else with text.
+        struct GatedParent {
+            gate: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl horsie_agentcore::LlmProvider for GatedParent {
+            fn model_id(&self) -> &str {
+                "mock"
+            }
+
+            async fn complete(
+                &self,
+                request: horsie_agentcore::CompletionRequest<'_>,
+                _message_id: &str,
+                _events: &dyn horsie_agentcore::EventSink,
+            ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError>
+            {
+                let says = |needle: &str| {
+                    request.messages.iter().any(|m| {
+                        m.parts.iter().any(|p| {
+                            matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains(needle))
+                        })
+                    })
+                };
+                if says("HANG-CHILD") {
+                    std::future::pending::<()>().await;
+                }
+                if says("PARENT-TASK") {
+                    self.gate.notified().await;
+                }
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "sub answer".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }
+        }
+
+        let provider = Arc::new(GatedParent {
+            gate: tokio::sync::Notify::new(),
+        });
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(provider.clone() as Arc<dyn horsie_agentcore::LlmProvider>)
+                .await;
+
+        // The parent subagent's turn is held open while its child is planted
+        // under it, so the turn genuinely ends *over* a running child.
+        let parent = spawn_sub(&session, "lead", "PARENT-TASK: delegate and report").await;
+        let child = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: parent,
+                    label: "helper".into(),
+                    task: "HANG-CHILD until stopped".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |t| t.sub(child).is_some()).await;
+        provider.gate.notify_one();
+
+        // The parent's turn ends — and the gate holds: still `Running` in the
+        // forest, nothing delivered to main. Waited out via its own log (the
+        // park is journaled there), so the assertion observes a real park
+        // rather than a race it won.
+        wait_for_agent(&journal, parent, |s| s.parked).await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let rec = state.forest.sub(parent).unwrap();
+        assert_eq!(
+            rec.status,
+            SubAgentStatus::Running,
+            "a parked subagent has not concluded"
+        );
+        assert!(
+            subagent_texts(&main_history(&session).await)
+                .iter()
+                .all(|t| !t.contains("\"lead\"")),
+            "no early report reaches the parent conversation"
+        );
+
+        // The child ends (stopped here, which is one of the ways); its result
+        // wakes the parent, whose next turn has nothing outstanding — that
+        // conclusion is the report, and it is the only one.
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: child.to_string(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        provider.gate.notify_one();
+        wait_for_tree(&journal, id, |t| t.sub(parent).is_some_and(|r| r.notified)).await;
+        let texts = wait_for_subagent_text(&session, |texts| {
+            texts.iter().any(|t| t.contains("\"lead\""))
+        })
+        .await;
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("\"lead\"")).count(),
+            1,
+            "the parent hears exactly one report: {texts:?}"
+        );
     }
 }

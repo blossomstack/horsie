@@ -499,6 +499,12 @@ impl SessionActor {
         // A step is the only agent that owes a structured result, and the only
         // one for which a turn ending with plain text is not an answer.
         params.requires_result = matches!(plan.kind, SessionAgentKind::Step(_));
+        // A subagent's conclusion is a report its parent consumes once, so it
+        // may not conclude over delegated work still in flight — it parks, and
+        // reports when its whole subtree is done. A conversation's text is an
+        // answer to a person, not a report, so main and forks keep concluding
+        // per turn.
+        params.park_on_outstanding_work = matches!(plan.kind, SessionAgentKind::Sub(_));
         params.thinking_effort = plan
             .settings
             .thinking_effort
