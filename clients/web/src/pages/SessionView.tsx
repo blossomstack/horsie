@@ -1,4 +1,4 @@
-import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2 } from "lucide-react";
+import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2, Waypoints } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
@@ -9,6 +9,7 @@ import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { ContextGauge } from "../components/ContextGauge";
 import { SessionConfigBar } from "../components/SessionConfigBar";
+import { AgentGraph } from "../components/AgentGraph";
 import { SessionTimeline } from "../components/SessionTimeline";
 import { SettingsMenu } from "../components/SettingsMenu";
 import { StatusBadge } from "../components/StatusBadge";
@@ -34,6 +35,7 @@ import {
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
+import { layoutAgentTree } from "../lib/agentTree";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
 /** The session's name, and the only way a person can change it.
@@ -201,14 +203,22 @@ export function SessionView() {
   // still the whole session's: the map would label the open agent "main agent"
   // and draw its siblings hanging off it. A run already has its graph, which is
   // the structural view for a run.
-  const timelineOpen = !agentId && searchParams.get("view") === "timeline";
-  const showTimeline = (on: boolean) =>
+  //
+  // Three views of the same session: its prose, its shape in time, and its
+  // shape in lineage. Only one holds the pane at a time — they are answers to
+  // the same question, not panels to arrange.
+  const view = agentId ? "transcript" : (searchParams.get("view") ?? "transcript");
+  const timelineOpen = view === "timeline";
+  const graphOpen = view === "graph";
+  /** Whether anything has taken the pane from the transcript. */
+  const overlayOpen = timelineOpen || graphOpen;
+  const showView = (next: "transcript" | "timeline" | "graph") =>
     setSearchParams(
       (prev) => {
-        const next = new URLSearchParams(prev);
-        if (on) next.set("view", "timeline");
-        else next.delete("view");
-        return next;
+        const params = new URLSearchParams(prev);
+        if (next === "transcript") params.delete("view");
+        else params.set("view", next);
+        return params;
       },
       { replace: true },
     );
@@ -377,6 +387,13 @@ export function SessionView() {
     [stream.items, detail?.agents, detail?.forks, histories],
   );
 
+  // The same `collapsed` list the timeline reads: folding an agent is a
+  // statement about the agent, not about the view it was folded in.
+  const agentTree = useMemo(
+    () => layoutAgentTree(detail?.agents ?? [], collapsed),
+    [detail?.agents, collapsed],
+  );
+
   /** Scroll to a transcript entry by id, to a boundary by seq, or to either end. */
   const seek = (target: number | string) => {
     const el = scrollRef.current;
@@ -426,11 +443,11 @@ export function SessionView() {
   };
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    // Not while the timeline has the pane: the transcript is `display: none`
+    // Not while the timeline or the graph has the pane: the transcript is `display: none`
     // there, so every measurement below reads zero and would leave it parked at
     // the top. Re-running when the pane comes back is what restores it, which
-    // is why `timelineOpen` is a dependency rather than just a guard.
-    if (!el || timelineOpen) return;
+    // is why `overlayOpen` is a dependency rather than just a guard.
+    if (!el || overlayOpen) return;
     // A just-completed scroll-back prepend: keep the viewport where it was by
     // pushing down by exactly the height the older messages added.
     if (loadAnchor.current != null) {
@@ -439,16 +456,16 @@ export function SessionView() {
       return;
     }
     if (stick.current) el.scrollTop = el.scrollHeight;
-  }, [stream.items, stream.streaming, stream.orphanTools.length, timelineOpen]);
+  }, [stream.items, stream.streaming, stream.orphanTools.length, overlayOpen]);
 
   // A bar was clicked. Runs after the layout effect above has put the
   // transcript back where it was, so this lands on top of it rather than
   // fighting it.
   useEffect(() => {
-    if (timelineOpen || pendingSeek === null) return;
+    if (overlayOpen || pendingSeek === null) return;
     seek(pendingSeek);
     setPendingSeek(null);
-  }, [timelineOpen, pendingSeek]);
+  }, [overlayOpen, pendingSeek]);
 
   // Reset scroll intent when switching sessions.
   useEffect(() => {
@@ -533,16 +550,32 @@ export function SessionView() {
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}
             {!agentId && (
-              <button
-                className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
-                onClick={() => showTimeline(!timelineOpen)}
-                aria-pressed={timelineOpen}
-                title={timelineOpen ? "Show the transcript" : "Show the timeline"}
-                aria-label="Toggle the session timeline"
-                data-testid="timeline-toggle"
-              >
-                <ChartNoAxesGantt size={15} aria-hidden />
-              </button>
+              <>
+                <button
+                  className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
+                  onClick={() => showView(timelineOpen ? "transcript" : "timeline")}
+                  aria-pressed={timelineOpen}
+                  title={timelineOpen ? "Show the transcript" : "Show the timeline"}
+                  aria-label="Toggle the session timeline"
+                  data-testid="timeline-toggle"
+                >
+                  <ChartNoAxesGantt size={15} aria-hidden />
+                </button>
+                {/* The timeline answers "when", this answers "what spawned
+                    what". Two keys rather than one cycling key: a control that
+                    changes what it does each time you press it cannot say what
+                    it is about to do. */}
+                <button
+                  className={cn("key-icon shrink-0", graphOpen && "bg-raised !text-legend")}
+                  onClick={() => showView(graphOpen ? "transcript" : "graph")}
+                  aria-pressed={graphOpen}
+                  title={graphOpen ? "Show the transcript" : "Show the agent graph"}
+                  aria-label="Toggle the agent graph"
+                  data-testid="graph-toggle"
+                >
+                  <Waypoints size={15} aria-hidden />
+                </button>
+              </>
             )}
             {status && <StatusBadge status={status} />}
             {/* Durability is the product's whole differentiator, so a dropped
@@ -637,8 +670,24 @@ export function SessionView() {
                   // and record where to go; the effect above seeks once the
                   // transcript has actually rendered its anchors.
                   setPendingSeek(entryId);
-                  showTimeline(false);
+                  showView("transcript");
                 }}
+                onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+              />
+            </div>
+          )}
+
+          {/* The same roster the timeline lays along an axis, laid along its
+              lineage instead. */}
+          {graphOpen && (
+            <div className="min-h-0 flex-1">
+              <AgentGraph
+                tree={agentTree}
+                onToggleCollapse={(agent) =>
+                  setCollapsed((prev) =>
+                    prev.includes(agent) ? prev.filter((a) => a !== agent) : [...prev, agent],
+                  )
+                }
                 onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
               />
             </div>
@@ -649,7 +698,7 @@ export function SessionView() {
             ref={scrollRef}
             onScroll={onScroll}
             data-testid="transcript-scroll"
-            className={cn("relative flex-1 overflow-y-auto", timelineOpen && "hidden")}
+            className={cn("relative flex-1 overflow-y-auto", overlayOpen && "hidden")}
           >
             {/* Inside the scroller so the spine's own `sticky` keeps it in
                 view; outside it there would be nothing to stick to. */}
