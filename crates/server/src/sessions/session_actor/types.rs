@@ -17,16 +17,16 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
-    forks::{ForkMode, ForkParent, ForkRoster},
+    run_forest::{ForkMode, RunForest, RunId, RunState, TurnPhase},
     spec::{AgentSettings, SessionSpec, SessionStatus},
-    subagents::{SubAgentForest, SubAgentParent, TreeOwner},
-    workflow::WorkflowRunState,
+    workflow::{WorkflowRunSpec, WorkflowRunStatus},
 };
 use horsie_actor::ReplyTo;
 use horsie_models::hooks::HookRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Commands accepted by a [`SessionActor`].
@@ -124,32 +124,58 @@ pub enum TurnCommand {
     },
 }
 
-/// The workflow graph.
+/// The workflow runs this session hosts: its own, and the ones its agents
+/// invoke mid-session.
 #[derive(Serialize, Deserialize)]
 pub enum RunCommand {
-    /// Let the orchestrator start whatever it wants started. Sent to a run at
-    /// load so a pending one begins, and after a retry.
+    /// The `invoke_workflow` tool: start a run of `graph` under `parent`, the
+    /// agent that called it. The graph arrives already resolved — the tool
+    /// resolves presets on its own task, off this mailbox — so the session
+    /// only checks its limits and journals the snapshot.
+    Create {
+        parent: Uuid,
+        graph: Arc<WorkflowRunSpec>,
+        reply: ReplyTo<Result<Uuid, String>>,
+    },
+    /// Internal: the create's `RunCreated` write came back — only now is the
+    /// run real (persist-then-reply, the same shape a subagent spawn has). A
+    /// failed write starts nothing and the tool gets the error.
+    FinishCreate {
+        id: Uuid,
+        reply: ReplyTo<Result<Uuid, String>>,
+        persisted: Result<(), horsie_actor::JournalError>,
+    },
+    /// The `workflow_status` tool: one run's phase and step log, visible to
+    /// the agent that invoked it and to its ancestors.
+    Status {
+        caller: Uuid,
+        run: Uuid,
+        reply: ReplyTo<Result<String, String>>,
+    },
+    /// Let the orchestrators start whatever they want started. Sent at load so
+    /// a pending run begins, and after a retry.
     Advance,
-    /// Re-run one execution from the run log.
+    /// Re-run one execution from the root run's log.
     RetryStep {
         index: u32,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Read this session's workflow run, if it is one.
+    /// Read this session's own workflow run, if it is one.
     State {
         reply: ReplyTo<Option<crate::sessions::workflow::WorkflowRunState>>,
     },
-    /// Recovery found a step the process died inside. Suspends the run, which is
-    /// the state a retry can move.
+    /// Recovery found steps the process died inside. Suspends their runs,
+    /// which is the state a retry can move.
     ReconcileInterrupted,
 }
 
 /// The tree of delegated work.
 #[derive(Serialize, Deserialize)]
 pub enum SubAgentCommand {
-    /// The `spawn_agent` tool: start a subagent under `caller`.
+    /// The `spawn_agent` tool: start a subagent under `caller` — the agent
+    /// that called it, whichever kind it is.
     Spawn {
-        caller: SubAgentParent,
+        caller: Uuid,
         label: String,
         task: String,
         /// A plugin-declared agent type, already checked against the catalogue
@@ -172,7 +198,7 @@ pub enum SubAgentCommand {
     },
     /// The `subagent_status` tool: one node, or the caller's whole subtree.
     Status {
-        caller: SubAgentParent,
+        caller: Uuid,
         id: Option<Uuid>,
         reply: ReplyTo<Result<String, String>>,
     },
@@ -214,10 +240,11 @@ impl MessageAccepted {
 /// is what a client redirects to.
 #[derive(Serialize, Deserialize)]
 pub enum ForkCommand {
-    /// `/fork` or `/summary-n-fork`: branch `parent`, and queue `message` in the
+    /// `/fork` or `/summary-n-fork`: branch the conversation of agent
+    /// `parent` — the main agent or another fork — and queue `message` in the
     /// new fork so it has something to do when its seed lands.
     Create {
-        parent: ForkParent,
+        parent: Uuid,
         mode: ForkMode,
         message: String,
         reply: ReplyTo<Result<Uuid, String>>,
@@ -365,7 +392,13 @@ pub enum SessionDomainEvent {
     ///
     /// Boxed because a spec is much larger than any other variant here, and an
     /// enum is as big as its widest arm.
+    ///
+    /// Carries the session's own id: the fold roots the run forest from this
+    /// event, main's entry is keyed by the session id, and a pure fold has no
+    /// other way to learn it.
     SpecRecorded {
+        at_ms: u64,
+        session: Uuid,
         spec: Box<SessionSpec>,
     },
     /// This session was given a name — by a person, by the title tool, or
@@ -418,33 +451,40 @@ pub enum SessionDomainEvent {
     /// that queue becomes a turn, so this is the session learning what
     /// happened. What the turn consumed and answered is the agent's own fact
     /// and lives in the agent's journal — this carries only the fact that the
-    /// session is now `Running`.
+    /// conversation is now running.
     TurnBegan {
         at_ms: u64,
+        agent: Uuid,
     },
-    /// The main agent parked on questions for the user.
+    /// `agent` parked on questions for the user — the main agent, or a
+    /// workflow step, whose park holds its run.
     ///
     /// Also recorded rather than decided, and carries no payload for the same
     /// reason: the questions belong to the agent that asked them, which is what
-    /// answers them. All this drives is the session's status.
+    /// answers them. All this drives is the owning entry's phase.
     AskRecorded {
         at_ms: u64,
+        agent: Uuid,
     },
     TurnEnded {
         at_ms: u64,
+        agent: Uuid,
     },
     TurnFailed {
         at_ms: u64,
+        agent: Uuid,
         error: String,
     },
     /// The user cancelled the turn. Distinct from `TurnEnded` only in intent.
     TurnStopped {
         at_ms: u64,
+        agent: Uuid,
     },
     /// Recovery found a turn that the process died in. Recorded rather than
     /// inferred, so the transition is in the log like every other one.
     TurnInterrupted {
         at_ms: u64,
+        agent: Uuid,
     },
     /// Terminal: this session can never run again.
     SessionFailed {
@@ -458,20 +498,19 @@ pub enum SessionDomainEvent {
         agent_id: String,
         usage_total: UsageTotal,
     },
-    /// A subagent was spawned by `parent` (the main agent or another
-    /// subagent). Persisted before the child actor exists — a crash between
-    /// the two replays as a node that recovery reconciles to failed.
+    /// A subagent was spawned by agent `parent` — main, a step, a fork, or
+    /// another subagent. Persisted before the child actor exists — a crash
+    /// between the two replays as a node that recovery reconciles to failed.
+    ///
+    /// The parent is the actual agent, resolved when the tool was called;
+    /// depth is a walk over the forest, so neither is re-derived at fold time.
     SubAgentSpawned {
         at_ms: u64,
         id: Uuid,
-        parent: SubAgentParent,
+        parent: Uuid,
         label: String,
         task: String,
-        depth: u32,
         /// The plugin-declared agent type this subagent runs as, if any.
-        /// Defaulted so journals written before typed agents existed replay as
-        /// the general-purpose subagent they were.
-        #[serde(default)]
         agent_type: Option<String>,
     },
     /// A terminal node started another run, woken to consume child results.
@@ -495,11 +534,24 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         id: Uuid,
     },
+    /// An agent invoked a workflow mid-session. Persisted before anything
+    /// starts, with the graph snapshotted onto the event — replay never
+    /// reaches a store, and a crash between this write and the tool's ack
+    /// replays as a pending run the next boundary simply starts.
+    RunCreated {
+        at_ms: u64,
+        id: Uuid,
+        /// The agent the run reports to.
+        parent: Uuid,
+        graph: Arc<WorkflowRunSpec>,
+    },
     /// One execution of one workflow step began. Appended, never replacing: a
     /// loop back onto a step and a retry of one are both new entries, which is
     /// what keeps the log replayable and the graph projection lossless.
     StepStarted {
         at_ms: u64,
+        /// The run this execution belongs to — the session's own, or invoked.
+        run: Uuid,
         index: u32,
         step: String,
         agent: Uuid,
@@ -512,11 +564,13 @@ pub enum SessionDomainEvent {
     },
     StepConcluded {
         at_ms: u64,
+        run: Uuid,
         index: u32,
         output: Value,
     },
     StepFailed {
         at_ms: u64,
+        run: Uuid,
         index: u32,
         error: String,
     },
@@ -525,15 +579,25 @@ pub enum SessionDomainEvent {
     /// because the step's effect on the shared workspace is unknown.
     StepCancelled {
         at_ms: u64,
+        run: Uuid,
         index: u32,
     },
     RunFinished {
         at_ms: u64,
+        run: Uuid,
         output: Value,
     },
     RunFailed {
         at_ms: u64,
+        run: Uuid,
         error: String,
+    },
+    /// An invoked run's terminal result was sent to the agent that invoked it.
+    /// Persisted in the same effect as the send, exactly as a subagent's
+    /// `SubAgentNotified` is, so a reload neither re- nor never-sends.
+    RunNotified {
+        at_ms: u64,
+        run: Uuid,
     },
     /// A conversation was branched. Persisted before the fork's actor exists —
     /// a crash between the two replays as a fork still `Provisioning`, which
@@ -542,7 +606,8 @@ pub enum SessionDomainEvent {
     ForkCreated {
         at_ms: u64,
         id: Uuid,
-        parent: ForkParent,
+        /// The agent whose conversation was branched: main, or another fork.
+        parent: Uuid,
         /// The source agent's log seq at the branch point.
         source_seq: u64,
         mode: ForkMode,
@@ -681,6 +746,40 @@ pub(super) enum NotAnEnd {
     },
 }
 
+/// The runtime-build half of a session's life, folded from the provisioning
+/// events. Its own slice rather than writes into a shared `status` field, so
+/// the status can be a projection with one owner per fact.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub enum ProvisioningState {
+    /// No create has ever been asked for.
+    #[default]
+    Never,
+    /// A create is outstanding. Found at load, it means the process died
+    /// mid-create — safe to re-attempt, because no turn can have run under it.
+    InFlight { at_ms: u64 },
+    /// The vendor confirmed the runtime. `at_ms` is the provision's identity:
+    /// re-acquiring the sandbox means addressing the one already running, and
+    /// a server that forgot which provision that was could not name it.
+    Ready { at_ms: u64 },
+    /// The create failed on something retryable — an offline vendor, a token
+    /// that could not be minted. A terminal refusal is `SessionState::fatal`
+    /// instead: it ends the session, and this variant must stay re-attemptable.
+    Failed { at_ms: u64, reason: String },
+}
+
+impl ProvisioningState {
+    /// The identity of the current (or last attempted) provision.
+    #[must_use]
+    pub fn at_ms(&self) -> Option<u64> {
+        match self {
+            Self::Never => None,
+            Self::InFlight { at_ms } | Self::Ready { at_ms } | Self::Failed { at_ms, .. } => {
+                Some(*at_ms)
+            }
+        }
+    }
+}
+
 /// Persisted session state — purely a function of the event log.
 ///
 /// `#[serde(default)]` on the container: this is snapshotted, so it is a
@@ -703,44 +802,21 @@ pub struct SessionState {
     /// asks its supervisor for the seed rather than guessing.
     #[serde(default)]
     pub spec: Option<SessionSpec>,
-    pub status: SessionStatus,
-    pub last_error: Option<String>,
+    /// Terminal, session-wide failure: the one status a session cannot leave.
+    /// Everything else about "how is it going" lives on the entry it is true
+    /// of, in the forest.
+    pub fatal: Option<String>,
+    /// The sandbox lifecycle, its sole owner.
+    pub provisioning: ProvisioningState,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
-    /// The workflow run this session is, if it is one. `None` for every
-    /// conversation, which is what makes the field additive.
+    /// Every unit of work this session hosts — the main conversation, its
+    /// workflow runs, every subagent and every fork — as one hierarchy.
     #[serde(default)]
-    pub run: Option<WorkflowRunState>,
-    /// Every subagent this session holds, in one forest keyed by the agent that
-    /// roots each tree. Beside the run rather than inside it: a capability that
-    /// lives inside one kind is a capability the other kind silently loses.
-    #[serde(default)]
-    pub subagents: SubAgentForest,
-    /// Every fork this session holds. Beside the subagent forest rather than
-    /// inside it: that forest's whole vocabulary is about a parent being owed a
-    /// result, and a fork owes nobody one. `#[serde(default)]` so pre-fork
-    /// journal rows load with an empty roster.
-    #[serde(default)]
-    pub forks: ForkRoster,
-    /// Which provision of this session's runtime is the current one.
-    ///
-    /// Derived from the `ProvisioningStarted` that began it rather than stored
-    /// as its own event: that entry is already journaled exactly once per
-    /// provision, immediately before the vendor is called, so it already *is*
-    /// the fact. Recording it a second time would be two sources for one
-    /// answer, and a journal shape to keep in step.
-    ///
-    /// It has to survive a reload because re-acquiring a sandbox means
-    /// addressing the one already running, and a server that forgot which
-    /// provision that was could not name it.
-    #[serde(default)]
-    pub provisioned_at_ms: Option<u64>,
+    pub forest: RunForest,
 }
 
 impl SessionState {
-    /// What this session's own "Main" means right now: the step in flight for a
-    /// run, the main agent otherwise. The single kind-shaped fact the subagent
-    /// code is ever told, and it arrives as a value rather than a branch.
     /// Tokens banked across every agent this session hosts. Banked, so a turn
     /// in flight is not in it and nothing has to be asked of an agent.
     pub fn session_usage_total(&self) -> UsageTotal {
@@ -749,11 +825,64 @@ impl SessionState {
             .fold(UsageTotal::default(), |acc, u| acc.combine(u))
     }
 
-    pub fn root_owner(&self) -> TreeOwner {
-        match self.run.as_ref().and_then(WorkflowRunState::current_agent) {
-            Some(agent) => TreeOwner::Step(agent),
-            None => TreeOwner::Main,
+    /// The session's status, as a pure projection: a terminal failure, then
+    /// the sandbox lifecycle, then the *root* entry's own phase. Child work
+    /// never moves this — a subagent's invoked workflow failing is that
+    /// subagent's news, not the session turning red.
+    #[must_use]
+    pub fn status(&self) -> SessionStatus {
+        if let Some(reason) = &self.fatal {
+            return SessionStatus::Unrecoverable {
+                reason: reason.clone(),
+            };
         }
+        match &self.provisioning {
+            ProvisioningState::InFlight { .. } => return SessionStatus::Provisioning,
+            ProvisioningState::Failed { reason, .. } => {
+                return SessionStatus::ProvisioningFailed {
+                    reason: reason.clone(),
+                };
+            }
+            ProvisioningState::Never | ProvisioningState::Ready { .. } => {}
+        }
+        match self.forest.root().map(|entry| &entry.state) {
+            Some(RunState::Main(main)) => match &main.turn {
+                TurnPhase::Idle => SessionStatus::Idle,
+                TurnPhase::Running => SessionStatus::Running,
+                TurnPhase::AwaitingInput => SessionStatus::AwaitingInput,
+                TurnPhase::Failed { error } => SessionStatus::Failed {
+                    reason: error.clone(),
+                },
+            },
+            Some(RunState::Workflow(w)) => match w.run.status {
+                // Pending and suspended both rest: a person decides what moves
+                // them (the first step starts itself; a retry moves a
+                // suspension).
+                WorkflowRunStatus::Pending | WorkflowRunStatus::Suspended => SessionStatus::Idle,
+                WorkflowRunStatus::Running => SessionStatus::Running,
+                WorkflowRunStatus::AwaitingInput => SessionStatus::AwaitingInput,
+                WorkflowRunStatus::Finished => SessionStatus::Finished,
+                WorkflowRunStatus::Failed => SessionStatus::Failed {
+                    reason: w.run.error.clone().unwrap_or_default(),
+                },
+            },
+            // A root is only ever a conversation or a run; an unrooted session
+            // has not been told what it is yet and rests.
+            Some(RunState::Sub(_) | RunState::Fork(_)) | None => SessionStatus::Idle,
+        }
+    }
+
+    /// The failure a client is shown beside the status, derived from the same
+    /// facts the status is.
+    #[must_use]
+    pub fn last_error(&self) -> Option<String> {
+        crate::sessions::spec::status_reason(&self.status())
+    }
+
+    /// The graph a run resolves its steps from: the run entry's own snapshot.
+    #[must_use]
+    pub fn run_graph(&self, run: RunId) -> Option<Arc<WorkflowRunSpec>> {
+        self.forest.workflow(run).map(|w| w.graph.clone())
     }
 }
 
@@ -943,14 +1072,51 @@ mod tests {
         }
     }
 
-    /// Every session journaled before forks existed carries no `forks` key. It
-    /// must load with an empty roster — the alternative is a `recover()` that
-    /// fails for every existing session and takes the supervisor with it, which
-    /// is what renamed event variants did on 2026-08-02.
+    /// The container default fills anything a future version adds, so a bare
+    /// snapshot still loads — the durability contract `#[serde(default)]`
+    /// exists for.
     #[test]
-    fn a_session_state_without_forks_deserializes_empty() {
-        let row = r#"{"status":"Idle","last_error":null}"#;
-        let state: SessionState = serde_json::from_str(row).unwrap();
-        assert!(state.forks.is_empty());
+    fn a_bare_session_state_deserializes_empty() {
+        let state: SessionState = serde_json::from_str("{}").unwrap();
+        assert_eq!(state.status(), SessionStatus::Idle);
+        assert!(state.fatal.is_none());
+        assert!(state.forest.root_id().is_none());
+    }
+
+    /// The one status a session cannot leave wins over everything else.
+    #[test]
+    fn fatal_projects_unrecoverable_over_any_root_phase() {
+        let mut state = SessionState::default();
+        state.forest.apply_root_agent(Uuid::new_v4(), 0);
+        state.fatal = Some("runtime gone".into());
+        assert_eq!(
+            state.status(),
+            SessionStatus::Unrecoverable {
+                reason: "runtime gone".into()
+            }
+        );
+        assert_eq!(state.last_error().as_deref(), Some("runtime gone"));
+    }
+
+    /// The sandbox lifecycle outranks the root's phase: nothing may look
+    /// runnable while the runtime is still being built.
+    #[test]
+    fn provisioning_projects_over_an_idle_root() {
+        let mut state = SessionState::default();
+        state.forest.apply_root_agent(Uuid::new_v4(), 0);
+        state.provisioning = ProvisioningState::InFlight { at_ms: 5 };
+        assert_eq!(state.status(), SessionStatus::Provisioning);
+        state.provisioning = ProvisioningState::Failed {
+            at_ms: 5,
+            reason: "vendor offline".into(),
+        };
+        assert_eq!(
+            state.status(),
+            SessionStatus::ProvisioningFailed {
+                reason: "vendor offline".into()
+            }
+        );
+        state.provisioning = ProvisioningState::Ready { at_ms: 5 };
+        assert_eq!(state.status(), SessionStatus::Idle);
     }
 }

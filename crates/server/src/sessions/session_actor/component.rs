@@ -34,19 +34,6 @@
 //! is the half that benefits from being uniform.
 
 use super::{AgentAction, SessionCommand, SessionDomainEvent, SessionState};
-use crate::sessions::spec::SessionSpec;
-use uuid::Uuid;
-
-/// What a component needs besides the folded state to decide what to start.
-///
-/// Both halves are deterministic: the id is fixed, and the spec is a snapshot
-/// taken at creation. So `actions` stays a pure function of things that do not
-/// change under it — a workflow's own definition lives here, not in the journal,
-/// because the run was started from it rather than deriving it.
-pub(super) struct ActionCx<'a> {
-    pub id: Uuid,
-    pub spec: &'a SessionSpec,
-}
 
 pub(super) trait Component {
     /// Fold one of this component's events into its slice of state.
@@ -70,7 +57,7 @@ pub(super) trait Component {
     /// Pure, like `apply`. The actor performs what this returns; deciding and
     /// performing stay apart so the decision is testable against a hand-built
     /// state with no actor, no runtime and no journal.
-    fn actions(_cx: &ActionCx<'_>, _state: &SessionState) -> Vec<AgentAction> {
+    fn actions(_state: &SessionState) -> Vec<AgentAction> {
         Vec::new()
     }
 
@@ -80,7 +67,7 @@ pub(super) trait Component {
     /// A self-send rather than direct work: recovery must not persist, and this
     /// runs before the first live command, so anything needing to journal has
     /// to arrive as an ordinary command.
-    fn on_load(_cx: &ActionCx<'_>, _state: &SessionState) -> Option<SessionCommand> {
+    fn on_load(_state: &SessionState) -> Option<SessionCommand> {
         None
     }
 

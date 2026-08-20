@@ -11,7 +11,6 @@ use crate::agent_loop::AgentCatalog;
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::session_actor::SubAgentCommand;
-use crate::sessions::subagents::SubAgentParent;
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
@@ -111,7 +110,7 @@ pub struct SubAgentToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
     /// Which agent this toolbox belongs to — the parent spawns attribute to.
-    caller: SubAgentParent,
+    caller: Uuid,
     /// The plugin-declared agents this session can spawn. Held here because
     /// this toolbox is built in `provide()`, where the library scan is; the
     /// session actor never learns what an agent type is, it journals a string.
@@ -122,7 +121,7 @@ impl SubAgentToolbox {
     pub fn new(
         inner: Arc<dyn Toolbox>,
         session: SessionRef,
-        caller: SubAgentParent,
+        caller: Uuid,
         catalog: Arc<AgentCatalog>,
     ) -> Self {
         Self {
@@ -311,7 +310,7 @@ mod tests {
         SubAgentToolbox::new(
             Arc::new(EmptyToolbox),
             session,
-            SubAgentParent::Main,
+            Uuid::new_v4(),
             Arc::new(catalog),
         )
     }

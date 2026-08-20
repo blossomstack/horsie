@@ -79,7 +79,7 @@ pub struct AgentSettings {
     pub thinking_effort: Option<String>,
     /// Cap on concurrently-active subagents. `#[serde(default)]` so
     /// pre-subagent journal rows deserialize; `None` resolves to
-    /// [`crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
+    /// [`crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS`].
     #[serde(default)]
     pub max_concurrent_subagents: Option<u32>,
     /// Standing instructions this session's agent runs under, resolved from its
@@ -116,7 +116,7 @@ impl AgentSettings {
     /// The session's effective concurrency cap.
     pub fn max_subagents(&self) -> u32 {
         self.max_concurrent_subagents
-            .unwrap_or(crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS)
+            .unwrap_or(crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS)
     }
 }
 
@@ -564,7 +564,7 @@ mod tests {
         assert_eq!(s.max_concurrent_subagents, None);
         assert_eq!(
             s.max_subagents(),
-            crate::sessions::subagents::DEFAULT_MAX_CONCURRENT_SUBAGENTS
+            crate::sessions::run_forest::DEFAULT_MAX_CONCURRENT_SUBAGENTS
         );
 
         let s = AgentSettings {

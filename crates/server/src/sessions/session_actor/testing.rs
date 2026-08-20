@@ -512,17 +512,17 @@ pub(super) async fn wait_for_run(
 ) -> crate::sessions::workflow::WorkflowRunState {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if let Some(run) = state.run.as_ref()
-            && pred(run)
+        if let Some((_, w)) = state.forest.root_workflow()
+            && pred(&w.run)
         {
-            return run.clone();
+            return w.run.clone();
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let state = crate::sessions::events::fold_session_state(journal, session_id).await;
     panic!(
         "run never satisfied the predicate: {:?}",
-        state.run.as_ref()
+        state.forest.root_workflow().map(|(_, w)| &w.run)
     );
 }
 
@@ -581,11 +581,11 @@ pub(super) const ASK_CALL_ID: &str = "a-1";
 pub(super) async fn wait_for_tree(
     journal: &Arc<dyn horsie_actor::Journal>,
     session_id: Uuid,
-    pred: impl Fn(&crate::sessions::subagents::SubAgentForest) -> bool,
+    pred: impl Fn(&crate::sessions::run_forest::RunForest) -> bool,
 ) {
     for _ in 0..200 {
         let state = crate::sessions::events::fold_session_state(journal, session_id).await;
-        if pred(&state.subagents) {
+        if pred(&state.forest) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -618,6 +618,8 @@ pub(crate) async fn seed_session(
     if at == 0 {
         encoded.push(
             serde_json::to_vec(&SessionDomainEvent::SpecRecorded {
+                at_ms: 0,
+                session: id,
                 spec: Box::new(spec.clone()),
             })
             .unwrap(),
@@ -806,11 +808,16 @@ impl horsie_actor::Journal for CountingJournal {
     }
 }
 
+/// Spawn a subagent under whatever this session's own "main" is right now:
+/// the root run's step in flight for a workflow session, the main agent
+/// otherwise — the same resolution the spawn tool performs from inside the
+/// calling agent.
 pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> Uuid {
+    let caller = current_main_agent(session).await;
     session
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
+                caller,
                 label: label.into(),
                 task: task.into(),
                 agent_type: None,
@@ -820,6 +827,20 @@ pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> 
         .await
         .unwrap()
         .unwrap()
+}
+
+/// The agent an unaddressed request means: the root run's step in flight, or
+/// the main agent (whose id is the session's).
+pub(super) async fn current_main_agent(session: &SessionRef) -> Uuid {
+    session
+        .ask(|reply| {
+            SessionCommand::Run(crate::sessions::session_actor::RunCommand::State { reply })
+        })
+        .await
+        .ok()
+        .flatten()
+        .and_then(|run| run.current_agent())
+        .unwrap_or_else(|| session.session())
 }
 
 /// How each turn in one agent's log ended, in order.
@@ -1345,7 +1366,7 @@ pub(super) async fn spawn_typed(
     session
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                caller: crate::sessions::subagents::SubAgentParent::Main,
+                caller: session.session(),
                 label: "review".into(),
                 task: "look at the diff".into(),
                 agent_type: agent_type.map(str::to_string),

@@ -23,7 +23,7 @@ use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
         ask_tool::AskUserToolbox, spawn_tool::SubAgentToolbox, spec::AgentSettings,
-        subagents::SubAgentParent, title_tool::SessionTitleToolbox,
+        title_tool::SessionTitleToolbox,
     },
 };
 use async_trait::async_trait;
@@ -862,13 +862,13 @@ impl ContextProvider for SessionContextProvider {
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
             build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
+        // Spawns and invocations attribute to the actual agent making them —
+        // the main agent's id is the session's.
         let caller = match self.kind {
-            // A step roots its own tree, so its spawns are that tree's `Main`.
-            // A fork roots its own tree too, for the same reason a step does.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                SubAgentParent::Main
+            SessionAgentKind::Main => self.session_id,
+            SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) | SessionAgentKind::Sub(id) => {
+                id
             }
-            SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
         };
         // A zero cap disables subagents outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.
@@ -884,6 +884,36 @@ impl ContextProvider for SessionContextProvider {
                     .map(|s| Arc::clone(&s.agents))
                     .unwrap_or_default(),
             ))
+        };
+        // Every kind of agent may invoke a workflow — main, subagents, steps
+        // and forks alike; the session gates at call time (depth, live runs).
+        // The saved workflows ride in the tool description so the model knows
+        // what exists; with none saved the tools are not offered at all, so a
+        // session without workflows sees exactly the toolbox it saw before
+        // they existed. Re-read per turn, where this toolbox is rebuilt, so a
+        // workflow saved mid-session appears at the next turn.
+        let workflow_catalog: Vec<(String, String)> = match &self.services {
+            Some(services) => services
+                .workflows
+                .list()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|w| (w.name, w.description))
+                .collect(),
+            None => Vec::new(),
+        };
+        let with_spawn: Arc<dyn Toolbox> = match (&self.services, workflow_catalog.is_empty()) {
+            (Some(services), false) => Arc::new(
+                crate::sessions::invoke_workflow_tool::InvokeWorkflowToolbox::new(
+                    with_spawn,
+                    self.session.clone(),
+                    caller,
+                    services.clone(),
+                    workflow_catalog,
+                ),
+            ),
+            (Some(_), true) | (None, _) => with_spawn,
         };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than

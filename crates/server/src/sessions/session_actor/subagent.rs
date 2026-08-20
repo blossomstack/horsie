@@ -10,7 +10,7 @@
 //! the identical code path a conversation's use. The previous shape put the tree
 //! inside the session's mode and every read silently answered empty for a run.
 
-use super::component::{ActionCx, Component};
+use super::component::Component;
 use super::context::SessionAgentKind;
 use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, SessionActor, SessionCommand,
@@ -18,9 +18,7 @@ use super::{
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::subagents::{
-    INTERRUPTED_ERROR, MAX_SUBAGENT_DEPTH, SubAgentParent, TreeOwner,
-};
+use crate::sessions::run_forest::{INTERRUPTED_ERROR, MAX_DEPTH};
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::ReplyTo;
@@ -46,34 +44,25 @@ impl SubAgents {
                 agent_type,
                 reply,
             } => {
-                let owner = state.subagents.owner_for(caller, state.root_owner());
-                let Some(parent_depth) = owner
-                    .and_then(|owner| state.subagents.tree(owner))
-                    .map_or_else(
-                        // An empty forest still has a Main at depth 0: the very
-                        // first spawn of a session has no tree to look in yet.
-                        || matches!(caller, SubAgentParent::Main).then_some(0),
-                        |tree| tree.depth_of(caller),
-                    )
-                else {
+                // One depth rule for every delegation edge: a spawn from a
+                // nested workflow's step counts the invocations above it too.
+                let Some(parent_depth) = state.forest.depth_of_agent(caller) else {
                     let _ = reply.send(Err("caller is not a known agent".to_string()));
                     return CommandEffect::none();
                 };
-                if parent_depth >= MAX_SUBAGENT_DEPTH {
-                    let _ = reply.send(Err(format!(
-                        "max subagent depth {MAX_SUBAGENT_DEPTH} reached"
-                    )));
+                if parent_depth >= MAX_DEPTH {
+                    let _ = reply.send(Err(format!("max subagent depth {MAX_DEPTH} reached")));
                     return CommandEffect::none();
                 }
                 // The cap is the *caller's* settings' cap: a workflow step's
                 // spawns are counted against the step's preset, never against a
                 // session-wide value that nothing in a run owns.
-                let Some(settings) = actor.effective_settings_for_parent(state, caller) else {
+                let Some(settings) = actor.effective_settings_of_agent(state, caller) else {
                     let _ = reply.send(Err("caller is not a known agent".to_string()));
                     return CommandEffect::none();
                 };
                 let max = settings.max_subagents();
-                if state.subagents.active_count() >= max {
+                if state.forest.active_sub_count() >= max {
                     let _ = reply.send(Err(format!("{max} subagents already active")));
                     return CommandEffect::none();
                 }
@@ -87,7 +76,6 @@ impl SubAgents {
                     parent: caller,
                     label: label.clone(),
                     task: task.clone(),
-                    depth: parent_depth + 1,
                     agent_type: agent_type.clone(),
                 };
                 let (tx, rx) = oneshot::channel();
@@ -142,29 +130,23 @@ impl SubAgents {
                 CommandEffect::none()
             }
             SubAgentCommand::Status { caller, id, reply } => {
-                // Visibility is answered within the caller's own tree: a step
-                // and a conversation each see their own, and neither learns the
-                // other exists.
-                let tree = state
-                    .subagents
-                    .owner_for(caller, state.root_owner())
-                    .and_then(|owner| state.subagents.tree(owner));
+                // Visibility is the caller's own descendant closure: an agent
+                // sees itself and what runs under it, never a sibling's work.
                 let rendered = match id {
-                    Some(id) if tree.is_some_and(|t| t.visible_to(caller, &id)) => tree
-                        .and_then(|t| t.render_node(&id))
+                    Some(id) if state.forest.descends_from(id, caller) => state
+                        .forest
+                        .render_sub(id)
                         .ok_or_else(|| format!("no such subagent: {id}")),
                     // Out-of-subtree and unknown ids are indistinguishable —
                     // neither confirms the node exists.
                     Some(id) => Err(format!("no such subagent: {id}")),
-                    None => Ok(tree
-                        .map(|t| t.render_subtree(caller))
-                        .unwrap_or_else(|| "No subagents.\n".to_string())),
+                    None => Ok(state.forest.render_sub_tree(caller)),
                 };
                 let _ = reply.send(rendered);
                 CommandEffect::none()
             }
             SubAgentCommand::Reconcile => {
-                let interrupted = state.subagents.interrupted();
+                let interrupted = state.forest.interrupted_subs();
                 if interrupted.is_empty() {
                     return CommandEffect::none();
                 }
@@ -197,7 +179,7 @@ impl SessionActor {
         end: TurnEnd,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        if state.subagents.node(id).is_none() {
+        if state.forest.sub(id).is_none() {
             tracing::warn!(subagent = %id, "outcome from an unknown subagent; ignored");
             return CommandEffect::none();
         }
@@ -215,18 +197,21 @@ impl SessionActor {
                 id,
                 error,
             },
-            // Defensive: a subagent has no ask or timer tools, so neither
-            // outcome should ever occur.
+            // Defensive: a subagent has no ask tool, so this should not occur.
             TurnEnd::Asked => SessionDomainEvent::SubAgentFailed {
                 at_ms: now_ms(),
                 id,
                 error: "subagent asked the user; not supported".to_string(),
             },
-            TurnEnd::Parked => SessionDomainEvent::SubAgentFailed {
-                at_ms: now_ms(),
-                id,
-                error: "subagent parked; timers are not supported in sessions".to_string(),
-            },
+            // Not done, deliberately: the subagent's turn ended while work it
+            // delegated is still running, so its own gate parked it rather
+            // than concluding over an unfinished subtree. The node stays
+            // `Running`; the children's results are what wake it, and its next
+            // conclusion is the report. The boundary still flushes — one of
+            // those children may already be owed to it.
+            TurnEnd::Parked => {
+                return self.persist_and_advance(state, Vec::new(), ctx).await;
+            }
             // A subagent's interruption is repaired from the forest at *session*
             // load, by `SubAgents::on_load`, which is also where the parent is
             // owed the failure. This report cannot arrive first: a subagent
@@ -274,25 +259,25 @@ impl Component for SubAgents {
     /// Deliver every result a child owes its parent. Reads the forest, so it
     /// works in a run exactly as in a conversation — and it never asks which it
     /// is in.
-    fn actions(_cx: &ActionCx<'_>, state: &SessionState) -> Vec<AgentAction> {
+    fn actions(state: &SessionState) -> Vec<AgentAction> {
         crate::sessions::orchestrator::owed_deliveries(state)
     }
 
     /// Nodes left `Running` by a dead process. Their runs are over; the parents
     /// are owed the failure like any other terminal result.
-    fn on_load(_cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        (!state.subagents.interrupted().is_empty())
+    fn on_load(state: &SessionState) -> Option<SessionCommand> {
+        (!state.forest.interrupted_subs().is_empty())
             .then_some(SessionCommand::SubAgent(SubAgentCommand::Reconcile))
     }
 
     /// This is the invariant that keeps a forty-minute tool call from being
     /// unloaded out from under itself.
     fn busy(state: &SessionState) -> bool {
-        state.subagents.has_active()
+        state.forest.has_active_subs()
     }
 
-    /// The forest. The owner is resolved from the state as it stands *before*
-    /// the event, which is the step in flight for a run and `Main` otherwise.
+    /// The subagent entries of the forest. The parent is on the event —
+    /// resolved when the tool was called — so nothing is re-derived here.
     ///
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
@@ -309,46 +294,24 @@ impl Component for SubAgents {
                 parent,
                 label,
                 task,
-                depth,
                 at_ms,
                 agent_type,
             } => {
-                // The owner is resolved against the state as it stands *before*
-                // this event: the step in flight for a run, Main otherwise.
-                let owner = state
-                    .subagents
-                    .owner_for(parent, state.root_owner())
-                    .unwrap_or(TreeOwner::Main);
                 state
-                    .subagents
-                    .tree_mut(owner)
-                    .apply_spawned(id, parent, label, task, depth, at_ms, agent_type);
+                    .forest
+                    .apply_sub_spawned(id, parent, label, task, agent_type, at_ms);
             }
             SessionDomainEvent::SubAgentRunning { id, at_ms } => {
-                if let Some(owner) = state.subagents.owner_of(id) {
-                    state.subagents.tree_mut(owner).apply_running(id, at_ms);
-                }
+                state.forest.apply_sub_running(id, at_ms);
             }
             SessionDomainEvent::SubAgentCompleted { id, output, at_ms } => {
-                if let Some(owner) = state.subagents.owner_of(id) {
-                    state
-                        .subagents
-                        .tree_mut(owner)
-                        .apply_completed(id, output, at_ms);
-                }
+                state.forest.apply_sub_completed(id, output, at_ms);
             }
             SessionDomainEvent::SubAgentFailed { id, error, at_ms } => {
-                if let Some(owner) = state.subagents.owner_of(id) {
-                    state
-                        .subagents
-                        .tree_mut(owner)
-                        .apply_failed(id, error, at_ms);
-                }
+                state.forest.apply_sub_failed(id, error, at_ms);
             }
             SessionDomainEvent::SubAgentNotified { id, .. } => {
-                if let Some(owner) = state.subagents.owner_of(id) {
-                    state.subagents.tree_mut(owner).apply_notified(id);
-                }
+                state.forest.apply_sub_notified(id);
             }
             other => unreachable!("SubAgents was handed {other:?}"),
         }
@@ -367,7 +330,7 @@ mod tests {
     //! snapshot written under an older shape still loads as.
     use super::super::testing::*;
     use super::super::*;
-    use super::*;
+    use crate::sessions::run_forest::SubAgentStatus;
     use crate::sessions::session_actor::testing::seed_session;
 
     use std::sync::Arc;
@@ -390,7 +353,7 @@ mod tests {
         let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
         let sub = spawn_sub(&session, "worker", "dig").await;
         wait_for_state(&journal, id, "the subagent to be running", |s| {
-            s.subagents.interrupted().contains(&sub)
+            s.forest.interrupted_subs().contains(&sub)
         })
         .await;
         drop(session);
@@ -406,18 +369,17 @@ mod tests {
 
     #[test]
     fn subagent_events_fold_into_the_tree() {
-        use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};
+        let parent = Uuid::new_v4();
         let id = Uuid::new_v4();
         let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
             at_ms: 0,
             id,
-            parent: SubAgentParent::Main,
+            parent,
             label: "research".into(),
             task: "look into it".into(),
-            depth: 1,
             agent_type: None,
         }]);
-        assert_eq!(s.subagents.active_count(), 1);
+        assert_eq!(s.forest.active_sub_count(), 1);
 
         let s = SessionActor::apply_event(
             s,
@@ -427,28 +389,27 @@ mod tests {
                 output: "answer".into(),
             },
         );
-        let rec = s.subagents.node(id).unwrap();
+        let rec = s.forest.sub(id).unwrap();
         assert_eq!(rec.status, SubAgentStatus::Completed);
         assert!(!rec.notified);
 
         let s = SessionActor::apply_event(s, SessionDomainEvent::SubAgentNotified { at_ms: 0, id });
-        assert!(s.subagents.node(id).unwrap().notified);
+        assert!(s.forest.sub(id).unwrap().notified);
     }
 
     #[test]
     fn a_running_then_failed_subagent_reads_as_interrupted_then_terminal() {
-        use crate::sessions::subagents::SubAgentParent;
+        let parent = Uuid::new_v4();
         let id = Uuid::new_v4();
         let s = fold(vec![SessionDomainEvent::SubAgentSpawned {
             at_ms: 0,
             id,
-            parent: SubAgentParent::Main,
+            parent,
             label: "w".into(),
             task: "t".into(),
-            depth: 1,
             agent_type: None,
         }]);
-        assert_eq!(s.subagents.interrupted(), vec![id]);
+        assert_eq!(s.forest.interrupted_subs(), vec![id]);
         let s = SessionActor::apply_event(
             s,
             SessionDomainEvent::SubAgentFailed {
@@ -457,7 +418,7 @@ mod tests {
                 error: "interrupted by restart".into(),
             },
         );
-        assert!(s.subagents.interrupted().is_empty());
+        assert!(s.forest.interrupted_subs().is_empty());
     }
 
     #[tokio::test]
@@ -468,14 +429,18 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Running)
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let rec = &state.subagents.node(sub).unwrap();
-        assert_eq!(rec.depth, 1);
-        assert_eq!(rec.parent, crate::sessions::subagents::SubAgentParent::Main);
+        let rec = state.forest.sub(sub).unwrap();
+        assert_eq!(state.forest.depth_of_agent(sub), Some(1));
+        assert_eq!(
+            state.forest.owner_of_agent(sub).unwrap().1.parent,
+            Some(id),
+            "a top-level spawn hangs off the main agent"
+        );
         assert_eq!(rec.label, "research");
         assert_eq!(rec.task, "dig into it");
     }
@@ -487,7 +452,7 @@ mod tests {
         // is refused.
         let gate = BlockingProvider::new();
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
-        let mut parent = crate::sessions::subagents::SubAgentParent::Main;
+        let mut parent = id;
         for _ in 0..4 {
             let id_child = session
                 .ask(|reply| {
@@ -502,8 +467,8 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            wait_for_tree(&journal, id, |t| t.has_active()).await;
-            parent = crate::sessions::subagents::SubAgentParent::SubAgent(id_child);
+            wait_for_tree(&journal, id, |t| t.has_active_subs()).await;
+            parent = id_child;
         }
         let res = session
             .ask(|reply| {
@@ -527,11 +492,11 @@ mod tests {
         for _ in 0..8 {
             let _ = spawn_sub(&session, "w", "t").await;
         }
-        wait_for_tree(&journal, id, |t| t.active_count() == 8).await;
+        wait_for_tree(&journal, id, |t| t.active_sub_count() == 8).await;
         let res = session
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                    caller: crate::sessions::subagents::SubAgentParent::Main,
+                    caller: id,
                     label: "x".into(),
                     task: "y".into(),
                     agent_type: None,
@@ -550,7 +515,7 @@ mod tests {
         let res = session
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                    caller: crate::sessions::subagents::SubAgentParent::SubAgent(Uuid::new_v4()),
+                    caller: Uuid::new_v4(),
                     label: "x".into(),
                     task: "y".into(),
                     agent_type: None,
@@ -567,7 +532,7 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, "research", "dig").await;
         // Owed, then delivered: the tree's notified flag flips exactly once.
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
         // …and then wait for the main agent to have *taken* it. The flag says
         // the result was handed over — one message into main's mailbox — never
         // that main has appended it, so reading the history the moment the flag
@@ -605,7 +570,7 @@ mod tests {
     async fn a_completed_subagent_closes_the_turn_in_its_own_log() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, "research", "dig").await;
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
 
         let outcomes = turn_outcomes(&agent_history(&session, Some(sub.to_string())).await);
         assert!(
@@ -631,8 +596,8 @@ mod tests {
                 .await;
         let sub = spawn_sub(&session, "research", "dig").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Running)
         })
         .await;
 
@@ -648,13 +613,10 @@ mod tests {
             .expect("a working subagent is stoppable");
 
         // Owed and delivered: a stopped child still owes its parent an answer.
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let rec = state.subagents.node(sub).unwrap();
-        assert_eq!(
-            rec.status,
-            crate::sessions::subagents::SubAgentStatus::Failed
-        );
+        let rec = state.forest.sub(sub).unwrap();
+        assert_eq!(rec.status, SubAgentStatus::Failed);
         let texts = subagent_texts(&main_history(&session).await);
         assert!(
             texts
@@ -673,7 +635,7 @@ mod tests {
         };
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
         let sub = spawn_sub(&session, "risky", "doomed task").await;
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
 
         let outcomes = turn_outcomes(&agent_history(&session, Some(sub.to_string())).await);
         match outcomes.as_slice() {
@@ -691,13 +653,10 @@ mod tests {
         };
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(provider)).await;
         let sub = spawn_sub(&session, "risky", "doomed task").await;
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let rec = &state.subagents.node(sub).unwrap();
-        assert_eq!(
-            rec.status,
-            crate::sessions::subagents::SubAgentStatus::Failed
-        );
+        let rec = state.forest.sub(sub).unwrap();
+        assert_eq!(rec.status, SubAgentStatus::Failed);
         assert!(rec.error.as_deref().unwrap().contains("bad key"));
         // Polled, not read once. `SubAgentNotified` is journaled as soon as the
         // parent's *mailbox* accepts the report — it is a `tell` — so the flag
@@ -724,7 +683,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stranded_grandchild_result_flushes_at_the_next_turn_boundary() {
-        use crate::sessions::subagents::{SubAgentParent, SubAgentStatus};
         // Fold a crashed-session state straight into the journal: P completed
         // and its parent was told; P's child C died mid-run and was reconciled
         // to failed. Every node is terminal, so no subagent outcome will ever
@@ -737,10 +695,9 @@ mod tests {
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 0,
                 id: p,
-                parent: SubAgentParent::Main,
+                parent: id,
                 label: "parent".into(),
                 task: "parent task".into(),
-                depth: 1,
                 agent_type: None,
             },
             SessionDomainEvent::SubAgentCompleted {
@@ -752,16 +709,15 @@ mod tests {
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 0,
                 id: c,
-                parent: SubAgentParent::SubAgent(p),
+                parent: p,
                 label: "child".into(),
                 task: "child task".into(),
-                depth: 2,
                 agent_type: None,
             },
             SessionDomainEvent::SubAgentFailed {
                 at_ms: 0,
                 id: c,
-                error: crate::sessions::subagents::INTERRUPTED_ERROR.into(),
+                error: crate::sessions::run_forest::INTERRUPTED_ERROR.into(),
             },
         ];
 
@@ -769,9 +725,9 @@ mod tests {
         let session2 = seed_session(&_f, id, actor_spec_fixture(), &events).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        assert!(!&state.subagents.node(c).unwrap().notified);
+        assert!(!state.forest.sub(c).unwrap().notified);
         assert_eq!(
-            state.subagents.node(p).unwrap().status,
+            state.forest.sub(p).unwrap().status,
             SubAgentStatus::Completed
         );
 
@@ -792,8 +748,8 @@ mod tests {
         // one effect, so don't wait on a `!notified` window — C delivered and
         // P re-concluded are the durable facts.
         wait_for_tree(&journal, id, |t| {
-            t.node(c).is_some_and(|r| r.notified)
-                && t.node(p).is_some_and(|r| {
+            t.sub(c).is_some_and(|r| r.notified)
+                && t.sub(p).is_some_and(|r| {
                     r.status == SubAgentStatus::Completed
                         && r.output.as_deref() == Some("sub answer")
                 })
@@ -829,8 +785,8 @@ mod tests {
         let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
         let sub = spawn_sub(&session, "w", "t").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Running)
         })
         .await;
         // Simulate process death: the last ref drops, the journal lives on.
@@ -840,14 +796,14 @@ mod tests {
         f.node.restart().await;
         let session2 = f.start(id, actor_spec_fixture()).await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Failed)
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Failed)
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert_eq!(
-            state.subagents.node(sub).unwrap().error.as_deref(),
-            Some(crate::sessions::subagents::INTERRUPTED_ERROR)
+            state.forest.sub(sub).unwrap().error.as_deref(),
+            Some(crate::sessions::run_forest::INTERRUPTED_ERROR)
         );
         // The transcript stays pageable: the resident actor answers history.
         let page = session2
@@ -873,25 +829,25 @@ mod tests {
         let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
         let sub = spawn_sub(&session, "helper", "dig").await;
 
-        // The spawn lands in the step's tree, not the conversation's.
+        // The spawn hangs off the step agent, not off some session-wide value.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
-        let step_agent = state.run.as_ref().unwrap().steps[0].agent;
+        let step_agent = state.forest.root_workflow().unwrap().1.run.steps[0].agent;
         assert_eq!(
-            state.subagents.owner_of(sub),
-            Some(TreeOwner::Step(step_agent)),
-            "a step's spawn belongs to that step's tree"
+            state.forest.owner_of_agent(sub).unwrap().1.parent,
+            Some(step_agent),
+            "a step's spawn belongs to that step"
         );
 
         // And its completion is journaled rather than dropped.
         wait_for_tree(&journal, id, |forest| {
             forest
-                .node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Completed)
+                .sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Completed)
         })
         .await;
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert_eq!(
-            state.subagents.node(sub).unwrap().output.as_deref(),
+            state.forest.sub(sub).unwrap().output.as_deref(),
             Some("sub answer")
         );
     }
@@ -905,18 +861,18 @@ mod tests {
         let (_f, session, id, journal) = spawn_run_with_provider(provider).await;
         wait_for_run(&journal, id, |r| r.current().is_some()).await;
         let sub = spawn_sub(&session, "slow", "work").await;
-        wait_for_tree(&journal, id, |f| f.node(sub).is_some()).await;
+        wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;
 
         // While it runs, the session is busy. This is what stops the supervisor
         // unloading a run out from under a step's subagent — `has_active` answered
         // false for every run before the forest.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(
-            state.subagents.has_active(),
+            state.forest.has_active_subs(),
             "a run's subagent is active work"
         );
-        assert_eq!(state.subagents.active_count(), 1);
-        assert_eq!(state.subagents.interrupted(), vec![sub]);
+        assert_eq!(state.forest.active_sub_count(), 1);
+        assert_eq!(state.forest.interrupted_subs(), vec![sub]);
 
         // And the API reports it: the roster spans every tree, so a run's step
         // agents and the subagents beneath them arrive in one list.
@@ -939,15 +895,15 @@ mod tests {
         let (_f, session, id, journal) = a_run_with_a_step_in_flight().await;
         let parent = spawn_sub(&session, "lead", "delegate").await;
         wait_for_tree(&journal, id, |f| {
-            f.node(parent)
-                .is_some_and(|r| r.status != crate::sessions::subagents::SubAgentStatus::Running)
+            f.sub(parent)
+                .is_some_and(|r| r.status != SubAgentStatus::Running)
         })
         .await;
 
         let child = session
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                    caller: crate::sessions::subagents::SubAgentParent::SubAgent(parent),
+                    caller: parent,
                     label: "helper".into(),
                     task: "dig".into(),
                     agent_type: None,
@@ -960,25 +916,144 @@ mod tests {
 
         // The child's result is delivered to its parent — `notified` flips only
         // when the parent has actually been resumed with it.
-        wait_for_tree(&journal, id, |f| f.node(child).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |f| f.sub(child).is_some_and(|r| r.notified)).await;
     }
 
     /// The new shape round-trips.
     #[test]
     fn the_new_state_shape_round_trips() {
         let mut state = SessionState::default();
+        let session = Uuid::new_v4();
         let id = Uuid::new_v4();
-        state.subagents.tree_mut(TreeOwner::Main).apply_spawned(
-            id,
-            SubAgentParent::Main,
-            "x".into(),
-            "t".into(),
-            1,
-            100,
-            None,
-        );
+        state.forest.apply_root_agent(session, 0);
+        state
+            .forest
+            .apply_sub_spawned(id, session, "x".into(), "t".into(), None, 100);
         let json = serde_json::to_value(&state).unwrap();
         let back: SessionState = serde_json::from_value(json).unwrap();
-        assert_eq!(back.subagents.node(id).unwrap().label, "x");
+        assert_eq!(back.forest.sub(id).unwrap().label, "x");
+    }
+
+    /// The outstanding-work gate: a subagent whose turn ends while work it
+    /// delegated is still running parks instead of concluding, and its parent
+    /// hears exactly one report — when the whole subtree is done — rather than
+    /// an early answer followed by corrections.
+    #[tokio::test]
+    async fn a_subagent_parks_over_its_running_child_and_reports_once_when_done() {
+        use std::sync::Arc;
+
+        /// Holds the parent subagent's turn until released (once per turn),
+        /// hangs the grandchild forever, answers everything else with text.
+        struct GatedParent {
+            gate: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl horsie_agentcore::LlmProvider for GatedParent {
+            fn model_id(&self) -> &str {
+                "mock"
+            }
+
+            async fn complete(
+                &self,
+                request: horsie_agentcore::CompletionRequest<'_>,
+                _message_id: &str,
+                _events: &dyn horsie_agentcore::EventSink,
+            ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError>
+            {
+                let says = |needle: &str| {
+                    request.messages.iter().any(|m| {
+                        m.parts.iter().any(|p| {
+                            matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains(needle))
+                        })
+                    })
+                };
+                if says("HANG-CHILD") {
+                    std::future::pending::<()>().await;
+                }
+                if says("PARENT-TASK") {
+                    self.gate.notified().await;
+                }
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "sub answer".to_string(),
+                        },
+                    )],
+                    stop_reason: horsie_agentcore::StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }
+        }
+
+        let provider = Arc::new(GatedParent {
+            gate: tokio::sync::Notify::new(),
+        });
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(provider.clone() as Arc<dyn horsie_agentcore::LlmProvider>)
+                .await;
+
+        // The parent subagent's turn is held open while its child is planted
+        // under it, so the turn genuinely ends *over* a running child.
+        let parent = spawn_sub(&session, "lead", "PARENT-TASK: delegate and report").await;
+        let child = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: parent,
+                    label: "helper".into(),
+                    task: "HANG-CHILD until stopped".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |t| t.sub(child).is_some()).await;
+        provider.gate.notify_one();
+
+        // The parent's turn ends — and the gate holds: still `Running` in the
+        // forest, nothing delivered to main. Waited out via its own log (the
+        // park is journaled there), so the assertion observes a real park
+        // rather than a race it won.
+        wait_for_agent(&journal, parent, |s| s.parked).await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        let rec = state.forest.sub(parent).unwrap();
+        assert_eq!(
+            rec.status,
+            SubAgentStatus::Running,
+            "a parked subagent has not concluded"
+        );
+        assert!(
+            subagent_texts(&main_history(&session).await)
+                .iter()
+                .all(|t| !t.contains("\"lead\"")),
+            "no early report reaches the parent conversation"
+        );
+
+        // The child ends (stopped here, which is one of the ways); its result
+        // wakes the parent, whose next turn has nothing outstanding — that
+        // conclusion is the report, and it is the only one.
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: child.to_string(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        provider.gate.notify_one();
+        wait_for_tree(&journal, id, |t| t.sub(parent).is_some_and(|r| r.notified)).await;
+        let texts = wait_for_subagent_text(&session, |texts| {
+            texts.iter().any(|t| t.contains("\"lead\""))
+        })
+        .await;
+        assert_eq!(
+            texts.iter().filter(|t| t.contains("\"lead\"")).count(),
+            1,
+            "the parent hears exactly one report: {texts:?}"
+        );
     }
 }

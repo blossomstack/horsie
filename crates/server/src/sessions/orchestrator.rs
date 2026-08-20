@@ -1,5 +1,6 @@
 //! The pure decisions a session makes about work it owns: which agents are owed
-//! a finished subagent's result, and — for a run — which step goes next.
+//! a finished child's result, and — for each workflow run — which step goes
+//! next.
 //!
 //! Turns are not among them. An agent holds its own queue and decides when that
 //! queue becomes a turn, so what used to be `main_turn` is now
@@ -9,13 +10,12 @@
 //! putting that result in the parent's queue.
 //!
 //! No actors, no I/O, no clock — so this is unit-testable against a hand-built
-//! [`SessionState`]. Called from the component that owns it
-//! ([`SubAgents`](crate::sessions::session_actor)), which is why there is no
-//! strategy trait: the actor concatenates what its components return rather than
-//! delegating the whole decision to one object.
+//! [`SessionState`]. Called from the components that own the work, which is why
+//! there is no strategy trait: the actor concatenates what its components return
+//! rather than delegating the whole decision to one object.
 
+use crate::sessions::run_forest::{RunId, RunState};
 use crate::sessions::session_actor::{AgentKey, SessionState};
-use crate::sessions::subagents::{SubAgentParent, TreeOwner};
 use horsie_models::agent::SubAgentResultPart;
 use serde_json::Value;
 use uuid::Uuid;
@@ -26,12 +26,12 @@ use uuid::Uuid;
 pub enum AgentAction {
     /// Begin one execution of one workflow step.
     StartStep(StepStart),
-    /// The run is over and succeeded, carrying the last step's output.
-    Finish { output: Value },
-    /// The run is over and failed.
-    Fail { error: String },
-    /// Put a finished subagent's result in the queue of the agent that spawned
-    /// it.
+    /// One run is over and succeeded, carrying the last step's output.
+    Finish { run: RunId, output: Value },
+    /// One run is over and failed.
+    Fail { run: RunId, error: String },
+    /// Put a finished child's result — a subagent's, or an invoked run's — in
+    /// the queue of the agent that asked for it.
     Deliver(Delivery),
 }
 
@@ -40,6 +40,8 @@ pub enum AgentAction {
 /// decision.
 #[derive(Debug, Clone)]
 pub struct StepStart {
+    /// The run this execution belongs to.
+    pub run: RunId,
     pub index: u32,
     pub step: String,
     pub agent: Uuid,
@@ -51,51 +53,46 @@ pub struct StepStart {
     pub input: String,
 }
 
-/// One finished subagent's result, on its way to the agent that is owed it.
+/// One finished child's result, on its way to the agent that is owed it.
 #[derive(Debug, Clone)]
 pub struct Delivery {
     /// Whose queue it goes in.
     pub to: AgentKey,
-    /// The subagent whose result this is, so the session can record that it has
-    /// now been sent.
-    pub child: Uuid,
+    /// The forest entry whose result this is — a subagent's or a workflow
+    /// run's — so the session can record that it has now been sent.
+    pub child: RunId,
     pub part: SubAgentResultPart,
 }
 
-/// Every result a child owes a parent that the parent has not been sent.
+/// Every result a child owes a parent that the parent has not been sent —
+/// finished subagents and finished invoked runs, under one rule.
 ///
 /// Unconditional: whether the recipient is idle, running or parked is no longer
 /// a question this has to answer, because the result goes into a queue rather
 /// than into a turn. The agent decides when its queue becomes a turn, and a
 /// report deliberately waits out a park rather than overriding it.
-///
-/// Reads the forest rather than one kind's tree, so it delivers to a workflow
-/// step's subagent parents as readily as a conversation's. It used to read an
-/// accessor that answered empty for a run, which is why a step's subagent could
-/// finish and never be heard from.
 #[must_use]
 pub fn owed_deliveries(state: &SessionState) -> Vec<AgentAction> {
     state
-        .subagents
+        .forest
         .owed()
         .into_iter()
-        .map(|owed| {
-            let to = match owed.parent {
-                SubAgentParent::SubAgent(parent) => AgentKey::Sub(parent),
-                // A top-level spawn reports to the agent that roots its own
-                // tree — the step that spawned it, or the main agent. Read off
-                // the tree rather than off the session's *current* root: a step
-                // that has since been superseded is still what asked.
-                SubAgentParent::Main => match owed.owner {
-                    TreeOwner::Step(agent) => AgentKey::Step(agent),
-                    TreeOwner::Main => AgentKey::Main,
-                },
+        .filter_map(|owed| {
+            // The recipient's key comes off the entry that hosts it, read from
+            // the forest rather than from the session's *current* shape: a
+            // step that has since been superseded is still what asked.
+            let (_, entry) = state.forest.owner_of_agent(owed.to)?;
+            let to = match &entry.state {
+                RunState::Main(_) => AgentKey::Main,
+                RunState::Sub(_) => AgentKey::Sub(owed.to),
+                RunState::Workflow(_) => AgentKey::Step(owed.to),
+                RunState::Fork(_) => AgentKey::Fork(owed.to),
             };
-            AgentAction::Deliver(Delivery {
+            Some(AgentAction::Deliver(Delivery {
                 to,
                 child: owed.child,
-                part: owed.part.clone(),
-            })
+                part: owed.part,
+            }))
         })
         .collect()
 }
@@ -106,21 +103,15 @@ mod tests {
     use super::*;
 
     /// Build a state whose main agent is owed one finished subagent's result.
-    fn owing_main(label: &str, output: &str) -> (SessionState, Uuid) {
+    fn owing_main(label: &str, output: &str) -> (SessionState, Uuid, Uuid) {
         let mut s = SessionState::default();
+        let session = Uuid::new_v4();
+        s.forest.apply_root_agent(session, 0);
         let id = Uuid::new_v4();
-        let tree = s.subagents.tree_mut(TreeOwner::Main);
-        tree.apply_spawned(
-            id,
-            SubAgentParent::Main,
-            label.into(),
-            "t".into(),
-            1,
-            100,
-            None,
-        );
-        tree.apply_completed(id, output.into(), 400);
-        (s, id)
+        s.forest
+            .apply_sub_spawned(id, session, label.into(), "t".into(), None, 100);
+        s.forest.apply_sub_completed(id, output.into(), 400);
+        (s, session, id)
     }
 
     #[test]
@@ -130,14 +121,14 @@ mod tests {
 
     #[test]
     fn a_finished_child_is_owed_to_the_main_agent() {
-        let (s, id) = owing_main("audit", "three stale crates");
+        let (s, _session, id) = owing_main("audit", "three stale crates");
         let actions = owed_deliveries(&s);
         assert_eq!(actions.len(), 1);
         let AgentAction::Deliver(d) = &actions[0] else {
             panic!("expected a delivery");
         };
         assert_eq!(d.to, AgentKey::Main);
-        assert_eq!(d.child, id);
+        assert_eq!(d.child, RunId(id));
         assert_eq!(d.part.text, "three stale crates");
         assert_eq!(d.part.label, "audit");
     }
@@ -147,49 +138,34 @@ mod tests {
     /// queue becomes a turn is the agent's own rule.
     #[test]
     fn a_delivery_does_not_wait_for_the_recipient_to_be_idle() {
-        let (mut s, _) = owing_main("audit", "done");
-        s.status = crate::sessions::spec::SessionStatus::Running;
+        let (mut s, session, _) = owing_main("audit", "done");
+        s.forest.apply_turn_began(session);
         assert_eq!(owed_deliveries(&s).len(), 1);
-        s.status = crate::sessions::spec::SessionStatus::AwaitingInput;
+        s.forest.apply_asked(session);
         assert_eq!(owed_deliveries(&s).len(), 1);
     }
 
     #[test]
     fn a_result_already_sent_is_not_owed_again() {
-        let (mut s, id) = owing_main("audit", "done");
-        s.subagents.tree_mut(TreeOwner::Main).apply_notified(id);
+        let (mut s, _session, id) = owing_main("audit", "done");
+        s.forest.apply_sub_notified(id);
         assert!(owed_deliveries(&s).is_empty());
     }
 
     #[test]
     fn a_nested_child_is_owed_to_the_subagent_that_spawned_it() {
         let mut s = SessionState::default();
+        let session = Uuid::new_v4();
+        s.forest.apply_root_agent(session, 0);
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
-        {
-            let tree = s.subagents.tree_mut(TreeOwner::Main);
-            tree.apply_spawned(
-                parent,
-                SubAgentParent::Main,
-                "lead".into(),
-                "t".into(),
-                1,
-                100,
-                None,
-            );
-            tree.apply_completed(parent, "waiting".into(), 200);
-            tree.apply_notified(parent);
-            tree.apply_spawned(
-                child,
-                SubAgentParent::SubAgent(parent),
-                "helper".into(),
-                "t".into(),
-                2,
-                300,
-                None,
-            );
-            tree.apply_completed(child, "kid done".into(), 600);
-        }
+        s.forest
+            .apply_sub_spawned(parent, session, "lead".into(), "t".into(), None, 100);
+        s.forest.apply_sub_completed(parent, "waiting".into(), 200);
+        s.forest.apply_sub_notified(parent);
+        s.forest
+            .apply_sub_spawned(child, parent, "helper".into(), "t".into(), None, 300);
+        s.forest.apply_sub_completed(child, "kid done".into(), 600);
         let actions = owed_deliveries(&s);
         assert_eq!(actions.len(), 1);
         let AgentAction::Deliver(d) = &actions[0] else {
@@ -197,5 +173,47 @@ mod tests {
         };
         assert_eq!(d.to, AgentKey::Sub(parent));
         assert_eq!(d.part.text, "kid done");
+    }
+
+    /// A finished run reaches whoever invoked it through the same rule, keyed
+    /// as what its invoker *is* — here a step agent, which is what closes the
+    /// deliver-to-a-superseded-step question the same way subagents answer it.
+    #[test]
+    fn a_finished_invoked_run_is_owed_to_its_invoking_step() {
+        let mut s = SessionState::default();
+        let session = Uuid::new_v4();
+        let graph = std::sync::Arc::new(crate::sessions::workflow::WorkflowRunSpec {
+            workflow: "review".into(),
+            start: "plan".into(),
+            steps: vec![],
+            input: "go".into(),
+            max_steps: 5,
+        });
+        s.forest
+            .apply_root_workflow(session, "review".into(), graph.clone(), 0);
+        let step_agent = Uuid::new_v4();
+        s.forest.apply_step_started(
+            RunId(session),
+            "plan".into(),
+            step_agent,
+            1,
+            None,
+            None,
+            "go".into(),
+            100,
+        );
+        let invoked = RunId(Uuid::new_v4());
+        s.forest
+            .apply_run_created(invoked, step_agent, "deploy".into(), graph, 200);
+        s.forest
+            .apply_run_finished(invoked, serde_json::json!({"description": "shipped"}));
+        let actions = owed_deliveries(&s);
+        assert_eq!(actions.len(), 1);
+        let AgentAction::Deliver(d) = &actions[0] else {
+            panic!("expected a delivery");
+        };
+        assert_eq!(d.to, AgentKey::Step(step_agent));
+        assert_eq!(d.child, invoked);
+        assert_eq!(d.part.label, "workflow deploy");
     }
 }

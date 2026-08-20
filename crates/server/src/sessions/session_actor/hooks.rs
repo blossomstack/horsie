@@ -19,7 +19,7 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
 use crate::sessions::addressing::{SessionInbox, SessionRef};
-use crate::sessions::spec::SessionStatus;
+use crate::sessions::run_forest::{SubAgentStatus, TurnPhase};
 use async_trait::async_trait;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
@@ -399,6 +399,35 @@ fn cap_reached(mut records: Vec<HookRecord>) -> Vec<HookRecord> {
     records
 }
 
+/// Whether the keyed agent has a turn of its own in flight — the halt gate.
+///
+/// Per key rather than the session's status: a subagent working while the
+/// main conversation rests is still haltable, and a halt that raced the
+/// turn's own end still no-ops.
+fn is_working(state: &SessionState, key: AgentKey) -> bool {
+    match key {
+        AgentKey::Main => state.forest.main_turn() == Some(&TurnPhase::Running),
+        AgentKey::Sub(id) => state
+            .forest
+            .sub(id)
+            .is_some_and(|s| s.status == SubAgentStatus::Running),
+        AgentKey::Step(id) => state
+            .forest
+            .step_of_agent(id)
+            .and_then(|(run, index)| {
+                state
+                    .forest
+                    .workflow(run)
+                    .map(|w| w.run.current() == Some(index))
+            })
+            .unwrap_or(false),
+        AgentKey::Fork(id) => state
+            .forest
+            .fork(id)
+            .is_some_and(|f| f.status == super::AgentStatus::Running),
+    }
+}
+
 /// Routing what plugin hooks did into the session.
 ///
 /// No events and no state: a hook record belongs in the transcript of the agent
@@ -421,7 +450,7 @@ impl HookRouting {
                 // rather than into the session's log. An agent that has already
                 // gone is not an error: the records describe a call it made
                 // before it left, and there is nothing left to tell.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(key) {
                     let _ = agent.actor.tell(AgentCommand::HooksRan { records }).await;
                 }
                 CommandEffect::none()
@@ -434,9 +463,8 @@ impl HookRouting {
                 // `ContinueAfterStop` below no-ops on the same condition.
                 let live = actor
                     .agents
-                    .as_ref()
-                    .and_then(|a| a.get(key))
-                    .filter(|_| state.status == SessionStatus::Running)
+                    .get(key)
+                    .filter(|_| is_working(state, key))
                     .cloned();
                 let Some(agent) = live else {
                     tracing::warn!(
@@ -484,7 +512,7 @@ impl HookRouting {
                 // One more thing addressed to the agent, queued like the rest:
                 // the turn it continues is over by the time this lands, so the
                 // agent's own boundary drain is what starts the next one.
-                if let Some(agent) = actor.agents.as_ref().and_then(|a| a.get(key)) {
+                if let Some(agent) = actor.agents.get(key) {
                     let _ = agent
                         .actor
                         .tell(AgentCommand::Enqueue {
@@ -722,8 +750,8 @@ mod tests {
         let (_f, session, id, journal) = spawn_session_with_provider(gate).await;
         let sub = spawn_sub(&session, "research", "dig into it").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub)
-                .is_some_and(|r| r.status == crate::sessions::subagents::SubAgentStatus::Running)
+            t.sub(sub)
+                .is_some_and(|r| r.status == crate::sessions::run_forest::SubAgentStatus::Running)
         })
         .await;
 

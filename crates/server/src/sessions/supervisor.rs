@@ -1929,7 +1929,11 @@ mod tests {
         journal
             .persist(
                 &pid,
-                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded { at_ms: 0 }).unwrap()],
+                &[serde_json::to_vec(&SessionDomainEvent::AskRecorded {
+                    at_ms: 0,
+                    agent: Uuid::parse_str(&id).unwrap(),
+                })
+                .unwrap()],
                 at,
             )
             .await

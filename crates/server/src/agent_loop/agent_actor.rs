@@ -45,6 +45,15 @@ pub struct AgentParams {
     /// snapshot-compacted (SSE cursors are journal sequence numbers and must
     /// stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
+    /// Whether a turn ending with text is allowed to *conclude* while this
+    /// agent still has delegated work in flight — subagents it spawned,
+    /// workflows it invoked, timers it armed. True for a subagent: its
+    /// conclusion is a report its parent consumes once, so an agent that is
+    /// still waiting parks instead, and reports when its whole subtree is
+    /// done. A step has the stronger `requires_result` gate; a conversation's
+    /// final text is an answer to a person, not a report, and stays a turn
+    /// boundary.
+    pub park_on_outstanding_work: bool,
 }
 
 impl AgentParams {
@@ -56,6 +65,7 @@ impl AgentParams {
             max_retries: def.max_retries.unwrap_or(0),
             thinking_effort: None,
             interactive: false,
+            park_on_outstanding_work: false,
         }
     }
 }
@@ -1734,6 +1744,28 @@ impl AgentActor {
                 if self.params.requires_result {
                     return self.ended_without_result(state, ctx, agent, parent).await;
                 }
+                // An agent that owes its parent one report is not done while
+                // work it delegated is still running: its conclusion would be
+                // consumed now and the children's results would arrive at an
+                // agent whose requester already moved on. The queue is checked
+                // first — a child's report that landed mid-turn simply starts
+                // the next turn — and otherwise the agent parks; the children
+                // finishing is what wakes it, and its next conclusion is the
+                // report.
+                if self.params.park_on_outstanding_work {
+                    let drained = self.try_drain(state, ctx).await;
+                    if !drained.is_empty() {
+                        return self.persist_maybe_snapshot(drained);
+                    }
+                    if !state.timers.is_empty()
+                        || crate::agent_loop::carried_state::has_outstanding_children(state)
+                    {
+                        parent.deliver(AgentOutcome::Parked { agent }).await;
+                        let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
+                        self.events_since_snapshot = 0;
+                        return CommandEffect::persist(vec![parked]).and_snapshot();
+                    }
+                }
                 parent
                     .deliver(AgentOutcome::Concluded {
                         agent,
@@ -1965,7 +1997,7 @@ impl AgentActor {
             return self.persist_maybe_snapshot(drained);
         }
         if !state.timers.is_empty()
-            || crate::agent_loop::carried_state::has_running_subagents(state)
+            || crate::agent_loop::carried_state::has_outstanding_children(state)
         {
             parent.deliver(AgentOutcome::Parked { agent }).await;
             let parked = AgentDomainEvent::Parked { at_ms: now_ms() };
@@ -2001,9 +2033,9 @@ impl AgentActor {
                 id: format!("nudge-result:{}", state.nudges),
                 text: format!(
                     "Your turn ended without calling `{SUBMIT_RESULT_TOOL}`, and nothing will \
-                     wake you — you have no armed timers and no subagents still running. If \
-                     the step's work is done, call `{SUBMIT_RESULT_TOOL}` now. If it is not, \
-                     carry on working."
+                     wake you — you have no armed timers and no delegated work still running. \
+                     If the step's work is done, call `{SUBMIT_RESULT_TOOL}` now. If it is \
+                     not, carry on working."
                 ),
             },
             at_ms: now_ms(),

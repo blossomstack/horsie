@@ -236,6 +236,12 @@ impl SessionRef {
         }
     }
 
+    /// The session this reference addresses.
+    #[must_use]
+    pub fn session(&self) -> Uuid {
+        self.entity.session
+    }
+
     /// # Errors
     /// If the command could not be delivered — see [`ActorRef::tell`].
     pub async fn tell(&self, cmd: SessionCommand) -> Result<(), TellError> {
