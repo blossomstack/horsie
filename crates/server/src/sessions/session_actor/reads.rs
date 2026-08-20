@@ -15,9 +15,8 @@ use super::{
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::forks::{ForkParent, ForkRecord, ForkRoster};
+use crate::sessions::run_forest::{ForkRun, RunForest, SubAgentRun, SubAgentStatus};
 use crate::sessions::spec::SessionStatus;
-use crate::sessions::subagents::{SubAgentParent, SubAgentRecord, SubAgentStatus};
 use crate::sessions::workflow::{StepRun, StepStatus};
 use horsie_actor::ActorContext;
 use uuid::Uuid;
@@ -76,7 +75,7 @@ impl Reads {
             }
             ReadCommand::Snapshot { reply } => {
                 let _ = reply.send(SessionSnapshot {
-                    status: state.status.clone(),
+                    status: state.status(),
                     // Banked totals only, so this asks no agent anything. The
                     // live context size is per-agent and never summed, and it
                     // is on the agent document rather than here.
@@ -150,71 +149,44 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
 
 /// One fork of a conversation.
 ///
-/// Its status is read straight off the roster rather than mapped from anything:
-/// a fork *is* a conversation, so `AgentStatus` is already the vocabulary its
-/// record is kept in. `label` carries the title it gave itself, which is `None`
-/// until it does — a client shows what it was branched from instead.
-fn fork_entry(id: Uuid, roster: &ForkRoster, rec: &ForkRecord) -> AgentEntry {
+/// Its status is read straight off the record rather than mapped from
+/// anything: a fork *is* a conversation, so `AgentStatus` is already the
+/// vocabulary its record is kept in. `label` carries the title it gave itself,
+/// which is `None` until it does — a client shows what it was branched from
+/// instead.
+fn fork_entry(id: Uuid, forest: &RunForest, rec: &ForkRun) -> AgentEntry {
+    let (created_at_ms, parent) = forest
+        .owner_of_agent(id)
+        .map(|(_, e)| (e.created_at_ms, e.parent))
+        .unwrap_or((0, None));
     AgentEntry {
         id: id.to_string(),
-        parent: match rec.parent {
-            // Rooted on the session's main agent, which is not a fork.
-            ForkParent::Main => None,
-            ForkParent::Fork(pid) => Some(pid),
-        },
+        // Rooted on the session's main agent, which is not a fork, so only a
+        // fork parent is reported.
+        parent: parent.filter(|pid| forest.fork(*pid).is_some()),
         label: rec.title.clone(),
-        depth: fork_depth(roster, rec),
+        depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: None,
-        // Read straight off the roster rather than mapped: a fork *is* a
-        // conversation, so `AgentStatus` is already the vocabulary its record
-        // is kept in.
         status: rec.status,
         error: None,
-        started_at_ms: rec.created_at_ms,
+        started_at_ms: created_at_ms,
         // A conversation is never *done*, so it has no end.
         ended_at_ms: 0,
     }
 }
 
-/// How deep a fork sits, by walking its parents.
-///
-/// Bounded by the roster's own size rather than trusted to terminate: a chain
-/// is only ever built by appending, so a cycle is impossible — but this walks
-/// data recovered from a journal, and a bound costs one comparison.
-fn fork_depth(roster: &ForkRoster, rec: &ForkRecord) -> u32 {
-    let limit = roster.iter().count();
-    let mut depth = 0;
-    let mut at = rec.parent;
-    while let ForkParent::Fork(pid) = at {
-        depth += 1;
-        if depth as usize > limit {
-            // A parent chain longer than the roster means the roster is not a
-            // tree. Nothing can produce that, so say so rather than spin.
-            tracing::warn!("a fork's parent chain does not terminate; reporting it flat");
-            return 0;
-        }
-        match roster.get(pid) {
-            Some(parent) => at = parent.parent,
-            // A deleted parent leaves its child where it stands: the chain
-            // above it is gone, so this is as deep as it can be said to be.
-            None => break,
-        }
-    }
-    depth
-}
-
-/// One node of a subagent tree.
-fn sub_entry(id: Uuid, rec: &SubAgentRecord) -> AgentEntry {
+/// One subagent of the forest.
+fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
     AgentEntry {
         id: id.to_string(),
-        parent: match rec.parent {
-            // Rooted on whatever this session's "main" is — the main agent, or
-            // the step that spawned it. Either way, not a subagent.
-            SubAgentParent::Main => None,
-            SubAgentParent::SubAgent(pid) => Some(pid),
-        },
+        // Reported only when the parent is itself a subagent: a node rooted
+        // directly on main, a step or a fork is a top-level one to a reader.
+        parent: forest
+            .owner_of_agent(id)
+            .and_then(|(_, e)| e.parent)
+            .filter(|pid| forest.sub(*pid).is_some()),
         label: Some(rec.label.clone()),
-        depth: rec.depth,
+        depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
         status: match rec.status {
             SubAgentStatus::Running => AgentStatus::Running,
@@ -222,7 +194,7 @@ fn sub_entry(id: Uuid, rec: &SubAgentRecord) -> AgentEntry {
             SubAgentStatus::Failed => AgentStatus::Failed,
         },
         error: rec.error.clone(),
-        started_at_ms: rec.spawned_at_ms,
+        started_at_ms: rec.started_at_ms,
         ended_at_ms: rec.ended_at_ms,
     }
 }
@@ -243,24 +215,28 @@ impl SessionActor {
     /// [`SessionAgents::Workflow`](super::SessionAgents) records about the live
     /// actors, asked of the durable state instead.
     pub(super) fn agent_roster(&self, state: &SessionState) -> Vec<AgentEntry> {
-        let mut agents: Vec<AgentEntry> = match self.spec().workflow_run() {
-            Some(_) => state
-                .run
-                .iter()
-                .flat_map(|run| run.steps.iter())
-                .map(step_entry)
-                .collect(),
-            // Listed even though nothing spawned it, so that every agent is
-            // reachable at one shape.
-            None => vec![main_entry(&state.status)],
+        // Listed even though nothing spawned it, so that every agent is
+        // reachable at one shape. A workflow session has no main agent — it
+        // *is* its steps.
+        let mut agents: Vec<AgentEntry> = match state.forest.root_is_workflow() {
+            true => Vec::new(),
+            false => vec![main_entry(&state.status())],
         };
+        // Every run's executions — the session's own and any invoked one's —
+        // then every subagent. Forks are read through `read_agent`, as before.
         agents.extend(
             state
-                .subagents
-                .ids()
-                .into_iter()
-                .filter_map(|id| state.subagents.node(id).map(|rec| sub_entry(id, rec))),
+                .forest
+                .workflows()
+                .flat_map(|(_, w)| w.run.steps.iter())
+                .map(step_entry),
         );
+        agents.extend(state.forest.sub_ids().into_iter().filter_map(|id| {
+            state
+                .forest
+                .sub(id)
+                .map(|rec| sub_entry(id, &state.forest, rec))
+        }));
         agents
     }
 
@@ -280,20 +256,20 @@ impl SessionActor {
         let (key, agent) = self.resolve_agent(state, ctx, agent_id)?;
         let execution = match key {
             AgentKey::Step(id) => state
-                .run
-                .as_ref()
-                .and_then(|run| run.index_of_agent(id).and_then(|i| run.get(i))),
+                .forest
+                .step_of_agent(id)
+                .and_then(|(run, index)| state.forest.workflow(run).and_then(|w| w.run.get(index))),
             AgentKey::Main | AgentKey::Sub(_) | AgentKey::Fork(_) => None,
         };
         let node = match key {
-            AgentKey::Sub(id) => state.subagents.node(id),
+            AgentKey::Sub(id) => state.forest.sub(id),
             AgentKey::Main | AgentKey::Step(_) | AgentKey::Fork(_) => None,
         };
         let entry = match key {
-            AgentKey::Main => main_entry(&state.status),
+            AgentKey::Main => main_entry(&state.status()),
             AgentKey::Step(_) => step_entry(execution?),
-            AgentKey::Sub(id) => sub_entry(id, node?),
-            AgentKey::Fork(id) => fork_entry(id, &state.forks, state.forks.get(id)?),
+            AgentKey::Sub(id) => sub_entry(id, &state.forest, node?),
+            AgentKey::Fork(id) => fork_entry(id, &state.forest, state.forest.fork(id)?),
         };
         Some(AgentDetail {
             entry,
@@ -434,7 +410,7 @@ mod tests {
     async fn a_conversation_lists_its_main_agent_and_its_subagents() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, "research", "dig").await;
-        wait_for_tree(&journal, id, |f| f.node(sub).is_some()).await;
+        wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;
 
         let agents = roster(&session).await;
         assert_eq!(agents[0].id, MAIN_AGENT_ID);
@@ -579,7 +555,7 @@ mod tests {
         // A subagent spawned under the code step inherits its settings — the
         // model it runs, and the cap its spawn is counted against.
         let sub = spawn_sub(&session, "helper", "dig").await;
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some()).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some()).await;
         let sub_detail = session
             .ask(|reply| {
                 SessionCommand::Read(ReadCommand::Agent {
@@ -598,7 +574,7 @@ mod tests {
         let res = session
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
-                    caller: crate::sessions::subagents::SubAgentParent::Main,
+                    caller: code_agent,
                     label: "second".into(),
                     task: "more".into(),
                     agent_type: None,

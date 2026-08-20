@@ -8,13 +8,13 @@
 //! mailbox, so an interrupted create is discoverable at load and a session stays
 //! able to answer reads, stops and deletes for the minutes one takes.
 
-use super::component::{ActionCx, Component};
+use super::component::Component;
 use super::{
-    CommandEffect, LifecycleCommand, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
+    CommandEffect, LifecycleCommand, ProvisioningState, SessionActor, SessionCommand,
+    SessionDomainEvent, SessionState,
 };
 use crate::runtime_manager::RuntimeError;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::spec::SessionStatus;
 use horsie_actor::{ActorContext, EventSourcedActor};
 use horsie_models::now_ms;
 
@@ -25,15 +25,15 @@ impl RuntimeLifecycle {
     /// Whether this session has a runtime to run on — the single gate the turn
     /// boundary checks before asking any component what to start.
     ///
-    /// Both answers are journaled statuses, so they survive the process dying
-    /// mid-create, which no in-memory gate could. `ProvisioningFailed` is the
-    /// second of them: a create that failed on something retryable leaves a
-    /// session with no runtime at all, and a turn started there would ask a
-    /// vendor for one and be told, terminally, that it is gone.
+    /// Both answers are journaled facts, so they survive the process dying
+    /// mid-create, which no in-memory gate could. `Failed` is the second of
+    /// them: a create that failed on something retryable leaves a session with
+    /// no runtime at all, and a turn started there would ask a vendor for one
+    /// and be told, terminally, that it is gone.
     pub(super) fn ready(state: &SessionState) -> bool {
         !matches!(
-            state.status,
-            SessionStatus::Provisioning | SessionStatus::ProvisioningFailed { .. }
+            state.provisioning,
+            ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
         )
     }
 }
@@ -47,24 +47,19 @@ impl RuntimeLifecycle {
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
             LifecycleCommand::Provision => {
-                // Provision only from the three states that mean "no runtime has
-                // ever been confirmed": a session just created (nothing
-                // journaled, so the default `Idle`), one found still
-                // `Provisioning` at load because the process died inside its
-                // create, and one whose create failed on something retryable.
-                //
-                // Every other status means a create already succeeded, and
-                // re-running one would rebuild a workspace someone may be using
-                // — the thing this design exists to make impossible. The
-                // `Idle` arm is the loose one: it is also every healthy
-                // session's status, so it holds only because the supervisor
-                // sends this exactly once, at creation.
-                if !matches!(
-                    state.status,
-                    SessionStatus::Idle
-                        | SessionStatus::Provisioning
-                        | SessionStatus::ProvisioningFailed { .. }
-                ) {
+                // Provision only while no runtime has ever been confirmed: a
+                // session just created, one found mid-create at load because
+                // the process died inside it, and one whose create failed on
+                // something retryable. `Ready` means a create already
+                // succeeded, and re-running one would rebuild a workspace
+                // someone may be using — the thing this design exists to make
+                // impossible. This used to be a status check whose `Idle` arm
+                // was every healthy session's status too; the provisioning
+                // slice having one owner is what lets the gate say what it
+                // means.
+                if state.fatal.is_some()
+                    || matches!(state.provisioning, ProvisioningState::Ready { .. })
+                {
                     return CommandEffect::none();
                 }
                 let runtimes = actor.deps().runtimes.clone();
@@ -119,7 +114,7 @@ impl RuntimeLifecycle {
                 // Only while a create is actually outstanding. A vendor's word
                 // that lands after the outcome would say a session is still
                 // coming up when it is already running.
-                if !matches!(state.status, SessionStatus::Provisioning) {
+                if !matches!(state.provisioning, ProvisioningState::InFlight { .. }) {
                     return CommandEffect::none();
                 }
                 CommandEffect::persist(vec![SessionDomainEvent::ProvisioningProgress {
@@ -185,16 +180,17 @@ impl Component for RuntimeLifecycle {
     /// retryable. Re-attempting is safe here and nowhere else: `Provisioning` is
     /// precisely the state in which no turn has run, so there is no work in the
     /// workspace for a rebuild to destroy.
-    fn on_load(_cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        matches!(
-            state.status,
-            SessionStatus::Provisioning | SessionStatus::ProvisioningFailed { .. }
-        )
+    fn on_load(state: &SessionState) -> Option<SessionCommand> {
+        (state.fatal.is_none()
+            && matches!(
+                state.provisioning,
+                ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
+            ))
         .then_some(SessionCommand::Lifecycle(LifecycleCommand::Provision))
     }
 
     fn busy(state: &SessionState) -> bool {
-        matches!(state.status, SessionStatus::Provisioning)
+        matches!(state.provisioning, ProvisioningState::InFlight { .. })
     }
 
     /// The three provisioning facts. Each one sets `status`, which is how the
@@ -211,35 +207,33 @@ impl Component for RuntimeLifecycle {
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
             SessionDomainEvent::ProvisioningStarted { at_ms } => {
-                state.status = SessionStatus::Provisioning;
-                // The identity of this provision, and the reason this arm reads
-                // a field it used to ignore. Every later acquisition addresses
-                // the sandbox this create produced, so the name has to outlive
-                // the create — and a reload.
-                state.provisioned_at_ms = Some(at_ms);
+                // `at_ms` is the identity of this provision: every later
+                // acquisition addresses the sandbox this create produced, so
+                // the name has to outlive the create — and a reload.
+                state.provisioning = ProvisioningState::InFlight { at_ms };
             }
-            // Narration: it changes nothing, and the status it is describing
+            // Narration: it changes nothing, and the state it is describing
             // was set by the `ProvisioningStarted` before it. Journaled all the
             // same, so a client that arrives mid-create reads the same account
             // of the wait as one that watched it live.
             SessionDomainEvent::ProvisioningProgress { .. } => {}
             SessionDomainEvent::ProvisioningSucceeded { .. } => {
-                state.status = SessionStatus::Idle;
-                state.last_error = None;
+                let at_ms = state.provisioning.at_ms().unwrap_or_default();
+                state.provisioning = ProvisioningState::Ready { at_ms };
             }
             SessionDomainEvent::ProvisioningFailed {
                 error, terminal, ..
             } => {
-                state.status = if terminal {
-                    SessionStatus::Unrecoverable {
-                        reason: error.clone(),
-                    }
-                } else {
-                    SessionStatus::ProvisioningFailed {
-                        reason: error.clone(),
-                    }
+                let at_ms = state.provisioning.at_ms().unwrap_or_default();
+                state.provisioning = ProvisioningState::Failed {
+                    at_ms,
+                    reason: error.clone(),
                 };
-                state.last_error = Some(error);
+                // A live vendor refusing to produce the runtime ends the
+                // session; anything else stays a retryable provisioning fact.
+                if terminal {
+                    state.fatal = Some(error);
+                }
             }
             other => unreachable!("RuntimeLifecycle was handed {other:?}"),
         }
@@ -259,6 +253,7 @@ mod tests {
     use super::super::testing::*;
     use super::super::*;
     use super::*;
+    use crate::sessions::spec::SessionStatus;
 
     use horsie_agentcore::LlmProvider;
 
@@ -275,7 +270,7 @@ mod tests {
         let started = fold(vec![SessionDomainEvent::ProvisioningStarted {
             at_ms: 1234,
         }]);
-        assert_eq!(started.provisioned_at_ms, Some(1234));
+        assert_eq!(started.provisioning.at_ms(), Some(1234));
     }
 
     /// And a second provision replaces the first, which is the whole point: a
@@ -288,7 +283,7 @@ mod tests {
             SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
             SessionDomainEvent::ProvisioningStarted { at_ms: 2 },
         ]);
-        assert_eq!(reprovisioned.provisioned_at_ms, Some(2));
+        assert_eq!(reprovisioned.provisioning.at_ms(), Some(2));
     }
 
     /// A session is `Provisioning` from the moment its create is journaled
@@ -297,13 +292,13 @@ mod tests {
     #[test]
     fn a_created_session_provisions_before_it_is_idle() {
         let started = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
-        assert_eq!(started.status, SessionStatus::Provisioning);
+        assert_eq!(started.status(), SessionStatus::Provisioning);
 
         let ready = fold(vec![
             SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
             SessionDomainEvent::ProvisioningSucceeded { at_ms: 1 },
         ]);
-        assert_eq!(ready.status, SessionStatus::Idle);
+        assert_eq!(ready.status(), SessionStatus::Idle);
     }
 
     /// The message the session was created with waits in its agent's queue
@@ -313,7 +308,7 @@ mod tests {
     #[test]
     fn a_session_is_not_runnable_until_its_runtime_lands() {
         let waiting = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
-        assert_eq!(waiting.status, SessionStatus::Provisioning);
+        assert_eq!(waiting.status(), SessionStatus::Provisioning);
         assert!(
             !RuntimeLifecycle::ready(&waiting),
             "nothing may run before the runtime exists"
@@ -323,7 +318,7 @@ mod tests {
             waiting,
             SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
         );
-        assert_eq!(ready.status, SessionStatus::Idle);
+        assert_eq!(ready.status(), SessionStatus::Idle);
         assert!(RuntimeLifecycle::ready(&ready));
     }
 
@@ -346,12 +341,12 @@ mod tests {
         // failed turn has a runtime and can simply run again, while this one has
         // no runtime at all and must build one before it can do anything.
         assert_eq!(
-            s.status,
+            s.status(),
             SessionStatus::ProvisioningFailed {
                 reason: "runtime vendor unavailable: vendor 'local' is not connected".into(),
             }
         );
-        assert!(s.last_error.is_some());
+        assert!(s.last_error().is_some());
     }
 
     /// The status a failed create leaves must not let a turn start — the turn
@@ -385,7 +380,7 @@ mod tests {
                 terminal: true,
             },
         ]);
-        assert!(matches!(s.status, SessionStatus::Unrecoverable { .. }));
+        assert!(matches!(s.status(), SessionStatus::Unrecoverable { .. }));
     }
 
     /// The bug in one test: a message that arrives while the create is still in
@@ -425,7 +420,7 @@ mod tests {
         // exist: it waits in the agent's queue, and the agent has been told it
         // is not ready.
         wait_for_state(&journal, id, "a live create", |s| {
-            s.status == SessionStatus::Provisioning
+            s.status() == SessionStatus::Provisioning
         })
         .await;
         assert!(
@@ -468,7 +463,7 @@ mod tests {
         )
         .await;
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
-            s.status != SessionStatus::Provisioning
+            s.status() != SessionStatus::Provisioning
         })
         .await;
         assert!(
@@ -513,16 +508,16 @@ mod tests {
             &journal,
             id,
             "a create that could not reach a vendor",
-            |s| matches!(s.status, SessionStatus::ProvisioningFailed { .. }),
+            |s| matches!(s.status(), SessionStatus::ProvisioningFailed { .. }),
         )
         .await;
         assert!(
             failed
-                .last_error
+                .last_error()
                 .as_deref()
                 .is_some_and(|e| e.contains("unavailable")),
             "the vendor's own reason survives: {:?}",
-            failed.last_error
+            failed.last_error()
         );
 
         // The vendor comes back, and the user does what the UI tells them to.
@@ -542,7 +537,7 @@ mod tests {
             .unwrap();
 
         wait_for_state(&journal, id, "the retry building a runtime", |s| {
-            !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
+            !matches!(s.status(), SessionStatus::ProvisioningFailed { .. })
         })
         .await;
         assert!(
@@ -561,9 +556,9 @@ mod tests {
         .await;
         let ran = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(
-            !matches!(ran.status, SessionStatus::Unrecoverable { .. }),
+            !matches!(ran.status(), SessionStatus::Unrecoverable { .. }),
             "retrying must never be what kills the session: {:?}",
-            ran.status
+            ran.status()
         );
     }
 
@@ -591,7 +586,7 @@ mod tests {
         )
         .await;
         wait_for_state(&journal, id, "the create re-attempted at load", |s| {
-            !matches!(s.status, SessionStatus::ProvisioningFailed { .. })
+            !matches!(s.status(), SessionStatus::ProvisioningFailed { .. })
         })
         .await;
         assert!(
@@ -788,7 +783,7 @@ mod tests {
         let gate = BlockingProvider::new();
         let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
         let _sub = spawn_sub(&session, "w", "t").await;
-        wait_for_tree(&journal, id, |t| t.has_active()).await;
+        wait_for_tree(&journal, id, |t| t.has_active_subs()).await;
 
         let offloadable = session
             .ask(|reply| SessionCommand::Lifecycle(LifecycleCommand::PrepareOffload { reply }))
@@ -811,6 +806,6 @@ mod tests {
             at_ms: 0,
             reason: "vendor has no runtime".into(),
         }]);
-        assert!(matches!(s.status, SessionStatus::Unrecoverable { .. }));
+        assert!(matches!(s.status(), SessionStatus::Unrecoverable { .. }));
     }
 }

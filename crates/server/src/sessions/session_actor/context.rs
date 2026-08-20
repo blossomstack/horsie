@@ -23,7 +23,7 @@ use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
         ask_tool::AskUserToolbox, spawn_tool::SubAgentToolbox, spec::AgentSettings,
-        subagents::SubAgentParent, title_tool::SessionTitleToolbox,
+        title_tool::SessionTitleToolbox,
     },
 };
 use async_trait::async_trait;
@@ -862,13 +862,13 @@ impl ContextProvider for SessionContextProvider {
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
             build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
+        // Spawns and invocations attribute to the actual agent making them —
+        // the main agent's id is the session's.
         let caller = match self.kind {
-            // A step roots its own tree, so its spawns are that tree's `Main`.
-            // A fork roots its own tree too, for the same reason a step does.
-            SessionAgentKind::Main | SessionAgentKind::Step(_) | SessionAgentKind::Fork(_) => {
-                SubAgentParent::Main
+            SessionAgentKind::Main => self.session_id,
+            SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) | SessionAgentKind::Sub(id) => {
+                id
             }
-            SessionAgentKind::Sub(id) => SubAgentParent::SubAgent(id),
         };
         // A zero cap disables subagents outright: no tools advertised, so the
         // model never meets a tool that only ever rejects.

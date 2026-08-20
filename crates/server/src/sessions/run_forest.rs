@@ -298,6 +298,50 @@ impl RunForest {
         self.root.and_then(|id| self.entries.get(&id))
     }
 
+    /// The session's own workflow run, when the root is one.
+    #[must_use]
+    pub fn root_workflow(&self) -> Option<(RunId, &WorkflowRun)> {
+        let id = self.root?;
+        match self.entries.get(&id).map(|e| &e.state) {
+            Some(RunState::Workflow(w)) => Some((id, w)),
+            Some(RunState::Main(_) | RunState::Sub(_) | RunState::Fork(_)) | None => None,
+        }
+    }
+
+    /// Whether this session *is* a workflow run.
+    #[must_use]
+    pub fn root_is_workflow(&self) -> bool {
+        self.root_workflow().is_some()
+    }
+
+    /// The agent of the root run's step in flight — what an unaddressed
+    /// request on a workflow session means, since a run has no main agent and
+    /// at most one of its steps runs at a time.
+    #[must_use]
+    pub fn current_root_step_agent(&self) -> Option<Uuid> {
+        self.root_workflow()
+            .and_then(|(_, w)| w.run.current_agent())
+    }
+
+    /// Every step in flight, across every run: the executions a stop, a delete
+    /// or crash recovery must account for.
+    #[must_use]
+    pub fn in_flight_steps(&self) -> Vec<(RunId, u32, Uuid)> {
+        self.workflows()
+            .filter_map(|(id, w)| {
+                let index = w.run.current()?;
+                let agent = w.run.get(index)?.agent;
+                Some((id, index, agent))
+            })
+            .collect()
+    }
+
+    /// Whether any run has a step in flight.
+    #[must_use]
+    pub fn has_step_in_flight(&self) -> bool {
+        self.workflows().any(|(_, w)| w.run.current().is_some())
+    }
+
     #[must_use]
     pub fn entry(&self, id: RunId) -> Option<&RunEntry> {
         self.entries.get(&id)

@@ -5,27 +5,22 @@
 //! is why the same function serves live operation and recovery.
 
 use crate::sessions::orchestrator::{AgentAction, StepStart};
-use crate::sessions::session_actor::SessionState;
+use crate::sessions::run_forest::RunId;
 use crate::sessions::workflow::spec::{WorkflowRunSpec, compose_step_input, output_as_input};
 use crate::sessions::workflow::{StepStatus, WorkflowRunState};
 use serde_json::Value;
 use std::sync::Arc;
-use uuid::Uuid;
 
-/// Drives one run: the definition it was started from, and the session that
-/// hosts it.
+/// Drives one run: the definition it was started from, and the run it belongs
+/// to — several may be live in one session, so every decision names its run.
 pub struct WorkflowOrchestrator {
-    session_id: Uuid,
+    run_id: RunId,
     spec: Arc<WorkflowRunSpec>,
 }
 
 impl WorkflowOrchestrator {
-    pub fn new(session_id: Uuid, spec: Arc<WorkflowRunSpec>) -> Self {
-        Self { session_id, spec }
-    }
-
-    fn run<'a>(&self, state: &'a SessionState) -> Option<&'a WorkflowRunState> {
-        state.run.as_ref()
+    pub fn new(run_id: RunId, spec: Arc<WorkflowRunSpec>) -> Self {
+        Self { run_id, spec }
     }
 
     /// The action that starts `step`, coming out of `from`.
@@ -45,9 +40,10 @@ impl WorkflowOrchestrator {
             .map(|s| s.prompt.as_str())
             .unwrap_or_default();
         AgentAction::StartStep(StepStart {
+            run: self.run_id,
             index,
             step: step_name.to_string(),
-            agent: WorkflowRunSpec::step_agent_id(self.session_id, index),
+            agent: WorkflowRunSpec::step_agent_id(self.run_id.0, index),
             attempt: run.attempts_of(step_name) + 1,
             from,
             via,
@@ -59,13 +55,7 @@ impl WorkflowOrchestrator {
 impl WorkflowOrchestrator {
     /// What the graph wants started: the next step, the run's end, or its
     /// failure. Knows nothing about subagents.
-    pub fn step_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // A run that has not folded a `StepStarted` yet holds no run state:
-        // `initial_state` is static and cannot see the spec. This driver is
-        // only ever installed on a run, so an absent one means "nothing has
-        // happened yet", not "this is a conversation".
-        let empty = WorkflowRunState::default();
-        let run = self.run(state).unwrap_or(&empty);
+    pub fn step_actions(&self, run: &WorkflowRunState) -> Vec<AgentAction> {
         // A step in flight, a park, a suspension and a terminal run all mean
         // the same thing here: nothing starts by itself. Only a retry moves a
         // suspended run, and only an answer moves a parked one.
@@ -84,6 +74,7 @@ impl WorkflowOrchestrator {
         // executions that ran.
         if run.steps.len() as u32 >= self.spec.max_steps {
             return vec![AgentAction::Fail {
+                run: self.run_id,
                 error: format!("step budget exhausted after {} steps", self.spec.max_steps),
             }];
         }
@@ -91,6 +82,7 @@ impl WorkflowOrchestrator {
             // Nothing has run: begin at the start step.
             if self.spec.step(&self.spec.start).is_none() {
                 return vec![AgentAction::Fail {
+                    run: self.run_id,
                     error: format!("start step '{}' is not in this workflow", self.spec.start),
                 }];
             }
@@ -104,6 +96,7 @@ impl WorkflowOrchestrator {
         let output = last.output.clone().unwrap_or(Value::Null);
         let Some(step) = self.spec.step(&last.step) else {
             return vec![AgentAction::Fail {
+                run: self.run_id,
                 error: format!("step '{}' is no longer in this workflow", last.step),
             }];
         };
@@ -115,10 +108,14 @@ impl WorkflowOrchestrator {
         match next_transition(&step.transitions, &outcome) {
             // No transition matched: this step is terminal, and its result is
             // the run's.
-            None => vec![AgentAction::Finish { output }],
+            None => vec![AgentAction::Finish {
+                run: self.run_id,
+                output,
+            }],
             Some((to, via)) => {
                 if self.spec.step(&to).is_none() {
                     return vec![AgentAction::Fail {
+                        run: self.run_id,
                         error: format!(
                             "step '{}' transitions to '{to}', which is not in this workflow",
                             last.step
@@ -169,6 +166,7 @@ mod tests {
     use crate::sessions::workflow::WorkflowRunStatus;
     use crate::sessions::workflow::spec::{TransitionSpec, WorkflowStepSpec};
     use horsie_models::workflow::OutcomeFilter;
+    use uuid::Uuid;
 
     fn settings() -> AgentSettings {
         AgentSettings {
@@ -240,22 +238,15 @@ mod tests {
         })
     }
 
-    fn driver() -> (WorkflowOrchestrator, Uuid) {
-        let id = Uuid::new_v4();
-        (WorkflowOrchestrator::new(id, spec()), id)
-    }
-
-    fn state(run: WorkflowRunState) -> SessionState {
-        SessionState {
-            run: Some(run),
-            ..SessionState::default()
-        }
+    fn driver() -> (WorkflowOrchestrator, uuid::Uuid) {
+        let id = uuid::Uuid::new_v4();
+        (WorkflowOrchestrator::new(RunId(id), spec()), id)
     }
 
     /// Drive the run forward by performing whatever the driver asks, so a test
     /// reads as the sequence of steps rather than as a fold.
     fn advance(d: &WorkflowOrchestrator, run: &mut WorkflowRunState, output: Value) -> AgentAction {
-        let action = d.step_actions(&state(run.clone())).remove(0);
+        let action = d.step_actions(run).remove(0);
         match &action {
             AgentAction::StartStep(StepStart {
                 step,
@@ -278,8 +269,8 @@ mod tests {
                 let index = (run.steps.len() - 1) as u32;
                 run.apply_concluded(index, output, 1);
             }
-            AgentAction::Finish { output } => run.apply_finished(output.clone()),
-            AgentAction::Fail { error } => run.apply_failed(error.clone()),
+            AgentAction::Finish { output, .. } => run.apply_finished(output.clone()),
+            AgentAction::Fail { error, .. } => run.apply_failed(error.clone()),
             AgentAction::Deliver(_) => panic!("a run's step decisions never deliver a result"),
         }
         action
@@ -288,7 +279,7 @@ mod tests {
     #[test]
     fn a_fresh_run_starts_at_the_start_step_with_the_run_input() {
         let (d, session) = driver();
-        let actions = d.step_actions(&state(WorkflowRunState::default()));
+        let actions = d.step_actions(&WorkflowRunState::default());
         assert_eq!(actions.len(), 1);
         let AgentAction::StartStep(StepStart {
             index,
@@ -347,7 +338,7 @@ mod tests {
         advance(&d, &mut run, serde_json::json!({"outcome": "p2"}));
         advance(&d, &mut run, serde_json::json!({"filed": 12}));
         let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::Finish { output } = &action else {
+        let AgentAction::Finish { output, .. } = &action else {
             panic!("expected the run to finish, got {action:?}");
         };
         assert_eq!(output, &serde_json::json!({"filed": 12}));
@@ -358,7 +349,7 @@ mod tests {
     #[test]
     fn a_loop_is_stopped_by_the_step_budget() {
         let d = WorkflowOrchestrator::new(
-            Uuid::new_v4(),
+            RunId(Uuid::new_v4()),
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
@@ -372,7 +363,7 @@ mod tests {
             advance(&d, &mut run, serde_json::json!({}));
         }
         let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::Fail { error } = &action else {
+        let AgentAction::Fail { error, .. } = &action else {
             panic!("expected the budget to stop it, got {action:?}");
         };
         assert!(error.contains("step budget exhausted after 3"), "{error}");
@@ -392,7 +383,7 @@ mod tests {
             "in".into(),
             0,
         );
-        assert!(d.step_actions(&state(run)).is_empty());
+        assert!(d.step_actions(&run).is_empty());
     }
 
     /// A suspended run waits for a person: an interrupted step's effect on the
@@ -411,7 +402,7 @@ mod tests {
                 ..WorkflowRunState::default()
             };
             assert!(
-                d.step_actions(&state(run)).is_empty(),
+                d.step_actions(&run).is_empty(),
                 "{status:?} must start nothing"
             );
         }
@@ -431,7 +422,7 @@ mod tests {
             0,
         );
         run.apply_step_failed(0, "provider 500".into(), 1);
-        assert!(d.step_actions(&state(run)).is_empty());
+        assert!(d.step_actions(&run).is_empty());
     }
 
     /// The definition is snapshotted, so this can only happen to a run whose
@@ -439,7 +430,7 @@ mod tests {
     #[test]
     fn a_transition_to_a_missing_step_fails_the_run() {
         let d = WorkflowOrchestrator::new(
-            Uuid::new_v4(),
+            RunId(Uuid::new_v4()),
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
@@ -451,7 +442,7 @@ mod tests {
         let mut run = WorkflowRunState::default();
         advance(&d, &mut run, serde_json::json!({}));
         let action = advance(&d, &mut run, serde_json::json!({}));
-        let AgentAction::Fail { error } = &action else {
+        let AgentAction::Fail { error, .. } = &action else {
             panic!("expected a failure, got {action:?}");
         };
         assert!(error.contains("'ghost'"), "{error}");
@@ -460,7 +451,7 @@ mod tests {
     #[test]
     fn not_in_matches_everything_it_does_not_name() {
         let d = WorkflowOrchestrator::new(
-            Uuid::new_v4(),
+            RunId(Uuid::new_v4()),
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
@@ -486,7 +477,7 @@ mod tests {
     #[test]
     fn a_not_in_filter_that_names_the_outcome_falls_through() {
         let d = WorkflowOrchestrator::new(
-            Uuid::new_v4(),
+            RunId(Uuid::new_v4()),
             Arc::new(WorkflowRunSpec {
                 workflow: "w".into(),
                 start: "a".into(),
@@ -537,7 +528,7 @@ mod tests {
     #[test]
     fn a_state_with_no_run_folded_yet_starts_the_first_step() {
         let (d, _) = driver();
-        let actions = d.step_actions(&SessionState::default());
+        let actions = d.step_actions(&WorkflowRunState::default());
         assert_eq!(actions.len(), 1);
         let AgentAction::StartStep(StepStart { step, index, .. }) = &actions[0] else {
             panic!("expected the start step, got {:?}", actions[0]);

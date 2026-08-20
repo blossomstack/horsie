@@ -12,7 +12,7 @@
 //! which [`ForkedAgents::on_load`] re-seeds — strictly better than an untracked
 //! agent.
 
-use super::component::{ActionCx, Component};
+use super::component::Component;
 use super::context::SessionAgentKind;
 use super::{
     AgentKey, AgentPlan, AgentStatus, CommandEffect, ForkCommand, SessionActor, SessionCommand,
@@ -20,7 +20,7 @@ use super::{
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::forks::{ForkMode, ForkParent};
+use crate::sessions::run_forest::ForkMode;
 use horsie_actor::{ActorContext, ActorRef, ReplyTo};
 use horsie_agentcore::{
     ContentPart, EmptyOutcome, FailedOutcome, Message, Role, TextPart, TurnOutcome,
@@ -109,7 +109,7 @@ impl ForkedAgents {
                     // Dropped rather than reported: a fork deleted while its
                     // summary was being taken is not a failure, it is the user
                     // having changed their mind.
-                    if !state.forks.contains(id) {
+                    if state.forest.fork(id).is_none() {
                         continue;
                     }
                     match &result {
@@ -128,7 +128,7 @@ impl ForkedAgents {
                 CommandEffect::none()
             }
             ForkCommand::Seeded { id } => {
-                if !state.forks.contains(id) {
+                if state.forest.fork(id).is_none() {
                     return CommandEffect::none();
                 }
                 // Through `persist_and_advance` rather than a bare persist: the
@@ -146,7 +146,7 @@ impl ForkedAgents {
                     .await
             }
             ForkCommand::SeedFailed { id, error } => {
-                if !state.forks.contains(id) {
+                if state.forest.fork(id).is_none() {
                     return CommandEffect::none();
                 }
                 tracing::warn!(fork = %id, error, "seeding a fork failed");
@@ -165,7 +165,7 @@ impl ForkedAgents {
                         return CommandEffect::none();
                     }
                 };
-                if !state.forks.contains(id) {
+                if state.forest.fork(id).is_none() {
                     let _ = reply.send(Err(format!("no such fork: {id}")));
                     return CommandEffect::none();
                 }
@@ -177,7 +177,7 @@ impl ForkedAgents {
                 }])
             }
             ForkCommand::Delete { id, reply } => {
-                if !state.forks.contains(id) {
+                if state.forest.fork(id).is_none() {
                     let _ = reply.send(Err(format!("no such fork: {id}")));
                     return CommandEffect::none();
                 }
@@ -189,7 +189,7 @@ impl ForkedAgents {
                 }])
             }
             ForkCommand::ReseedInterrupted => {
-                for id in state.forks.seeding() {
+                for id in state.forest.seeding_forks() {
                     // Spawning is what a fork needs to be seeded *into*: a
                     // session that reloaded has no resident agents at all.
                     if actor.spawn_fork_actor(ctx, state, id).is_none() {
@@ -212,10 +212,10 @@ impl Component for ForkedAgents {
     /// Safe to re-attempt for the reason [`RuntimeLifecycle`](super::lifecycle::RuntimeLifecycle)
     /// gives about its own case: `Provisioning` is precisely the state in which
     /// no turn has run.
-    fn on_load(_cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
+    fn on_load(state: &SessionState) -> Option<SessionCommand> {
         state
-            .forks
-            .has_seeding()
+            .forest
+            .has_seeding_forks()
             .then_some(SessionCommand::Fork(ForkCommand::ReseedInterrupted))
     }
 
@@ -223,7 +223,13 @@ impl Component for ForkedAgents {
     /// Unloading the session mid-seed loses it and leaves a fork that only a
     /// reload repairs.
     fn busy(state: &SessionState) -> bool {
-        state.forks.has_seeding()
+        // A summariser call mid-seed, or a fork's own turn in flight: both are
+        // work an unload would lose.
+        state.forest.has_seeding_forks()
+            || state
+                .forest
+                .forks()
+                .any(|(_, f)| f.status == AgentStatus::Running)
     }
 
     // The fallthrough is unreachable by construction: `SessionActor::apply_event`
@@ -241,12 +247,14 @@ impl Component for ForkedAgents {
                 message,
                 at_ms,
             } => state
-                .forks
-                .apply_created(id, parent, source_seq, mode, message, at_ms),
-            SessionDomainEvent::ForkSeeded { id, .. } => state.forks.apply_seeded(id),
-            SessionDomainEvent::ForkTitled { id, name, .. } => state.forks.apply_titled(id, name),
+                .forest
+                .apply_fork_created(id, parent, source_seq, mode, message, at_ms),
+            SessionDomainEvent::ForkSeeded { id, .. } => state.forest.apply_fork_seeded(id),
+            SessionDomainEvent::ForkTitled { id, name, .. } => {
+                state.forest.apply_fork_titled(id, name);
+            }
             SessionDomainEvent::ForkStatusChanged { at_ms, id, status } => {
-                state.forks.apply_status(id, status, at_ms);
+                state.forest.apply_fork_status(id, status, at_ms);
             }
             // The status is derived from the outcome, never carried beside it:
             // a conversation that stopped working is idle unless the turn is
@@ -259,9 +267,9 @@ impl Component for ForkedAgents {
                     | TurnOutcome::Stopped(_)
                     | TurnOutcome::Interrupted(_) => AgentStatus::Idle,
                 };
-                state.forks.apply_status(id, status, at_ms);
+                state.forest.apply_fork_status(id, status, at_ms);
             }
-            SessionDomainEvent::ForkDeleted { id, .. } => state.forks.apply_deleted(id),
+            SessionDomainEvent::ForkDeleted { id, .. } => state.forest.apply_fork_deleted(id),
             other => unreachable!("ForkedAgents was handed {other:?}"),
         }
     }
@@ -334,8 +342,8 @@ impl SessionActor {
             // about anything but a live turn is history already written.
             TurnEnd::Interrupted => {
                 let running = state
-                    .forks
-                    .get(id)
+                    .forest
+                    .fork(id)
                     .is_some_and(|rec| rec.status == AgentStatus::Running);
                 if !running {
                     return CommandEffect::none();
@@ -366,7 +374,7 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
     ) -> Option<ActorRef<AgentCommand>> {
-        if let Some(resident) = self.agents.as_ref().and_then(|a| a.sub(id)) {
+        if let Some(resident) = self.agents.sub(id) {
             return Some(resident.actor.clone());
         }
         // A fork runs under the agent session's own settings — forks exist only
@@ -388,16 +396,17 @@ impl SessionActor {
         .map(|resident| resident.actor)
     }
 
-    /// The agent a fork is being taken from, spawned if it is not resident.
+    /// The agent a fork is being taken from — main, or another fork — spawned
+    /// if it is not resident.
     pub(super) fn fork_source(
         &mut self,
         state: &SessionState,
         ctx: &ActorContext<SessionInbox>,
-        parent: ForkParent,
+        parent: Uuid,
     ) -> Option<ActorRef<AgentCommand>> {
-        match parent {
-            ForkParent::Main => self.agent(),
-            ForkParent::Fork(id) => self.spawn_fork_actor(ctx, state, id),
+        match parent == self.id {
+            true => self.agent(),
+            false => self.spawn_fork_actor(ctx, state, parent),
         }
     }
 
@@ -406,7 +415,7 @@ impl SessionActor {
         &mut self,
         state: &SessionState,
         ctx: &ActorContext<SessionInbox>,
-        parent: ForkParent,
+        parent: Uuid,
     ) -> Option<u64> {
         let agent = self.fork_source(state, ctx, parent)?;
         agent
@@ -433,13 +442,21 @@ impl SessionActor {
         state: &SessionState,
         id: Uuid,
     ) {
-        let Some(rec) = state.forks.get(id) else {
+        let Some((entry, rec)) = state
+            .forest
+            .owner_of_agent(id)
+            .and_then(|(rid, e)| state.forest.fork(rid.0).map(|f| (e, f)))
+        else {
             tracing::warn!(fork = %id, "no record to seed a fork from");
+            return;
+        };
+        let Some(parent) = entry.parent else {
+            tracing::warn!(fork = %id, "a fork with no parent cannot be seeded");
             return;
         };
         match rec.mode {
             ForkMode::Copy => self.copy_into_fork(ctx, state, id),
-            ForkMode::Summary => self.ask_source_to_summarise(ctx, state, id, rec.parent),
+            ForkMode::Summary => self.ask_source_to_summarise(ctx, state, id, parent),
         }
     }
 
@@ -452,7 +469,7 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         id: Uuid,
-        parent: ForkParent,
+        parent: Uuid,
     ) {
         let Some(source) = self.fork_source(state, ctx, parent) else {
             tracing::warn!(fork = %id, "no conversation to summarise for a fork");
@@ -506,17 +523,19 @@ impl SessionActor {
         // re-seed after a crash reads too — so taking it from there is what
         // makes the first attempt and the retry cut the copy at the same
         // place, from the same branch point, with the same message.
-        let Some(rec) = state.forks.get(id).cloned() else {
+        let Some((parent, rec)) = state
+            .forest
+            .owner_of_agent(id)
+            .and_then(|(_, e)| e.parent)
+            .zip(state.forest.fork(id).cloned())
+        else {
             tracing::warn!(fork = %id, "no record to seed a fork from");
             return;
         };
-        let (parent, source_seq, message) = (rec.parent, rec.source_seq, rec.message);
+        let (source_seq, message) = (rec.source_seq, rec.message);
         let (Some(source), Some(fork)) = (
             self.fork_source(state, ctx, parent),
-            self.agents
-                .as_ref()
-                .and_then(|a| a.sub(id))
-                .map(|r| r.actor.clone()),
+            self.agents.sub(id).map(|r| r.actor.clone()),
         ) else {
             tracing::warn!(fork = %id, "no agents to seed a fork between");
             return;
@@ -542,10 +561,10 @@ impl SessionActor {
     /// What to call the conversation a fork came from, in the fork's own seed.
     /// A fork of a fork names that fork; anything unnamed falls back to a
     /// phrase rather than to an id, which means nothing to a reader.
-    fn source_title(&self, state: &SessionState, parent: ForkParent) -> String {
-        let named = match parent {
-            ForkParent::Main => self.spec().name.clone(),
-            ForkParent::Fork(id) => state.forks.get(id).and_then(|rec| rec.title.clone()),
+    fn source_title(&self, state: &SessionState, parent: Uuid) -> String {
+        let named = match parent == self.id {
+            true => self.spec().name.clone(),
+            false => state.forest.fork(parent).and_then(|rec| rec.title.clone()),
         };
         named.unwrap_or_else(|| "the conversation before this one".to_string())
     }
@@ -555,7 +574,7 @@ impl SessionActor {
     /// Best effort: a fork that is not resident has nothing to stop, and the
     /// `ForkDeleted` that follows is what makes the removal durable either way.
     pub(super) async fn retire_fork_actor(&mut self, id: Uuid) {
-        let Some(agent) = self.agents.as_mut().and_then(|a| a.remove_sub(id)) else {
+        let Some(agent) = self.agents.remove(id) else {
             return;
         };
         agent.actor.stop().await;
@@ -633,7 +652,7 @@ fn fork_seed_text(source_title: &str, summary: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::forks::{ForkMode, ForkParent};
+    use crate::sessions::run_forest::ForkMode;
 
     fn id(n: u8) -> Uuid {
         Uuid::from_bytes([n; 16])
@@ -641,15 +660,12 @@ mod tests {
 
     fn state_with_fork(status: AgentStatus) -> SessionState {
         let mut state = SessionState::default();
-        state.forks.apply_created(
-            id(1),
-            ForkParent::Main,
-            0,
-            ForkMode::Summary,
-            "go".into(),
-            1,
-        );
-        state.forks.apply_status(id(1), status, 5_000);
+        let session = id(9);
+        state.forest.apply_root_agent(session, 0);
+        state
+            .forest
+            .apply_fork_created(id(1), session, 0, ForkMode::Summary, "go".into(), 1);
+        state.forest.apply_fork_status(id(1), status, 5_000);
         state
     }
 
@@ -667,17 +683,12 @@ mod tests {
     /// else can finish one a dead process abandoned.
     #[test]
     fn a_fork_left_mid_seed_is_reseeded_at_load() {
-        let spec = crate::sessions::spec::SessionSpec::for_vendor("mock");
-        let cx = ActionCx {
-            id: id(9),
-            spec: &spec,
-        };
         assert!(matches!(
-            ForkedAgents::on_load(&cx, &state_with_fork(AgentStatus::Provisioning)),
+            ForkedAgents::on_load(&state_with_fork(AgentStatus::Provisioning)),
             Some(SessionCommand::Fork(ForkCommand::ReseedInterrupted))
         ));
         assert!(
-            ForkedAgents::on_load(&cx, &state_with_fork(AgentStatus::Idle)).is_none(),
+            ForkedAgents::on_load(&state_with_fork(AgentStatus::Idle)).is_none(),
             "a seeded fork has nothing to repair"
         );
     }
@@ -685,19 +696,20 @@ mod tests {
     #[test]
     fn the_fold_tracks_a_fork_through_its_life() {
         let mut state = SessionState::default();
+        state.forest.apply_root_agent(id(9), 0);
         ForkedAgents::apply(
             &mut state,
             &SessionDomainEvent::ForkCreated {
                 at_ms: 1,
                 id: id(1),
-                parent: ForkParent::Main,
+                parent: id(9),
                 source_seq: 12,
                 mode: ForkMode::Copy,
                 message: "go".into(),
             },
         );
         assert_eq!(
-            state.forks.get(id(1)).unwrap().status,
+            state.forest.fork(id(1)).unwrap().status,
             AgentStatus::Provisioning
         );
         ForkedAgents::apply(
@@ -707,7 +719,7 @@ mod tests {
                 id: id(1),
             },
         );
-        assert_eq!(state.forks.get(id(1)).unwrap().status, AgentStatus::Idle);
+        assert_eq!(state.forest.fork(id(1)).unwrap().status, AgentStatus::Idle);
         ForkedAgents::apply(
             &mut state,
             &SessionDomainEvent::ForkTitled {
@@ -717,7 +729,7 @@ mod tests {
             },
         );
         assert_eq!(
-            state.forks.get(id(1)).unwrap().title.as_deref(),
+            state.forest.fork(id(1)).unwrap().title.as_deref(),
             Some("Other migration")
         );
         ForkedAgents::apply(
@@ -727,7 +739,7 @@ mod tests {
                 id: id(1),
             },
         );
-        assert!(!state.forks.contains(id(1)));
+        assert!(state.forest.fork(id(1)).is_none());
     }
 
     // ---- integration, over the real actors ----
@@ -854,7 +866,9 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -889,13 +903,13 @@ mod tests {
         wait_for_turn_end(&session, Some(fork.clone()), 2).await;
 
         let state = wait_for_state(&journal, id, "the fork settles", |s| {
-            s.forks
-                .get(fork_id)
+            s.forest
+                .fork(fork_id)
                 .is_some_and(|r| r.status == AgentStatus::Idle && r.last_activity_ms > 0)
         })
         .await;
         assert_eq!(
-            state.status,
+            state.status(),
             crate::sessions::spec::SessionStatus::Idle,
             "the session's own status belongs to its main agent"
         );
@@ -921,7 +935,9 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -956,8 +972,8 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is working", |s| {
-            s.forks
-                .get(fork_id)
+            s.forest
+                .fork(fork_id)
                 .is_some_and(|r| r.status == AgentStatus::Running)
         })
         .await;
@@ -984,7 +1000,7 @@ mod tests {
         );
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert_eq!(
-            state.status,
+            state.status(),
             crate::sessions::spec::SessionStatus::Running,
             "the source's own turn is untouched — it was not what was stopped"
         );
@@ -1045,7 +1061,9 @@ mod tests {
         // and it is what releases the message waiting in the fork's queue.
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -1076,7 +1094,9 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the summary fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -1110,8 +1130,8 @@ mod tests {
             .expect("a fork");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the summary fork is seeded", |s| {
-            s.forks
-                .get(fork_id)
+            s.forest
+                .fork(fork_id)
                 .is_some_and(|r| matches!(r.status, AgentStatus::Idle))
         })
         .await;
@@ -1194,7 +1214,9 @@ mod tests {
         let first = fork_via(&session, None, "/fork one").await.expect("a fork");
         let first_id = Uuid::parse_str(&first).unwrap();
         wait_for_state(&journal, id, "the first fork is seeded", |s| {
-            s.forks.is_seeded(first_id)
+            s.forest
+                .fork(first_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -1203,12 +1225,12 @@ mod tests {
             .expect("a fork of a fork");
         let second_id = Uuid::parse_str(&second).unwrap();
         let state = wait_for_state(&journal, id, "the second fork exists", |s| {
-            s.forks.contains(second_id)
+            s.forest.fork(second_id).is_some()
         })
         .await;
         assert_eq!(
-            state.forks.get(second_id).unwrap().parent,
-            ForkParent::Fork(first_id),
+            state.forest.owner_of_agent(second_id).unwrap().1.parent,
+            Some(first_id),
             "a fork of a fork is rooted on that fork"
         );
     }
@@ -1261,7 +1283,7 @@ mod tests {
         send(&session, "start").await;
         wait_for_state(&journal, id, "the source parks on its question", |s| {
             matches!(
-                s.status,
+                s.status(),
                 crate::sessions::spec::SessionStatus::AwaitingInput
             )
         })
@@ -1272,7 +1294,9 @@ mod tests {
             .expect("a parked conversation can still be forked");
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
 
@@ -1314,7 +1338,7 @@ mod tests {
         // than draining.
         send(&session, "the turn that is running").await;
         wait_for_state(&journal, id, "the source is running", |s| {
-            matches!(s.status, crate::sessions::spec::SessionStatus::Running)
+            matches!(s.status(), crate::sessions::spec::SessionStatus::Running)
         })
         .await;
         send(&session, "QUEUED-FOR-THE-SOURCE").await;
@@ -1329,7 +1353,9 @@ mod tests {
         // `Incoming` the fork will merge into a turn.
         let fork_id = Uuid::parse_str(&fork).unwrap();
         wait_for_state(&journal, id, "the fork is seeded", |s| {
-            s.forks.is_seeded(fork_id)
+            s.forest
+                .fork(fork_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
         })
         .await;
         let forked = transcript(&session, Some(fork.clone())).await;

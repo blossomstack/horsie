@@ -12,7 +12,7 @@ use crate::agent_loop::AgentCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
-use horsie_actor::ActorContext;
+use horsie_actor::{ActorContext, EventSourcedActor};
 use horsie_models::now_ms;
 
 /// Longest auto-derived session title, in characters.
@@ -70,12 +70,22 @@ impl SessionCore {
                 if state.spec.is_some() {
                     return CommandEffect::none();
                 }
+                let event = SessionDomainEvent::SpecRecorded {
+                    at_ms: now_ms(),
+                    session: actor.id,
+                    spec,
+                };
                 // The other half of how a session learns what it is. Recovery
                 // covers a session with a history; this covers the one case it
                 // cannot — a session created a moment ago, whose log is empty
-                // and whose agents nothing else would ever start.
-                actor.adopt((*spec).clone(), state, ctx).await;
-                CommandEffect::persist(vec![SessionDomainEvent::SpecRecorded { spec }])
+                // and whose agents nothing else would ever start. Adopted
+                // against the folded state, because this event is what roots
+                // the forest and the repairs read the root.
+                let next = SessionActor::apply_event(state.clone(), event.clone());
+                if let Some(spec) = next.spec.clone() {
+                    actor.adopt(spec, &next, ctx).await;
+                }
+                CommandEffect::persist(vec![event])
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
@@ -164,7 +174,7 @@ impl SessionActor {
     ) {
         for event in events {
             for (key, payload) in crate::sessions::lifecycle_routing::route(event, state) {
-                let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+                let Some(agent) = self.agents.get(key).cloned() else {
                     tracing::warn!(
                         session = %self.id,
                         ?key,
@@ -188,7 +198,7 @@ impl SessionActor {
         key: AgentKey,
         event: horsie_agentcore::LifecycleEvent,
     ) {
-        let agent = self.agents.as_ref().and_then(|a| a.get(key)).cloned();
+        let agent = self.agents.get(key).cloned();
         if let Some(agent) = agent {
             let _ = agent
                 .actor
@@ -222,7 +232,27 @@ impl Component for SessionCore {
             } => {
                 state.agent_usage.insert(agent_id, usage_total);
             }
-            SessionDomainEvent::SpecRecorded { spec } => {
+            SessionDomainEvent::SpecRecorded {
+                at_ms,
+                session,
+                spec,
+            } => {
+                // The spec is also what roots the forest: a conversation's
+                // main entry, or the session's own workflow run — keyed by the
+                // session id, so replay needs nothing but this event.
+                match &spec.kind {
+                    crate::sessions::spec::SessionKind::Agent { .. } => {
+                        state.forest.apply_root_agent(session, at_ms);
+                    }
+                    crate::sessions::spec::SessionKind::Workflow { run } => {
+                        state.forest.apply_root_workflow(
+                            session,
+                            run.workflow.clone(),
+                            run.clone(),
+                            at_ms,
+                        );
+                    }
+                }
                 state.spec = Some(*spec);
             }
             SessionDomainEvent::Renamed { name } => {

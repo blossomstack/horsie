@@ -15,17 +15,16 @@
 //! definition and there is nobody to send *it* a message — though a step of one
 //! can still be addressed directly.
 
-use super::component::{ActionCx, Component};
+use super::component::Component;
 use super::{AgentAction, LifecycleCommand, TurnEnd};
 use super::{
     AgentKey, AgentStatus, AnswerError, AskAnswer, CommandEffect, ForkCommand, MessageAccepted,
-    SessionActor, SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
+    ProvisioningState, SessionActor, SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::forks::{ForkMode, ForkParent};
-use crate::sessions::subagents::SubAgentStatus;
+use crate::sessions::run_forest::{ForkMode, SubAgentStatus, TurnPhase};
 use horsie_agentcore::{EmptyOutcome, TurnOutcome};
 
 /// A recognised fork command: which of the two it was, and what the new
@@ -40,8 +39,6 @@ struct ForkRequest {
     name: &'static str,
     message: String,
 }
-use crate::sessions::spec::SessionStatus;
-use crate::sessions::workflow::WorkflowRunState;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
@@ -99,7 +96,7 @@ impl SessionActor {
         reply: ReplyTo<Result<(), String>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let Some(key) = Self::stop_target(state, agent_id) else {
+        let Some(key) = self.stop_target(state, agent_id) else {
             let _ = reply.send(Err(format!("no such agent: {agent_id}")));
             return CommandEffect::none();
         };
@@ -116,39 +113,26 @@ impl SessionActor {
 
     /// Which agent `agent_id` names, without spawning anything.
     ///
-    /// `main` on a run resolves to the step in flight: a run has no main agent,
-    /// and at most one step runs at a time, so there is nothing else an
-    /// unaddressed stop could mean there.
-    fn stop_target(state: &SessionState, agent_id: &str) -> Option<AgentKey> {
+    /// `main` on a workflow session resolves to the root run's step in flight:
+    /// a run has no main agent, and at most one of its steps runs at a time,
+    /// so there is nothing else an unaddressed stop could mean there.
+    fn stop_target(&self, state: &SessionState, agent_id: &str) -> Option<AgentKey> {
         if agent_id == super::MAIN_AGENT_ID {
-            return match state.run.as_ref().and_then(WorkflowRunState::current_agent) {
+            return match state.forest.current_root_step_agent() {
                 Some(step) => Some(AgentKey::Step(step)),
                 None => Some(AgentKey::Main),
             };
         }
         let id = Uuid::parse_str(agent_id).ok()?;
-        // Steps and forks before the forest, and forks before subagents, for the
-        // reason `resolve_agent` gives: the roster cannot say what *kind* of
-        // agent an id names, because forks and subagents share one map.
-        if state
-            .run
-            .as_ref()
-            .is_some_and(|r| r.index_of_agent(id).is_some())
-        {
-            return Some(AgentKey::Step(id));
-        }
-        if state.forks.contains(id) {
-            return Some(AgentKey::Fork(id));
-        }
-        state.subagents.node(id).map(|_| AgentKey::Sub(id))
+        self.agent_key_of(state, id)
     }
 
     /// What to journal for stopping `key`, or `None` if it is not working.
     ///
-    /// Every kind ends its turn in its own vocabulary — the session's status is
-    /// the main agent's, a fork's is its roster entry, a subagent's is its node
-    /// in the forest — so there is no one event that means "stopped" for all of
-    /// them, and the mapping lives here rather than four times over.
+    /// Every kind ends its turn in its own vocabulary — the main entry's turn
+    /// phase, a step's log entry, a fork's status, a subagent's node — so
+    /// there is no one event that means "stopped" for all of them, and the
+    /// mapping lives here rather than four times over.
     ///
     /// The gate is `Running` and not also `AwaitingInput`, except for a step.
     /// Cancelling does not clear the questions an agent is parked on, so a
@@ -161,35 +145,41 @@ impl SessionActor {
             // Stop is a turn boundary like any other: the agent drains whatever
             // arrived while the cancelled turn ran, because a stop cancels the
             // turn, not the promise.
-            AgentKey::Main => (state.status == SessionStatus::Running)
-                .then_some(SessionDomainEvent::TurnStopped { at_ms }),
+            AgentKey::Main => {
+                let agent = state.forest.root_id()?.0;
+                (state.forest.main_turn() == Some(&TurnPhase::Running))
+                    .then_some(SessionDomainEvent::TurnStopped { at_ms, agent })
+            }
             // Cancelling the agent is not enough on a run: without this the
             // step's log entry stays `Running` for ever, so `current()` never
             // clears and the driver starts nothing again — the run wedged while
             // its page read "Running". `StepCancelled` suspends it, which is the
             // state a retry can move.
             AgentKey::Step(id) => {
-                let run = state.run.as_ref()?;
-                let index = run.index_of_agent(id)?;
-                (run.current() == Some(index))
-                    .then_some(SessionDomainEvent::StepCancelled { at_ms, index })
+                let (run, index) = state.forest.step_of_agent(id)?;
+                (state.forest.workflow(run)?.run.current() == Some(index)).then_some(
+                    SessionDomainEvent::StepCancelled {
+                        at_ms,
+                        run: run.0,
+                        index,
+                    },
+                )
             }
-            AgentKey::Fork(id) => (state.forks.get(id)?.status == AgentStatus::Running).then_some(
-                SessionDomainEvent::ForkTurnEnded {
+            AgentKey::Fork(id) => (state.forest.fork(id)?.status == AgentStatus::Running)
+                .then_some(SessionDomainEvent::ForkTurnEnded {
                     at_ms,
                     id,
                     outcome: TurnOutcome::Stopped(EmptyOutcome {}),
-                },
-            ),
+                }),
             // The parent is blocked on this child's result, so stopping it
             // quietly would leave it waiting for one that can never come. The
             // same shape recovery delivers for a child a crash left running:
             // the parent hears a failure, and carries on.
-            AgentKey::Sub(id) => (state.subagents.node(id)?.status == SubAgentStatus::Running)
+            AgentKey::Sub(id) => (state.forest.sub(id)?.status == SubAgentStatus::Running)
                 .then_some(SessionDomainEvent::SubAgentFailed {
                     at_ms,
                     id,
-                    error: crate::sessions::subagents::STOPPED_ERROR.to_string(),
+                    error: crate::sessions::run_forest::STOPPED_ERROR.to_string(),
                 }),
         }
     }
@@ -239,23 +229,33 @@ impl SessionActor {
         end: TurnEnd,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
+        let agent = self.id;
         let events = match end {
             TurnEnd::Concluded { .. } => {
-                vec![SessionDomainEvent::TurnEnded { at_ms: now_ms() }]
+                vec![SessionDomainEvent::TurnEnded {
+                    at_ms: now_ms(),
+                    agent,
+                }]
             }
             TurnEnd::Asked => {
-                vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }]
+                vec![SessionDomainEvent::AskRecorded {
+                    at_ms: now_ms(),
+                    agent,
+                }]
             }
-            // Only from a session that still believes the turn is running. The
-            // agent reports what its *own* journal left open, and a turn that
-            // failed before the loop began — abandoned by a start hook, or a
-            // context that would not build — never banked a boundary there, so
-            // the agent still calls it open while the session, which was told
-            // directly, has already recorded `TurnFailed`. The session owns the
-            // merged status, so the session decides; a report about anything but
-            // a live turn is history that is already written.
-            TurnEnd::Interrupted if state.status == SessionStatus::Running => {
-                vec![SessionDomainEvent::TurnInterrupted { at_ms: now_ms() }]
+            // Only from a conversation that still believes the turn is running.
+            // The agent reports what its *own* journal left open, and a turn
+            // that failed before the loop began — abandoned by a start hook, or
+            // a context that would not build — never banked a boundary there,
+            // so the agent still calls it open while the session, which was
+            // told directly, has already recorded `TurnFailed`. The session
+            // owns the merged phase, so the session decides; a report about
+            // anything but a live turn is history that is already written.
+            TurnEnd::Interrupted if state.forest.main_turn() == Some(&TurnPhase::Running) => {
+                vec![SessionDomainEvent::TurnInterrupted {
+                    at_ms: now_ms(),
+                    agent,
+                }]
             }
             TurnEnd::Interrupted => return CommandEffect::none(),
             // A runtime that a live vendor cannot produce is the one terminal
@@ -278,6 +278,7 @@ impl SessionActor {
             } => {
                 vec![SessionDomainEvent::TurnFailed {
                     at_ms: now_ms(),
+                    agent,
                     error,
                 }]
             }
@@ -285,6 +286,7 @@ impl SessionActor {
                 let error = "agent parked; timers are not supported in sessions".to_string();
                 vec![SessionDomainEvent::TurnFailed {
                     at_ms: now_ms(),
+                    agent,
                     error,
                 }]
             }
@@ -343,7 +345,7 @@ impl SessionActor {
         }
         // A run has no conversation to branch: its steps are chosen by the
         // definition, and nobody talks to one.
-        if state.run.is_some() {
+        if state.forest.root_is_workflow() {
             let _ = reply.send(Err(UserMessageError::Rejected(
                 "a workflow run cannot be forked".to_string(),
             )));
@@ -352,8 +354,8 @@ impl SessionActor {
         // Only a conversation forks. A subagent's is delegated work and a
         // step's belongs to the run, so neither has a branch to take.
         let parent = match key {
-            AgentKey::Main => ForkParent::Main,
-            AgentKey::Fork(id) => ForkParent::Fork(id),
+            AgentKey::Main => self.id,
+            AgentKey::Fork(id) => id,
             AgentKey::Sub(_) | AgentKey::Step(_) => {
                 let _ = reply.send(Err(UserMessageError::Rejected(
                     "only a conversation can be forked".to_string(),
@@ -403,7 +405,7 @@ impl SessionActor {
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        if let SessionStatus::Unrecoverable { reason } = &state.status {
+        if let Some(reason) = &state.fatal {
             let _ = reply.send(Err(UserMessageError::Unrecoverable(reason.clone())));
             return CommandEffect::none();
         }
@@ -491,7 +493,7 @@ impl SessionActor {
         // than start a turn that would ask for it. The message waits in the
         // agent's queue and the create's own completion releases it, exactly as
         // at session creation.
-        if matches!(state.status, SessionStatus::ProvisioningFailed { .. }) {
+        if matches!(state.provisioning, ProvisioningState::Failed { .. }) {
             let _ = self
                 .me(ctx)
                 .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
@@ -509,7 +511,7 @@ impl Component for Turns {
     /// Nothing. A conversation's turns are the agent's own decision now, taken
     /// against the queue it holds — the session has neither the message nor the
     /// gate any more.
-    fn actions(_cx: &ActionCx<'_>, _state: &SessionState) -> Vec<AgentAction> {
+    fn actions(_state: &SessionState) -> Vec<AgentAction> {
         Vec::new()
     }
 
@@ -525,20 +527,21 @@ impl Component for Turns {
     /// as interrupted: the client dropped the text it was streaming, the run
     /// carried on generating with nothing able to stop it, and the session
     /// called itself idle while it did. Asking the agent removes the question.
-    fn on_load(_cx: &ActionCx<'_>, _state: &SessionState) -> Option<SessionCommand> {
+    fn on_load(_state: &SessionState) -> Option<SessionCommand> {
         None
     }
 
-    /// A turn in flight. `WorkflowRun` answers for a step, so this is only ever
-    /// asked about a conversation — but `status` is shared, so the check is the
-    /// same either way and double-counting is harmless.
+    /// The main conversation's turn in flight. A step in flight is
+    /// `WorkflowRuns`' answer; each component reports only its own slice now
+    /// that the phases are separate facts.
     fn busy(state: &SessionState) -> bool {
-        matches!(state.status, SessionStatus::Running)
+        state.forest.main_turn() == Some(&TurnPhase::Running)
     }
 
-    /// Everything a conversation records, which is now only `status`: a turn
-    /// beginning, ending, failing or being interrupted is the session's own
-    /// state, and what the turn actually carried belongs to the agent that ran it.
+    /// Everything a conversation records, which is now only the root entry's
+    /// turn phase: a turn beginning, ending, failing or being interrupted is
+    /// that entry's own state, and what the turn actually carried belongs to
+    /// the agent that ran it.
     ///
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
@@ -550,35 +553,24 @@ impl Component for Turns {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
-            SessionDomainEvent::TurnBegan { .. } => {
-                state.status = SessionStatus::Running;
-                // The previous turn's failure is history once a new turn is
-                // under way; leaving it set makes the detail endpoint report a
-                // stale error for the rest of the session's life.
-                state.last_error = None;
+            SessionDomainEvent::TurnBegan { agent, .. } => {
+                state.forest.apply_turn_began(agent);
             }
-            SessionDomainEvent::AskRecorded { .. } => {
-                state.status = SessionStatus::AwaitingInput;
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_awaiting();
-                }
+            // Routed by the owning entry: the main conversation parks its turn,
+            // a workflow step's ask parks its run.
+            SessionDomainEvent::AskRecorded { agent, .. } => {
+                state.forest.apply_asked(agent);
             }
-            SessionDomainEvent::TurnEnded { .. }
-            | SessionDomainEvent::TurnStopped { .. }
-            | SessionDomainEvent::TurnInterrupted { .. } => {
-                state.status = SessionStatus::Idle;
+            SessionDomainEvent::TurnEnded { agent, .. }
+            | SessionDomainEvent::TurnStopped { agent, .. }
+            | SessionDomainEvent::TurnInterrupted { agent, .. } => {
+                state.forest.apply_turn_idle(agent);
             }
-            SessionDomainEvent::TurnFailed { error, .. } => {
-                state.status = SessionStatus::Failed {
-                    reason: error.clone(),
-                };
-                state.last_error = Some(error);
+            SessionDomainEvent::TurnFailed { agent, error, .. } => {
+                state.forest.apply_turn_failed(agent, error);
             }
             SessionDomainEvent::SessionFailed { reason, .. } => {
-                state.status = SessionStatus::Unrecoverable {
-                    reason: reason.clone(),
-                };
-                state.last_error = Some(reason);
+                state.fatal = Some(reason);
             }
             other => unreachable!("Turns was handed {other:?}"),
         }
@@ -608,46 +600,83 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    use crate::sessions::spec::SessionStatus;
+
+    /// The event that roots the forest: every turn fold resolves its agent
+    /// through it now.
+    fn rooted(session: Uuid) -> SessionDomainEvent {
+        SessionDomainEvent::SpecRecorded {
+            at_ms: 0,
+            session,
+            spec: Box::new(crate::sessions::spec::SessionSpec::for_vendor("mock")),
+        }
+    }
+
     #[test]
     fn a_fresh_session_is_idle() {
-        assert_eq!(SessionState::default().status, SessionStatus::Idle);
+        assert_eq!(SessionState::default().status(), SessionStatus::Idle);
     }
 
     /// The session learns a turn began because the agent tells it, and that is
     /// the whole of what it records: `Running`, and last turn's failure cleared.
     #[test]
     fn a_turn_beginning_clears_the_previous_failure() {
+        let session = Uuid::new_v4();
         let s = fold(vec![
+            rooted(session),
             SessionDomainEvent::TurnFailed {
                 at_ms: 0,
+                agent: session,
                 error: "provider exploded".into(),
             },
-            SessionDomainEvent::TurnBegan { at_ms: 1 },
+            SessionDomainEvent::TurnBegan {
+                at_ms: 1,
+                agent: session,
+            },
         ]);
-        assert_eq!(s.status, SessionStatus::Running);
+        assert_eq!(s.status(), SessionStatus::Running);
         // The detail endpoint reports `last_error`, so a turn that has just
         // started must not still be advertising the previous turn's failure.
-        assert_eq!(s.last_error, None);
+        assert_eq!(s.last_error(), None);
     }
 
     #[test]
     fn a_failed_turn_is_sticky_but_not_terminal() {
-        let s = fold(vec![SessionDomainEvent::TurnFailed {
-            at_ms: 0,
-            error: "provider exploded".into(),
-        }]);
-        assert!(matches!(s.status, SessionStatus::Failed { .. }));
-        assert_eq!(s.last_error.as_deref(), Some("provider exploded"));
+        let session = Uuid::new_v4();
+        let s = fold(vec![
+            rooted(session),
+            SessionDomainEvent::TurnFailed {
+                at_ms: 0,
+                agent: session,
+                error: "provider exploded".into(),
+            },
+        ]);
+        assert!(matches!(s.status(), SessionStatus::Failed { .. }));
+        assert_eq!(s.last_error().as_deref(), Some("provider exploded"));
     }
 
     #[test]
     fn stop_and_interrupt_both_land_idle() {
+        let session = Uuid::new_v4();
         for boundary in [
-            SessionDomainEvent::TurnStopped { at_ms: 1 },
-            SessionDomainEvent::TurnInterrupted { at_ms: 1 },
+            SessionDomainEvent::TurnStopped {
+                at_ms: 1,
+                agent: session,
+            },
+            SessionDomainEvent::TurnInterrupted {
+                at_ms: 1,
+                agent: session,
+            },
         ] {
-            let s = fold(vec![SessionDomainEvent::TurnBegan { at_ms: 0 }, boundary]);
-            assert_eq!(s.status, SessionStatus::Idle);
+            let s = fold(vec![
+                rooted(session),
+                SessionDomainEvent::TurnBegan {
+                    at_ms: 0,
+                    agent: session,
+                },
+                boundary,
+            ]);
+            assert_eq!(s.status(), SessionStatus::Idle);
         }
     }
 
@@ -656,10 +685,23 @@ mod tests {
     /// session carries none of them.
     #[test]
     fn an_ask_parks_the_session_without_carrying_the_questions() {
-        let s = fold(vec![SessionDomainEvent::AskRecorded { at_ms: 0 }]);
-        assert_eq!(s.status, SessionStatus::AwaitingInput);
-        let next = SessionActor::apply_event(s, SessionDomainEvent::TurnBegan { at_ms: 1 });
-        assert_eq!(next.status, SessionStatus::Running);
+        let session = Uuid::new_v4();
+        let s = fold(vec![
+            rooted(session),
+            SessionDomainEvent::AskRecorded {
+                at_ms: 0,
+                agent: session,
+            },
+        ]);
+        assert_eq!(s.status(), SessionStatus::AwaitingInput);
+        let next = SessionActor::apply_event(
+            s,
+            SessionDomainEvent::TurnBegan {
+                at_ms: 1,
+                agent: session,
+            },
+        );
+        assert_eq!(next.status(), SessionStatus::Running);
     }
 
     /// A terminal session refuses a message outright rather than queueing one
@@ -740,8 +782,15 @@ mod tests {
         let id = Uuid::new_v4();
         // A journal that ends mid-turn: exactly what a process killed during a
         // run leaves behind.
-        let (session, journal) =
-            load_from(&f, id, &[SessionDomainEvent::TurnBegan { at_ms: 0 }]).await;
+        let (session, journal) = load_from(
+            &f,
+            id,
+            &[SessionDomainEvent::TurnBegan {
+                at_ms: 0,
+                agent: id,
+            }],
+        )
+        .await;
 
         session
             .tell(SessionCommand::AgentOutcome(
@@ -751,7 +800,7 @@ mod tests {
             .unwrap();
 
         wait_for_state(&journal, id, "the interrupted turn to be recorded", |s| {
-            s.status == SessionStatus::Idle
+            s.status() == crate::sessions::spec::SessionStatus::Idle
         })
         .await;
     }
@@ -773,9 +822,13 @@ mod tests {
             &f,
             id,
             &[
-                SessionDomainEvent::TurnBegan { at_ms: 0 },
+                SessionDomainEvent::TurnBegan {
+                    at_ms: 0,
+                    agent: id,
+                },
                 SessionDomainEvent::TurnFailed {
                     at_ms: 1,
+                    agent: id,
                     error: "provider said no".into(),
                 },
             ],
@@ -800,7 +853,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             rx.await.unwrap().status,
-            SessionStatus::Failed {
+            crate::sessions::spec::SessionStatus::Failed {
                 reason: "provider said no".into()
             },
             "an interruption reported over a turn that already failed changed the status"
@@ -916,7 +969,7 @@ mod tests {
         send(&session, "start").await;
         for _ in 0..200 {
             let state = crate::sessions::events::fold_session_state(&journal, id).await;
-            if state.status == SessionStatus::AwaitingInput {
+            if state.status() == crate::sessions::spec::SessionStatus::AwaitingInput {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -925,23 +978,22 @@ mod tests {
         // A subagent completes while the session is AwaitingInput.
         let sub = spawn_sub(&session, "research", "dig").await;
         wait_for_tree(&journal, id, |t| {
-            t.node(sub).is_some_and(|r| {
-                r.status == crate::sessions::subagents::SubAgentStatus::Completed && r.notified
-            })
+            t.sub(sub)
+                .is_some_and(|r| r.status == SubAgentStatus::Completed && r.notified)
         })
         .await;
         // Delivered into the agent's queue, but the park holds: a report has no
         // opinion about the question, so it waits rather than overriding it.
         let state = crate::sessions::events::fold_session_state(&journal, id).await;
         assert_eq!(
-            state.status,
-            SessionStatus::AwaitingInput,
+            state.status(),
+            crate::sessions::spec::SessionStatus::AwaitingInput,
             "a report must not answer the question for the user"
         );
 
         // The user's reply is what releases it, and carries the report along.
         send(&session, "the first one").await;
-        wait_for_tree(&journal, id, |t| t.node(sub).is_some_and(|r| r.notified)).await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some_and(|r| r.notified)).await;
         for _ in 0..200 {
             if subagent_texts(&main_history(&session).await)
                 .iter()

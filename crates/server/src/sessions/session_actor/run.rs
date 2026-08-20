@@ -1,15 +1,17 @@
-//! The workflow graph, when this session is a run.
+//! The workflow runs this session hosts: its own, and every run its agents
+//! invoke mid-session.
 //!
-//! Reads the run log, evaluates the transition out of the last concluded step,
-//! and decides the next step, the run's end, or its failure. Appends rather than
-//! replaces: a loop back onto a step and a retry of one are both new entries,
-//! which is what keeps the log replayable and the graph projection lossless.
+//! Reads each run's log, evaluates the transition out of its last concluded
+//! step, and decides the next step, the run's end, or its failure. Appends
+//! rather than replaces: a loop back onto a step and a retry of one are both
+//! new entries, which is what keeps the log replayable and the graph
+//! projection lossless.
 //!
-//! Silent when `state.run` is `None`. That check, rather than a branch chosen at
-//! construction, is the whole of what makes this component inert in a
-//! conversation.
+//! Silent when the forest holds no runs. That check, rather than a branch
+//! chosen at construction, is the whole of what makes this component inert in
+//! a conversation that has invoked nothing.
 
-use super::component::{ActionCx, Component};
+use super::component::Component;
 use super::context::SessionAgentKind;
 use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, RunCommand, SessionActor, SessionCommand,
@@ -18,20 +20,19 @@ use super::{
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::orchestrator::StepStart;
-use crate::sessions::spec::SessionStatus;
-use crate::sessions::workflow::WorkflowRunState;
+use crate::sessions::run_forest::RunId;
+use crate::sessions::workflow::{WorkflowOrchestrator, WorkflowRunStatus};
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
 use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
-use serde_json::Value;
 use uuid::Uuid;
 
-/// WorkflowRun.
-pub(super) struct WorkflowRun;
+/// WorkflowRuns.
+pub(super) struct WorkflowRuns;
 
-impl WorkflowRun {
+impl WorkflowRuns {
     pub(super) async fn handle(
         actor: &mut SessionActor,
         state: &SessionState,
@@ -39,8 +40,10 @@ impl WorkflowRun {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
+            // The HTTP surface addresses the session's own run; invoked runs
+            // report to their invoker instead of to a route.
             RunCommand::State { reply } => {
-                let _ = reply.send(state.run.clone());
+                let _ = reply.send(state.forest.root_workflow().map(|(_, w)| w.run.clone()));
                 CommandEffect::none()
             }
             RunCommand::Advance => CommandEffect::persist(actor.flush_then_drain(state, ctx).await),
@@ -48,13 +51,20 @@ impl WorkflowRun {
                 actor.on_retry_step(state, index, reply, ctx).await
             }
             RunCommand::ReconcileInterrupted => {
-                let Some(index) = state.run.as_ref().and_then(WorkflowRunState::current) else {
+                let cancelled: Vec<SessionDomainEvent> = state
+                    .forest
+                    .in_flight_steps()
+                    .into_iter()
+                    .map(|(run, index, _)| SessionDomainEvent::StepCancelled {
+                        at_ms: now_ms(),
+                        run: run.0,
+                        index,
+                    })
+                    .collect();
+                if cancelled.is_empty() {
                     return CommandEffect::none();
-                };
-                CommandEffect::persist(vec![SessionDomainEvent::StepCancelled {
-                    at_ms: now_ms(),
-                    index,
-                }])
+                }
+                CommandEffect::persist(cancelled)
             }
         }
     }
@@ -72,6 +82,7 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
         let StepStart {
+            run,
             index,
             step,
             agent,
@@ -82,9 +93,10 @@ impl SessionActor {
         } = start;
         // The name is not in the log yet — this event is what puts it there —
         // so it is handed to the spawner rather than looked up.
-        let Some(actor) = self.spawn_step_agent(ctx, state, agent, &step) else {
+        let Some(actor) = self.spawn_step_agent(ctx, state, run, agent, &step) else {
             return vec![SessionDomainEvent::RunFailed {
                 at_ms: now_ms(),
+                run: run.0,
                 error: format!("step '{step}' is no longer in this workflow"),
             }];
         };
@@ -105,11 +117,13 @@ impl SessionActor {
         {
             return vec![SessionDomainEvent::RunFailed {
                 at_ms: now_ms(),
+                run: run.0,
                 error: format!("step '{step}' could not be started"),
             }];
         }
         vec![SessionDomainEvent::StepStarted {
             at_ms: now_ms(),
+            run: run.0,
             index,
             step,
             agent,
@@ -120,22 +134,7 @@ impl SessionActor {
         }]
     }
 
-    /// The run reached a terminal step and succeeded.
-    pub(super) async fn finish_run(&mut self, output: Value) -> Vec<SessionDomainEvent> {
-        vec![SessionDomainEvent::RunFinished {
-            at_ms: now_ms(),
-            output,
-        }]
-    }
-
-    /// The run cannot continue — no transition matched, or a step failed.
-    pub(super) async fn fail_run(&mut self, error: String) -> Vec<SessionDomainEvent> {
-        vec![SessionDomainEvent::RunFailed {
-            at_ms: now_ms(),
-            error,
-        }]
-    }
-    /// Re-run one execution from the log.
+    /// Re-run one execution from the root run's log.
     ///
     /// Appends rather than truncating: earlier attempts stay readable, and the
     /// graph renders them stacked on their node. A run still in flight has its
@@ -152,22 +151,23 @@ impl SessionActor {
         reply: ReplyTo<Result<(), String>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let Some(run) = state.run.as_ref() else {
+        let Some((run_id, w)) = state.forest.root_workflow() else {
             let _ = reply.send(Err("this session is not a workflow run".into()));
             return CommandEffect::none();
         };
-        let Some(target) = run.get(index).cloned() else {
+        let Some(target) = w.run.get(index).cloned() else {
             let _ = reply.send(Err(format!("no step execution at index {index}")));
             return CommandEffect::none();
         };
         let mut events = Vec::new();
         // Cancel whatever is in flight first, so the retry is the only writer.
-        if let Some(current) = run.current() {
-            if let Some(step) = run.get(current) {
+        if let Some(current) = w.run.current() {
+            if let Some(step) = w.run.get(current) {
                 self.cancel_agent(AgentKey::Step(step.agent)).await;
             }
             events.push(SessionDomainEvent::StepCancelled {
                 at_ms: now_ms(),
+                run: run_id.0,
                 index: current,
             });
         }
@@ -175,24 +175,25 @@ impl SessionActor {
         for e in &events {
             next = SessionActor::apply_event(next, e.clone());
         }
-        let new_index = next
-            .run
-            .as_ref()
-            .map(|r| r.steps.len() as u32)
-            .unwrap_or_default();
-        let attempt = next
-            .run
-            .as_ref()
-            .map(|r| r.attempts_of(&target.step) + 1)
-            .unwrap_or(1);
+        let (new_index, attempt) = next
+            .forest
+            .workflow(run_id)
+            .map(|w| {
+                (
+                    w.run.steps.len() as u32,
+                    w.run.attempts_of(&target.step) + 1,
+                )
+            })
+            .unwrap_or((0, 1));
         let _ = reply.send(Ok(()));
         events.extend(
             self.start_step(
                 StepStart {
+                    run: run_id,
                     index: new_index,
                     step: target.step.clone(),
                     agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(
-                        self.id, new_index,
+                        run_id.0, new_index,
                     ),
                     attempt,
                     // The retry sits where the original sat, so the graph draws
@@ -208,6 +209,7 @@ impl SessionActor {
         );
         CommandEffect::persist(events)
     }
+
     /// One step's outcome. Mechanical: map it onto the log entry that records
     /// it, then let the orchestrator read the folded state and decide what runs
     /// next. Every branching decision — which transition, whether the run is
@@ -215,7 +217,9 @@ impl SessionActor {
     pub(super) async fn on_step_outcome(
         &mut self,
         state: &SessionState,
+        run: RunId,
         index: u32,
+        agent: Uuid,
         end: TurnEnd,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
@@ -223,6 +227,7 @@ impl SessionActor {
             TurnEnd::Concluded { output } => (
                 vec![SessionDomainEvent::StepConcluded {
                     at_ms: now_ms(),
+                    run: run.0,
                     index,
                     output,
                 }],
@@ -230,7 +235,10 @@ impl SessionActor {
             ),
             TurnEnd::Asked => {
                 (
-                    vec![SessionDomainEvent::AskRecorded { at_ms: now_ms() }],
+                    vec![SessionDomainEvent::AskRecorded {
+                        at_ms: now_ms(),
+                        agent,
+                    }],
                     // The step is still running, parked on its question. The
                     // answer — sent to the step agent, which owns it — resumes
                     // it; nothing else starts meanwhile.
@@ -244,10 +252,13 @@ impl SessionActor {
             TurnEnd::Failed { error, .. } => (
                 vec![SessionDomainEvent::StepFailed {
                     at_ms: now_ms(),
+                    run: run.0,
                     index,
                     error,
                 }],
-                false,
+                // An invoked run's failure is a report its invoker is owed,
+                // and delivery is a boundary action.
+                true,
             ),
             // A step that armed a timer, or is waiting on subagents it spawned,
             // ends its turn without finishing — and that is not the step
@@ -257,7 +268,7 @@ impl SessionActor {
             // indistinguishable from one that crashed.
             TurnEnd::Parked => (Vec::new(), false),
             // A step the process died inside is suspended by
-            // `WorkflowRun::on_load`, which is the state a retry can move.
+            // `WorkflowRuns::on_load`, which is the state a retry can move.
             // Recording it a second time from the step agent's own recovery
             // would append a second log entry for one execution — and a step
             // agent stays cold, so its report arrives long after the repair.
@@ -268,23 +279,28 @@ impl SessionActor {
             false => CommandEffect::persist(events),
         }
     }
+
     /// Spawn the agent for one execution of a workflow step.
     ///
     /// Differs from a subagent in three ways, all of them the point: it runs
     /// with its *own* preset's settings rather than the session's, it carries
     /// what the step promises to return so `submit_result` is typed, and it is
-    /// keyed as a step so it roots its own subagent tree.
+    /// keyed as a step so its spawns hang off it.
+    ///
+    /// The definition comes from the *run entry's* snapshot, never the session
+    /// spec: an invoked run carries its own graph, and even the root run's
+    /// entry holds the same `Arc` the spec does.
     pub(super) fn spawn_step_agent(
         &mut self,
         ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
+        run: RunId,
         agent_id: Uuid,
         step_name: &str,
     ) -> Option<ActorRef<AgentCommand>> {
-        let run_spec = self.spec().workflow_run().cloned()?;
-        let step = run_spec.step(step_name)?.clone();
-        // A step runs under its own preset. Resolved here from the run
-        // snapshot rather than through [`SessionActor::effective_settings`]:
+        let graph = state.run_graph(run)?;
+        let step = graph.step(step_name)?.clone();
+        // A step runs under its own preset, resolved from the run snapshot:
         // at spawn the execution is not in the run log yet (the event that
         // records it persists after the agent exists), so the id cannot be
         // looked up — the step's own spec is the same settings a later read
@@ -308,48 +324,41 @@ impl SessionActor {
     }
 }
 
-impl Component for WorkflowRun {
-    /// The next step, the run's end, or its failure. Silent when this session is
-    /// not a run — that check, and not a branch chosen at construction, is what
-    /// makes this component inert in a conversation.
-    fn actions(cx: &ActionCx<'_>, state: &SessionState) -> Vec<AgentAction> {
-        let Some(run_spec) = cx.spec.workflow_run().cloned() else {
-            return Vec::new();
-        };
-        crate::sessions::workflow::WorkflowOrchestrator::new(cx.id, run_spec).step_actions(state)
+impl Component for WorkflowRuns {
+    /// The next step, the end, or the failure — of every live run. Sibling
+    /// runs progress concurrently; within one run, one step at a time.
+    fn actions(state: &SessionState) -> Vec<AgentAction> {
+        state
+            .forest
+            .workflows()
+            .flat_map(|(id, w)| WorkflowOrchestrator::new(id, w.graph.clone()).step_actions(&w.run))
+            .collect()
     }
 
     /// A run is created and then left to begin by itself, with no first message
     /// to trigger it. This is the one place a session starts work at load.
-    ///
-    /// Gated on the *spec*: a conversation also has no run state, and reading
-    /// only the state would advance one — which, for a session holding a
-    /// subagent result nobody has collected, silently starts a turn at load.
     ///
     /// A step left in flight is the other thing recovery finds, and it is not
     /// resumed: how far it got is unknowable, and its effect on the shared
     /// workspace with it. It is suspended instead, which is what makes a retry
     /// the person's decision. Without this the entry stayed `Running`, so
     /// `current()` never cleared and the run started nothing ever again.
-    fn on_load(cx: &ActionCx<'_>, state: &SessionState) -> Option<SessionCommand> {
-        cx.spec.workflow_run()?;
-        match &state.run {
-            None => Some(SessionCommand::Run(RunCommand::Advance)),
-            Some(run) if run.current().is_some() => {
-                Some(SessionCommand::Run(RunCommand::ReconcileInterrupted))
-            }
-            Some(run) if run.status == crate::sessions::workflow::WorkflowRunStatus::Pending => {
-                Some(SessionCommand::Run(RunCommand::Advance))
-            }
-            Some(_) => None,
+    fn on_load(state: &SessionState) -> Option<SessionCommand> {
+        if state.forest.has_step_in_flight() {
+            return Some(SessionCommand::Run(RunCommand::ReconcileInterrupted));
         }
+        state
+            .forest
+            .workflows()
+            .any(|(_, w)| w.run.status == WorkflowRunStatus::Pending)
+            .then_some(SessionCommand::Run(RunCommand::Advance))
     }
 
     fn busy(state: &SessionState) -> bool {
-        state.run.as_ref().is_some_and(|r| r.current().is_some())
+        state.forest.has_step_in_flight()
     }
 
-    /// The run log. Appended, never replaced — a loop back onto a step and a
+    /// The run logs. Appended, never replaced — a loop back onto a step and a
     /// retry of one are both new entries, which is what keeps this a pure fold.
     ///
     /// Pure, and an associated function rather than a method: replay runs with
@@ -362,8 +371,23 @@ impl Component for WorkflowRun {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
+            SessionDomainEvent::RunCreated {
+                at_ms,
+                id,
+                parent,
+                graph,
+            } => {
+                state.forest.apply_run_created(
+                    RunId(id),
+                    parent,
+                    graph.workflow.clone(),
+                    graph,
+                    at_ms,
+                );
+            }
             SessionDomainEvent::StepStarted {
                 at_ms,
+                run,
                 step,
                 agent,
                 attempt,
@@ -372,67 +396,50 @@ impl Component for WorkflowRun {
                 input,
                 ..
             } => {
-                // The first step is what turns the state into a run:
-                // `initial_state` is static and cannot see the spec, so the mode
-                // is established by the log rather than at construction.
-                // The first step is what turns this state into a run:
-                // `initial_state` is static and cannot see the spec, so the run
-                // is established by the log rather than at construction.
-                let run = state.run.get_or_insert_with(WorkflowRunState::default);
-                {
-                    run.apply_started(step, agent, attempt, from, via, input, at_ms);
-                }
-                state.status = SessionStatus::Running;
-                state.last_error = None;
+                state.forest.apply_step_started(
+                    RunId(run),
+                    step,
+                    agent,
+                    attempt,
+                    from,
+                    via,
+                    input,
+                    at_ms,
+                );
             }
             SessionDomainEvent::StepConcluded {
                 at_ms,
+                run,
                 index,
                 output,
             } => {
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_concluded(index, output, at_ms);
-                }
+                state
+                    .forest
+                    .apply_step_concluded(RunId(run), index, output, at_ms);
             }
             SessionDomainEvent::StepFailed {
                 at_ms,
+                run,
                 index,
                 error,
             } => {
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_step_failed(index, error.clone(), at_ms);
-                    run.apply_failed(error.clone());
-                }
-                state.status = SessionStatus::Failed {
-                    reason: error.clone(),
-                };
-                state.last_error = Some(error);
+                state
+                    .forest
+                    .apply_step_failed(RunId(run), index, error, at_ms);
             }
-            SessionDomainEvent::StepCancelled { at_ms, index } => {
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_cancelled(index, at_ms);
-                }
-                state.status = SessionStatus::Idle;
+            SessionDomainEvent::StepCancelled { at_ms, run, index } => {
+                state.forest.apply_step_cancelled(RunId(run), index, at_ms);
             }
-            SessionDomainEvent::RunFinished { output, .. } => {
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_finished(output);
-                }
-                // Not `Idle`: a run that ran to completion and one that stopped
-                // part-way both rest, and telling them apart is the whole
-                // reason to look at a list of past runs.
-                state.status = SessionStatus::Finished;
+            SessionDomainEvent::RunFinished { run, output, .. } => {
+                state.forest.apply_run_finished(RunId(run), output);
             }
-            SessionDomainEvent::RunFailed { error, .. } => {
-                if let Some(run) = state.run.as_mut() {
-                    run.apply_failed(error.clone());
-                }
-                state.status = SessionStatus::Failed {
-                    reason: error.clone(),
-                };
-                state.last_error = Some(error);
+            SessionDomainEvent::RunFailed { run, error, .. } => {
+                state.forest.apply_run_failed(RunId(run), error);
             }
-            other => unreachable!("WorkflowRun was handed {other:?}"),
+            SessionDomainEvent::RunNotified { run, .. } => {
+                state.forest.apply_run_notified(RunId(run));
+            }
+            other => unreachable!("WorkflowRuns was handed {other:?}"),
         }
     }
 }
@@ -449,7 +456,6 @@ mod tests {
     //! appends.
     use super::super::testing::*;
     use super::super::*;
-    use super::*;
     use crate::sessions::session_actor::testing::seed_session;
 
     use horsie_agentcore::LlmProvider;
@@ -473,14 +479,14 @@ mod tests {
         );
         let (_f, _session, id, journal) = spawn_run_with_provider(provider).await;
         let state = wait_for_state(&journal, id, "the run to finish", |s| {
-            s.run
-                .as_ref()
-                .is_some_and(|r| r.status == crate::sessions::workflow::WorkflowRunStatus::Finished)
+            s.forest.root_workflow().is_some_and(|(_, w)| {
+                w.run.status == crate::sessions::workflow::WorkflowRunStatus::Finished
+            })
         })
         .await;
         assert_eq!(
-            state.status,
-            SessionStatus::Finished,
+            state.status(),
+            crate::sessions::spec::SessionStatus::Finished,
             "a run that completed is not merely idle"
         );
     }
@@ -641,8 +647,12 @@ mod tests {
         assert_eq!(step.timers.len(), 1, "and the timer is still armed");
         let run = crate::sessions::events::fold_session_state(&journal, id)
             .await
+            .forest
+            .root_workflow()
+            .expect("the run exists")
+            .1
             .run
-            .expect("the run exists");
+            .clone();
         assert_eq!(
             run.steps[0].status,
             crate::sessions::workflow::StepStatus::Running,
@@ -796,12 +806,14 @@ mod tests {
             .unwrap();
 
         wait_for_state(&journal, id, "a run holding at its create", |s| {
-            s.status == SessionStatus::Provisioning
+            s.status() == crate::sessions::spec::SessionStatus::Provisioning
         })
         .await;
         let held = crate::sessions::events::fold_session_state(&journal, id).await;
         assert!(
-            held.run.as_ref().is_none_or(|r| r.steps.is_empty()),
+            held.forest
+                .root_workflow()
+                .is_none_or(|(_, w)| w.run.steps.is_empty()),
             "no step may start before the runtime it would run on"
         );
 
@@ -930,6 +942,7 @@ mod tests {
             spec,
             &[SessionDomainEvent::StepStarted {
                 at_ms: 0,
+                run: id,
                 index: 0,
                 step: "triage".into(),
                 agent: crate::sessions::workflow::WorkflowRunSpec::step_agent_id(id, 0),

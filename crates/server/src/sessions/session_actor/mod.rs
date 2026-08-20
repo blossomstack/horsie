@@ -43,7 +43,7 @@ use fork::ForkedAgents;
 use hooks::{HookRouting, StopHookParent};
 use lifecycle::RuntimeLifecycle;
 use reads::Reads;
-use run::WorkflowRun;
+use run::WorkflowRuns;
 use subagent::SubAgents;
 use turns::Turns;
 
@@ -53,10 +53,9 @@ use crate::agent_loop::{
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
     orchestrator::{AgentAction, Delivery},
+    run_forest::RunState,
     spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
-    subagents::{SubAgentParent, TreeOwner},
     supervisor::{ForkRow, SessionSupervisorCommand},
-    workflow::WorkflowRunState,
 };
 use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
@@ -93,88 +92,55 @@ struct ResidentAgent {
     provider: Arc<SessionContextProvider>,
 }
 
-/// The agent actors a session hosts.
-///
-/// An enum rather than an `Option` plus a map: a session's topology is decided
-/// at creation and never changes, and a workflow run has no main agent at all.
-enum SessionAgents {
-    Interactive {
-        main: ResidentAgent,
-        subs: HashMap<Uuid, ResidentAgent>,
-    },
-    /// A workflow run: step agents and their subagents, all keyed by id. There
-    /// is no main agent — the definition, not a person, decides who runs.
-    Workflow { live: HashMap<Uuid, ResidentAgent> },
+/// The agent actors a session hosts, one flat roster keyed by agent id — the
+/// main agent under the session's own id, everything else under its uuid. What
+/// an id *is* lives in the forest; residency is just residency.
+struct SessionAgents {
+    /// The main agent's key — the session id — so `AgentKey::Main` resolves
+    /// without the actor in scope.
+    main: Uuid,
+    live: HashMap<Uuid, ResidentAgent>,
 }
 
 impl SessionAgents {
-    fn interactive(main: ResidentAgent) -> Self {
-        Self::Interactive {
+    fn new(main: Uuid) -> Self {
+        Self {
             main,
-            subs: HashMap::new(),
-        }
-    }
-
-    fn workflow() -> Self {
-        Self::Workflow {
             live: HashMap::new(),
         }
     }
 
     /// The session's primary agent, for the kinds that have one.
     fn main(&self) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { main, .. } => Some(main),
-            Self::Workflow { .. } => None,
-        }
+        self.live.get(&self.main)
     }
 
     fn sub(&self, id: Uuid) -> Option<&ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.get(&id),
-            Self::Workflow { live } => live.get(&id),
-        }
+        self.live.get(&id)
     }
 
     /// The agent registered under `key`, if it is still resident.
     fn get(&self, key: AgentKey) -> Option<&ResidentAgent> {
         match key {
             AgentKey::Main => self.main(),
-            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.sub(id),
+            AgentKey::Sub(id) | AgentKey::Step(id) | AgentKey::Fork(id) => self.live.get(&id),
         }
     }
 
-    fn insert_sub(&mut self, id: Uuid, agent: ResidentAgent) {
-        match self {
-            Self::Interactive { subs, .. } => {
-                subs.insert(id, agent);
-            }
-            Self::Workflow { live } => {
-                live.insert(id, agent);
-            }
-        }
+    fn insert(&mut self, id: Uuid, agent: ResidentAgent) {
+        self.live.insert(id, agent);
     }
 
     /// Forget one agent, handing it back so the caller can stop it. Only a
     /// fork's delete uses this: every other agent lives as long as the session
     /// is loaded, and nothing else removes one on request.
-    fn remove_sub(&mut self, id: Uuid) -> Option<ResidentAgent> {
-        match self {
-            Self::Interactive { subs, .. } => subs.remove(&id),
-            Self::Workflow { live } => live.remove(&id),
-        }
+    fn remove(&mut self, id: Uuid) -> Option<ResidentAgent> {
+        self.live.remove(&id)
     }
 
     /// Every agent, emptying the set. Used when the session unloads.
     fn drain_all(&mut self) -> Vec<ResidentAgent> {
-        match self {
-            Self::Interactive { main, subs } => {
-                let mut out: Vec<_> = subs.drain().map(|(_, a)| a).collect();
-                out.push(main.clone());
-                out
-            }
-            Self::Workflow { live } => live.drain().map(|(_, a)| a).collect(),
-        }
+        self.live.drain().map(|(_, a)| a).collect()
     }
 }
 
@@ -221,11 +187,8 @@ pub struct SessionActor {
     /// reference for the whole supervisor type rather than for an instance.
     supervisor: SupervisorRef,
     /// The agent actors this session hosts, resident for as long as this actor
-    /// is loaded. `None` means exactly one thing — this session does not yet
-    /// know what it is — which is why the topology inside is a value rather
-    /// than a second `Option`: a session's shape is decided at creation and
-    /// never changes.
-    agents: Option<SessionAgents>,
+    /// is loaded.
+    agents: SessionAgents,
     /// The last status this actor told the supervisor, so an unchanged one is
     /// not re-sent. `None` until it has reported once, which is why a freshly
     /// loaded session always reports.
@@ -248,7 +211,7 @@ impl SessionActor {
             users,
             services: None,
             supervisor,
-            agents: None,
+            agents: SessionAgents::new(entity.session),
             last_reported: None,
             last_reported_forks: Vec::new(),
         }
@@ -335,7 +298,6 @@ impl SessionActor {
                 // A run has no main agent. Step actors, like subagent actors,
                 // stay cold: they spawn on demand for a history read, a retry,
                 // or the next step a boundary picks.
-                self.agents = Some(SessionAgents::workflow());
             }
             SessionKind::Agent { .. } => self.spawn_main_agent(ctx, state),
         }
@@ -344,15 +306,12 @@ impl SessionActor {
         // all, and `RecordSpec` is already returning an effect of its own — so
         // anything that needs to journal arrives as an ordinary command, down
         // the same path a live one would take.
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
         let repairs: Vec<SessionCommand> = [
-            RuntimeLifecycle::on_load(&cx, state),
-            SubAgents::on_load(&cx, state),
-            WorkflowRun::on_load(&cx, state),
-            Turns::on_load(&cx, state),
+            RuntimeLifecycle::on_load(state),
+            SubAgents::on_load(state),
+            WorkflowRuns::on_load(state),
+            ForkedAgents::on_load(state),
+            Turns::on_load(state),
         ]
         .into_iter()
         .flatten()
@@ -400,21 +359,26 @@ impl SessionActor {
     /// nothing, so a sidebar that could not read this from the registry could
     /// not show forks at all without waking every session that has one.
     async fn report_forks(&mut self, state: &SessionState) {
-        if state.forks.is_empty() && self.last_reported_forks.is_empty() {
+        if !state.forest.has_forks() && self.last_reported_forks.is_empty() {
             return;
         }
         let forks: Vec<ForkRow> = state
-            .forks
-            .iter()
+            .forest
+            .forks()
             .map(|(id, rec)| ForkRow {
-                id: *id,
-                parent: match rec.parent {
-                    crate::sessions::forks::ForkParent::Main => None,
-                    crate::sessions::forks::ForkParent::Fork(pid) => Some(pid),
-                },
+                id,
+                parent: state
+                    .forest
+                    .owner_of_agent(id)
+                    .and_then(|(_, e)| e.parent)
+                    .filter(|pid| *pid != self.id),
                 title: rec.title.clone(),
                 status: rec.status,
-                created_at_ms: rec.created_at_ms,
+                created_at_ms: state
+                    .forest
+                    .owner_of_agent(id)
+                    .map(|(_, e)| e.created_at_ms)
+                    .unwrap_or_default(),
                 last_activity_ms: rec.last_activity_ms,
             })
             .collect();
@@ -432,15 +396,16 @@ impl SessionActor {
     }
 
     async fn report_status(&mut self, state: &SessionState) {
-        if self.last_reported.as_ref() == Some(&state.status) {
+        let status = state.status();
+        if self.last_reported.as_ref() == Some(&status) {
             return;
         }
-        self.last_reported = Some(state.status.clone());
+        self.last_reported = Some(status.clone());
         let _ = self
             .supervisor
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: self.id.to_string(),
-                status: state.status.clone(),
+                status,
             })
             .await;
     }
@@ -493,7 +458,8 @@ impl SessionActor {
                 // acquisition below will fail on rather than silently
                 // addressing some other sandbox.
                 state
-                    .provisioned_at_ms
+                    .provisioning
+                    .at_ms()
                     .map(|at| at.to_string())
                     .unwrap_or_default(),
                 // A create is still outstanding. The journal is the only thing
@@ -501,7 +467,10 @@ impl SessionActor {
                 // reported the object yet is indistinguishable from one with
                 // nothing there, and the difference is between waiting for a
                 // runtime and declaring it gone.
-                matches!(state.status, SessionStatus::Provisioning),
+                matches!(
+                    state.provisioning,
+                    crate::sessions::session_actor::ProvisioningState::InFlight { .. }
+                ),
                 self.spec().vendor.clone(),
                 self.spec().clone(),
             ),
@@ -559,16 +528,13 @@ impl SessionActor {
             }
         };
         let resident = ResidentAgent { actor, provider };
-        match plan.kind {
-            SessionAgentKind::Main => {
-                self.agents = Some(SessionAgents::interactive(resident.clone()));
-            }
+        let id = match plan.kind {
+            SessionAgentKind::Main => self.id,
             SessionAgentKind::Sub(id) | SessionAgentKind::Step(id) | SessionAgentKind::Fork(id) => {
-                if let Some(agents) = self.agents.as_mut() {
-                    agents.insert_sub(id, resident.clone());
-                }
+                id
             }
-        }
+        };
+        self.agents.insert(id, resident.clone());
         Some(resident)
     }
 
@@ -609,115 +575,131 @@ impl SessionActor {
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
         match agent_id {
             None | Some(MAIN_AGENT_ID) => {
-                match state.run.as_ref().and_then(WorkflowRunState::current_agent) {
-                    // At most one step runs at a time, and the definition chose
-                    // it, so there is nothing else an unaddressed request on a
-                    // run could mean.
+                match state.forest.current_root_step_agent() {
+                    // At most one of the root run's steps runs at a time, and
+                    // the definition chose it, so there is nothing else an
+                    // unaddressed request on a run could mean.
                     Some(step) => self.resolve_step(state, ctx, step),
                     None => self.agent().map(|actor| (AgentKey::Main, actor)),
                 }
             }
             Some(raw) => {
                 let id = Uuid::parse_str(raw).ok()?;
-                if let Some(resolved) = self.resolve_step(state, ctx, id) {
-                    return Some(resolved);
-                }
-                // Before the roster is consulted, because the roster cannot
-                // say what *kind* of agent an id names — forks and subagents
-                // share one map. Answering `Sub` for a fork made a fork of a
-                // fork read as a fork of a subagent, and be refused.
-                if state.forks.contains(id) {
-                    return self
-                        .spawn_fork_actor(ctx, state, id)
-                        .map(|actor| (AgentKey::Fork(id), actor));
-                }
-                if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
-                    return Some((AgentKey::Sub(id), agent.actor.clone()));
-                }
-                // The type comes off the record, not from the caller: a cold
-                // node woken to answer a read must run as what it was spawned as.
-                let agent_type = state.subagents.node(id)?.agent_type.clone();
-                Some((
-                    AgentKey::Sub(id),
-                    self.spawn_sub_agent_actor(ctx, state, id, agent_type)?,
-                ))
+                let key = self.agent_key_of(state, id)?;
+                let actor = match key {
+                    AgentKey::Step(_) => return self.resolve_step(state, ctx, id),
+                    AgentKey::Fork(_) => self.spawn_fork_actor(ctx, state, id)?,
+                    AgentKey::Sub(_) => {
+                        if let Some(agent) = self.agents.sub(id) {
+                            return Some((key, agent.actor.clone()));
+                        }
+                        // The type comes off the record, not from the caller: a
+                        // cold node woken to answer a read must run as what it
+                        // was spawned as.
+                        let agent_type = state.forest.sub(id)?.agent_type.clone();
+                        self.spawn_sub_agent_actor(ctx, state, id, agent_type)?
+                    }
+                    AgentKey::Main => self.agent()?,
+                };
+                Some((key, actor))
             }
         }
     }
 
-    /// One of a run's step agents, spawned if it is not resident. `None` when
-    /// this session is not a run, or when the id names no execution in its log.
+    /// What kind of agent `id` names here, answered by the forest in one
+    /// lookup: the entry that hosts an agent says what it is.
+    pub(super) fn agent_key_of(&self, state: &SessionState, id: Uuid) -> Option<AgentKey> {
+        let (_, entry) = state.forest.owner_of_agent(id)?;
+        Some(match &entry.state {
+            RunState::Main(_) => AgentKey::Main,
+            RunState::Sub(_) => AgentKey::Sub(id),
+            RunState::Workflow(_) => AgentKey::Step(id),
+            RunState::Fork(_) => AgentKey::Fork(id),
+        })
+    }
+
+    /// One step agent, spawned if it is not resident. `None` when the id names
+    /// no execution in any run's log.
     ///
-    /// The log, not the roster, is what identifies a step: a run's step
-    /// subagents are registered in the same roster, so residency alone cannot
-    /// tell the two apart. Spawning on demand is what keeps a finished run's
-    /// step transcripts readable — the roster is empty after a reload, and
-    /// every agent-scoped read comes through here.
+    /// The log, not the roster, is what identifies a step. Spawning on demand
+    /// is what keeps a finished run's step transcripts readable — the roster is
+    /// empty after a reload, and every agent-scoped read comes through here.
     fn resolve_step(
         &mut self,
         state: &SessionState,
         ctx: &ActorContext<SessionInbox>,
         id: Uuid,
     ) -> Option<(AgentKey, ActorRef<AgentCommand>)> {
-        let run = state.run.as_ref()?;
-        let index = run.index_of_agent(id)?;
-        if let Some(agent) = self.agents.as_ref().and_then(|a| a.sub(id)) {
+        let (run, index) = state.forest.step_of_agent(id)?;
+        if let Some(agent) = self.agents.sub(id) {
             return Some((AgentKey::Step(id), agent.actor.clone()));
         }
-        let step = run.get(index)?.step.clone();
+        let step = state.forest.workflow(run)?.run.get(index)?.step.clone();
         Some((
             AgentKey::Step(id),
-            self.spawn_step_agent(ctx, state, id, &step)?,
+            self.spawn_step_agent(ctx, state, run, id, &step)?,
         ))
     }
 
     fn agent(&self) -> Option<ActorRef<AgentCommand>> {
-        self.agents
-            .as_ref()
-            .and_then(SessionAgents::main)
-            .map(|a| a.actor.clone())
+        self.agents.main().map(|a| a.actor.clone())
     }
 
-    /// The settings an agent runs under, resolved from what this session is
-    /// and where the agent sits in it: the main agent and forks use the agent
-    /// session's settings, a step uses its own preset, and a subagent inherits
-    /// its tree's root. `None` when the key names no agent this session hosts.
-    pub(super) fn effective_settings(
-        &self,
-        state: &SessionState,
+    /// The settings an agent runs under, resolved from where it sits in the
+    /// forest: the main agent and forks use the agent session's settings, a
+    /// step uses its own run's preset, and a subagent inherits from the
+    /// nearest ancestor that owns settings — the step, fork or main agent it
+    /// ultimately runs under. `None` when the key names no agent here.
+    pub(super) fn effective_settings<'a>(
+        &'a self,
+        state: &'a SessionState,
         key: AgentKey,
-    ) -> Option<&AgentSettings> {
+    ) -> Option<&'a AgentSettings> {
         match key {
             AgentKey::Main | AgentKey::Fork(_) => self.spec().agent_settings(),
             AgentKey::Step(id) => {
-                let run = self.spec().workflow_run()?;
-                let execution = state.run.as_ref()?.index_of_agent(id)?;
-                let name = &state.run.as_ref()?.get(execution)?.step;
-                run.step(name).map(|step| &step.settings)
+                let (run, index) = state.forest.step_of_agent(id)?;
+                let w = state.forest.workflow(run)?;
+                let name = &w.run.get(index)?.step;
+                w.graph.step(name).map(|step| &step.settings)
             }
-            AgentKey::Sub(id) => match state.subagents.owner_of(id)? {
-                TreeOwner::Main => self.spec().agent_settings(),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
+            AgentKey::Sub(id) => {
+                // Walk up to the nearest non-subagent ancestor, bounded like
+                // every other walk over recovered data.
+                let mut at = id;
+                for _ in 0..=state.forest.depth_of_agent(id).unwrap_or(0) {
+                    let (_, entry) = state.forest.owner_of_agent(at)?;
+                    match &entry.state {
+                        RunState::Sub(_) => at = entry.parent?,
+                        RunState::Main(_) | RunState::Fork(_) => {
+                            return self.spec().agent_settings();
+                        }
+                        RunState::Workflow(_) => {
+                            return self.effective_settings(state, AgentKey::Step(at));
+                        }
+                    }
+                }
+                // Deeper than its own depth: the chain is broken.
+                let (_, entry) = state.forest.owner_of_agent(at)?;
+                match &entry.state {
+                    RunState::Sub(_) => None,
+                    RunState::Main(_) | RunState::Fork(_) => self.spec().agent_settings(),
+                    RunState::Workflow(_) => self.effective_settings(state, AgentKey::Step(at)),
+                }
+            }
         }
     }
 
-    /// The settings a subagent *spawn* runs under: the caller's own, so a
-    /// step's spawns inherit the step's settings and its cap. Resolved from
-    /// the caller's tree root, exactly as [`Self::effective_settings`] reads a
-    /// cold node.
-    pub(super) fn effective_settings_for_parent(
-        &self,
-        state: &SessionState,
-        caller: SubAgentParent,
-    ) -> Option<&AgentSettings> {
-        match caller {
-            SubAgentParent::Main => match state.root_owner() {
-                TreeOwner::Main => self.effective_settings(state, AgentKey::Main),
-                TreeOwner::Step(agent) => self.effective_settings(state, AgentKey::Step(agent)),
-            },
-            SubAgentParent::SubAgent(id) => self.effective_settings(state, AgentKey::Sub(id)),
-        }
+    /// The settings a spawn or an invocation by `caller` runs under: the
+    /// caller's own, so a step's spawns inherit the step's settings and its
+    /// cap.
+    pub(super) fn effective_settings_of_agent<'a>(
+        &'a self,
+        state: &'a SessionState,
+        caller: Uuid,
+    ) -> Option<&'a AgentSettings> {
+        let key = self.agent_key_of(state, caller)?;
+        self.effective_settings(state, key)
     }
 
     /// Cancel one agent's run and wait for it to actually be over.
@@ -731,7 +713,7 @@ impl SessionActor {
     /// Waiting matters: the caller is about to record a turn boundary, and a run
     /// still winding down can still append to the agent journal.
     async fn cancel_agent(&mut self, key: AgentKey) {
-        let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)).cloned() else {
+        let Some(agent) = self.agents.get(key).cloned() else {
             return;
         };
         if let Some(client) = agent.provider.cached_client() {
@@ -752,18 +734,18 @@ impl SessionActor {
         }
     }
 
-    /// Cancel whatever this session is running: the step in flight for a run,
-    /// the main agent otherwise. A run used to be skipped here entirely, so
-    /// deleting one mid-step left its sandbox call running.
+    /// Cancel whatever this session is running: every step in flight — the
+    /// root run's and any invoked run's — and the main agent's turn. A run
+    /// used to be skipped here entirely, so deleting one mid-step left its
+    /// sandbox call running.
     async fn cancel_in_flight(&mut self, state: &SessionState) {
-        let step = state
-            .run
-            .as_ref()
-            .and_then(|r| r.current().and_then(|i| r.get(i)))
-            .map(|s| s.agent);
-        match step {
-            Some(agent) => self.cancel_agent(AgentKey::Step(agent)).await,
-            None => self.cancel_agent(AgentKey::Main).await,
+        let steps = state.forest.in_flight_steps();
+        if steps.is_empty() {
+            self.cancel_agent(AgentKey::Main).await;
+            return;
+        }
+        for (_, _, agent) in steps {
+            self.cancel_agent(AgentKey::Step(agent)).await;
         }
     }
 
@@ -781,8 +763,16 @@ impl SessionActor {
         match action {
             AgentAction::Deliver(delivery) => self.deliver(delivery, state, ctx).await,
             AgentAction::StartStep(step) => self.start_step(step, state, ctx).await,
-            AgentAction::Finish { output } => self.finish_run(output).await,
-            AgentAction::Fail { error } => self.fail_run(error).await,
+            AgentAction::Finish { run, output } => vec![SessionDomainEvent::RunFinished {
+                at_ms: now_ms(),
+                run: run.0,
+                output,
+            }],
+            AgentAction::Fail { run, error } => vec![SessionDomainEvent::RunFailed {
+                at_ms: now_ms(),
+                run: run.0,
+                error,
+            }],
         }
     }
 
@@ -810,7 +800,7 @@ impl SessionActor {
         if agent
             .tell(AgentCommand::Enqueue {
                 item: Incoming::SubAgent {
-                    id: child.to_string(),
+                    id: child.0.to_string(),
                     part: Box::new(part),
                 },
                 ack: None,
@@ -820,10 +810,21 @@ impl SessionActor {
         {
             return Vec::new();
         }
-        vec![SessionDomainEvent::SubAgentNotified {
-            at_ms: now_ms(),
-            id: child,
-        }]
+        // What was sent decides what records the send: a subagent's report
+        // marks its node, a run's report marks its run entry.
+        let recorded = match state.forest.entry(child).map(|e| &e.state) {
+            Some(RunState::Workflow(_)) => SessionDomainEvent::RunNotified {
+                at_ms: now_ms(),
+                run: child.0,
+            },
+            Some(RunState::Sub(_) | RunState::Main(_) | RunState::Fork(_)) | None => {
+                SessionDomainEvent::SubAgentNotified {
+                    at_ms: now_ms(),
+                    id: child.0,
+                }
+            }
+        };
+        vec![recorded]
     }
 
     /// The mailbox of one of this session's agents, spawning a cold subagent's
@@ -834,7 +835,7 @@ impl SessionActor {
         state: &SessionState,
         ctx: &ActorContext<SessionInbox>,
     ) -> Option<ActorRef<AgentCommand>> {
-        if let Some(agent) = self.agents.as_ref().and_then(|a| a.get(key)) {
+        if let Some(agent) = self.agents.get(key) {
             return Some(agent.actor.clone());
         }
         match key {
@@ -842,7 +843,7 @@ impl SessionActor {
             // off the record, not from the caller: a node woken to receive a
             // result must run as what it was spawned as.
             AgentKey::Sub(id) => {
-                let agent_type = state.subagents.node(id)?.agent_type.clone();
+                let agent_type = state.forest.sub(id)?.agent_type.clone();
                 self.spawn_sub_agent_actor(ctx, state, id, agent_type)
             }
             // A step's actor spawns on demand from the run log, the same way a
@@ -854,8 +855,9 @@ impl SessionActor {
             // the session's own settings, like the conversation it branched
             // from.
             AgentKey::Fork(id) => state
-                .forks
-                .contains(id)
+                .forest
+                .fork(id)
+                .is_some()
                 .then(|| self.spawn_fork_actor(ctx, state, id))?,
             // Spawned at load, so it is either resident or this session is a run
             // and has none.
@@ -876,8 +878,9 @@ impl SessionActor {
     fn busy(&self, state: &SessionState) -> bool {
         RuntimeLifecycle::busy(state)
             || Turns::busy(state)
-            || WorkflowRun::busy(state)
+            || WorkflowRuns::busy(state)
             || SubAgents::busy(state)
+            || ForkedAgents::busy(state)
     }
 
     /// Everything every component wants started, given the state as it now is.
@@ -892,14 +895,10 @@ impl SessionActor {
         if !RuntimeLifecycle::ready(state) {
             return Vec::new();
         }
-        let cx = component::ActionCx {
-            id: self.id,
-            spec: self.spec(),
-        };
         [
-            SubAgents::actions(&cx, state),
-            Turns::actions(&cx, state),
-            WorkflowRun::actions(&cx, state),
+            SubAgents::actions(state),
+            Turns::actions(state),
+            WorkflowRuns::actions(state),
         ]
         .concat()
     }
@@ -990,23 +989,22 @@ impl SessionActor {
                 .await;
             }
         };
-        // In a run, an outcome is a step's or one of a step's subagents'.
-        if let Some(run) = state.run.as_ref() {
-            return match run.index_of_agent(who) {
-                Some(index) => self.on_step_outcome(state, index, end, ctx).await,
-                None => self.on_sub_agent_outcome(state, who, end, ctx).await,
-            };
+        // One lookup: the entry that hosts the agent says what its outcome
+        // means. No ordering between registries to get right, because there is
+        // one registry.
+        match self.agent_key_of(state, who) {
+            Some(AgentKey::Main) => self.on_main_outcome(state, end, ctx).await,
+            Some(AgentKey::Step(_)) => match state.forest.step_of_agent(who) {
+                Some((run, index)) => self.on_step_outcome(state, run, index, who, end, ctx).await,
+                None => CommandEffect::none(),
+            },
+            Some(AgentKey::Fork(_)) => self.on_fork_outcome(state, who, end, ctx).await,
+            Some(AgentKey::Sub(_)) => self.on_sub_agent_outcome(state, who, end, ctx).await,
+            None => {
+                tracing::warn!(agent = %who, "outcome from an agent nothing hosts; ignored");
+                CommandEffect::none()
+            }
         }
-        if who == self.id {
-            return self.on_main_outcome(state, end, ctx).await;
-        }
-        // Before the subagent forest, because a fork is not in it: asked last,
-        // every one of a fork's turns would be dropped as an outcome from an
-        // agent nothing recognises.
-        if state.forks.contains(who) {
-            return self.on_fork_outcome(state, who, end, ctx).await;
-        }
-        self.on_sub_agent_outcome(state, who, end, ctx).await
     }
 
     /// One of this session's agents drained its queue into a turn.
@@ -1021,42 +1019,43 @@ impl SessionActor {
         state: &SessionState,
         who: Uuid,
     ) -> CommandEffect<SessionDomainEvent> {
-        if who == self.id {
-            return CommandEffect::persist(vec![SessionDomainEvent::TurnBegan { at_ms: now_ms() }]);
-        }
-        if state.subagents.node(who).is_some() {
-            return CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
+        match self.agent_key_of(state, who) {
+            Some(AgentKey::Main) => CommandEffect::persist(vec![SessionDomainEvent::TurnBegan {
                 at_ms: now_ms(),
-                id: who,
-            }]);
+                agent: who,
+            }]),
+            Some(AgentKey::Sub(_)) => {
+                CommandEffect::persist(vec![SessionDomainEvent::SubAgentRunning {
+                    at_ms: now_ms(),
+                    id: who,
+                }])
+            }
+            // A fork's own status, and only its own: the session's belongs to
+            // the main agent, and a fork answering a question is not the
+            // session working.
+            Some(AgentKey::Fork(_)) => {
+                CommandEffect::persist(vec![SessionDomainEvent::ForkStatusChanged {
+                    at_ms: now_ms(),
+                    id: who,
+                    status: AgentStatus::Running,
+                }])
+            }
+            // A step announces itself through `StepStarted` when the run picks
+            // it, so there is nothing to add here.
+            Some(AgentKey::Step(_)) | None => CommandEffect::none(),
         }
-        // A fork's own status, and only its own: the session's belongs to the
-        // main agent, and a fork answering a question is not the session
-        // working.
-        if state.forks.contains(who) {
-            return CommandEffect::persist(vec![SessionDomainEvent::ForkStatusChanged {
-                at_ms: now_ms(),
-                id: who,
-                status: AgentStatus::Running,
-            }]);
-        }
-        CommandEffect::none()
     }
 
     /// Whether this session's agents may start a turn at all: it has a runtime,
     /// and it is not terminal. The whole of what an agent's own drain gate
     /// cannot answer for itself.
     fn runnable(state: &SessionState) -> bool {
-        RuntimeLifecycle::ready(state)
-            && !matches!(state.status, SessionStatus::Unrecoverable { .. })
+        RuntimeLifecycle::ready(state) && state.fatal.is_none()
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.
     async fn stop_agents(&mut self) {
-        let Some(mut agents) = self.agents.take() else {
-            return;
-        };
-        for agent in agents.drain_all() {
+        for agent in self.agents.drain_all() {
             // Cancel first: a stopped mailbox makes the run task's next persist
             // fail, but an in-flight tool call would run to completion first.
             let _ = agent.actor.tell(AgentCommand::Cancel { ack: None }).await;
@@ -1094,12 +1093,14 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::TurnStopped { .. }
             | SessionDomainEvent::TurnInterrupted { .. }
             | SessionDomainEvent::SessionFailed { .. } => Turns::apply(&mut state, &event),
-            SessionDomainEvent::StepStarted { .. }
+            SessionDomainEvent::RunCreated { .. }
+            | SessionDomainEvent::StepStarted { .. }
             | SessionDomainEvent::StepConcluded { .. }
             | SessionDomainEvent::StepFailed { .. }
             | SessionDomainEvent::StepCancelled { .. }
             | SessionDomainEvent::RunFinished { .. }
-            | SessionDomainEvent::RunFailed { .. } => WorkflowRun::apply(&mut state, &event),
+            | SessionDomainEvent::RunFailed { .. }
+            | SessionDomainEvent::RunNotified { .. } => WorkflowRuns::apply(&mut state, &event),
             SessionDomainEvent::SubAgentSpawned { .. }
             | SessionDomainEvent::SubAgentRunning { .. }
             | SessionDomainEvent::SubAgentCompleted { .. }
@@ -1143,7 +1144,7 @@ impl EventSourcedActor for SessionActor {
         match cmd.cmd {
             SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
             SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
-            SessionCommand::Run(c) => WorkflowRun::handle(self, state, c, ctx).await,
+            SessionCommand::Run(c) => WorkflowRuns::handle(self, state, c, ctx).await,
             SessionCommand::SubAgent(c) => SubAgents::handle(self, state, c, ctx).await,
             SessionCommand::Fork(c) => ForkedAgents::handle(self, state, c, ctx).await,
             SessionCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
