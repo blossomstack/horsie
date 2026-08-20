@@ -96,6 +96,30 @@ duration.
 
 The view is in the address bar, so a link to it opens on the timeline.
 
+## See what it spawned
+
+The next key over swaps the transcript for a **graph**: every agent the session
+holds, drawn as the tree it is. Where the timeline answers *when*, this answers
+*what spawned what* — reach for it when a session has delegated deeply enough
+that the lineage is the thing you are trying to follow.
+
+The main agent sits on the left, and everything it spawned hangs off it to the
+right, generation by generation. Each box gives an agent's name, what it is
+doing right now, and the preset it runs; its colour is its status, the same
+lamp colours the rest of the console uses. Hover one for its full name, how
+long it took and when it started.
+
+From there:
+
+- **Click a box** — opens that agent's own page.
+- **Click the circle on its right edge** — folds away everything below it. The
+  box then shows how many agents it is standing in for, so a folded branch
+  still says how big it is. Click again to bring them back.
+
+Folding is shared with the timeline: what you put away in one view is put away
+in the other. The view is in the address bar, so a link to it opens on the
+graph.
+
 ## Answer a question
 
 An agent can pause and ask you something. A question card appears in the
