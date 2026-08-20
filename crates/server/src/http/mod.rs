@@ -1337,11 +1337,14 @@ mod tests {
                     |reply| crate::sessions::supervisor::SessionSupervisorCommand::Create {
                         spec,
                         created_at: 0,
+                        message: None,
                         reply,
                     },
                 )
                 .await
                 .unwrap()
+                .unwrap()
+                .id
         };
         let token = dial_token_for(&state, &session).await;
         let app = app(state.clone());

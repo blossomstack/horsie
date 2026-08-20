@@ -425,6 +425,30 @@ pub enum UserMessageError {
     Rejected(String),
 }
 
+/// A session that now exists, and what became of the first thing said to it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreatedSession {
+    pub id: spec::SessionId,
+    /// Absent when the create carried no message — a workflow run.
+    pub message: Option<session_actor::MessageAccepted>,
+}
+
+/// Why a create did not produce a usable session.
+///
+/// Split from [`UserMessageError`] because the two fail at different ends: a
+/// message this session will not take is the caller's answer to live with,
+/// while a record that could not be written means nothing was created at all.
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+pub enum CreateSessionError {
+    /// The session's row could not be written, so there is no session. Always
+    /// the server's fault, never the request's.
+    #[error("recording the session: {0}")]
+    NotRecorded(String),
+    /// The session exists; its first message was refused.
+    #[error(transparent)]
+    Message(UserMessageError),
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

@@ -163,9 +163,12 @@ async fn run_workflow(
     let id = ask(services, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
         created_at,
+        message: None,
         reply,
     })
-    .await?;
+    .await?
+    .map_err(super::create_failed)?
+    .id;
     // Just created, so it carries no annotations yet.
     let rec = SessionRecord {
         spec,

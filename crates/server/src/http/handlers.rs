@@ -111,28 +111,19 @@ pub async fn create_session(
     )
     .await?;
     let created_at = now_ms();
-    let id = ask(&state, |reply| SessionSupervisorCommand::Create {
+    // One ask, not two. Queued, not run: the runtime is still provisioning
+    // behind this call, and the agent's own queue is what holds the message
+    // until it is there. The agent is not ready yet, so this returns once the
+    // message is durable and the create's completion is what releases it.
+    let created = ask(&state, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
         created_at,
-        reply,
-    })
-    .await?;
-    // Queued, not run: the runtime is still provisioning behind this call, and
-    // the agent's own queue is what holds the message until it is there. The
-    // agent is not ready yet, so this returns once the message is durable and
-    // the create's completion is what releases it.
-    ask(&state, |reply| SessionSupervisorCommand::UserMessage {
-        id: id.clone(),
-        agent_id: None,
-        text: req.message,
+        message: Some(req.message),
         reply,
     })
     .await?
-    .map_err(|e| match e {
-        UserMessageError::NotFound => Api::not_found("no such session"),
-        UserMessageError::Unrecoverable(reason) => Api::conflict("unrecoverable", reason),
-        UserMessageError::Rejected(why) => Api::conflict("not-a-conversation", why),
-    })?;
+    .map_err(Api::from)?;
+    let id = created.id;
     let rec = SessionRecord {
         spec,
         created_at,

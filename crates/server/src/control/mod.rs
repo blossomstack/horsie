@@ -97,6 +97,28 @@ where
     })
 }
 
+/// A create's failure in the control envelope.
+///
+/// Two ends, and they are not the same fault: a message this session will not
+/// take is the caller's answer to live with, while a record that could not be
+/// written means nothing was created at all.
+pub(crate) fn create_failed(e: crate::sessions::CreateSessionError) -> ControlError {
+    use crate::sessions::CreateSessionError as E;
+    use crate::sessions::UserMessageError as M;
+    match e {
+        E::NotRecorded(m) => ControlError::Internal(m),
+        E::Message(M::NotFound) => ControlError::NotFound("no such session".to_string()),
+        E::Message(M::Unrecoverable(reason)) => ControlError::Conflict {
+            code: "unrecoverable".to_string(),
+            message: reason,
+        },
+        E::Message(M::Rejected(why)) => ControlError::Conflict {
+            code: "not-a-conversation".to_string(),
+            message: why,
+        },
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Method {
     Get,
