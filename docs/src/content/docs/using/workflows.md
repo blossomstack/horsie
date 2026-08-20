@@ -165,11 +165,55 @@ Retries append. The earlier attempt stays readable, and the node shows a count.
 ## What a step can and cannot do
 
 A step can read and write the shared workspace, call its preset's MCP servers,
-use its memory spaces, arm timers, and spawn subagents of its own.
+use its memory spaces, arm timers, spawn subagents of its own, and invoke
+other workflows.
 
 A step cannot rename the session, and a run takes no messages — sending one is
 answered `409`. A workflow works from its definition; if you want to talk to
 it, you want a session.
+
+## Invoking a workflow from an agent
+
+Every agent — a session's main agent, a subagent, a workflow step, a fork —
+carries an `invoke_workflow` tool. Calling it starts a run of a saved workflow
+**inside the same session**, sharing its workspace, and returns immediately
+with the run's id. When the run ends, its final result (or failure) is
+delivered back into the invoking agent's conversation, exactly the way a
+subagent's report is. The agent does not wait: it continues with other work,
+or rests until the report wakes it.
+
+This composes with everything else, because each edge is the same edge:
+
+- The main agent can spawn subagents and invoke workflows.
+- A subagent can spawn subagents and invoke workflows.
+- A workflow's step can spawn subagents and invoke workflows — including the
+  workflow it is itself a step of.
+
+The rules that bound the tree:
+
+- **Depth.** Every delegation edge counts — a spawn and an invocation alike —
+  and the chain stops at four. This is also the recursion bound: a workflow
+  that invokes itself gets four levels and the fifth is refused.
+- **Live runs.** One session hosts at most eight runs that have not finished.
+- **One step at a time, per run.** Sibling runs progress concurrently; within
+  one run the graph's order holds, as always.
+- **An invoked run never moves the session's status.** Its phase is its own;
+  its invoker hears the result as a message and decides what it means. Only
+  the session's *root* — the conversation, or the run the session was created
+  as — is what the session list shows.
+- **Stopping an agent stops its delegation.** Stop a subagent or retry a step
+  and everything running under it — subagents, invoked runs, their steps —
+  is cancelled with it, each reporting `stopped before it finished` to its
+  own parent.
+- **An agent is not done while its delegation runs.** A subagent whose turn
+  ends while a child subagent or an invoked workflow is still running parks
+  rather than concluding; its parent hears exactly one report, when the whole
+  subtree is done.
+
+The run resolves its steps' presets when it is invoked, snapshots them, and
+never re-reads them — the same rule a run started from the Workflows page
+follows. One caveat: a run invoked mid-session runs on the session's existing
+runtime, so its steps can only use skill bundles that runtime already has.
 
 ## Skills across a run
 

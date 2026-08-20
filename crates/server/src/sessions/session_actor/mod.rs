@@ -15,10 +15,12 @@
 //! are performed in order. Everything else lives beside it.
 //!
 //! One component per slice of the session — [`lifecycle`] the sandbox,
-//! [`turns`] the conversation, [`run`] the workflow graph, [`subagent`] the tree
-//! of delegated work, [`reads`] the questions that wake nothing, [`hooks`] what
-//! plugins did, [`core`] the session's own bookkeeping — over the vocabulary in
-//! [`types`], to the shape in [`component`]. [`context`] is not one of them: it
+//! [`turns`] the conversation, [`run`] the workflow runs (the session's own and
+//! every one its agents invoke), [`subagent`] the tree of delegated work,
+//! [`reads`] the questions that wake nothing, [`hooks`] what plugins did,
+//! [`core`] the session's own bookkeeping — over the vocabulary in [`types`]
+//! and the state in [`crate::sessions::run_forest`], to the shape in
+//! [`component`]. [`context`] is not one of them: it
 //! assembles a turn on the *agent's* task rather than on this mailbox, which is
 //! what keeps a thirty-second toolbox build from blocking a cancel.
 

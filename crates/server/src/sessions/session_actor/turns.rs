@@ -11,9 +11,9 @@
 //! moves as turns begin and end. All three are facts about the session, not
 //! about the queue.
 //!
-//! Silent when `state.run` is set and no agent is named: a run works from its
-//! definition and there is nobody to send *it* a message — though a step of one
-//! can still be addressed directly.
+//! Silent when the session is a workflow run and no agent is named: a run
+//! works from its definition and there is nobody to send *it* a message —
+//! though a step of one can still be addressed directly.
 
 use super::component::Component;
 use super::{AgentAction, LifecycleCommand, TurnEnd};
