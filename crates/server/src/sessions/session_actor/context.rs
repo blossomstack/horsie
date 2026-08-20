@@ -887,17 +887,33 @@ impl ContextProvider for SessionContextProvider {
         };
         // Every kind of agent may invoke a workflow — main, subagents, steps
         // and forks alike; the session gates at call time (depth, live runs).
-        // Absent only when no store is wired to resolve one from (tests).
-        let with_spawn: Arc<dyn Toolbox> = match &self.services {
-            Some(services) => Arc::new(
+        // The saved workflows ride in the tool description so the model knows
+        // what exists; with none saved the tools are not offered at all, so a
+        // session without workflows sees exactly the toolbox it saw before
+        // they existed. Re-read per turn, where this toolbox is rebuilt, so a
+        // workflow saved mid-session appears at the next turn.
+        let workflow_catalog: Vec<(String, String)> = match &self.services {
+            Some(services) => services
+                .workflows
+                .list()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|w| (w.name, w.description))
+                .collect(),
+            None => Vec::new(),
+        };
+        let with_spawn: Arc<dyn Toolbox> = match (&self.services, workflow_catalog.is_empty()) {
+            (Some(services), false) => Arc::new(
                 crate::sessions::invoke_workflow_tool::InvokeWorkflowToolbox::new(
                     with_spawn,
                     self.session.clone(),
                     caller,
                     services.clone(),
+                    workflow_catalog,
                 ),
             ),
-            None => with_spawn,
+            (Some(_), true) | (None, _) => with_spawn,
         };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than

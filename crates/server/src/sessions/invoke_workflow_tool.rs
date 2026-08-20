@@ -14,6 +14,20 @@
 //! [`resolve_run_spec`] the HTTP `run` operation uses — so a run created
 //! mid-session is exactly the run a request would have created, and the
 //! session's mailbox never waits on a store.
+//!
+//! The saved workflows ride in the tool's *description*, the way
+//! `spawn_agent` carries the agent-type catalogue: a bare name parameter says
+//! nothing about when to pick one, and the description is what the model
+//! reads to choose. The listing is a snapshot from when the turn's toolbox
+//! was built; the call itself re-resolves, so a listing gone stale degrades
+//! to a clean refusal rather than a wrong run.
+//!
+//! The saved workflows ride in the tool's *description*, the way
+//! `spawn_agent` carries the agent-type catalogue: a bare name parameter says
+//! nothing about when to pick one, and the description is what the model
+//! reads to choose. The listing is a snapshot from when the turn's toolbox
+//! was built; the call itself re-resolves, so a listing gone stale degrades
+//! to a clean refusal rather than a wrong run.
 
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::{RunCommand, SessionCommand};
@@ -30,16 +44,34 @@ pub const INVOKE_WORKFLOW_TOOL: &str = "invoke_workflow";
 /// Name of the built-in run-inspection tool.
 pub const WORKFLOW_STATUS_TOOL: &str = "workflow_status";
 
-fn invoke_workflow_spec() -> ToolSpec {
+fn invoke_workflow_spec(catalog: &[(String, String)]) -> ToolSpec {
+    let mut description = "Start a run of a saved workflow — a predefined graph of agent \
+        steps — inside this session, sharing its workspace. Returns immediately with the \
+        run's id; the run's final result or failure is automatically delivered back to you \
+        as a message when it ends. Continue with independent work, or wait if none remains; \
+        do not poll workflow_status. Invoking fails when the workflow does not exist or the \
+        session's delegation limits (depth or live runs) are reached."
+        .to_string();
+    // The catalogue goes in the description, not in a JSON `enum`: a bare list
+    // of names says nothing about when to pick one, and the description is
+    // what the model reads to choose. Pick by fit, never by default — most
+    // tasks are not workflow-shaped.
+    let listing = catalog
+        .iter()
+        .map(|(name, description)| match description.is_empty() {
+            true => format!("- {name}"),
+            false => format!("- {name}: {description}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    description.push_str(&format!(
+        "\n\nSaved workflows, each a fixed sequence of specialised agents. Invoke one when \
+         its description fits the task better than doing the work yourself or spawning a \
+         subagent would:\n{listing}"
+    ));
     ToolSpec {
         name: INVOKE_WORKFLOW_TOOL.to_string(),
-        description: "Start a run of a saved workflow — a predefined graph of agent steps — \
-            inside this session, sharing its workspace. Returns immediately with the run's id; \
-            the run's final result or failure is automatically delivered back to you as a \
-            message when it ends. Continue with independent work, or wait if none remains; do \
-            not poll workflow_status. Invoking fails when the workflow does not exist or the \
-            session's delegation limits (depth or live runs) are reached."
-            .to_string(),
+        description,
         input_schema: json!({
             "type": "object",
             "required": ["workflow", "input"],
@@ -90,6 +122,11 @@ pub struct InvokeWorkflowToolbox {
     /// because resolution runs on the agent's task; the session actor never
     /// reads a store, it journals the resolved snapshot.
     services: Arc<UserServices>,
+    /// The saved workflows as of this turn's toolbox build — `(name,
+    /// description)`, advertised in the tool description so the model knows
+    /// what exists and when to reach for it. `specs()` is synchronous, so the
+    /// read happens where the toolbox is built.
+    catalog: Vec<(String, String)>,
 }
 
 impl InvokeWorkflowToolbox {
@@ -98,12 +135,14 @@ impl InvokeWorkflowToolbox {
         session: SessionRef,
         caller: Uuid,
         services: Arc<UserServices>,
+        catalog: Vec<(String, String)>,
     ) -> Self {
         Self {
             inner,
             session,
             caller,
             services,
+            catalog,
         }
     }
 }
@@ -112,7 +151,7 @@ impl InvokeWorkflowToolbox {
 impl Toolbox for InvokeWorkflowToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.push(invoke_workflow_spec());
+        specs.push(invoke_workflow_spec(&self.catalog));
         specs.push(workflow_status_spec());
         specs
     }
@@ -178,5 +217,41 @@ impl Toolbox for InvokeWorkflowToolbox {
             return Ok(ToolOutcome::Result(Value::String(rendered)));
         }
         self.inner.execute(name, input, tool_call_id).await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// The catalogue is how the model learns what exists and when to reach
+    /// for it — the same trick `spawn_agent` plays with agent types.
+    #[test]
+    fn the_tool_description_lists_the_saved_workflows() {
+        let spec = invoke_workflow_spec(&[
+            ("fix-bug".into(), "Triage, fix and open a PR.".into()),
+            ("undescribed".into(), String::new()),
+        ]);
+        assert!(
+            spec.description
+                .contains("- fix-bug: Triage, fix and open a PR."),
+            "{}",
+            spec.description
+        );
+        assert!(
+            spec.description.contains("- undescribed\n")
+                || spec.description.ends_with("- undescribed"),
+            "a workflow with no description is still listed: {}",
+            spec.description
+        );
+        assert!(
+            spec.input_schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == "workflow"),
+            "the slug stays required"
+        );
     }
 }

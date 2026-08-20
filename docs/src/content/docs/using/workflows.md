@@ -175,9 +175,11 @@ it, you want a session.
 ## Invoking a workflow from an agent
 
 Every agent — a session's main agent, a subagent, a workflow step, a fork —
-carries an `invoke_workflow` tool. Calling it starts a run of a saved workflow
-**inside the same session**, sharing its workspace, and returns immediately
-with the run's id. When the run ends, its final result (or failure) is
+carries an `invoke_workflow` tool whenever the server has workflows saved. The
+tool lists them by name and description, which is how the model knows what
+exists and when one fits; with none saved the tool is not offered at all.
+Calling it starts a run of a saved workflow **inside the same session**,
+sharing its workspace, and returns immediately with the run's id. When the run ends, its final result (or failure) is
 delivered back into the invoking agent's conversation, exactly the way a
 subagent's report is. The agent does not wait: it continues with other work,
 or rests until the report wakes it.
