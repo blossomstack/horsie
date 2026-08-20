@@ -108,7 +108,16 @@ impl SessionActor {
         };
         self.cancel_agent(key).await;
         let _ = reply.send(Ok(()));
-        self.persist_and_advance(state, vec![stopped], ctx).await
+        // Stopping delegated work ends the delegation: everything running
+        // under a stopped subagent or step goes with it. A main agent's or a
+        // fork's stop cancels only the *turn* — its subagents and invoked
+        // runs are independent work that still delivers.
+        let mut events = match key {
+            AgentKey::Sub(id) | AgentKey::Step(id) => self.cancel_descendants(state, id).await,
+            AgentKey::Main | AgentKey::Fork(_) => Vec::new(),
+        };
+        events.push(stopped);
+        self.persist_and_advance(state, events, ctx).await
     }
 
     /// Which agent `agent_id` names, without spawning anything.

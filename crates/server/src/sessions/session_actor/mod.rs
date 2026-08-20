@@ -908,14 +908,29 @@ impl SessionActor {
         state: &SessionState,
         ctx: &ActorContext<SessionInbox>,
     ) -> Vec<SessionDomainEvent> {
+        // To a fixpoint, not one pass: an action can make the next one
+        // startable within the same boundary. A step concluding finishes its
+        // run, and the finish is what makes the run's report owed — stopping
+        // after one round would strand that report until the next boundary.
+        // Every action extinguishes its own trigger when folded (a delivery
+        // marks notified, a started step is in flight, a finished run is
+        // terminal), so the rounds run dry; the cap is a backstop for a fold
+        // that breaks that promise, not a budget.
         let mut events = Vec::new();
         let mut next = state.clone();
-        for action in self.next_actions(&next) {
-            let produced = self.perform(action, &next, ctx).await;
-            for e in &produced {
-                next = Self::apply_event(next, e.clone());
+        for _ in 0..8 {
+            let mut produced_any = false;
+            for action in self.next_actions(&next) {
+                let produced = self.perform(action, &next, ctx).await;
+                produced_any = produced_any || !produced.is_empty();
+                for e in &produced {
+                    next = Self::apply_event(next, e.clone());
+                }
+                events.extend(produced);
             }
-            events.extend(produced);
+            if !produced_any {
+                break;
+            }
         }
         events
     }

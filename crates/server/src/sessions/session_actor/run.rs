@@ -20,13 +20,14 @@ use super::{
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::orchestrator::StepStart;
-use crate::sessions::run_forest::RunId;
+use crate::sessions::run_forest::{MAX_DEPTH, MAX_LIVE_RUNS, RunId, RunState, STOPPED_ERROR};
 use crate::sessions::workflow::{WorkflowOrchestrator, WorkflowRunStatus};
 use horsie_actor::ActorContext;
 use horsie_actor::ActorRef;
 use horsie_actor::EventSourcedActor;
 use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
+use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// WorkflowRuns.
@@ -40,6 +41,90 @@ impl WorkflowRuns {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
+            RunCommand::Create {
+                parent,
+                graph,
+                reply,
+            } => {
+                // One depth rule for every delegation edge, which is what
+                // bounds a workflow that invokes itself: each invocation is a
+                // level, and the fifth is refused wherever it comes from.
+                let Some(parent_depth) = state.forest.depth_of_agent(parent) else {
+                    let _ = reply.send(Err("caller is not a known agent".to_string()));
+                    return CommandEffect::none();
+                };
+                if parent_depth >= MAX_DEPTH {
+                    let _ = reply.send(Err(format!("max delegation depth {MAX_DEPTH} reached")));
+                    return CommandEffect::none();
+                }
+                if state.forest.live_run_count() >= MAX_LIVE_RUNS {
+                    let _ = reply.send(Err(format!(
+                        "{MAX_LIVE_RUNS} workflow runs already live in this session"
+                    )));
+                    return CommandEffect::none();
+                }
+                // Persist first, start second: a crash between the two replays
+                // as a pending run the next boundary simply starts — never an
+                // untracked one.
+                let id = Uuid::new_v4();
+                let created = SessionDomainEvent::RunCreated {
+                    at_ms: now_ms(),
+                    id,
+                    parent,
+                    graph,
+                };
+                let (tx, rx) = oneshot::channel();
+                let self_ref = actor.me(ctx);
+                tokio::spawn(async move {
+                    let persisted = rx.await.unwrap_or_else(|_| {
+                        Err(horsie_actor::JournalError::Backend(
+                            "run ack channel closed".to_string(),
+                        ))
+                    });
+                    let _ = self_ref
+                        .tell(SessionCommand::Run(RunCommand::FinishCreate {
+                            id,
+                            reply,
+                            persisted,
+                        }))
+                        .await;
+                });
+                CommandEffect::persist(vec![created]).and_ack(ReplyTo::from_sender(tx))
+            }
+            RunCommand::FinishCreate {
+                id,
+                reply,
+                persisted,
+            } => {
+                if let Err(e) = persisted {
+                    let _ = reply.send(Err(format!("persist workflow run: {e}")));
+                    return CommandEffect::none();
+                }
+                // The id travels now; the boundary drain below is what starts
+                // the pending run's first step.
+                let _ = reply.send(Ok(id));
+                CommandEffect::persist(actor.flush_then_drain(state, ctx).await)
+            }
+            RunCommand::Status { caller, run, reply } => {
+                // Visibility is the caller's descendant closure, like a
+                // subagent's: the invoker and its ancestors see the run,
+                // siblings do not — and an out-of-subtree id is refused
+                // without confirming the run exists.
+                let visible = state
+                    .forest
+                    .entry(RunId(run))
+                    .and_then(|e| e.parent)
+                    .is_some_and(|p| p == caller || state.forest.descends_from(p, caller));
+                let rendered = match visible {
+                    true => state
+                        .forest
+                        .render_run(RunId(run))
+                        .ok_or_else(|| format!("no such workflow run: {run}")),
+                    false => Err(format!("no such workflow run: {run}")),
+                };
+                let _ = reply.send(rendered);
+                CommandEffect::none()
+            }
             // The HTTP surface addresses the session's own run; invoked runs
             // report to their invoker instead of to a route.
             RunCommand::State { reply } => {
@@ -161,9 +246,13 @@ impl SessionActor {
         };
         let mut events = Vec::new();
         // Cancel whatever is in flight first, so the retry is the only writer.
+        // The superseded step's own outstanding children go with it: their
+        // results would otherwise arrive addressed to an execution the retry
+        // has replaced.
         if let Some(current) = w.run.current() {
             if let Some(step) = w.run.get(current) {
                 self.cancel_agent(AgentKey::Step(step.agent)).await;
+                events.extend(self.cancel_descendants(state, step.agent).await);
             }
             events.push(SessionDomainEvent::StepCancelled {
                 at_ms: now_ms(),
@@ -278,6 +367,66 @@ impl SessionActor {
             true => self.persist_and_advance(state, events, ctx).await,
             false => CommandEffect::persist(events),
         }
+    }
+
+    /// Cancel everything running under `of` — its subagents, the workflows it
+    /// invoked, their in-flight steps, and everything under those — and return
+    /// the events that record it.
+    ///
+    /// The whole closure, not one level: a person stopping an agent means the
+    /// delegation is over, and a grandchild left running would go on writing
+    /// to the shared workspace for a requester that walked away. Each stopped
+    /// child still reports [`STOPPED_ERROR`] to its own parent through the
+    /// ordinary owed-delivery path — delivered as data, never as a failure of
+    /// the parent itself.
+    pub(super) async fn cancel_descendants(
+        &mut self,
+        state: &SessionState,
+        of: Uuid,
+    ) -> Vec<SessionDomainEvent> {
+        let mut events = Vec::new();
+        for id in state.forest.descendant_entries(of) {
+            let Some(entry) = state.forest.entry(id) else {
+                continue;
+            };
+            match &entry.state {
+                RunState::Sub(sub) => {
+                    if sub.status == crate::sessions::run_forest::SubAgentStatus::Running {
+                        self.cancel_agent(AgentKey::Sub(id.0)).await;
+                        events.push(SessionDomainEvent::SubAgentFailed {
+                            at_ms: now_ms(),
+                            id: id.0,
+                            error: STOPPED_ERROR.to_string(),
+                        });
+                    }
+                }
+                RunState::Workflow(w) => {
+                    if w.run.status.is_terminal() {
+                        continue;
+                    }
+                    if let Some(index) = w.run.current() {
+                        if let Some(step) = w.run.get(index) {
+                            self.cancel_agent(AgentKey::Step(step.agent)).await;
+                        }
+                        events.push(SessionDomainEvent::StepCancelled {
+                            at_ms: now_ms(),
+                            run: id.0,
+                            index,
+                        });
+                    }
+                    events.push(SessionDomainEvent::RunFailed {
+                        at_ms: now_ms(),
+                        run: id.0,
+                        error: STOPPED_ERROR.to_string(),
+                    });
+                }
+                // A fork is a conversation of its own, not delegated work: it
+                // outlives whoever branched it, exactly as deleting a parent
+                // fork leaves its children.
+                RunState::Fork(_) | RunState::Main(_) => {}
+            }
+        }
+        events
     }
 
     /// Spawn the agent for one execution of a workflow step.
@@ -1007,6 +1156,498 @@ mod tests {
         assert!(
             !log.entries.is_empty(),
             "the step's transcript is what the step page shows"
+        );
+    }
+
+    // ---- invoked runs: any agent can start a workflow mid-session ----
+
+    use crate::sessions::run_forest::{MAX_DEPTH, MAX_LIVE_RUNS, RunId};
+    use crate::sessions::workflow::{WorkflowRunSpec, WorkflowRunStatus};
+
+    /// A one-step graph whose prompt decides how [`NestedRunsProvider`]
+    /// answers its step.
+    fn single_step_graph(workflow: &str, prompt: &str) -> Arc<WorkflowRunSpec> {
+        use crate::sessions::workflow::WorkflowStepSpec;
+        Arc::new(WorkflowRunSpec {
+            workflow: workflow.into(),
+            start: "ship".into(),
+            steps: vec![WorkflowStepSpec {
+                name: "ship".into(),
+                agent: "shipper".into(),
+                prompt: prompt.into(),
+                outcomes: crate::sessions::workflow::default_outcomes(),
+                fields: Vec::new(),
+                interactive: false,
+                transitions: vec![],
+                settings: agent_settings_fixture(),
+            }],
+            input: "go".into(),
+            max_steps: 10,
+        })
+    }
+
+    /// Routes by prompt marker, so one provider serves a whole nesting tree:
+    /// `Triage it.`/`HANG` hold an agent mid-turn for as long as the test
+    /// looks at it, `SHIP` concludes a step, everything else is plain text.
+    struct NestedRunsProvider;
+
+    #[async_trait]
+    impl horsie_agentcore::LlmProvider for NestedRunsProvider {
+        fn model_id(&self) -> &str {
+            "mock"
+        }
+
+        async fn complete(
+            &self,
+            request: horsie_agentcore::CompletionRequest<'_>,
+            _message_id: &str,
+            _events: &dyn horsie_agentcore::EventSink,
+        ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+            let says = |needle: &str| {
+                request.messages.iter().any(|m| {
+                    m.parts.iter().any(|p| {
+                        matches!(p, horsie_agentcore::ContentPart::Text(t) if t.text.contains(needle))
+                    })
+                })
+            };
+            if says("Triage it.") || says("HANG") {
+                std::future::pending::<()>().await;
+            }
+            if says("SHIP") {
+                return Ok(concludes(serde_json::json!({"description": "shipped"})));
+            }
+            Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::Text(
+                    horsie_agentcore::TextPart {
+                        text: "sub answer".to_string(),
+                    },
+                )],
+                stop_reason: horsie_agentcore::StopReason::EndTurn,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })
+        }
+    }
+
+    async fn invoke(
+        session: &SessionRef,
+        parent: Uuid,
+        graph: Arc<WorkflowRunSpec>,
+    ) -> Result<Uuid, String> {
+        session
+            .ask(|reply| {
+                SessionCommand::Run(RunCommand::Create {
+                    parent,
+                    graph,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// The feature, end to end: the main agent invokes a workflow, its step
+    /// runs and concludes, and the run's report is delivered back into the
+    /// invoker's own conversation — through the same owed-delivery rule a
+    /// subagent's report takes.
+    #[tokio::test]
+    async fn an_invoked_run_executes_and_reports_to_its_invoker() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        let run = invoke(
+            &session,
+            id,
+            single_step_graph("deploy", "SHIP the artifact."),
+        )
+        .await
+        .expect("main may invoke a workflow");
+
+        wait_for_state(&journal, id, "the invoked run to finish and report", |s| {
+            s.forest
+                .workflow(RunId(run))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Finished && w.notified)
+        })
+        .await;
+        // Never the session's own status: an invoked run's phase is its own.
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_ne!(
+            state.status(),
+            crate::sessions::spec::SessionStatus::Finished,
+            "a conversation does not finish because a run it invoked did"
+        );
+        let texts = wait_for_subagent_text(&session, |texts| {
+            texts
+                .iter()
+                .any(|t| t.contains("workflow deploy") && t.contains("shipped"))
+        })
+        .await;
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("[subagent \"workflow deploy\" completed]")
+                    && t.contains("shipped")),
+            "the invoker hears the run's result: {texts:?}"
+        );
+    }
+
+    /// Nesting: a workflow's own step invokes another workflow, and the report
+    /// is owed to the *step agent* — the run forest's one parent edge, again.
+    #[tokio::test]
+    async fn a_workflow_step_invokes_a_workflow_and_is_owed_the_report() {
+        let (_f, session, id, journal) =
+            spawn_run_with_provider(Arc::new(NestedRunsProvider)).await;
+        let root = wait_for_run(&journal, id, |r| r.current().is_some()).await;
+        let step_agent = root.steps[0].agent;
+
+        let nested = invoke(
+            &session,
+            step_agent,
+            single_step_graph("deploy", "SHIP the artifact."),
+        )
+        .await
+        .expect("a step may invoke a workflow");
+
+        wait_for_state(&journal, id, "the nested run to finish and report", |s| {
+            s.forest
+                .workflow(RunId(nested))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Finished && w.notified)
+        })
+        .await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(
+            state
+                .forest
+                .owner_of_agent(nested)
+                .map(|(id, _)| id)
+                .or_else(|| state.forest.entry(RunId(nested)).map(|_| RunId(nested))),
+            Some(RunId(nested)),
+        );
+        assert_eq!(
+            state.forest.entry(RunId(nested)).unwrap().parent,
+            Some(step_agent),
+            "the run reports to the step that invoked it"
+        );
+        // And the root run is untouched by its child finishing.
+        assert_eq!(
+            state.forest.root_workflow().unwrap().1.run.status,
+            WorkflowRunStatus::Running
+        );
+    }
+
+    /// Sibling runs progress concurrently: one blocked run does not stop
+    /// another from finishing.
+    #[tokio::test]
+    async fn sibling_invoked_runs_progress_independently() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        let stuck = invoke(&session, id, single_step_graph("slow", "HANG forever."))
+            .await
+            .expect("first run");
+        let quick = invoke(&session, id, single_step_graph("quick", "SHIP it."))
+            .await
+            .expect("second run");
+
+        wait_for_state(&journal, id, "the quick run to finish", |s| {
+            s.forest
+                .workflow(RunId(quick))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Finished)
+        })
+        .await;
+        let state = crate::sessions::events::fold_session_state(&journal, id).await;
+        assert_eq!(
+            state.forest.workflow(RunId(stuck)).unwrap().run.status,
+            WorkflowRunStatus::Running,
+            "the blocked sibling is still going, independently"
+        );
+    }
+
+    /// The recursion bound: an invocation is a delegation edge like a spawn,
+    /// so a chain four deep refuses the fifth — which is what stops a workflow
+    /// that invokes itself from running away.
+    #[tokio::test]
+    async fn invoking_beyond_the_delegation_depth_is_refused() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        // A chain of subagents built by seeding events would race the resident
+        // roster; spawn them for real instead, held open by HANG tasks.
+        let mut parent = id;
+        for _ in 0..MAX_DEPTH {
+            let child = session
+                .ask(|reply| {
+                    SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                        caller: parent,
+                        label: "link".into(),
+                        task: "HANG until stopped".into(),
+                        agent_type: None,
+                        reply,
+                    })
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            wait_for_tree(&journal, id, |t| t.sub(child).is_some()).await;
+            parent = child;
+        }
+        let err = invoke(&session, parent, single_step_graph("deep", "SHIP it."))
+            .await
+            .expect_err("the fifth delegation level is refused");
+        assert_eq!(err, format!("max delegation depth {MAX_DEPTH} reached"));
+    }
+
+    #[tokio::test]
+    async fn invoking_beyond_the_live_run_cap_is_refused() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        for n in 0..MAX_LIVE_RUNS {
+            let run = invoke(
+                &session,
+                id,
+                single_step_graph(&format!("slow-{n}"), "HANG forever."),
+            )
+            .await
+            .expect("live runs under the cap start");
+            wait_for_state(&journal, id, "the run to be live", |s| {
+                s.forest.workflow(RunId(run)).is_some()
+            })
+            .await;
+        }
+        let err = invoke(&session, id, single_step_graph("one-too-many", "SHIP it."))
+            .await
+            .expect_err("the ninth live run is refused");
+        assert_eq!(
+            err,
+            format!("{MAX_LIVE_RUNS} workflow runs already live in this session")
+        );
+    }
+
+    #[tokio::test]
+    async fn invoking_from_an_unknown_agent_is_refused() {
+        let (_f, session, _id, _journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        let err = invoke(
+            &session,
+            Uuid::new_v4(),
+            single_step_graph("orphan", "SHIP it."),
+        )
+        .await
+        .expect_err("an unknown caller is refused");
+        assert_eq!(err, "caller is not a known agent");
+    }
+
+    /// Persist-then-start, replayed: a crash between the `RunCreated` write
+    /// and anything else leaves a pending run, and loading is what starts it.
+    #[tokio::test]
+    async fn a_run_created_just_before_a_crash_starts_at_load() {
+        let (f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        drop(session);
+        let run = Uuid::new_v4();
+        let session2 = seed_session(
+            &f,
+            id,
+            actor_spec_fixture(),
+            &[SessionDomainEvent::RunCreated {
+                at_ms: 1,
+                id: run,
+                parent: id,
+                graph: single_step_graph("deploy", "SHIP the artifact."),
+            }],
+        )
+        .await;
+        wait_for_state(&journal, id, "the recovered run to finish", |s| {
+            s.forest
+                .workflow(RunId(run))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Finished)
+        })
+        .await;
+        let _ = session2;
+    }
+
+    /// At-least-once delivery for run reports: a crash after `RunFinished` and
+    /// before `RunNotified` leaves the report owed, and the next boundary — a
+    /// person acting — re-delivers it.
+    #[tokio::test]
+    async fn a_run_finished_but_unreported_before_a_crash_is_redelivered() {
+        let (f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        drop(session);
+        let run = Uuid::new_v4();
+        let graph = single_step_graph("deploy", "SHIP the artifact.");
+        let step_agent = WorkflowRunSpec::step_agent_id(run, 0);
+        let session2 = seed_session(
+            &f,
+            id,
+            actor_spec_fixture(),
+            &[
+                SessionDomainEvent::RunCreated {
+                    at_ms: 1,
+                    id: run,
+                    parent: id,
+                    graph,
+                },
+                SessionDomainEvent::StepStarted {
+                    at_ms: 2,
+                    run,
+                    index: 0,
+                    step: "ship".into(),
+                    agent: step_agent,
+                    attempt: 1,
+                    from: None,
+                    via: None,
+                    input: "SHIP the artifact.".into(),
+                },
+                SessionDomainEvent::StepConcluded {
+                    at_ms: 3,
+                    run,
+                    index: 0,
+                    output: serde_json::json!({"outcome": "success", "description": "shipped"}),
+                },
+                SessionDomainEvent::RunFinished {
+                    at_ms: 4,
+                    run,
+                    output: serde_json::json!({"outcome": "success", "description": "shipped"}),
+                },
+            ],
+        )
+        .await;
+        // Loading starts nothing; the user's next action is the boundary.
+        send(&session2, "hello again").await;
+        wait_for_state(&journal, id, "the stranded report re-delivered", |s| {
+            s.forest.workflow(RunId(run)).is_some_and(|w| w.notified)
+        })
+        .await;
+        let texts = wait_for_subagent_text(&session2, |texts| {
+            texts.iter().any(|t| t.contains("workflow deploy"))
+        })
+        .await;
+        assert!(
+            texts.iter().any(|t| t.contains("shipped")),
+            "the report survives the crash: {texts:?}"
+        );
+    }
+
+    /// Stopping a subagent ends its delegation: the workflow it invoked is
+    /// cancelled with it, in-flight step and all, and reports the stop.
+    #[tokio::test]
+    async fn stopping_a_subagent_cancels_the_workflow_it_invoked() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        let sub = spawn_sub(&session, "lead", "HANG while delegating").await;
+        wait_for_tree(&journal, id, |t| t.sub(sub).is_some()).await;
+        let run = invoke(&session, sub, single_step_graph("slow", "HANG forever."))
+            .await
+            .expect("a subagent may invoke a workflow");
+        wait_for_state(&journal, id, "the nested run's step in flight", |s| {
+            s.forest
+                .workflow(RunId(run))
+                .is_some_and(|w| w.run.current().is_some())
+        })
+        .await;
+
+        session
+            .ask(|reply| {
+                SessionCommand::Turn(TurnCommand::Stop {
+                    agent_id: sub.to_string(),
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .expect("a working subagent is stoppable");
+
+        let state = wait_for_state(&journal, id, "the cascade to land", |s| {
+            s.forest
+                .workflow(RunId(run))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Failed)
+        })
+        .await;
+        let w = state.forest.workflow(RunId(run)).unwrap();
+        assert_eq!(
+            w.run.error.as_deref(),
+            Some(crate::sessions::run_forest::STOPPED_ERROR)
+        );
+        assert_eq!(
+            w.run.steps[0].status,
+            crate::sessions::workflow::StepStatus::Cancelled,
+            "the in-flight step is cancelled, not left running for ever"
+        );
+    }
+
+    /// Retrying a step supersedes the old execution, and the old execution's
+    /// outstanding children go with it — a result addressed to a replaced
+    /// step would otherwise arrive at something the run has moved past.
+    #[tokio::test]
+    async fn retrying_a_step_cancels_the_superseded_steps_invoked_run() {
+        let (_f, session, id, journal) =
+            spawn_run_with_provider(Arc::new(NestedRunsProvider)).await;
+        let root = wait_for_run(&journal, id, |r| r.current().is_some()).await;
+        let step_agent = root.steps[0].agent;
+        let nested = invoke(
+            &session,
+            step_agent,
+            single_step_graph("slow", "HANG forever."),
+        )
+        .await
+        .expect("the step invokes a workflow");
+        wait_for_state(&journal, id, "the nested run's step in flight", |s| {
+            s.forest
+                .workflow(RunId(nested))
+                .is_some_and(|w| w.run.current().is_some())
+        })
+        .await;
+
+        session
+            .ask(|reply| SessionCommand::Run(RunCommand::RetryStep { index: 0, reply }))
+            .await
+            .unwrap()
+            .expect("a step in flight is retryable");
+
+        let state = wait_for_state(&journal, id, "the superseded child cancelled", |s| {
+            s.forest
+                .workflow(RunId(nested))
+                .is_some_and(|w| w.run.status == WorkflowRunStatus::Failed)
+        })
+        .await;
+        assert_eq!(
+            state
+                .forest
+                .workflow(RunId(nested))
+                .unwrap()
+                .run
+                .error
+                .as_deref(),
+            Some(crate::sessions::run_forest::STOPPED_ERROR)
+        );
+    }
+
+    /// `workflow_status` answers the invoker and its ancestors; a stranger —
+    /// or an id that names nothing — gets the same refusal, so neither
+    /// confirms the run exists.
+    #[tokio::test]
+    async fn run_status_is_visible_to_the_invoker_and_nobody_else() {
+        let (_f, session, id, journal) =
+            spawn_session_with_provider(Arc::new(NestedRunsProvider)).await;
+        let outsider = spawn_sub(&session, "bystander", "HANG around").await;
+        wait_for_tree(&journal, id, |t| t.sub(outsider).is_some()).await;
+        let run = invoke(&session, id, single_step_graph("slow", "HANG forever."))
+            .await
+            .expect("a run");
+
+        let status = |caller: Uuid| {
+            let session = session.clone();
+            async move {
+                session
+                    .ask(move |reply| {
+                        SessionCommand::Run(RunCommand::Status { caller, run, reply })
+                    })
+                    .await
+                    .unwrap()
+            }
+        };
+        let rendered = status(id).await.expect("the invoker sees its run");
+        assert!(rendered.contains("workflow \"slow\""), "{rendered}");
+        assert!(
+            status(outsider).await.is_err(),
+            "a sibling must not see someone else's run"
         );
     }
 }

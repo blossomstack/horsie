@@ -128,6 +128,30 @@ pub enum TurnCommand {
 /// invoke mid-session.
 #[derive(Serialize, Deserialize)]
 pub enum RunCommand {
+    /// The `invoke_workflow` tool: start a run of `graph` under `parent`, the
+    /// agent that called it. The graph arrives already resolved — the tool
+    /// resolves presets on its own task, off this mailbox — so the session
+    /// only checks its limits and journals the snapshot.
+    Create {
+        parent: Uuid,
+        graph: Arc<WorkflowRunSpec>,
+        reply: ReplyTo<Result<Uuid, String>>,
+    },
+    /// Internal: the create's `RunCreated` write came back — only now is the
+    /// run real (persist-then-reply, the same shape a subagent spawn has). A
+    /// failed write starts nothing and the tool gets the error.
+    FinishCreate {
+        id: Uuid,
+        reply: ReplyTo<Result<Uuid, String>>,
+        persisted: Result<(), horsie_actor::JournalError>,
+    },
+    /// The `workflow_status` tool: one run's phase and step log, visible to
+    /// the agent that invoked it and to its ancestors.
+    Status {
+        caller: Uuid,
+        run: Uuid,
+        reply: ReplyTo<Result<String, String>>,
+    },
     /// Let the orchestrators start whatever they want started. Sent at load so
     /// a pending run begins, and after a retry.
     Advance,

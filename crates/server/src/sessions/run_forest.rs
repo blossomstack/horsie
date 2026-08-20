@@ -719,6 +719,66 @@ impl RunForest {
             .count()
     }
 
+    /// Every entry that runs under `of`, directly or through any chain of
+    /// spawns and invocations — the closure a stop must take down with it.
+    /// `of`'s own entry is not in it.
+    #[must_use]
+    pub fn descendant_entries(&self, of: Uuid) -> Vec<RunId> {
+        self.entries
+            .iter()
+            .filter(|(id, entry)| {
+                if id.0 == of {
+                    return false;
+                }
+                match &entry.state {
+                    // An agent-shaped entry is its own agent: walk from it.
+                    RunState::Sub(_) | RunState::Fork(_) | RunState::Main(_) => {
+                        self.descends_from(id.0, of)
+                    }
+                    // A run is reached through the agent that invoked it.
+                    RunState::Workflow(_) => entry
+                        .parent
+                        .is_some_and(|p| p == of || self.descends_from(p, of)),
+                }
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// One run's detail for the `workflow_status` tool: its phase and its step
+    /// log, each execution with its status.
+    #[must_use]
+    pub fn render_run(&self, id: RunId) -> Option<String> {
+        let w = self.workflow(id)?;
+        let phase = match w.run.status {
+            crate::sessions::workflow::WorkflowRunStatus::Pending => "pending",
+            crate::sessions::workflow::WorkflowRunStatus::Running => "running",
+            crate::sessions::workflow::WorkflowRunStatus::Suspended => "suspended",
+            crate::sessions::workflow::WorkflowRunStatus::AwaitingInput => "awaiting input",
+            crate::sessions::workflow::WorkflowRunStatus::Finished => "finished",
+            crate::sessions::workflow::WorkflowRunStatus::Failed => "failed",
+        };
+        let mut out = format!("workflow \"{}\" ({}) — {phase}", w.workflow, id.0);
+        for (index, step) in w.run.steps.iter().enumerate() {
+            let status = match step.status {
+                crate::sessions::workflow::StepStatus::Running => "running",
+                crate::sessions::workflow::StepStatus::Concluded => "concluded",
+                crate::sessions::workflow::StepStatus::Failed => "failed",
+                crate::sessions::workflow::StepStatus::Cancelled => "cancelled",
+            };
+            out.push_str(&format!("\n{index}. \"{}\" [{status}]", step.step));
+        }
+        if let Some(error) = &w.run.error {
+            out.push_str(&format!("\n\nerror:\n{}", truncate_result(error)));
+        } else if let Some(output) = &w.run.output {
+            out.push_str(&format!(
+                "\n\noutput:\n{}",
+                truncate_result(&render_result(output))
+            ));
+        }
+        Some(out)
+    }
+
     // ---------------------------------------------------------------- forks
 
     #[allow(clippy::too_many_arguments)]

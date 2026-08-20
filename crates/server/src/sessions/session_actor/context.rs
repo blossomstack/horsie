@@ -885,6 +885,20 @@ impl ContextProvider for SessionContextProvider {
                     .unwrap_or_default(),
             ))
         };
+        // Every kind of agent may invoke a workflow — main, subagents, steps
+        // and forks alike; the session gates at call time (depth, live runs).
+        // Absent only when no store is wired to resolve one from (tests).
+        let with_spawn: Arc<dyn Toolbox> = match &self.services {
+            Some(services) => Arc::new(
+                crate::sessions::invoke_workflow_tool::InvokeWorkflowToolbox::new(
+                    with_spawn,
+                    self.session.clone(),
+                    caller,
+                    services.clone(),
+                ),
+            ),
+            None => with_spawn,
+        };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than
             // offering a tool whose answer would never come.
