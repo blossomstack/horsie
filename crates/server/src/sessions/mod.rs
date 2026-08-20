@@ -18,6 +18,7 @@ pub mod events;
 pub mod forks;
 pub mod lifecycle_routing;
 pub mod orchestrator;
+pub mod run_forest;
 pub mod session_actor;
 pub mod spawn_tool;
 pub mod spec;
