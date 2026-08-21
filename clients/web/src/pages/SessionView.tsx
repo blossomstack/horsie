@@ -1,6 +1,14 @@
-import { ChartNoAxesGantt, CircleAlert, ListTodo, Trash2, Waypoints } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  ChartNoAxesGantt,
+  CircleAlert,
+  ListTodo,
+  MessageSquareText,
+  Trash2,
+  Waypoints,
+} from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { forkReadyToOpen } from "../lib/forkTree";
 import { SessionStatusKind, TaskStatus } from "../api/types";
@@ -37,6 +45,41 @@ import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
 import { layoutAgentTree } from "../lib/agentTree";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
+
+type SessionViewId = "transcript" | "timeline" | "graph";
+
+/** The three views of a session, in the order they read: its prose, its shape
+ * in time, its shape in lineage. Icons only — the row is an instrument face,
+ * and three labelled keys beside the title would crowd out the title. */
+const VIEWS: {
+  id: SessionViewId;
+  icon: LucideIcon;
+  label: string;
+  title: string;
+  testId: string;
+}[] = [
+  {
+    id: "transcript",
+    icon: MessageSquareText,
+    label: "Show the transcript",
+    title: "Transcript",
+    testId: "transcript-toggle",
+  },
+  {
+    id: "timeline",
+    icon: ChartNoAxesGantt,
+    label: "Show the session timeline",
+    title: "Timeline",
+    testId: "timeline-toggle",
+  },
+  {
+    id: "graph",
+    icon: Waypoints,
+    label: "Show the agent graph",
+    title: "Agent graph",
+    testId: "graph-toggle",
+  },
+];
 
 /** The session's name, and the only way a person can change it.
  *
@@ -207,12 +250,32 @@ export function SessionView() {
   // Three views of the same session: its prose, its shape in time, and its
   // shape in lineage. Only one holds the pane at a time — they are answers to
   // the same question, not panels to arrange.
-  const view = agentId ? "transcript" : (searchParams.get("view") ?? "transcript");
+  //
+  // The URL is what a link carries, so it wins when it names a view. What it
+  // cannot say is what *this* person was doing: opening the next session from
+  // the rail would drop someone who works in the timeline back into prose,
+  // every time. So the last view they picked is remembered on this browser and
+  // is what a session opens in when its URL says nothing.
+  const [lastView, setLastView] = usePersistentState<SessionViewId>(
+    "horsie-session-view",
+    "transcript",
+    { deserialize: (raw) => VIEWS.find((v) => v.id === raw)?.id },
+  );
+  // A session started a second ago is not one you *opened*: it is the answer
+  // to a message just typed, so it lands in the transcript whatever the
+  // remembered view is.
+  const fresh = (useLocation().state as { fresh?: boolean } | null)?.fresh === true;
+  const asked = searchParams.get("view");
+  const view: SessionViewId =
+    agentId || fresh
+      ? "transcript"
+      : (VIEWS.find((v) => v.id === asked)?.id ?? lastView);
   const timelineOpen = view === "timeline";
   const graphOpen = view === "graph";
   /** Whether anything has taken the pane from the transcript. */
   const overlayOpen = timelineOpen || graphOpen;
-  const showView = (next: "transcript" | "timeline" | "graph") =>
+  const showView = (next: SessionViewId) => {
+    setLastView(next);
     setSearchParams(
       (prev) => {
         const params = new URLSearchParams(prev);
@@ -222,6 +285,20 @@ export function SessionView() {
       },
       { replace: true },
     );
+  };
+  // A remembered view still has to reach the URL, or the page would show one
+  // thing and the link in the address bar would promise another.
+  useEffect(() => {
+    if (agentId || asked === view || view === "transcript") return;
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        params.set("view", view);
+        return params;
+      },
+      { replace: true },
+    );
+  }, [agentId, asked, view, setSearchParams]);
   /** An entry the timeline asked for, held until the transcript is on screen
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
@@ -550,32 +627,41 @@ export function SessionView() {
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}
             {!agentId && (
-              <>
-                <button
-                  className={cn("key-icon shrink-0", timelineOpen && "bg-raised !text-legend")}
-                  onClick={() => showView(timelineOpen ? "transcript" : "timeline")}
-                  aria-pressed={timelineOpen}
-                  title={timelineOpen ? "Show the transcript" : "Show the timeline"}
-                  aria-label="Toggle the session timeline"
-                  data-testid="timeline-toggle"
-                >
-                  <ChartNoAxesGantt size={15} aria-hidden />
-                </button>
-                {/* The timeline answers "when", this answers "what spawned
-                    what". Two keys rather than one cycling key: a control that
-                    changes what it does each time you press it cannot say what
-                    it is about to do. */}
-                <button
-                  className={cn("key-icon shrink-0", graphOpen && "bg-raised !text-legend")}
-                  onClick={() => showView(graphOpen ? "transcript" : "graph")}
-                  aria-pressed={graphOpen}
-                  title={graphOpen ? "Show the transcript" : "Show the agent graph"}
-                  aria-label="Toggle the agent graph"
-                  data-testid="graph-toggle"
-                >
-                  <Waypoints size={15} aria-hidden />
-                </button>
-              </>
+              <div
+                className="flex shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] bg-screen p-0.5 shadow-[var(--screen-inset)]"
+                role="radiogroup"
+                aria-label="View"
+                data-testid="view-switch"
+              >
+                {/* One control with three settings rather than two independent
+                    toggles: the views are answers to the same question, and
+                    exactly one of them always holds the pane. The transcript
+                    is a setting like the others — it was the only view you
+                    reached by un-pressing something, which said "off" where it
+                    meant "prose". */}
+                {VIEWS.map((v) => (
+                  <button
+                    key={v.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={view === v.id}
+                    className={cn(
+                      "key-icon shrink-0 !h-7 !w-7",
+                      // A recessed trough with one key standing proud of it:
+                      // the selected view is a raised key, not a tinted one.
+                      view === v.id
+                        ? "!bg-panel !text-legend shadow-[0_1px_2px_var(--rule)]"
+                        : "hover:!bg-raised",
+                    )}
+                    onClick={() => showView(v.id)}
+                    title={v.title}
+                    aria-label={v.label}
+                    data-testid={v.testId}
+                  >
+                    <v.icon size={15} aria-hidden />
+                  </button>
+                ))}
+              </div>
             )}
             {status && <StatusBadge status={status} />}
             {/* Durability is the product's whole differentiator, so a dropped

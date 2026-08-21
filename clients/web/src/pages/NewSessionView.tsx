@@ -47,7 +47,13 @@ export function NewSessionView() {
     const res = draft.agent
       ? await invoke.mutateAsync({ name: draft.agent, body: draft.buildAgentRequest(text) })
       : await create.mutateAsync(draft.buildRequest(text));
-    navigate(`/sessions/${res.session.id}`);
+    // Marked as freshly started so it opens in the transcript rather than in
+    // the remembered view: you just typed a message, and the answer to it is
+    // the transcript. A view is remembered for the sessions you *open*, not
+    // for the one you started a second ago. Router state rather than a query
+    // param — the URL is a thing people send, and `?view=transcript` on every
+    // new session is noise in it.
+    navigate(`/sessions/${res.session.id}`, { state: { fresh: true } });
   };
 
   const handleSend = async (text: string) => {
