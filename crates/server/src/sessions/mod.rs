@@ -14,6 +14,7 @@ pub mod addressing;
 pub mod ask_tool;
 pub mod builder;
 pub mod clock;
+pub mod conversation_tool;
 pub mod events;
 pub mod invoke_workflow_tool;
 pub mod lifecycle_routing;
