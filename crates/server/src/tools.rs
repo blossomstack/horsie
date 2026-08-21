@@ -37,7 +37,7 @@ pub const GROUP_RUNTIME: &str = "runtime";
 pub const GROUP_WORKSPACE: &str = "workspace";
 pub const GROUP_PLANNING: &str = "planning";
 pub const GROUP_TIMERS: &str = "timers";
-pub const GROUP_SUBAGENTS: &str = "subagents";
+pub const GROUP_DELEGATION: &str = "delegation";
 pub const GROUP_WORKFLOWS: &str = "workflows";
 pub const GROUP_SESSION: &str = "session";
 pub const GROUP_CONTROL: &str = "control";
@@ -107,9 +107,20 @@ const TIMERS: &[Row] = &[
     write("cancel_timer", "Disarm a timer."),
 ];
 
-const SUBAGENTS: &[Row] = &[
-    write("spawn_agent", "Delegate work to a subagent."),
+/// Both ways of handing work to another agent, which is why they are one group
+/// rather than "subagents" plus a stray. They differ only in where the result
+/// goes: a subagent reports back to whoever spawned it, a conversation talks to
+/// the person and never reports back at all.
+const DELEGATION: &[Row] = &[
+    write(
+        "spawn_agent",
+        "Delegate work to a subagent and get its result back.",
+    ),
     read("subagent_status", "Check on a spawned subagent."),
+    write(
+        "spawn_conversation",
+        "Hand work to a second conversation the user steers themselves.",
+    ),
 ];
 
 const WORKFLOWS: &[Row] = &[
@@ -232,10 +243,11 @@ pub fn catalog() -> ToolCatalog {
                 true,
             ),
             group(
-                GROUP_SUBAGENTS,
-                "Subagents",
-                "Delegate a piece of work to a fresh agent and collect its result.",
-                SUBAGENTS,
+                GROUP_DELEGATION,
+                "Delegation",
+                "Hand a piece of work to another agent — one that reports back, or one \
+                 that carries on with the user.",
+                DELEGATION,
                 true,
             ),
             group(
@@ -390,6 +402,7 @@ mod tests {
             crate::agent_loop::TASK_LIST_TOOL,
             crate::sessions::spawn_tool::SPAWN_AGENT_TOOL,
             crate::sessions::spawn_tool::SUBAGENT_STATUS_TOOL,
+            crate::sessions::conversation_tool::SPAWN_CONVERSATION_TOOL,
             crate::sessions::invoke_workflow_tool::INVOKE_WORKFLOW_TOOL,
             crate::sessions::invoke_workflow_tool::WORKFLOW_STATUS_TOOL,
             crate::sessions::title_tool::SET_SESSION_TITLE_TOOL,

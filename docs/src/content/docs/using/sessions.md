@@ -35,7 +35,7 @@ See [MCP servers](/using/mcp-servers/).
 **Memory** — which memory spaces the agent may read and write.
 
 **Tools** — which of horsie's built-in tools the agent may call, grouped: files
-and shell, workspace, planning, timers, subagents, workflows, session, and
+and shell, workspace, planning, timers, delegation, workflows, session, and
 horsie itself. Each tool is marked **read** or **write**, and the quick actions
 at the top select all of them, the read-only ones, or none.
 
