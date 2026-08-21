@@ -11,11 +11,11 @@ use crate::environments::EnvironmentService;
 use crate::routines::service::{RoutineError, RoutineService};
 use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
-use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SupervisorRef;
 use crate::sessions::builder::{SpecError, build_session_spec};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::SessionSupervisorCommand;
+use crate::sessions::{CreateSessionError, UserMessageError};
 use horsie_models::session::{AgentSettings as WireAgentSettings, SessionSummary};
 use std::sync::Arc;
 
@@ -143,34 +143,31 @@ impl RoutineRunner {
             )));
         }
 
+        // The prompt travels with the create. Two asks would be addressed
+        // separately, and a shard that moved between them left the second one
+        // talking to a supervisor that had never heard of the session.
         let id = self
             .supervisor
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: spec.clone(),
                 created_at: now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RoutineError::Internal("session supervisor unavailable".into()))?;
-
-        self.supervisor
-            .ask(|reply| SessionSupervisorCommand::UserMessage {
-                agent_id: None,
-                id: id.clone(),
-                text: routine.prompt.clone(),
+                message: Some(routine.prompt.clone()),
                 reply,
             })
             .await
             .map_err(|_| RoutineError::Internal("session supervisor unavailable".into()))?
             .map_err(|e| match e {
-                UserMessageError::NotFound => {
+                CreateSessionError::NotRecorded(m) => RoutineError::Internal(m),
+                CreateSessionError::Message(UserMessageError::NotFound) => {
                     RoutineError::Internal("the session vanished before its prompt".into())
                 }
-                UserMessageError::Unrecoverable(reason) => RoutineError::Conflict(reason),
-                // A routine invokes an agent preset, never a workflow, so this
-                // is unreachable rather than merely unlikely.
-                UserMessageError::Rejected(why) => RoutineError::Conflict(why),
-            })?;
+                CreateSessionError::Message(
+                    // A routine invokes an agent preset, never a workflow, so
+                    // `Rejected` is unreachable rather than merely unlikely.
+                    UserMessageError::Unrecoverable(why) | UserMessageError::Rejected(why),
+                ) => RoutineError::Conflict(why),
+            })?
+            .id;
 
         let status = SessionStatus::Idle;
         Ok(SessionSummary {

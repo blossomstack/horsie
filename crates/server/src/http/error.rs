@@ -63,6 +63,29 @@ impl From<crate::sessions::builder::SpecError> for Api {
     }
 }
 
+/// A message this session will not take is the caller's answer to live with; a
+/// record that could not be written is ours.
+impl From<crate::sessions::UserMessageError> for Api {
+    fn from(e: crate::sessions::UserMessageError) -> Self {
+        use crate::sessions::UserMessageError as E;
+        match e {
+            E::NotFound => Self::not_found("no such session"),
+            E::Unrecoverable(reason) => Self::conflict("unrecoverable", reason),
+            E::Rejected(why) => Self::conflict("not-a-conversation", why),
+        }
+    }
+}
+
+impl From<crate::sessions::CreateSessionError> for Api {
+    fn from(e: crate::sessions::CreateSessionError) -> Self {
+        use crate::sessions::CreateSessionError as E;
+        match e {
+            E::NotRecorded(m) => Self::internal(m),
+            E::Message(e) => e.into(),
+        }
+    }
+}
+
 impl IntoResponse for Api {
     fn into_response(self) -> Response {
         (self.0, Json(self.1)).into_response()

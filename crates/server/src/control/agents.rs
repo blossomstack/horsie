@@ -4,7 +4,6 @@ use crate::control::{
     ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, ask, op,
 };
 use crate::http::handlers;
-use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
 use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
@@ -184,30 +183,17 @@ async fn invoke(
         )));
     }
     let created_at = now_ms();
+    // One ask: the create carries the first message, so the two cannot be
+    // addressed separately and land on different nodes.
     let id = ask(services, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
         created_at,
-        reply,
-    })
-    .await?;
-    ask(services, |reply| SessionSupervisorCommand::UserMessage {
-        agent_id: None,
-        id: id.clone(),
-        text: request.message,
+        message: Some(request.message),
         reply,
     })
     .await?
-    .map_err(|e| match e {
-        UserMessageError::NotFound => ControlError::NotFound("no such session".to_string()),
-        UserMessageError::Unrecoverable(reason) => ControlError::Conflict {
-            code: "unrecoverable".to_string(),
-            message: reason,
-        },
-        UserMessageError::Rejected(why) => ControlError::Conflict {
-            code: "not-a-conversation".to_string(),
-            message: why,
-        },
-    })?;
+    .map_err(super::create_failed)?
+    .id;
     let rec = SessionRecord {
         spec,
         created_at,

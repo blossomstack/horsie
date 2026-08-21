@@ -26,7 +26,7 @@ use crate::sessions::session_actor::{
     CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
-use crate::sessions::{SessionRevisions, UserMessageError};
+use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
 use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
@@ -88,12 +88,27 @@ impl Default for SupervisorConfig {
 #[allow(clippy::large_enum_variant)]
 #[derive(Serialize, Deserialize)]
 pub enum SessionSupervisorCommand {
-    /// Create a new session; replies with its generated id.
+    /// Create a new session and queue its first message, in one command.
+    ///
+    /// One command, and not a `Create` a caller follows with a `UserMessage`,
+    /// because the two would be addressed separately. Placement is a pure
+    /// function of the live member set, so a node joining as the cluster forms
+    /// — or a heartbeat arriving late on a loaded machine — moves this shard,
+    /// and the follow-up lands on a supervisor rebuilt from the journal
+    /// somewhere else. It answered `NotFound` for a session the caller had just
+    /// been handed the id of.
     Create {
         spec: SessionSpec,
         /// Unix epoch millis (supplied by the caller for deterministic tests).
         created_at: u64,
-        reply: ReplyTo<SessionId>,
+        /// What to say to the new session's main agent. `None` only for a
+        /// workflow run, which works from its definition and has no
+        /// conversation to open.
+        message: Option<String>,
+        /// Answered once the session is durably recorded *and* its first
+        /// message is durably queued, so a caller holding an id holds one the
+        /// next node will recognise.
+        reply: ReplyTo<Result<CreatedSession, CreateSessionError>>,
     },
     /// List every known session, each with the status it last reported.
     ///
@@ -686,45 +701,109 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorCommand::Create {
                 spec,
                 created_at,
+                message,
                 reply,
             } => {
                 let id = Uuid::new_v4().to_string();
                 // The session owns its runtime's whole life, so creating one is
                 // the first thing it is asked to do rather than something done
-                // to it. Two things follow, and both are the point.
+                // to it. Three things follow, and all three are the point.
                 //
-                // `Provision` is enqueued here, before the reply — so it is
-                // ahead of the first message in the same mailbox, and the wait
-                // is ordinary actor sequencing rather than a gate beside the
-                // runtime manager. And the attempt is journaled by the session,
-                // so a process that dies mid-create leaves a session that knows
-                // to finish it, which no in-memory gate could.
-                if let Some(session) = self.reach(ctx, &id) {
-                    // What this session is, ahead of everything else it will
-                    // ever be told. Nothing else can have addressed a uuid
-                    // generated on this line, so this command is what brings the
-                    // actor into being and is therefore first in its mailbox —
-                    // which is what an empty journal needs, since a session
-                    // recovers nothing and waits to be told what it is.
-                    let _ = session
-                        .tell(SessionCommand::Core(CoreCommand::RecordSpec {
-                            spec: Box::new(spec.clone()),
-                        }))
-                        .await;
-                    let _ = session
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
-                        .await;
-                }
-                let _ = reply.send(id.clone());
+                // `Provision` is enqueued here — so it is ahead of the first
+                // message in the same mailbox, and the wait is ordinary actor
+                // sequencing rather than a gate beside the runtime manager. And
+                // the attempt is journaled by the session, so a process that
+                // dies mid-create leaves a session that knows to finish it,
+                // which no in-memory gate could.
+                //
+                // The message goes into that same mailbox, right behind them,
+                // rather than travelling back out to the caller and in again as
+                // a second command. A second command is addressed a second
+                // time, and placement can have moved between the two.
+                let queued = match self.reach(ctx, &id) {
+                    None => None,
+                    Some(session) => {
+                        // What this session is, ahead of everything else it will
+                        // ever be told. Nothing else can have addressed a uuid
+                        // generated on this line, so this command is what brings the
+                        // actor into being and is therefore first in its mailbox —
+                        // which is what an empty journal needs, since a session
+                        // recovers nothing and waits to be told what it is.
+                        let _ = session
+                            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+                                spec: Box::new(spec.clone()),
+                            }))
+                            .await;
+                        let _ = session
+                            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+                            .await;
+                        match message {
+                            None => None,
+                            Some(text) => {
+                                // The session answers this itself, once the
+                                // agent's write is durable — the same promise
+                                // `UserMessage` makes, forwarded rather than
+                                // resolved here so this mailbox never waits on
+                                // a journal.
+                                let (tx, rx) = oneshot::channel();
+                                let _ = session
+                                    .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                                        agent_id: None,
+                                        text,
+                                        reply: ReplyTo::from_sender(tx),
+                                    }))
+                                    .await;
+                                Some(rx)
+                            }
+                        }
+                    }
+                };
                 // Not a guess: a fresh session is provisioning, and says so
                 // until its vendor confirms the runtime. Recorded by the fold
                 // of `SessionCreated`, which is why nothing is inserted here.
                 self.list_changed();
+                // Answered off the mailbox and only after the write below, so
+                // an id a caller holds is one the journal holds too. It used to
+                // answer here, ahead of its own record — and the next command,
+                // landing on a supervisor rebuilt somewhere else, found no such
+                // session.
+                let (written, recorded) =
+                    oneshot::channel::<Result<(), horsie_actor::JournalError>>();
+                let answer = id.clone();
+                tokio::spawn(async move {
+                    let outcome = match recorded.await {
+                        Ok(Ok(())) => match queued {
+                            None => Ok(CreatedSession {
+                                id: answer,
+                                message: None,
+                            }),
+                            Some(rx) => match rx.await {
+                                Ok(Ok(accepted)) => Ok(CreatedSession {
+                                    id: answer,
+                                    message: Some(accepted),
+                                }),
+                                Ok(Err(e)) => Err(CreateSessionError::Message(e)),
+                                // The session never answered: it went away
+                                // under us, which for a message nobody wrote is
+                                // the same as never having found it.
+                                Err(_) => {
+                                    Err(CreateSessionError::Message(UserMessageError::NotFound))
+                                }
+                            },
+                        },
+                        Ok(Err(e)) => Err(CreateSessionError::NotRecorded(e.to_string())),
+                        Err(_) => Err(CreateSessionError::NotRecorded(
+                            "the supervisor went away mid-create".to_string(),
+                        )),
+                    };
+                    let _ = reply.send(outcome);
+                });
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
                     spec,
                     created_at,
                 }])
+                .and_ack(ReplyTo::from_sender(written))
             }
             SessionSupervisorCommand::List { reply } => {
                 let sessions = state
@@ -1251,7 +1330,7 @@ mod tests {
     use crate::sessions::session_actor::SessionActor;
     use crate::sessions::session_actor::SessionDomainEvent;
     use crate::sessions::spec::AgentSettings;
-    use horsie_actor::Journal;
+    use horsie_actor::{InMemoryJournal, Journal};
 
     fn spec_fixture() -> SessionSpec {
         SessionSpec {
@@ -1390,14 +1469,120 @@ mod tests {
             .unwrap()
     }
 
+    /// A create must not answer before the session it minted is in the journal.
+    ///
+    /// Placement is a pure function of the live member set, so a membership
+    /// change — a node joining as a cluster forms, a heartbeat arriving late on
+    /// a loaded machine — moves this shard, and the next command rebuilds the
+    /// supervisor from the journal somewhere else. An id answered ahead of its
+    /// own `SessionCreated` is one that node has never heard of: `POST
+    /// /api/sessions` returned `404 no such session` for the session it was in
+    /// the middle of creating.
+    ///
+    /// The write is held rather than merely raced. With an ordinary journal it
+    /// wins by a mile, and a create that answers too early passes anyway.
+    #[tokio::test]
+    async fn a_create_answers_only_once_its_session_is_recorded() {
+        let journal = crate::testing::HeldJournal::wrapping(
+            Arc::new(InMemoryJournal::new()),
+            SUPERVISOR_KIND,
+        );
+        let agent = FakeRuntimeVendor::builder("mock")
+            .serve_in_process()
+            .await
+            .expect("fake agent");
+        let clock: Arc<TestClock> = Arc::new(TestClock::new());
+        let node = crate::testing::Deployment::on(
+            journal.clone(),
+            crate::sessions::session_actor::testing::fake_deps(&agent, None),
+            manual_config(&clock),
+        )
+        .await;
+        let sup = node.services().await.supervisor.clone();
+        // Started and recovered before anything is held: a hold engaged over
+        // the supervisor's own arrival would stall that instead, and the
+        // assertion below would pass for a reason that has nothing to do with
+        // the create.
+        list_revision(&sup).await;
+
+        let unwritable = journal.hold().await;
+        let creating = tokio::spawn({
+            let sup = sup.clone();
+            async move { create_saying(&sup, Some("hi")).await }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !creating.is_finished(),
+            "a create answered while its own record was still unwritten"
+        );
+
+        drop(unwritable);
+        let id = tokio::time::timeout(Duration::from_secs(5), creating)
+            .await
+            .expect("the create answers once its record lands")
+            .unwrap();
+
+        // Every actor stopped: what a placement change leaves behind. The
+        // supervisor that answers next recovers from the journal, and the
+        // session it hands back is there.
+        node.restart().await;
+        let listed = node
+            .services()
+            .await
+            .supervisor
+            .ask(|reply| SessionSupervisorCommand::List { reply })
+            .await
+            .unwrap();
+        assert!(
+            listed.iter().any(|(known, _)| *known == id),
+            "a create answered with {id}, which the journal never recorded: {:?}",
+            listed.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+    }
+
+    /// A create queues its first message itself.
+    ///
+    /// The reason the two are one command: a `UserMessage` sent afterwards is
+    /// addressed a second time, and a shard that moved in between left it
+    /// talking to a supervisor with no such session. So the create answers with
+    /// what became of the message, and there is no second address to get wrong.
+    #[tokio::test]
+    async fn a_create_queues_its_first_message_in_the_same_command() {
+        let f = fixture().await;
+        let created = f
+            .supervisor()
+            .await
+            .ask(|reply| SessionSupervisorCommand::Create {
+                spec: spec_fixture(),
+                created_at: 1,
+                message: Some("hi".to_string()),
+                reply,
+            })
+            .await
+            .unwrap()
+            .expect("the create succeeds");
+        assert!(
+            created.message.is_some(),
+            "a create carrying a message must answer with what became of it"
+        );
+    }
+
     async fn create(sup: &SupervisorRef) -> SessionId {
+        create_saying(sup, None).await
+    }
+
+    /// A create with a first message, which is what every conversation is.
+    async fn create_saying(sup: &SupervisorRef, message: Option<&str>) -> SessionId {
         sup.ask(|reply| SessionSupervisorCommand::Create {
             spec: spec_fixture(),
             created_at: 1,
+            message: message.map(str::to_string),
             reply,
         })
         .await
         .unwrap()
+        .unwrap()
+        .id
     }
 
     async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
@@ -2226,10 +2411,13 @@ mod tests {
                     ..spec_fixture()
                 },
                 created_at: 1,
+                message: None,
                 reply,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .unwrap()
+            .id;
         sup.ask(|reply| SessionSupervisorCommand::RenameSession {
             id: id.clone(),
             name: "Investigate login failure".into(),
@@ -2282,10 +2470,13 @@ mod tests {
                     ..spec_fixture()
                 },
                 created_at: 1,
+                message: None,
                 reply,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .unwrap()
+            .id;
 
         let named = sup
             .ask(|reply| SessionSupervisorCommand::SetSessionTitle {

@@ -335,6 +335,111 @@ impl Deployment {
     }
 }
 
+/// A journal that can stall one actor kind's writes on demand.
+///
+/// For asserting *when* something answers rather than what it answers with. A
+/// promise that a reply means a durable write is only testable by stopping the
+/// write and watching the reply not arrive; with an ordinary journal the write
+/// wins the race by a mile and a broken promise passes.
+///
+/// Open until [`hold`](Self::hold) is called, so an actor can be started and
+/// warmed first — a hold engaged before that stalls the actor's own recovery
+/// and every later assertion is about the wrong thing.
+pub struct HeldJournal {
+    inner: Arc<dyn horsie_actor::Journal>,
+    kind: String,
+    lock: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl HeldJournal {
+    /// Wrap `inner`, ready to stall writes for `kind`. Other kinds always pass
+    /// straight through, so only the log under test is ever stopped.
+    pub fn wrapping(inner: Arc<dyn horsie_actor::Journal>, kind: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            kind: kind.to_string(),
+            lock: Arc::new(tokio::sync::RwLock::new(())),
+        })
+    }
+
+    /// Stall `kind`'s writes until the returned guard is dropped.
+    pub async fn hold(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.lock.clone().write_owned().await
+    }
+}
+
+#[async_trait::async_trait]
+impl horsie_actor::Journal for HeldJournal {
+    async fn persist(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        events: &[Vec<u8>],
+        expected_last_seq: u64,
+    ) -> horsie_actor::JournalResult<()> {
+        let _open = if pid.kind == self.kind {
+            Some(self.lock.read().await)
+        } else {
+            None
+        };
+        self.inner.persist(pid, events, expected_last_seq).await
+    }
+
+    // The rule is "read a journal through the actor that owns it". This is not a
+    // read: it is the wrapper handing the call to the journal underneath, which
+    // is the actor's own `replay` passing through.
+    #[allow(clippy::disallowed_methods)]
+    async fn replay(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        after_seq: u64,
+    ) -> futures_util::stream::BoxStream<'_, horsie_actor::JournalResult<(u64, Vec<u8>)>> {
+        self.inner.replay(pid, after_seq).await
+    }
+
+    async fn save_snapshot(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        state: Vec<u8>,
+        seq_nr: u64,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.save_snapshot(pid, state, seq_nr).await
+    }
+
+    async fn latest_snapshot(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<Option<(Vec<u8>, u64)>> {
+        self.inner.latest_snapshot(pid).await
+    }
+
+    async fn delete_events_before(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+        seq_nr: u64,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.delete_events_before(pid, seq_nr).await
+    }
+
+    async fn copy_snapshot(
+        &self,
+        from: &horsie_actor::PersistenceId,
+        to: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<()> {
+        self.inner.copy_snapshot(from, to).await
+    }
+
+    async fn last_seq(
+        &self,
+        pid: &horsie_actor::PersistenceId,
+    ) -> horsie_actor::JournalResult<u64> {
+        self.inner.last_seq(pid).await
+    }
+
+    async fn clear(&self, pid: &horsie_actor::PersistenceId) -> horsie_actor::JournalResult<()> {
+        self.inner.clear(pid).await
+    }
+}
+
 /// Start an event-sourced actor at a throwaway path, reachable only by the
 /// reference returned.
 ///

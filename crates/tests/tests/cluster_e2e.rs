@@ -454,8 +454,11 @@ async fn a_session_created_on_one_node_is_readable_on_another() {
             }),
         )
         .await;
-    assert_eq!(created.status(), 201, "node 0 should create the session");
+    // The body before the status, so a create that failed says why rather than
+    // leaving a bare number to guess from.
+    let status = created.status();
     let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(status, 201, "node 0 should create the session: {body}");
     let id = body["session"]["id"]
         .as_str()
         .expect("a session id")
@@ -539,8 +542,11 @@ async fn a_session_created_on_one_node_wakes_a_list_reader_on_another() {
         .node(0)
         .post_when_serving("/api/sessions", &new_session("hi"))
         .await;
-    assert_eq!(created.status(), 201, "node 0 should create the session");
+    // The body before the status, so a create that failed says why rather than
+    // leaving a bare number to guess from.
+    let status = created.status();
     let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(status, 201, "node 0 should create the session: {body}");
     let id = body["session"]["id"].as_str().expect("a session id");
 
     let listed = frames
@@ -574,8 +580,11 @@ async fn a_turn_on_one_node_moves_a_message_reader_on_another() {
         .node(0)
         .post_when_serving("/api/sessions", &new_session("hi"))
         .await;
-    assert_eq!(created.status(), 201, "node 0 should create the session");
+    // The body before the status, so a create that failed says why rather than
+    // leaving a bare number to guess from.
+    let status = created.status();
     let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(status, 201, "node 0 should create the session: {body}");
     let id = body["session"]["id"]
         .as_str()
         .expect("a session id")
