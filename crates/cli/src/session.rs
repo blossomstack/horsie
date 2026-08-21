@@ -153,6 +153,7 @@ const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// after the `Last-Event-ID` cursor, then bridges to the live broadcast.
 pub async fn tail(
     server: &str,
+    project: Option<&str>,
     session_id: &str,
     output: &Path,
     mode: EventsMode,
@@ -174,10 +175,13 @@ pub async fn tail(
     // reconnect loop could not see anyway, and a tail that outlives its access
     // token reconnects and re-resolves from the top.
     let token = crate::auth::resolve_token(server).await?;
+    // Resolved once, outside the reconnect loop: the stream stays in the
+    // project it started in even if the account's default were to change.
+    let project = crate::server_client::project_for(server, token.as_deref(), project).await?;
     // One endpoint, one stream. `aid` names the agent's log; absent means the
     // session's primary agent, and session-scoped events ride that log too.
     let url = format!(
-        "{}/api/sessions/{session_id}/messages?aid={}",
+        "{}/api/p/{project}/sessions/{session_id}/messages?aid={}",
         server.trim_end_matches('/'),
         agent.unwrap_or("main")
     );
@@ -278,16 +282,19 @@ fn scan_last_message_id(path: &Path) -> Result<Option<String>, CliError> {
 }
 
 /// `horsie session list` — every session the server knows about.
-pub async fn list(server: &str) -> Result<(), CliError> {
-    let sessions = ServerClient::new(server).await?.list_sessions().await?;
+pub async fn list(server: &str, project: Option<&str>) -> Result<(), CliError> {
+    let sessions = ServerClient::new(server, project)
+        .await?
+        .list_sessions()
+        .await?;
     print!("{}", render_session_table(&sessions, now_ms()));
     Ok(())
 }
 
 /// `horsie session status <id>` — a point-in-time snapshot (live progress is
 /// `session tail`'s job).
-pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let client = ServerClient::new(server).await?;
+pub async fn status(server: &str, project: Option<&str>, session_id: &str) -> Result<(), CliError> {
+    let client = ServerClient::new(server, project).await?;
     let detail = client.get_session(session_id).await?;
     // The model and configuration are the *agent's*, not the session's, so the
     // primary agent's document supplies them.

@@ -231,7 +231,7 @@ mod tests {
                     version: "test".into(),
                 },
             },
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )
         .await
         .unwrap();
@@ -274,7 +274,7 @@ mod tests {
             .unwrap();
         (
             AgentService::new(
-                AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+                AgentStore::new(opened.db.clone(), crate::projects::ProjectId::new("1")),
                 opened.store.clone(),
             ),
             tmp,

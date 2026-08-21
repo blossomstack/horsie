@@ -15,8 +15,8 @@ use crate::config::model_cards;
 use crate::db::Db;
 use crate::http::AppState;
 use crate::plugins::ArtifactStore;
+use crate::projects::{ProjectRegistry, Shared, register_session_shards};
 use crate::routines::RoutineScheduler;
-use crate::users::{Shared, UserRegistry, register_session_shards};
 use horsie_models::model_cards::ModelCardInput;
 use horsie_models::settings::ServerInfo;
 use std::path::PathBuf;
@@ -164,7 +164,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         ),
     };
 
-    let system = crate::users::node_system(&db, cluster.clone());
+    let system = crate::projects::node_system(&db, cluster.clone());
     if let Some(node) = &cluster {
         // Only now: the pump needs both halves, and nothing may arrive for this
         // node before something is draining it.
@@ -175,6 +175,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         system,
         serving: cluster.as_ref().map(|node| node.serving_watch()),
         bus,
+        project_service: Arc::new(crate::projects::ProjectService::new(db.clone())),
         db,
         artifacts: Arc::new(ArtifactStore::new(data_dir.join("plugins"))),
         info,
@@ -187,7 +188,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         deps: None,
         fly_api_base: crate::runtime_vendor::fly_api::DEFAULT_API_BASE.to_string(),
     });
-    let users = Arc::new(UserRegistry::new(shared.clone()));
+    let users = Arc::new(ProjectRegistry::new(shared.clone()));
     // Once per node, and only now: a recipe resolves an account's bundle
     // through the registry, so there has to be one for it to close over.
     register_session_shards(&users)?;
@@ -201,7 +202,7 @@ pub async fn boot(opts: BootOptions) -> Result<Booted, String> {
         state: AppState {
             auth,
             shared,
-            users,
+            projects: users,
             web_dir: opts.web_dir,
         },
         initial_password,

@@ -1,6 +1,7 @@
 // Reusable UI actions built on the data-testid hooks. Keep flow logic here so
 // the specs read as intent, not selector plumbing.
 
+import { readRuntimeInfo } from "./harness";
 import { expect, type Page } from "@playwright/test";
 
 /**
@@ -14,6 +15,44 @@ import { expect, type Page } from "@playwright/test";
  * makes the composer's send-while-starting race reachable; only the specs that
  * assert on plugin content should ask for it.
  */
+/**
+ * The path every route in this suite is relative to: `/p/<project>`.
+ *
+ * Every page horsie serves lives under a project, and the web router's basename
+ * is that prefix — so an assertion on a bare `/agents` is asserting about a
+ * document the app never renders.
+ */
+export function projectRoot(): string {
+  return `/p/${readRuntimeInfo().project}`;
+}
+
+/**
+ * Sign in if asked, then report the project `/` sent the browser to.
+ *
+ * For the two suites that run their own auth-enabled server. `defaultProject`
+ * cannot serve them: it fetches with no credential, which such a server answers
+ * with a 401 — and the redirect at `/` is behind the login form for the same
+ * reason. So this does what a person does: open the root, sign in, and read
+ * where it landed.
+ */
+export async function projectOf(
+  page: Page,
+  baseURL: string,
+  password: string,
+): Promise<string> {
+  await page.goto(baseURL);
+  const form = page.getByTestId("login-form");
+  if (await form.isVisible().catch(() => false)) {
+    await page.getByTestId("login-password").fill(password);
+    await page.getByTestId("login-submit").click();
+    await expect(form).toHaveCount(0);
+  }
+  await page.waitForURL(/\/p\/[^/]+/);
+  const id = new URL(page.url()).pathname.split("/")[2];
+  if (!id) throw new Error(`no project in ${page.url()}`);
+  return id;
+}
+
 export async function createSession(
   page: Page,
   appBase: string,
@@ -46,7 +85,7 @@ export async function createSession(
  * and waits for the `/sessions/:id` route. Returns the session id.
  */
 export async function sendMessage(page: Page, text: string): Promise<string> {
-  const onDraft = new URL(page.url()).pathname === "/";
+  const onDraft = new URL(page.url()).pathname === projectRoot();
   const input = page.getByTestId("composer-input");
   await input.fill(text);
   await input.press("Enter");

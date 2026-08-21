@@ -6,7 +6,7 @@
 //! route in `http::plugins`.
 
 use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use horsie_models::plugins::{CatalogEntryView, PluginDefaultInput, PluginInstallInput};
 use std::sync::Arc;
 
@@ -33,22 +33,22 @@ impl Resource for Plugins {
             op(
                 "list",
                 Method::Get,
-                "/api/plugins",
+                "/plugins",
                 "Every installed bundle, with the skills, commands and MCP \
                  servers it contributes.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.plugins.list().await.map_err(ControlError::Internal)
                 },
             ),
             op(
                 "builtins",
                 Method::Get,
-                "/api/builtins",
+                "/builtins",
                 "The slash commands horsie answers itself. Offered whether or \
                  not any bundle is installed.",
                 Expose::ApiAndTool,
-                |_s: Arc<UserServices>, _i: NoInput| async move {
+                |_s: Arc<ProjectServices>, _i: NoInput| async move {
                     Ok::<Vec<CatalogEntryView>, ControlError>(
                         horsie_support::plugin::builtins::catalogue_entries(),
                     )
@@ -57,12 +57,12 @@ impl Resource for Plugins {
             op(
                 "install",
                 Method::Post,
-                "/api/plugins",
+                "/plugins",
                 "Install a bundle from a URL, or from a marketplace by name. A \
                  URL that turns out to declare several plugins is recorded as a \
                  marketplace instead, and the outcome says which happened.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: PluginInstallInput| async move {
+                |s: Arc<ProjectServices>, i: PluginInstallInput| async move {
                     s.plugins.install(i).await.map_err(ControlError::Invalid)
                 },
             )
@@ -70,10 +70,10 @@ impl Resource for Plugins {
             op(
                 "set-default",
                 Method::Put,
-                "/api/plugins/{name}",
+                "/plugins/{name}",
                 "Toggle whether a bundle is pre-selected for new sessions.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: SetPluginDefault| async move {
+                |s: Arc<ProjectServices>, i: SetPluginDefault| async move {
                     s.plugins
                         .set_default(&i.name, i.input)
                         .await
@@ -83,10 +83,10 @@ impl Resource for Plugins {
             op(
                 "delete",
                 Method::Delete,
-                "/api/plugins/{name}",
+                "/plugins/{name}",
                 "Remove a bundle and garbage-collect its artifact.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.plugins
                         .remove(&i.name)
                         .await
@@ -97,10 +97,10 @@ impl Resource for Plugins {
             op(
                 "update",
                 Method::Post,
-                "/api/plugins/{name}/update",
+                "/plugins/{name}/update",
                 "Re-clone a bundle from the source it was installed from.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.plugins
                         .update(&i.name)
                         .await

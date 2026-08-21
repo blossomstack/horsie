@@ -4,8 +4,8 @@
 //! when cards change. Seeded on an account's first touch (insert-if-missing),
 //! managed via /api/admin/model-cards, searched via /api/model-cards.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -29,7 +29,7 @@ pub struct ModelCardStore {
     db: Db,
     /// Bound once, here, rather than passed per call: there is then no call
     /// site that *can* hand a method the wrong account.
-    user: UserId,
+    user: ProjectId,
 }
 
 fn validate(
@@ -136,14 +136,14 @@ fn row_to_card(r: &AnyRow) -> Result<ModelCard, sqlx::Error> {
 }
 
 impl ModelCardStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     /// Every card, ordered by `model_id`.
     pub async fn list(&self) -> Result<Vec<ModelCard>, ModelCardError> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? ORDER BY model_id"
+            "SELECT {COLUMNS} FROM model_cards WHERE project_id = ? ORDER BY model_id"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -164,7 +164,7 @@ impl ModelCardStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? AND model_id LIKE ? ESCAPE '\\' \
+            "SELECT {COLUMNS} FROM model_cards WHERE project_id = ? AND model_id LIKE ? ESCAPE '\\' \
              ORDER BY model_id LIMIT ?"
         )))
         .bind(self.user.as_str())
@@ -181,7 +181,7 @@ impl ModelCardStore {
 
     pub async fn get(&self, model_id: &str) -> Result<Option<ModelCard>, ModelCardError> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLUMNS} FROM model_cards WHERE user_id = ? AND model_id = ?"
+            "SELECT {COLUMNS} FROM model_cards WHERE project_id = ? AND model_id = ?"
         )))
         .bind(self.user.as_str())
         .bind(model_id)
@@ -211,7 +211,7 @@ impl ModelCardStore {
             )));
         }
         sqlx::query(&self.db.q(
-            "INSERT INTO model_cards (user_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+            "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
@@ -251,7 +251,7 @@ impl ModelCardStore {
             "UPDATE model_cards SET name = ?, context_window = ?, max_tokens = ?, \
              thinking_efforts = ?, default_thinking_effort = ?, thinking_dialect = ?, \
              base_url = ?, forced_tools_disable_thinking = ?, \
-             updated_at = {} WHERE user_id = ? AND model_id = ?",
+             updated_at = {} WHERE project_id = ? AND model_id = ?",
             self.db.now_text()
         );
         let res = sqlx::query(&self.db.q(&statement))
@@ -286,7 +286,7 @@ impl ModelCardStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM model_cards WHERE user_id = ? AND model_id = ?"),
+                .q("DELETE FROM model_cards WHERE project_id = ? AND model_id = ?"),
         )
         .bind(self.user.as_str())
         .bind(model_id)
@@ -311,9 +311,9 @@ impl ModelCardStore {
             // `ON CONFLICT DO NOTHING` rather than SQLite's `INSERT OR IGNORE`:
             // same semantics, and the standard spelling works on both backends.
             let res = sqlx::query(&self.db.q(
-                "INSERT INTO model_cards (user_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
+                "INSERT INTO model_cards (project_id, model_id, name, context_window, max_tokens, thinking_efforts, default_thinking_effort, thinking_dialect, base_url, forced_tools_disable_thinking) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT (user_id, model_id) DO NOTHING",
+                 ON CONFLICT (project_id, model_id) DO NOTHING",
             ))
             .bind(self.user.as_str())
             .bind(&c.model_id)
@@ -352,7 +352,7 @@ impl ModelCardStore {
         let seen: Option<String> = sqlx::query_scalar(
             &self
                 .db
-                .q("SELECT value FROM settings WHERE user_id = ? AND key = ?"),
+                .q("SELECT value FROM settings WHERE project_id = ? AND key = ?"),
         )
         .bind(self.user.as_str())
         .bind(SEED_MARKER_KEY)
@@ -364,8 +364,8 @@ impl ModelCardStore {
         }
         let inserted = self.seed_if_missing(cards).await?;
         sqlx::query(&self.db.q(
-            "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
-             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO settings (project_id, key, value) VALUES (?, ?, ?) \
+             ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value",
         ))
         .bind(self.user.as_str())
         .bind(SEED_MARKER_KEY)
@@ -439,7 +439,7 @@ mod tests {
     use super::*;
 
     async fn test_store() -> ModelCardStore {
-        ModelCardStore::new(crate::db::testing::db().await, UserId::new("1"))
+        ModelCardStore::new(crate::db::testing::db().await, ProjectId::new("1"))
     }
 
     /// The marker is what stops a boot-time loop becoming a per-request one:
@@ -486,8 +486,8 @@ mod tests {
     async fn each_account_is_seeded_separately() {
         let db = crate::db::testing::db().await;
         let (one, two) = (
-            ModelCardStore::new(db.clone(), UserId::generate()),
-            ModelCardStore::new(db, UserId::generate()),
+            ModelCardStore::new(db.clone(), ProjectId::generate()),
+            ModelCardStore::new(db, ProjectId::generate()),
         );
         let seeds = [input("m1", "One", Some(1000), None)];
         let marker = seed_marker(&seeds);
@@ -903,17 +903,15 @@ mod tests {
         assert_eq!(cards, 0, "migrations must not seed the catalog");
 
         // The new columns exist and default correctly on both tables.
-        sqlx::query(
-            &db.q(
-                "INSERT INTO model_cards (user_id, model_id, name) VALUES ('1', 'probe', 'Probe')",
-            ),
-        )
+        sqlx::query(&db.q(
+            "INSERT INTO model_cards (project_id, model_id, name) VALUES ('1', 'probe', 'Probe')",
+        ))
         .execute(pool)
         .await
         .expect("insert without the new columns still works");
         let row = sqlx::query(&db.q(
             "SELECT base_url, forced_tools_disable_thinking FROM model_cards \
-             WHERE user_id = '1' AND model_id = 'probe'",
+             WHERE project_id = '1' AND model_id = 'probe'",
         ))
         .fetch_one(pool)
         .await

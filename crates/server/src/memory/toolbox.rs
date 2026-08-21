@@ -391,7 +391,7 @@ mod tests {
         let pool = crate::db::testing::db().await;
         let service = Arc::new(MemoryService::new(MemoryStore::new(
             pool,
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )));
         for s in spaces {
             if *s != "default" {

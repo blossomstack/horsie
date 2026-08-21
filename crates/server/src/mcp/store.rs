@@ -5,8 +5,8 @@
 //! `""` clears, a value sets). `github_app` servers store no token — it is
 //! minted from the GitHub App connection at use time.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_agentcore::Secret;
 use horsie_models::mcp::{McpAuthInput, McpOAuthInput, McpServerInput};
 use sqlx::Row;
@@ -99,12 +99,20 @@ pub fn validate_server_name(name: &str) -> Result<(), String> {
 pub struct McpStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    project: ProjectId,
 }
 
 impl McpStore {
-    pub fn new(db: Db, user: UserId) -> Self {
-        Self { db, user }
+    pub fn new(db: Db, project: ProjectId) -> Self {
+        Self { db, project }
+    }
+
+    /// The project these servers belong to. Read by the OAuth callback builder:
+    /// a `redirect_uri` has to name the project, because the route that
+    /// receives it lives inside one.
+    #[must_use]
+    pub fn project(&self) -> &ProjectId {
+        &self.project
     }
 
     /// All configured servers, ordered by name.
@@ -113,9 +121,9 @@ impl McpStore {
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
              tool_count, last_error \
-             FROM mcp_servers WHERE user_id = ? ORDER BY name",
+             FROM mcp_servers WHERE project_id = ? ORDER BY name",
         ))
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .fetch_all(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -133,9 +141,9 @@ impl McpStore {
             "SELECT name, url, enabled, auth_kind, bearer_token, \
              oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
              tool_count, last_error \
-             FROM mcp_servers WHERE user_id = ? AND name = ?",
+             FROM mcp_servers WHERE project_id = ? AND name = ?",
         ))
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(name)
         .fetch_optional(self.db.pool())
         .await
@@ -161,11 +169,11 @@ impl McpStore {
         let now = now_secs().to_string();
         sqlx::query(&self.db.q(
             "INSERT INTO mcp_servers \
-             (user_id, name, url, enabled, auth_kind, bearer_token, \
+             (project_id, name, url, enabled, auth_kind, bearer_token, \
               oauth_client_id, oauth_client_secret, oauth_access_token, oauth_refresh_token, oauth_expires_at, oauth_meta, \
               tool_count, last_error, created_at, updated_at) \
              VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?) \
-             ON CONFLICT(user_id, name) DO UPDATE SET \
+             ON CONFLICT(project_id, name) DO UPDATE SET \
              url = excluded.url, auth_kind = excluded.auth_kind, \
              bearer_token = excluded.bearer_token, \
              oauth_client_id = excluded.oauth_client_id, \
@@ -176,7 +184,7 @@ impl McpStore {
              oauth_meta = excluded.oauth_meta, \
              enabled = 0, tool_count = NULL, last_error = NULL, updated_at = excluded.updated_at",
         ))
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(name)
         .bind(url)
         .bind(auth.kind())
@@ -202,9 +210,9 @@ impl McpStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM mcp_servers WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM mcp_servers WHERE project_id = ? AND name = ?"),
         )
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(name)
         .execute(self.db.pool())
         .await
@@ -223,13 +231,13 @@ impl McpStore {
     ) -> Result<(), String> {
         sqlx::query(&self.db.q(
             "UPDATE mcp_servers SET enabled = ?, tool_count = ?, last_error = ?, updated_at = ? \
-             WHERE user_id = ? AND name = ?",
+             WHERE project_id = ? AND name = ?",
         ))
         .bind(i64::from(enabled))
         .bind(tool_count.map(i64::from))
         .bind(last_error)
         .bind(now_secs().to_string())
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(name)
         .execute(self.db.pool())
         .await
@@ -248,13 +256,13 @@ impl McpStore {
     ) -> Result<(), String> {
         sqlx::query(&self.db.q(
             "UPDATE mcp_servers SET oauth_client_id = ?, oauth_client_secret = ?, oauth_meta = ?, updated_at = ? \
-             WHERE user_id = ? AND name = ?",
+             WHERE project_id = ? AND name = ?",
         ))
         .bind(client_id)
         .bind(client_secret)
         .bind(meta)
         .bind(now_secs().to_string())
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(name)
         .execute(self.db.pool())
         .await
@@ -274,13 +282,13 @@ impl McpStore {
         match refresh {
             Some(rt) => {
                 sqlx::query(&self.db.q(
-                    "UPDATE mcp_servers SET oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?, updated_at = ? WHERE user_id = ? AND name = ?",
+                    "UPDATE mcp_servers SET oauth_access_token = ?, oauth_refresh_token = ?, oauth_expires_at = ?, updated_at = ? WHERE project_id = ? AND name = ?",
                 ))
                 .bind(access)
                 .bind(rt)
                 .bind(expires_at)
                 .bind(now_secs().to_string())
-                .bind(self.user.as_str())
+                .bind(self.project.as_str())
                 .bind(name)
                 .execute(self.db.pool())
                 .await
@@ -288,12 +296,12 @@ impl McpStore {
             }
             None => {
                 sqlx::query(&self.db.q(
-                    "UPDATE mcp_servers SET oauth_access_token = ?, oauth_expires_at = ?, updated_at = ? WHERE user_id = ? AND name = ?",
+                    "UPDATE mcp_servers SET oauth_access_token = ?, oauth_expires_at = ?, updated_at = ? WHERE project_id = ? AND name = ?",
                 ))
                 .bind(access)
                 .bind(expires_at)
                 .bind(now_secs().to_string())
-                .bind(self.user.as_str())
+                .bind(self.project.as_str())
                 .bind(name)
                 .execute(self.db.pool())
                 .await
@@ -455,7 +463,10 @@ mod tests {
     async fn store() -> (McpStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (McpStore::new(pool, crate::auth::UserId::new("1")), tmp)
+        (
+            McpStore::new(pool, crate::projects::ProjectId::new("1")),
+            tmp,
+        )
     }
 
     fn bearer_input(name: &str, token: Option<&str>) -> McpServerInput {

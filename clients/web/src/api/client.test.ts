@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiRequestError } from "./client";
+import { api, ApiRequestError, setCurrentProject } from "./client";
+
+// Every scoped call carries the project, so a suite that never sets one is
+// testing a state no browser is ever in. `ProjectScope` does this from the URL.
+setCurrentProject("p1");
 
 /**
  * The error path only. Every one of these cases reached a user as a bare
@@ -25,7 +29,7 @@ describe("agent invocation", () => {
       environment: { type: "Runtime", value: { vendor: "local" } },
     });
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/agents/reviewer/invoke", {
+    expect(fetchMock).toHaveBeenCalledWith("/api/p/p1/agents/reviewer/invoke", {
       headers: { "Content-Type": "application/json" },
       method: "POST",
       body: JSON.stringify({
@@ -111,5 +115,49 @@ describe("request error reporting", () => {
     reply({ status: 500, body: JSON.stringify({ nope: true }) });
     const e = await failure();
     expect(e.message).toBe('{"nope":true}');
+  });
+});
+
+/**
+ * A scoped call with no project is a routing bug, and it says so rather than
+ * quietly asking for `/api/agents` — which the server answers with a 404 that
+ * reads like an empty account.
+ */
+describe("the project prefix", () => {
+  it("refuses a scoped call before a project is known", async () => {
+    setCurrentProject(null as unknown as string);
+    await expect(api.agents.list()).rejects.toThrow(/No project selected/);
+    setCurrentProject("p1");
+  });
+
+  it("leaves the credential routes unprefixed", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+    await api.auth.status();
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/auth/status");
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * The deployment-wide routes, which are not a project's to answer.
+   *
+   * Asking for one under a project is a 404 the UI renders as an empty
+   * feature — the tool picker came up with no groups at all, which reads as
+   * "this server offers no tools" rather than as a wrong URL.
+   */
+  it("leaves the deployment-wide routes unprefixed", async () => {
+    // A fresh `Response` per call: a body can only be read once.
+    const fetchMock = vi.fn().mockImplementation(() => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+    for (const [call, expected] of [
+      [() => api.tools.catalog(), "/api/tools"],
+      [() => api.health(), "/api/health"],
+      [() => api.projects.list(), "/api/projects"],
+    ] as const) {
+      fetchMock.mockClear();
+      await call();
+      expect(fetchMock.mock.calls[0][0]).toBe(expected);
+    }
+    vi.unstubAllGlobals();
   });
 });

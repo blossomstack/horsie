@@ -1,3 +1,4 @@
+import { projectRoot } from "./helpers";
 // Group N — agent presets: the /agents page lists, edits, and deletes a
 // preset created through the API (the model alias comes from the harness's
 // seeded settings, since save-time validation requires a configured model).
@@ -6,14 +7,15 @@ import { expect, test } from "./fixtures";
 test("N1: agents page lists, edits, and deletes an agent", async ({
   page,
   appBase,
+  apiBase,
 }) => {
   const cfg = (await (
-    await page.request.get(`${appBase}/api/config`)
+    await page.request.get(`${apiBase}/config`)
   ).json()) as { models: { alias: string }[] };
   const alias = cfg.models[0]?.alias;
   expect(alias, "the e2e harness seeds at least one model").toBeTruthy();
 
-  const res = await page.request.post(`${appBase}/api/agents`, {
+  const res = await page.request.post(`${apiBase}/agents`, {
     data: { name: "e2e-agent", model: alias, description: "from e2e" },
   });
   expect(res.status()).toBe(201);
@@ -38,7 +40,7 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
     .getByTestId("agent-instructions-input")
     .fill("Always end every reply with the word PELICAN.");
   await page.getByTestId("save-agent-button").click();
-  await page.waitForURL((url) => url.pathname === "/agents");
+  await page.waitForURL((url) => url.pathname === projectRoot() + "/agents");
   await expect(page.getByTestId("agent-row")).toContainText("edited");
 
   await page.getByTestId("agent-row").getByRole("link").click();
@@ -56,7 +58,7 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
 test("N2: the sidebar links to the agents page", async ({ page, appBase }) => {
   await page.goto(appBase);
   await page.getByTestId("agents-link").click();
-  await page.waitForURL((url) => url.pathname === "/agents");
+  await page.waitForURL((url) => url.pathname === projectRoot() + "/agents");
   await expect(page.getByTestId("agents-page")).toBeVisible();
 });
 
@@ -66,11 +68,12 @@ test("N2: the sidebar links to the agents page", async ({ page, appBase }) => {
 test("N3: the agent form offers skills and MCP, and no runtime", async ({
   page,
   appBase,
+  apiBase,
 }) => {
   const cfg = (await (
-    await page.request.get(`${appBase}/api/config`)
+    await page.request.get(`${apiBase}/config`)
   ).json()) as { models: { alias: string }[] };
-  const res = await page.request.post(`${appBase}/api/agents`, {
+  const res = await page.request.post(`${apiBase}/agents`, {
     data: { name: "e2e-channels", model: cfg.models[0]?.alias },
   });
   expect(res.status()).toBe(201);
@@ -83,17 +86,18 @@ test("N3: the agent form offers skills and MCP, and no runtime", async ({
   // against, belong to the invocation.
   await expect(page.getByTestId("config-environment")).toHaveCount(0);
 
-  await page.request.delete(`${appBase}/api/agents/e2e-channels`);
+  await page.request.delete(`${apiBase}/agents/e2e-channels`);
 });
 
 test("N4: the Horsie tool group is the control-plane grant, and it persists", async ({
   page,
   appBase,
+  apiBase,
 }) => {
   const cfg = (await (
-    await page.request.get(`${appBase}/api/config`)
+    await page.request.get(`${apiBase}/config`)
   ).json()) as { models: { alias: string }[] };
-  const res = await page.request.post(`${appBase}/api/agents`, {
+  const res = await page.request.post(`${apiBase}/agents`, {
     data: { name: "e2e-control", model: cfg.models[0]?.alias },
   });
   expect(res.status()).toBe(201);
@@ -129,7 +133,7 @@ test("N4: the Horsie tool group is the control-plane grant, and it persists", as
   await expect
     .poll(async () =>
       (
-        await (await page.request.get(`${appBase}/api/agents/e2e-control`)).json()
+        await (await page.request.get(`${apiBase}/agents/e2e-control`)).json()
       ).allowedTools?.includes("horsie_agents"),
     )
     .toBe(true);
@@ -143,5 +147,5 @@ test("N4: the Horsie tool group is the control-plane grant, and it persists", as
   await page.getByTestId("config-tools").click();
   await expect(page.getByTestId("tool-group-all-control")).toBeChecked();
 
-  await page.request.delete(`${appBase}/api/agents/e2e-control`);
+  await page.request.delete(`${apiBase}/agents/e2e-control`);
 });

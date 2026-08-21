@@ -639,6 +639,14 @@ mod tests {
     /// all of it — the seeded memory space on a fresh install, and *everything*
     /// on a deployment that had been running with authentication disabled and
     /// so had no account row for 0023 to carry across.
+    ///
+    /// Since `0040_projects.sql` the chain has one more link, and the same
+    /// property has to hold across it: the rows belong to a *project*, and the
+    /// first account's default project has to be that one. It is, because 0040
+    /// seeds a project per owner it finds in the scoped tables and `0009`'s
+    /// memory space is such an owner — so `ensure_default` finds a row rather
+    /// than minting one. A default project minted fresh here would leave the
+    /// account looking at an empty deployment holding all its data.
     #[tokio::test]
     async fn the_first_account_owns_what_the_migration_backfilled() {
         let tmp = tempfile::tempdir().unwrap();
@@ -653,16 +661,21 @@ mod tests {
         svc.bootstrap().await.unwrap();
 
         let account = svc.sole_user().await.unwrap().expect("an account exists");
+        let project = crate::projects::ProjectService::new(db.clone())
+            .default_project(&account)
+            .await
+            .expect("the first account resolves a default project");
         let backfilled: String =
-            sqlx::query_scalar(&db.q("SELECT user_id FROM memory_spaces LIMIT 1"))
+            sqlx::query_scalar(&db.q("SELECT project_id FROM memory_spaces LIMIT 1"))
                 .fetch_one(db.pool())
                 .await
                 .unwrap();
 
         assert_eq!(
-            account.as_str(),
+            project.id.as_str(),
             backfilled,
-            "the account and the backfilled rows must be the same owner"
+            "the account's default project and the backfilled rows must be the \
+             same scope"
         );
     }
 

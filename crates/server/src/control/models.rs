@@ -5,7 +5,7 @@
 
 use crate::config::model_cards::ModelCardError;
 use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use horsie_models::settings::{
     DefaultRuntimeVendorInput, ModelInput, ModelView, ProviderInput, ProviderView,
 };
@@ -40,11 +40,11 @@ impl Resource for Models {
             op(
                 "list",
                 Method::Get,
-                "/api/config/models",
+                "/config/models",
                 "Every configured model alias. These are the names an agent \
                  preset or a session selects a model by.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     let view = s
                         .config_store
                         .view()
@@ -56,11 +56,11 @@ impl Resource for Models {
             op(
                 "replace",
                 Method::Put,
-                "/api/config/models/{alias}",
+                "/config/models/{alias}",
                 "Create or replace one model alias. `provider` must name a \
                  configured provider.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: ModelInput| async move {
+                |s: Arc<ProjectServices>, i: ModelInput| async move {
                     s.config_store
                         .upsert_model(i)
                         .await
@@ -70,11 +70,11 @@ impl Resource for Models {
             op(
                 "delete",
                 Method::Delete,
-                "/api/config/models/{alias}",
+                "/config/models/{alias}",
                 "Delete a model alias. Sessions and presets naming it stop \
                  resolving.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: ModelRef| async move {
+                |s: Arc<ProjectServices>, i: ModelRef| async move {
                     // An unknown alias is a 404 rather than a 422: the caller
                     // named a thing, not a malformed thing.
                     s.config_store.delete_model(&i.alias).await.map_err(|e| {
@@ -90,11 +90,11 @@ impl Resource for Models {
             op(
                 "list-providers",
                 Method::Get,
-                "/api/config/model-providers",
+                "/config/model-providers",
                 "Every configured LLM provider. Credentials are never returned \
                  — `has_credential` reports only whether one is stored.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     let view = s
                         .config_store
                         .view()
@@ -112,10 +112,10 @@ impl Resource for Models {
             op(
                 "replace-provider",
                 Method::Put,
-                "/api/config/model-providers/{name}",
+                "/config/model-providers/{name}",
                 "Create or replace one provider, including its API key.",
                 Expose::Api,
-                |s: Arc<UserServices>, i: ProviderInput| async move {
+                |s: Arc<ProjectServices>, i: ProviderInput| async move {
                     s.config_store
                         .upsert_provider(i)
                         .await
@@ -125,11 +125,11 @@ impl Resource for Models {
             op(
                 "delete-provider",
                 Method::Delete,
-                "/api/config/model-providers/{name}",
+                "/config/model-providers/{name}",
                 "Delete a provider and, with it, every model that routed \
                  through it.",
                 Expose::Api,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.config_store.delete_provider(&i.name).await.map_err(|e| {
                         if e.starts_with("no such provider") {
                             ControlError::NotFound(e)
@@ -143,21 +143,21 @@ impl Resource for Models {
             op(
                 "get-config",
                 Method::Get,
-                "/api/config",
+                "/config",
                 "The whole settings snapshot: providers, models, the live \
                  vendor roster, and this deployment's paths and version.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.config_store.view().await.map_err(ControlError::Internal)
                 },
             ),
             op(
                 "set-default-runtime-vendor",
                 Method::Put,
-                "/api/config/default-runtime-vendor",
+                "/config/default-runtime-vendor",
                 "Set the runtime vendor new sessions use when they name none.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: DefaultRuntimeVendorInput| async move {
+                |s: Arc<ProjectServices>, i: DefaultRuntimeVendorInput| async move {
                     s.config_store
                         .set_default_runtime_vendor(&i.vendor)
                         .await
@@ -170,12 +170,12 @@ impl Resource for Models {
             op(
                 "clear-default-runtime-vendor",
                 Method::Delete,
-                "/api/config/default-runtime-vendor",
+                "/config/default-runtime-vendor",
                 "Forget the default runtime vendor and fall back to the \
                  built-in one. Distinct from setting it to an empty string, \
                  which is refused.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.config_store
                         .clear_default_runtime_vendor()
                         .await
@@ -185,11 +185,11 @@ impl Resource for Models {
             op(
                 "list-cards",
                 Method::Get,
-                "/api/model-cards",
+                "/model-cards",
                 "Known model ids and their context windows, by prefix. Use this \
                  to find the `model_id` for a new alias.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: CardQuery| async move {
+                |s: Arc<ProjectServices>, i: CardQuery| async move {
                     s.model_cards
                         .search_by_prefix(i.prefix.as_deref().unwrap_or(""))
                         .await

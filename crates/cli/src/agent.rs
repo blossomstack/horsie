@@ -18,14 +18,20 @@ pub fn truncate(s: &str, max: usize) -> String {
     format!("{}…", kept.trim_end())
 }
 
-pub async fn list(server: &str) -> Result<(), CliError> {
-    let agents = ServerClient::new(server).await?.list_agents().await?;
+pub async fn list(server: &str, project: Option<&str>) -> Result<(), CliError> {
+    let agents = ServerClient::new(server, project)
+        .await?
+        .list_agents()
+        .await?;
     print!("{}", render_agent_table(&agents));
     Ok(())
 }
 
-pub async fn get(server: &str, name: &str) -> Result<(), CliError> {
-    let agent = ServerClient::new(server).await?.get_agent(name).await?;
+pub async fn get(server: &str, project: Option<&str>, name: &str) -> Result<(), CliError> {
+    let agent = ServerClient::new(server, project)
+        .await?
+        .get_agent(name)
+        .await?;
     print!("{}", render_agent_detail(&agent));
     Ok(())
 }
@@ -34,12 +40,13 @@ pub async fn get(server: &str, name: &str) -> Result<(), CliError> {
 /// we print the session id and its web link as soon as it answers.
 pub async fn invoke(
     server: &str,
+    project: Option<&str>,
     name: &str,
     message: String,
     environment: EnvironmentSpec,
     session_name: Option<String>,
 ) -> Result<(), CliError> {
-    let client = ServerClient::new(server).await?;
+    let client = ServerClient::new(server, project).await?;
     let res = client
         .invoke_agent(
             name,

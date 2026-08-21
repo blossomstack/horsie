@@ -64,6 +64,7 @@ test("I2: a long session replays whole, so there is nothing to scroll back for",
   page,
   appBase,
   mock,
+  apiBase,
 }) => {
   test.setTimeout(60_000);
   // 26 turns → 52 messages, just past the 50-message window, so the tail omits
@@ -83,8 +84,8 @@ test("I2: a long session replays whole, so there is nothing to scroll back for",
     .poll(
       async () => {
         const [h, s] = await Promise.all([
-          page.request.get(`${appBase}/api/sessions/${id}/messages?aid=main&max=1000`),
-          page.request.get(`${appBase}/api/sessions/${id}`),
+          page.request.get(`${apiBase}/sessions/${id}/messages?aid=main&max=1000`),
+          page.request.get(`${apiBase}/sessions/${id}`),
         ]);
         const count = llmMessageCount(await h.json());
         const status = (await s.json()).session.status as string;
@@ -102,7 +103,7 @@ test("I2: a long session replays whole, so there is nothing to scroll back for",
   // Waiting on either alone races one of the two Idle↔Running transitions.
   for (let i = 2; i <= turns; i++) {
     const res = await page.request.post(
-      `${appBase}/api/sessions/${id}/messages`,
+      `${apiBase}/sessions/${id}/messages`,
       { data: { text: `question ${i}` } },
     );
     expect(res.status()).toBe(202);
@@ -110,8 +111,8 @@ test("I2: a long session replays whole, so there is nothing to scroll back for",
       .poll(
         async () => {
           const [h, s] = await Promise.all([
-            page.request.get(`${appBase}/api/sessions/${id}/messages?aid=main&max=1000`),
-            page.request.get(`${appBase}/api/sessions/${id}`),
+            page.request.get(`${apiBase}/sessions/${id}/messages?aid=main&max=1000`),
+            page.request.get(`${apiBase}/sessions/${id}`),
           ]);
           const count = llmMessageCount(await h.json());
           const status = (await s.json()).session.status as string;

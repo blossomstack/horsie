@@ -410,7 +410,7 @@ pub(crate) mod tests {
                     version: "test".into(),
                 },
             },
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )
         .await
         .unwrap();
@@ -439,7 +439,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(
-            AgentStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+            AgentStore::new(opened.db.clone(), crate::projects::ProjectId::new("1")),
             opened.store.clone(),
         ));
         agents
@@ -459,14 +459,14 @@ pub(crate) mod tests {
             .unwrap();
         Fixture {
             routines: Arc::new(RoutineService::new(
-                RoutineStore::new(opened.db.clone(), crate::auth::UserId::new("1")),
+                RoutineStore::new(opened.db.clone(), crate::projects::ProjectId::new("1")),
                 agents.clone(),
             )),
             agents,
             environments: Arc::new(crate::environments::EnvironmentService::new(
                 crate::environments::EnvironmentStore::new(
                     opened.db.clone(),
-                    crate::auth::UserId::new("1"),
+                    crate::projects::ProjectId::new("1"),
                 ),
             )),
             config: opened.store.clone(),

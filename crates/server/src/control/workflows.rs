@@ -9,11 +9,11 @@ use crate::control::{
     ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, ask, op,
 };
 use crate::http::handlers;
+use crate::projects::ProjectServices;
 use crate::sessions::builder::build_workflow_spec;
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
 use crate::sessions::workflow::{ResolveRunError, resolve_run_spec};
-use crate::users::UserServices;
 use horsie_models::now_ms;
 use horsie_models::workflow::{
     WorkflowInput, WorkflowRunRequest, WorkflowRunResponse, WorkflowView,
@@ -47,31 +47,31 @@ impl Resource for Workflows {
             op(
                 "list",
                 Method::Get,
-                "/api/workflows",
+                "/workflows",
                 "Every saved workflow definition.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     Ok::<Vec<WorkflowView>, ControlError>(s.workflows.list().await?)
                 },
             ),
             op(
                 "get",
                 Method::Get,
-                "/api/workflows/{name}",
+                "/workflows/{name}",
                 "One workflow definition by slug.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     Ok::<WorkflowView, ControlError>(s.workflows.get(&i.name).await?)
                 },
             ),
             op(
                 "create",
                 Method::Post,
-                "/api/workflows",
+                "/workflows",
                 "Save a new workflow: a graph of steps, each an agent preset plus a \
              fixed prompt, wired by conditions over the step's output.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: WorkflowInput| async move {
+                |s: Arc<ProjectServices>, i: WorkflowInput| async move {
                     Ok::<WorkflowView, ControlError>(s.workflows.create(i, now_secs()).await?)
                 },
             )
@@ -79,11 +79,11 @@ impl Resource for Workflows {
             op(
                 "replace",
                 Method::Put,
-                "/api/workflows/{name}",
+                "/workflows/{name}",
                 "Replace a workflow wholesale. Runs already under way keep the \
              definition they snapshotted, so this never changes one.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: WorkflowInput| async move {
+                |s: Arc<ProjectServices>, i: WorkflowInput| async move {
                     let name = i.name.clone();
                     Ok::<WorkflowView, ControlError>(
                         s.workflows.replace(&name, i, now_secs()).await?,
@@ -93,11 +93,11 @@ impl Resource for Workflows {
             op(
                 "delete",
                 Method::Delete,
-                "/api/workflows/{name}",
+                "/workflows/{name}",
                 "Delete a workflow. Its past runs are ordinary sessions and stay \
              readable.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.workflows.delete(&i.name).await?;
                     Ok::<(), ControlError>(())
                 },
@@ -106,11 +106,11 @@ impl Resource for Workflows {
             op(
                 "run",
                 Method::Post,
-                "/api/workflows/{name}/runs",
+                "/workflows/{name}/runs",
                 "Start a run: creates the session that drives the graph and returns \
              it immediately. The first step begins on its own.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: RunWorkflow| async move { run_workflow(&s, i).await },
+                |s: Arc<ProjectServices>, i: RunWorkflow| async move { run_workflow(&s, i).await },
             )
             .created(),
         ]
@@ -118,7 +118,7 @@ impl Resource for Workflows {
 }
 
 async fn run_workflow(
-    services: &UserServices,
+    services: &ProjectServices,
     input: RunWorkflow,
 ) -> Result<WorkflowRunResponse, ControlError> {
     let RunWorkflow { name, request: req } = input;

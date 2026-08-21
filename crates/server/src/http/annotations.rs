@@ -2,12 +2,11 @@
 //! ride on. Supervisor-journal state, so the handler is a thin ask-and-map
 //! over `SessionSupervisorCommand`.
 
-use crate::http::Scope;
 use crate::http::error::Api;
 use crate::http::handlers::ask;
+use crate::http::{Scope, Scoped};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Json;
-use axum::extract::Path;
 use axum::response::IntoResponse;
 use horsie_models::session_api::{Ack, SetAnnotationsRequest};
 use std::collections::BTreeMap;
@@ -23,7 +22,7 @@ fn valid_annotation_key(key: &str) -> bool {
 
 pub async fn set_annotations(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
     Json(req): Json<SetAnnotationsRequest>,
 ) -> Result<impl IntoResponse, Api> {
     if req.set.iter().any(|e| !valid_annotation_key(&e.key))

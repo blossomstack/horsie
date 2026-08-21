@@ -63,9 +63,14 @@ pub fn default_runtime_bin() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("horsie-runtime"))
 }
 
-/// Translate a `--server` URL (`http(s)://host[:port]`) into the
-/// `ws(s)://.../api/vendor/connect` endpoint the agent dials.
-pub fn server_to_endpoint(server: &str) -> Result<String, CliError> {
+/// Translate a `--server` URL (`http(s)://host[:port]`) and a project id into
+/// the `ws(s)://.../api/p/<project>/vendor/connect` endpoint the agent dials.
+///
+/// The project is in the path because a vendor process publishes into *one*
+/// project's map, and an account has several — the credential alone no longer
+/// says which. This is the one endpoint a machine token may reach, and the
+/// server matches it by exactly this shape.
+pub fn server_to_endpoint(server: &str, project: &str) -> Result<String, CliError> {
     let (scheme, rest) = server
         .split_once("://")
         .ok_or_else(|| CliError::Validation(format!("--server must be a URL, got '{server}'")))?;
@@ -79,7 +84,9 @@ pub fn server_to_endpoint(server: &str) -> Result<String, CliError> {
         }
     };
     let rest = rest.trim_end_matches('/');
-    Ok(format!("{ws_scheme}://{rest}/api/vendor/connect"))
+    Ok(format!(
+        "{ws_scheme}://{rest}/api/p/{project}/vendor/connect"
+    ))
 }
 
 /// A bare path (no `=`) becomes `main=<path>`; `name=path` passes through
@@ -230,6 +237,7 @@ fn runtime_socket_path(state_dir: &Path) -> PathBuf {
 pub async fn run(
     runtime_bin: &Path,
     server: &str,
+    project: Option<&str>,
     workspaces: &[String],
     vendor_name: &str,
     background: bool,
@@ -237,11 +245,27 @@ pub async fn run(
     hook_path: Vec<PathBuf>,
     sandbox: bool,
 ) -> Result<i32, CliError> {
-    let endpoint = server_to_endpoint(server)?;
+    // Before any network work: an argument this command will refuse outright is
+    // refused whether or not a server is reachable, and the message says what to
+    // do rather than reporting a failed lookup on the way to saying it.
+    if background {
+        return Err(CliError::Validation(
+            "--background is no longer supported: `horsie connect` is now a long-lived \
+             vendor process that supervises one runtime per session. Run it under your \
+             process manager (systemd, launchd, tmux) so its lifetime and logs are managed \
+             explicitly."
+                .to_string(),
+        ));
+    }
+
     // Reuse whatever `horsie auth login` stored for this server. `None` against
     // a server with authentication off, which is what keeps that setup working
     // untouched.
     let token = crate::auth::resolve_token(server).await?;
+    // Resolved through the same path every other command uses, so `--project`
+    // means one thing across the CLI and an unknown name is one error message.
+    let project = crate::server_client::project_for(server, token.as_deref(), project).await?;
+    let endpoint = server_to_endpoint(server, &project)?;
     // Resolved again before every dial, not captured here: an access token
     // lives an hour, an established link is never re-authenticated, and this
     // process is expected to run for days. The one-shot resolve above is only
@@ -278,16 +302,6 @@ pub async fn run(
         .map(|w| normalize_workspace_arg(w))
         .collect();
     let table = parse_workspaces(workspaces)?;
-
-    if background {
-        return Err(CliError::Validation(
-            "--background is no longer supported: `horsie connect` is now a long-lived \
-             vendor process that supervises one runtime per session. Run it under your \
-             process manager (systemd, launchd, tmux) so its lifetime and logs are managed \
-             explicitly."
-                .to_string(),
-        ));
-    }
 
     std::fs::create_dir_all(state_dir).map_err(|e| CliError::Io(e.to_string()))?;
     if sandbox {
@@ -447,26 +461,29 @@ mod tests {
         }
     }
 
+    /// The shape `http::auth::is_vendor_socket` matches. A machine token
+    /// reaches this path and nothing else, so the two have to agree exactly —
+    /// a stray segment here is a vendor that cannot dial in.
     #[test]
     fn server_url_becomes_the_vendor_connect_endpoint() {
         assert_eq!(
-            server_to_endpoint("http://localhost:3789").unwrap(),
-            "ws://localhost:3789/api/vendor/connect"
+            server_to_endpoint("http://localhost:3789", "p1").unwrap(),
+            "ws://localhost:3789/api/p/p1/vendor/connect"
         );
         assert_eq!(
-            server_to_endpoint("https://horsie.example.com").unwrap(),
-            "wss://horsie.example.com/api/vendor/connect"
+            server_to_endpoint("https://horsie.example.com", "abc123").unwrap(),
+            "wss://horsie.example.com/api/p/abc123/vendor/connect"
         );
         assert_eq!(
-            server_to_endpoint("http://localhost:3789/").unwrap(),
-            "ws://localhost:3789/api/vendor/connect"
+            server_to_endpoint("http://localhost:3789/", "p1").unwrap(),
+            "ws://localhost:3789/api/p/p1/vendor/connect"
         );
     }
 
     #[test]
     fn server_url_must_be_http_or_https() {
-        assert!(server_to_endpoint("localhost:3789").is_err());
-        assert!(server_to_endpoint("ws://localhost:3789").is_err());
+        assert!(server_to_endpoint("localhost:3789", "p1").is_err());
+        assert!(server_to_endpoint("ws://localhost:3789", "p1").is_err());
     }
 
     #[test]

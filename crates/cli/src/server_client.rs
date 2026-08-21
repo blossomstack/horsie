@@ -3,6 +3,7 @@
 
 use crate::error::CliError;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentView};
+use horsie_models::projects::ProjectView;
 use horsie_models::routines::{RoutineRunResponse, RoutineView};
 use horsie_models::session::{SessionDetail, SessionSummary};
 use horsie_models::session_api::{
@@ -17,6 +18,9 @@ use serde::de::DeserializeOwned;
 
 pub struct ServerClient {
     base: String,
+    /// The project every path below is relative to. Resolved once, at
+    /// construction, because it takes a round trip and every call needs it.
+    project: String,
     http: reqwest::Client,
     /// Bearer sent with every request. `None` when the user has no credential
     /// for this server — which is correct against a server running with
@@ -31,16 +35,31 @@ impl ServerClient {
     /// There is deliberately no un-authenticated constructor: a call site that
     /// forgets one would fail only against servers with auth on, which is the
     /// configuration least likely to be exercised while developing.
-    pub async fn new(server: &str) -> Result<Self, CliError> {
+    pub async fn new(server: &str, project: Option<&str>) -> Result<Self, CliError> {
+        let base = server.trim_end_matches('/').to_string();
+        let http = reqwest::Client::new();
+        let token = crate::auth::resolve_token(server).await?;
+        let project = resolve_project(&http, &base, token.as_deref(), project).await?;
         Ok(Self {
-            base: server.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
-            token: crate::auth::resolve_token(server).await?,
+            base,
+            project,
+            http,
+            token,
         })
     }
 
     pub fn base(&self) -> &str {
         &self.base
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// Every scoped route lives under this. `path` is relative to the project,
+    /// which is why none of the callers below writes `/api`.
+    fn url(&self, path: &str) -> String {
+        format!("{}/api/p/{}{path}", self.base, self.project)
     }
 
     /// One JSON round-trip. Non-2xx → the server's `ApiError` message;
@@ -51,7 +70,7 @@ impl ServerClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<T, CliError> {
-        let url = format!("{}{path}", self.base);
+        let url = self.url(path);
         let bytes = self.request_bytes(method, path, body).await?;
         serde_json::from_slice(&bytes)
             .map_err(|e| CliError::Server(format!("bad response from {url}: {e}")))
@@ -75,7 +94,7 @@ impl ServerClient {
         path: &str,
         body: Option<&B>,
     ) -> Result<Vec<u8>, CliError> {
-        let url = format!("{}{path}", self.base);
+        let url = self.url(path);
         let mut req = self.http.request(method, &url);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
@@ -110,14 +129,14 @@ impl ServerClient {
     }
 
     pub async fn list_agents(&self) -> Result<Vec<AgentView>, CliError> {
-        self.send(reqwest::Method::GET, "/api/agents", None::<&str>)
+        self.send(reqwest::Method::GET, "/agents", None::<&str>)
             .await
     }
 
     pub async fn get_agent(&self, name: &str) -> Result<AgentView, CliError> {
         self.send(
             reqwest::Method::GET,
-            &format!("/api/agents/{name}"),
+            &format!("/agents/{name}"),
             None::<&str>,
         )
         .await
@@ -130,21 +149,21 @@ impl ServerClient {
     ) -> Result<AgentInvokeResponse, CliError> {
         self.send(
             reqwest::Method::POST,
-            &format!("/api/agents/{name}/invoke"),
+            &format!("/agents/{name}/invoke"),
             Some(req),
         )
         .await
     }
 
     pub async fn list_workflows(&self) -> Result<Vec<WorkflowView>, CliError> {
-        self.send(reqwest::Method::GET, "/api/workflows", None::<&str>)
+        self.send(reqwest::Method::GET, "/workflows", None::<&str>)
             .await
     }
 
     pub async fn get_workflow(&self, name: &str) -> Result<WorkflowView, CliError> {
         self.send(
             reqwest::Method::GET,
-            &format!("/api/workflows/{name}"),
+            &format!("/workflows/{name}"),
             None::<&str>,
         )
         .await
@@ -157,14 +176,14 @@ impl ServerClient {
     ) -> Result<WorkflowRunResponse, CliError> {
         self.send(
             reqwest::Method::POST,
-            &format!("/api/workflows/{name}/runs"),
+            &format!("/workflows/{name}/runs"),
             Some(req),
         )
         .await
     }
 
     pub async fn create_workflow(&self, input: &WorkflowInput) -> Result<WorkflowView, CliError> {
-        self.send(reqwest::Method::POST, "/api/workflows", Some(input))
+        self.send(reqwest::Method::POST, "/workflows", Some(input))
             .await
     }
 
@@ -177,7 +196,7 @@ impl ServerClient {
     ) -> Result<WorkflowView, CliError> {
         self.send(
             reqwest::Method::PUT,
-            &format!("/api/workflows/{name}"),
+            &format!("/workflows/{name}"),
             Some(input),
         )
         .await
@@ -186,7 +205,7 @@ impl ServerClient {
     pub async fn delete_workflow(&self, name: &str) -> Result<(), CliError> {
         self.send_no_body(
             reqwest::Method::DELETE,
-            &format!("/api/workflows/{name}"),
+            &format!("/workflows/{name}"),
             None::<&str>,
         )
         .await
@@ -197,7 +216,7 @@ impl ServerClient {
     pub async fn workflow_run(&self, session_id: &str) -> Result<WorkflowRunGraph, CliError> {
         self.send(
             reqwest::Method::GET,
-            &format!("/api/sessions/{session_id}/workflow"),
+            &format!("/sessions/{session_id}/workflow"),
             None::<&str>,
         )
         .await
@@ -211,7 +230,7 @@ impl ServerClient {
     ) -> Result<(), CliError> {
         self.send_no_body(
             reqwest::Method::POST,
-            &format!("/api/sessions/{session_id}/workflow/retry"),
+            &format!("/sessions/{session_id}/workflow/retry"),
             Some(&WorkflowRetryRequest { step_index }),
         )
         .await
@@ -219,7 +238,7 @@ impl ServerClient {
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, CliError> {
         let resp: ListSessionsResponse = self
-            .send(reqwest::Method::GET, "/api/sessions", None::<&str>)
+            .send(reqwest::Method::GET, "/sessions", None::<&str>)
             .await?;
         Ok(resp.sessions)
     }
@@ -228,7 +247,7 @@ impl ServerClient {
         let resp: GetSessionResponse = self
             .send(
                 reqwest::Method::GET,
-                &format!("/api/sessions/{id}"),
+                &format!("/sessions/{id}"),
                 None::<&str>,
             )
             .await?;
@@ -243,7 +262,7 @@ impl ServerClient {
         let resp: GetAgentResponse = self
             .send(
                 reqwest::Method::GET,
-                &format!("/api/sessions/{id}/agents/{agent_id}"),
+                &format!("/sessions/{id}/agents/{agent_id}"),
                 None::<&str>,
             )
             .await?;
@@ -251,14 +270,14 @@ impl ServerClient {
     }
 
     pub async fn list_routines(&self) -> Result<Vec<RoutineView>, CliError> {
-        self.send(reqwest::Method::GET, "/api/routines", None::<&str>)
+        self.send(reqwest::Method::GET, "/routines", None::<&str>)
             .await
     }
 
     pub async fn get_routine(&self, name: &str) -> Result<RoutineView, CliError> {
         self.send(
             reqwest::Method::GET,
-            &format!("/api/routines/{name}"),
+            &format!("/routines/{name}"),
             None::<&str>,
         )
         .await
@@ -267,9 +286,92 @@ impl ServerClient {
     pub async fn run_routine(&self, name: &str) -> Result<RoutineRunResponse, CliError> {
         self.send(
             reqwest::Method::POST,
-            &format!("/api/routines/{name}/run"),
+            &format!("/routines/{name}/run"),
             None::<&str>,
         )
         .await
+    }
+}
+
+/// Which project this invocation acts in.
+///
+/// `--project` accepts an **id or a name**, because an id is what a URL carries
+/// and a name is what a person remembers, and the list that settles it has to
+/// be fetched either way. An id wins on a tie: it is the unambiguous form, and
+/// a project named after another's id is a coincidence rather than a request.
+///
+/// Absent → the account's default project, read from the server rather than
+/// remembered locally. A stored id would be wrong the moment the user pointed
+/// `--server` somewhere else, and would fail as a 404 on a route that has
+/// nothing to do with projects.
+/// [`resolve_project`] for a caller that has no [`ServerClient`] — `horsie
+/// connect`, which needs the project before it has anything to talk to.
+pub async fn project_for(
+    server: &str,
+    token: Option<&str>,
+    wanted: Option<&str>,
+) -> Result<String, CliError> {
+    resolve_project(
+        &reqwest::Client::new(),
+        server.trim_end_matches('/'),
+        token,
+        wanted,
+    )
+    .await
+}
+
+async fn resolve_project(
+    http: &reqwest::Client,
+    base: &str,
+    token: Option<&str>,
+    wanted: Option<&str>,
+) -> Result<String, CliError> {
+    let mut req = http
+        .get(format!("{base}/api/projects"))
+        // A startup step with a person waiting on it. Without a deadline a
+        // server that accepts the connection and never answers hangs the
+        // command for ever, which is how `horsie connect` first failed against
+        // a stand-in that spoke only the vendor socket.
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    let res = req
+        .send()
+        .await
+        .map_err(|e| CliError::Server(format!("cannot reach server at {base}: {e}")))?;
+    if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(CliError::Server(format!(
+            "not authorized for {base} — run `horsie auth login --server {base}`"
+        )));
+    }
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| CliError::Server(format!("read the project list from {base}: {e}")))?;
+    let projects: Vec<ProjectView> = serde_json::from_slice(&bytes)
+        .map_err(|e| CliError::Server(format!("bad project list from {base}: {e}")))?;
+
+    match wanted {
+        Some(w) => projects
+            .iter()
+            .find(|p| p.id == w)
+            .or_else(|| projects.iter().find(|p| p.name == w))
+            .map(|p| p.id.clone())
+            .ok_or_else(|| {
+                let known: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+                CliError::Server(format!(
+                    "no project '{w}' on {base}; this account has: {}",
+                    known.join(", ")
+                ))
+            }),
+        None => projects
+            .iter()
+            .find(|p| p.is_default)
+            .or_else(|| projects.first())
+            .map(|p| p.id.clone())
+            .ok_or_else(|| {
+                CliError::Server(format!("{base} reports no projects for this account"))
+            }),
     }
 }

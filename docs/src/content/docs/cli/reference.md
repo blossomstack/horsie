@@ -10,6 +10,10 @@ Every command that talks to a server accepts `--server <url>`. Omit it and the
 command uses your default server, falling back to `https://auth.horsie.dev`
 when none is configured. See [Install & sign in](/cli/install-and-sign-in/).
 
+Every command that talks to a server also accepts `--project <id-or-name>`,
+because everything a server holds belongs to one. Omit it and the command uses
+your default project. See [Projects](/using/projects/).
+
 ## `horsie auth`
 
 Log in to a server so other commands can reach it.
@@ -28,6 +32,7 @@ Dial a server as this machine's runtime source. See
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--server <url>` | default server | Server to dial. |
+| `--project <id-or-name>` | default project | Project to publish this runtime into. |
 | `--workspace [name=]path` | *(required)* | Directory to serve. Repeatable. |
 | `--name <label>` | `local` | Vendor name. Alias: `--runtime-id`. |
 | `--no-sandbox` | off | Do not sandbox the runtimes. |

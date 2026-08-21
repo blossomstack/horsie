@@ -1,0 +1,32 @@
+/// An account's projects.
+///
+/// A project is the scope every other resource in horsie belongs to: providers,
+/// models, agents, environments, workflows, routines, memories, plugins and
+/// sessions. Nothing is shared between two of them, so a second project starts
+/// empty — credentials included.
+///
+/// Every other package's routes live under `/api/p/{project}`. This one does
+/// not: it is the account's own, and it is how a client learns which ids it may
+/// put in that segment.
+package projects;
+
+/// One project.
+struct ProjectView {
+    /// The scope key, and the `{project}` segment of every scoped URL.
+    ///
+    /// Opaque and stable: renaming a project does not move it, so a link keeps
+    /// working.
+    id: String,
+    name: String,
+    /// The one project an account always has. It cannot be deleted, so a client
+    /// always has somewhere to send a request that names no project of its own.
+    is_default: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Create a project, or rename one. The id is never an input: it is minted on
+/// create and immutable afterwards.
+struct ProjectInput {
+    name: String,
+}

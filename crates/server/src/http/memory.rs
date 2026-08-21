@@ -5,10 +5,10 @@
 //! a second agent-facing vocabulary over them would be one to keep in step for
 //! no caller that wants it.
 
-use super::Scope;
 use super::error::Api;
+use super::{Scope, Scoped};
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::Query;
 use axum::http::StatusCode;
 use horsie_models::memory::{MemoryCreateInput, MemoryUpdateInput, MemoryView};
 use serde::Deserialize;
@@ -32,7 +32,10 @@ pub async fn list_memories(
 }
 
 /// GET /api/memories/:id
-pub async fn get_memory(Scope(state): Scope, Path(id): Path<i64>) -> Result<Json<MemoryView>, Api> {
+pub async fn get_memory(
+    Scope(state): Scope,
+    Scoped(id): Scoped<i64>,
+) -> Result<Json<MemoryView>, Api> {
     state
         .memory
         .get_memory(id)
@@ -57,7 +60,7 @@ pub async fn create_memory(
 /// PUT /api/memories/:id
 pub async fn update_memory(
     Scope(state): Scope,
-    Path(id): Path<i64>,
+    Scoped(id): Scoped<i64>,
     Json(input): Json<MemoryUpdateInput>,
 ) -> Result<Json<MemoryView>, Api> {
     state
@@ -69,7 +72,10 @@ pub async fn update_memory(
 }
 
 /// DELETE /api/memories/:id
-pub async fn delete_memory(Scope(state): Scope, Path(id): Path<i64>) -> Result<StatusCode, Api> {
+pub async fn delete_memory(
+    Scope(state): Scope,
+    Scoped(id): Scoped<i64>,
+) -> Result<StatusCode, Api> {
     state
         .memory
         .delete_memory(id)

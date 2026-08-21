@@ -4,8 +4,8 @@
 //! in [`Secret`] in memory; write-only inputs follow the settings store's
 //! keep/clear/set convention (`None` keeps, `""` clears, a value sets).
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_agentcore::Secret;
 use horsie_models::github::GitHubAppConfigInput;
 use sqlx::Row;
@@ -32,14 +32,23 @@ pub struct CredentialsRow {
 
 pub struct GithubStore {
     db: Db,
-    /// Whose credentials this reads and writes. The App registration below is
-    /// deliberately outside this scope.
-    user: UserId,
+    /// Which project's credentials this reads and writes. The App registration
+    /// below is deliberately outside this scope: an App is registered against
+    /// the deployment, and a project *installs* it.
+    project: ProjectId,
 }
 
 impl GithubStore {
-    pub fn new(db: Db, user: UserId) -> Self {
-        Self { db, user }
+    /// The project these credentials belong to. Read by the OAuth callback
+    /// builder: a `redirect_uri` has to name the project, because the route
+    /// that receives it lives inside one.
+    #[must_use]
+    pub fn project(&self) -> &ProjectId {
+        &self.project
+    }
+
+    pub fn new(db: Db, project: ProjectId) -> Self {
+        Self { db, project }
     }
 
     /// The deployment's GitHub App registration.
@@ -112,9 +121,9 @@ impl GithubStore {
     pub async fn credentials(&self) -> Result<Option<CredentialsRow>, String> {
         let row = sqlx::query(&self.db.q(
             "SELECT login, access_token, refresh_token, expires_at, installation_id \
-             FROM github_credentials WHERE user_id = ?",
+             FROM github_credentials WHERE project_id = ?",
         ))
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .fetch_optional(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -137,13 +146,13 @@ impl GithubStore {
 
     pub async fn save_credentials(&self, row: &CredentialsRow) -> Result<(), String> {
         sqlx::query(&self.db.q(
-            "INSERT INTO github_credentials (user_id, login, access_token, refresh_token, expires_at, installation_id) \
+            "INSERT INTO github_credentials (project_id, login, access_token, refresh_token, expires_at, installation_id) \
              VALUES (?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id) DO UPDATE SET login = excluded.login, \
+             ON CONFLICT(project_id) DO UPDATE SET login = excluded.login, \
              access_token = excluded.access_token, refresh_token = excluded.refresh_token, \
              expires_at = excluded.expires_at, installation_id = excluded.installation_id",
         ))
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .bind(row.login.trim())
         .bind(row.access_token.expose().to_string())
         .bind(row.refresh_token.as_ref().map(|s| s.expose().to_string()))
@@ -159,9 +168,9 @@ impl GithubStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM github_credentials WHERE user_id = ?"),
+                .q("DELETE FROM github_credentials WHERE project_id = ?"),
         )
-        .bind(self.user.as_str())
+        .bind(self.project.as_str())
         .execute(self.db.pool())
         .await
         .map_err(|e| e.to_string())?;
@@ -221,7 +230,10 @@ mod tests {
     async fn store() -> (GithubStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (GithubStore::new(pool, crate::auth::UserId::new("1")), tmp)
+        (
+            GithubStore::new(pool, crate::projects::ProjectId::new("1")),
+            tmp,
+        )
     }
 
     fn input(secret: Option<&str>, key: Option<&str>) -> GitHubAppConfigInput {

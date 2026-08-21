@@ -58,7 +58,8 @@ fn is_public(path: &str) -> bool {
 /// themselves — and reach everything their account owns. `Agent` is not a
 /// login. It is the "machine token" the UI describes as being for runtime
 /// vendor processes that run unattended, and `vendor_connect.rs` is explicit
-/// that `/api/vendor/connect` is the one endpoint those processes dial.
+/// that `/api/p/{project}/vendor/connect` is the one endpoint those processes
+/// dial.
 ///
 /// Until this existed, that token was an unrestricted, never-expiring admin
 /// credential: it read whole session transcripts, wrote config, could call
@@ -68,21 +69,67 @@ fn is_public(path: &str) -> bool {
 ///
 /// Deliberately an allowlist of one rather than a denylist of the dangerous
 /// routes: a denylist silently re-opens every time a route is added.
+///
+/// The one path carries a project now, so it is matched by shape rather than by
+/// equality — but only the shape it actually has: a *single* segment where the
+/// project goes, and the exact suffix. `starts_with("/api/p/")` would have let
+/// a machine token reach every scoped route there is.
 fn kind_may_reach(kind: crate::auth::TokenKind, path: &str) -> bool {
     match kind {
-        crate::auth::TokenKind::Agent => path == "/api/vendor/connect",
+        crate::auth::TokenKind::Agent => is_vendor_socket(path),
         crate::auth::TokenKind::Web
         | crate::auth::TokenKind::Access
         | crate::auth::TokenKind::Refresh => true,
     }
 }
 
+/// `/api/p/<project>/vendor/connect`, and nothing else that starts the same way.
+fn is_vendor_socket(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/p/") else {
+        return false;
+    };
+    let Some((project, tail)) = rest.split_once('/') else {
+        return false;
+    };
+    !project.is_empty() && tail == "vendor/connect"
+}
+
 fn forbidden_for_machine_token() -> Response {
     Api::forbidden(
         "a machine token authenticates runtime vendor processes and reaches only \
-         /api/vendor/connect; use a login for anything else",
+         /api/p/<project>/vendor/connect; use a login for anything else",
     )
     .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod machine_token_tests {
+    use super::is_vendor_socket;
+
+    /// The whole point of the allowlist. A machine token that could reach any
+    /// path beginning `/api/p/` would be the unrestricted admin credential this
+    /// gate was added to stop it being.
+    #[test]
+    fn only_the_vendor_socket_matches() {
+        assert!(is_vendor_socket("/api/p/abc123/vendor/connect"));
+
+        for path in [
+            "/api/p/abc123/sessions",
+            "/api/p/abc123/vendor/connect/extra",
+            "/api/p/abc123/vendor",
+            // A project segment is one segment: a token must not reach another
+            // project's socket by walking into the path.
+            "/api/p/abc/def/vendor/connect",
+            "/api/p//vendor/connect",
+            "/api/p/",
+            "/api/vendor/connect",
+            "/api/auth/password",
+            "",
+        ] {
+            assert!(!is_vendor_socket(path), "{path} must not be reachable");
+        }
+    }
 }
 
 /// The account a delegating front layer has already authenticated.

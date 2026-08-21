@@ -611,14 +611,14 @@ mod tests {
     /// The composite key is the whole point: the same natural name is free in
     /// every account.
     #[tokio::test]
-    async fn two_accounts_may_hold_the_same_name() {
+    async fn two_projects_may_hold_the_same_name() {
         let db = testing::db().await;
-        for user in ["1", "k3m9x0abc7qr"] {
+        for project in ["1", "k3m9x0abc7qr"] {
             sqlx::query(&db.q(
-                "INSERT INTO memory_spaces (user_id, name, description, created_at, \
+                "INSERT INTO memory_spaces (project_id, name, description, created_at, \
                  updated_at) VALUES (?, ?, ?, ?, ?)",
             ))
-            .bind(user)
+            .bind(project)
             .bind("notes")
             .bind("")
             .bind("2026-01-01 00:00:00")
@@ -634,10 +634,11 @@ mod tests {
             .unwrap();
         assert_eq!(n, 2);
 
-        // 0009_memory.sql seeds a space; the rebuild must have carried it over
-        // and given it the bootstrap account. This is the backfill working.
+        // 0009_memory.sql seeds a space; 0024's rebuild carried it over and gave
+        // it the bootstrap account, and 0040 renamed that column rather than
+        // rewriting it. This is both backfills working.
         let seeded: i64 = sqlx::query_scalar(
-            &db.q("SELECT COUNT(*) FROM memory_spaces WHERE user_id = ? AND name <> ?"),
+            &db.q("SELECT COUNT(*) FROM memory_spaces WHERE project_id = ? AND name <> ?"),
         )
         .bind("1")
         .bind("notes")

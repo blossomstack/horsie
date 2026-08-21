@@ -29,10 +29,10 @@
 //! was built; the call itself re-resolves, so a listing gone stale degrades
 //! to a clean refusal rather than a wrong run.
 
+use crate::projects::ProjectServices;
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::session_actor::{RunCommand, SessionCommand};
 use crate::sessions::workflow::resolve_run_spec;
-use crate::users::UserServices;
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
@@ -121,7 +121,7 @@ pub struct InvokeWorkflowToolbox {
     /// Where workflow definitions and presets are resolved from. Held here
     /// because resolution runs on the agent's task; the session actor never
     /// reads a store, it journals the resolved snapshot.
-    services: Arc<UserServices>,
+    services: Arc<ProjectServices>,
     /// The saved workflows as of this turn's toolbox build — `(name,
     /// description)`, advertised in the tool description so the model knows
     /// what exists and when to reach for it. `specs()` is synchronous, so the
@@ -134,7 +134,7 @@ impl InvokeWorkflowToolbox {
         inner: Arc<dyn Toolbox>,
         session: SessionRef,
         caller: Uuid,
-        services: Arc<UserServices>,
+        services: Arc<ProjectServices>,
         catalog: Vec<(String, String)>,
     ) -> Self {
         Self {

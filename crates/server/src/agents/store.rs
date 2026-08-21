@@ -1,8 +1,8 @@
 //! Storage for agent presets, sharing the config store's database.
 //! List-typed columns are JSON.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
@@ -35,17 +35,17 @@ pub struct AgentRow {
 pub struct AgentStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl AgentStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<AgentRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM agents WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM agents WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -56,7 +56,7 @@ impl AgentStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<AgentRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM agents WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM agents WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -70,7 +70,7 @@ impl AgentStore {
     /// would discard the existing preset).
     pub async fn insert(&self, row: &AgentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO agents (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO agents (project_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -96,7 +96,7 @@ impl AgentStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE agents SET description = ?, instructions = ?, model = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
-             auto_compact = ?, allowed_tools = ?, updated_at = ? WHERE user_id = ? AND name = ?",
+             auto_compact = ?, allowed_tools = ?, updated_at = ? WHERE project_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.instructions)
@@ -120,7 +120,7 @@ impl AgentStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM agents WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM agents WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -184,7 +184,10 @@ mod tests {
     async fn store() -> (AgentStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (AgentStore::new(pool, crate::auth::UserId::new("1")), tmp)
+        (
+            AgentStore::new(pool, crate::projects::ProjectId::new("1")),
+            tmp,
+        )
     }
 
     fn row(name: &str) -> AgentRow {

@@ -11,6 +11,7 @@ import {
 import { useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
+import { ProjectSwitcher } from "./ProjectSwitcher";
 import {
   allTags,
   EMPTY_FILTER,
@@ -178,6 +179,9 @@ export function Sidebar() {
           </span>
         )}
       </div>
+
+      {/* The scope everything below belongs to, before the things in it. */}
+      <ProjectSwitcher />
 
       {/* The things you keep, before the things you accumulate. */}
       <div className="space-y-px px-2 pt-3">

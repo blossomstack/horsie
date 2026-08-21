@@ -13,6 +13,7 @@ mod mcp;
 mod memory;
 pub(crate) mod messages;
 mod plugins;
+mod projects;
 pub mod runtime_connect;
 mod runtime_credentials;
 mod runtime_pump;
@@ -20,8 +21,8 @@ mod sse;
 mod vendor_connect;
 mod workflows;
 
-use crate::auth::{AuthService, Principal};
-use crate::users::{Shared, UserRegistry, UserServices};
+use crate::auth::{AuthService, Principal, UserId};
+use crate::projects::{ProjectId, ProjectRegistry, ProjectServices, Shared};
 use axum::Router;
 use axum::routing::{get, post, put};
 use std::path::PathBuf;
@@ -66,30 +67,35 @@ pub struct AppState {
     /// The deployment tier: the pool, the artifact store, and what boot
     /// resolved once.
     pub shared: Arc<Shared>,
-    /// Every account's services, built on first touch.
-    pub users: Arc<UserRegistry>,
+    /// Every project's services, built on first touch.
+    pub projects: Arc<ProjectRegistry>,
     /// Directory of built web-UI assets to serve alongside the API. When set,
     /// unmatched non-`/api` paths fall back to `index.html` (SPA routing), so
     /// the UI is served same-origin and no separate dev server is needed.
     pub web_dir: Option<PathBuf>,
 }
 
-/// The services belonging to whoever made this request.
+/// The services belonging to the project this request named.
 ///
-/// Resolved per request from the [`Principal`] the auth middleware already put
-/// in the extensions, because the credential is what carries the scope and one
-/// process may hold several. A handler that takes this cannot reach another
-/// account's anything: it holds that account's objects, not a filtered view of
-/// everyone's.
-pub struct Scope(pub Arc<UserServices>);
+/// Resolved per request from two things: the [`Principal`] the auth middleware
+/// put in the extensions, and the `{project}` segment of the path. A handler
+/// that takes this cannot reach another project's anything — not another
+/// account's, and not another project *of its own account's* — because it holds
+/// that project's objects rather than a filtered view of everyone's.
+pub struct Scope(pub Arc<ProjectServices>);
 
 impl std::ops::Deref for Scope {
-    type Target = UserServices;
+    type Target = ProjectServices;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+
+/// The path segment every scoped route carries. One constant because the router
+/// mounts it and this extractor reads it, and a typo in either would be a 500
+/// on every scoped request rather than a compile error.
+pub const PROJECT_PARAM: &str = "project";
 
 impl axum::extract::FromRequestParts<AppState> for Scope {
     type Rejection = error::Api;
@@ -106,21 +112,167 @@ impl axum::extract::FromRequestParts<AppState> for Scope {
                 path = %parts.uri.path(),
                 "a scoped route ran without an authenticated principal"
             );
-            return Err(error::Api::internal("could not resolve the account"));
+            return Err(error::Api::internal("could not resolve the project"));
         };
         let user = match principal {
             // Every request on a deployment with authentication disabled. The
-            // account still exists — it is where the rows go.
+            // account still exists — it is what owns the projects.
             Principal::Anonymous => state.shared.anonymous.clone(),
             Principal::User(id) => id.clone(),
         };
-        match state.users.get(&user).await {
+
+        // Same reasoning as the principal: a scoped route mounted outside the
+        // `/api/p/{project}` prefix is this file's mistake, not a caller's.
+        let Some(id) = project_param(parts, state).await else {
+            tracing::error!(
+                path = %parts.uri.path(),
+                "a scoped route ran without a project in its path"
+            );
+            return Err(error::Api::internal("could not resolve the project"));
+        };
+
+        // The row is read *before* the bundle is built, and that order is the
+        // security property. Building first would let any authenticated caller
+        // materialise another account's project — a supervisor, a dial secret,
+        // an orphan sweep against that account's cloud vendors — by naming its
+        // id, and learn it exists from how long the 403 took.
+        let row = match state.shared.project_service.store().get(&id).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return Err(error::Api::not_found("no such project")),
+            Err(e) => {
+                tracing::error!(project = %id, error = %e, "reading a project failed");
+                return Err(error::Api::internal("could not resolve the project"));
+            }
+        };
+        if row.user_id != user {
+            // A 404 rather than a 403: a 403 confirms the id names a real
+            // project, which is exactly what an unguessable id is for.
+            tracing::warn!(
+                project = %id,
+                %user,
+                "an account asked for a project it does not own"
+            );
+            return Err(error::Api::not_found("no such project"));
+        }
+
+        match state.projects.get(&id).await {
             Ok(services) => Ok(Self(services)),
             Err(e) => {
-                tracing::error!(user = %user, error = %e, "building an account's services failed");
-                Err(error::Api::internal("could not resolve the account"))
+                tracing::error!(project = %id, error = %e, "building a project's services failed");
+                Err(error::Api::internal("could not resolve the project"))
             }
         }
+    }
+}
+
+/// The `{project}` segment, if this route has one.
+///
+/// `RawPathParams` rather than `Path<HashMap<_, _>>` for the reason
+/// `control::http` gives: the latter rejects a request on a route with no path
+/// params at all.
+async fn project_param(
+    parts: &mut axum::http::request::Parts,
+    state: &AppState,
+) -> Option<ProjectId> {
+    use axum::extract::FromRequestParts;
+    let params = axum::extract::RawPathParams::from_request_parts(parts, state)
+        .await
+        .ok()?;
+    params
+        .iter()
+        .find(|(key, _)| *key == PROJECT_PARAM)
+        .map(|(_, value)| ProjectId::new(value))
+}
+
+/// The `{project}` segment alone, for the socket handler that resolves its own
+/// scope.
+///
+/// `vendor_connect` cannot take [`Scope`]: it needs the whole
+/// [`axum::extract::Request`] to get the raw `OnUpgrade` out of it, and it
+/// authenticates a machine credential rather than a session. It still needs to
+/// know which project, and reading the URI would not give it one — a nested
+/// router hands the inner handler a URI with the prefix already stripped, so
+/// `/api/p/{id}/vendor/connect` arrives as `/vendor/connect`. The path
+/// *parameter* survives that; the path does not.
+pub struct ProjectPath(pub ProjectId);
+
+impl axum::extract::FromRequestParts<AppState> for ProjectPath {
+    type Rejection = error::Api;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match project_param(parts, state).await {
+            Some(id) => Ok(Self(id)),
+            None => {
+                tracing::error!(
+                    path = %parts.uri.path(),
+                    "a scoped route ran without a project in its path"
+                );
+                Err(error::Api::internal("could not resolve the project"))
+            }
+        }
+    }
+}
+
+/// This route's own path parameter, with the `{project}` segment dropped.
+///
+/// Every scoped path begins with the project, and axum matches path parameters
+/// *positionally* — so a handler that kept `Path<Uuid>` under the prefix would
+/// get "expected 1 but got 2" at runtime rather than a compile error. This is
+/// what makes that mistake impossible to make quietly: a scoped handler asks
+/// for [`Scoped`] and gets its own parameter, while the project it belongs to
+/// arrives through [`Scope`], which is where it belongs.
+///
+/// One parameter only. A route with two of its own writes the whole tuple out —
+/// `Path<(String, String, String)>` — because `Path` deserializes a flat
+/// sequence and a nested tuple is not one.
+pub struct Scoped<T>(pub T);
+
+impl<T, S> axum::extract::FromRequestParts<S> for Scoped<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = error::Api;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::Path;
+        let Path((_project, own)) = Path::<(String, T)>::from_request_parts(parts, state)
+            .await
+            .map_err(|e| error::Api::not_found(e.to_string()))?;
+        Ok(Self(own))
+    }
+}
+
+/// Whoever made this request, without a project.
+///
+/// For the handful of routes that are an account's rather than a project's —
+/// listing the projects, and creating one. Everything else takes [`Scope`].
+pub struct Account(pub UserId);
+
+impl axum::extract::FromRequestParts<AppState> for Account {
+    type Rejection = error::Api;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let Some(principal) = parts.extensions.get::<Principal>() else {
+            tracing::error!(
+                path = %parts.uri.path(),
+                "an account route ran without an authenticated principal"
+            );
+            return Err(error::Api::internal("could not resolve the account"));
+        };
+        Ok(Self(match principal {
+            Principal::Anonymous => state.shared.anonymous.clone(),
+            Principal::User(id) => id.clone(),
+        }))
     }
 }
 
@@ -157,73 +309,78 @@ fn credentials(mode: crate::auth::AuthMode) -> Router<AppState> {
         )
 }
 
-pub fn app(state: AppState) -> Router {
-    let web_dir = state.web_dir.clone();
-    let api = Router::new()
-        .route("/api/health", get(handlers::health))
-        .route("/api/tools", get(handlers::tool_catalog))
-        .route("/api/sessions", post(handlers::create_session))
+/// Everything under `/api/p/{project}`: every route that reads or writes one
+/// project's data.
+///
+/// Paths here are relative to that prefix, which is also what a control-plane
+/// [`Operation`]'s `path` is — an operation is a thing you do *inside* a
+/// project, so its path has never had an account in it and does not gain one
+/// now.
+///
+/// [`Operation`]: crate::control::Operation
+fn scoped() -> Router<AppState> {
+    Router::new()
+        .route("/sessions", post(handlers::create_session))
         .route(
-            "/api/sessions/{id}/annotations",
+            "/sessions/{id}/annotations",
             put(annotations::set_annotations),
         )
-        .route("/api/sessions/{id}/answers", post(handlers::answer_asks))
+        .route("/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
-            "/api/sessions/{id}/agents/{agent_id}",
+            "/sessions/{id}/agents/{agent_id}",
             get(handlers::get_agent).delete(handlers::delete_fork),
         )
         .route(
-            "/api/sessions/{id}/messages",
+            "/sessions/{id}/messages",
             post(handlers::send_message).get(messages::read_messages),
         )
-        .route("/api/events", get(sse::global_events))
+        .route("/events", get(sse::global_events))
         .route(
-            "/api/config/model-providers/{name}/chatgpt",
+            "/config/model-providers/{name}/chatgpt",
             get(chatgpt::status),
         )
         .route(
-            "/api/config/model-providers/{name}/chatgpt/login",
+            "/config/model-providers/{name}/chatgpt/login",
             post(chatgpt::start).delete(chatgpt::sign_out),
         )
         .route(
-            "/api/config/model-providers/{name}/chatgpt/poll",
+            "/config/model-providers/{name}/chatgpt/poll",
             post(chatgpt::poll),
         )
         .route(
-            "/api/admin/model-cards",
+            "/admin/model-cards",
             get(admin::list_cards).post(admin::create_card),
         )
         .route(
-            "/api/admin/model-cards/{model_id}",
+            "/admin/model-cards/{model_id}",
             put(admin::update_card).delete(admin::delete_card),
         )
-        .route("/api/github/status", get(github::status))
-        .route("/api/github/auth", get(github::auth))
-        .route("/api/github/callback", get(github::callback))
+        .route("/github/status", get(github::status))
+        .route("/github/auth", get(github::auth))
+        .route("/github/callback", get(github::callback))
         .route(
-            "/api/github/app-config",
+            "/github/app-config",
             get(github::get_app_config).put(github::put_app_config),
         )
         .route(
-            "/api/github/disconnect",
+            "/github/disconnect",
             axum::routing::delete(github::disconnect),
         )
-        .route("/api/github/repos", get(github::repos))
-        .route("/api/github/repos/branches", get(github::branches))
+        .route("/github/repos", get(github::repos))
+        .route("/github/repos/branches", get(github::branches))
         // Not an operation: it builds its OAuth `redirect_uri` from this
         // request's own Host, and a tool call has no origin to build one from.
-        .route("/api/mcp/servers/{name}/connect", post(mcp::connect))
+        .route("/mcp/servers/{name}/connect", post(mcp::connect))
         .route(
-            "/api/mcp/servers/{name}/oauth/callback",
+            "/mcp/servers/{name}/oauth/callback",
             get(mcp::oauth_callback),
         )
-        .route("/api/plugin-artifacts/{file}", get(plugins::get_artifact))
         .route(
-            "/api/memories",
+            "/memories",
             get(memory::list_memories).post(memory::create_memory),
         )
         .route(
-            "/api/memories/{id}",
+            "/memories/{id}",
             get(memory::get_memory)
                 .put(memory::update_memory)
                 .delete(memory::delete_memory),
@@ -231,12 +388,33 @@ pub fn app(state: AppState) -> Router {
         // Every JSON management route is mounted from the operation table
         // instead of listed here, so a new operation cannot exist without one.
         .merge(crate::control::http::router(&crate::control::operations()))
-        .route("/api/sessions/{id}/workflow", get(workflows::get_run_graph))
+        .route("/sessions/{id}/workflow", get(workflows::get_run_graph))
+        .route("/sessions/{id}/workflow/retry", post(workflows::retry_step))
+        // A `horsie connect` process publishes into *one* project's vendor map,
+        // and the prefix is how it says which. Unlike `/api/runtime/connect`,
+        // whose dial token already names the scope, this one arrives with an
+        // ordinary account credential that names several.
+        .route("/vendor/connect", get(vendor_connect::vendor_connect))
+}
+
+pub fn app(state: AppState) -> Router {
+    let web_dir = state.web_dir.clone();
+    let api = Router::new()
+        .route("/api/health", get(handlers::health))
+        .route("/api/tools", get(handlers::tool_catalog))
+        .route("/api/plugin-artifacts/{file}", get(plugins::get_artifact))
+        // An account's own routes, outside any project: what projects it has,
+        // and how to gain or lose one.
         .route(
-            "/api/sessions/{id}/workflow/retry",
-            post(workflows::retry_step),
+            "/api/projects",
+            get(projects::list_projects).post(projects::create_project),
         )
-        .route("/api/vendor/connect", get(vendor_connect::vendor_connect))
+        .route(
+            "/api/projects/{id}",
+            put(projects::rename_project).delete(projects::delete_project),
+        )
+        // The scope travels inside the dial token rather than in the path; see
+        // the module docs on both.
         .route(
             "/api/runtime/connect",
             get(runtime_connect::runtime_connect),
@@ -245,6 +423,7 @@ pub fn app(state: AppState) -> Router {
             "/api/runtime/github-credential",
             get(runtime_credentials::github_credential),
         )
+        .nest("/api/p/{project}", scoped())
         .merge(credentials(state.auth.mode()))
         // Guards every route above. The SPA shell and its assets, added below,
         // are deliberately outside it: the app has to load in order to render a
@@ -345,26 +524,26 @@ mod tests {
 
     /// The real composition root, on a throwaway database, with one fake
     /// vendor process published under `mock` in the bootstrap account.
-    async fn test_state(tmp: &tempfile::TempDir) -> AppState {
+    async fn test_state(tmp: &tempfile::TempDir) -> crate::testing::TestState {
         let built = crate::testing::state(tmp.path()).build().await;
         publish_mock_vendor(&built.state).await;
-        built.state
+        built
     }
 
-    /// The dial token a runtime of the state's anonymous account would hold.
+    /// The dial token a runtime of the harness's project would hold.
     ///
-    /// Built from that account's real `runtime_dial_secret`, so it verifies the
+    /// Built from that project's real `runtime_dial_secret`, so it verifies the
     /// same way a live runtime's does — the point being that the artifact route
     /// now accepts exactly one thing, and it is the credential the runtime
     /// already has.
-    async fn dial_token_for(state: &AppState, runtime_id: &str) -> String {
-        let account = crate::auth::UserId::bootstrap();
-        // Building the account is what creates its secret on first use.
-        let _ = state.users.get(&account).await.unwrap();
-        let secret = crate::config::dial_secret_of(&state.shared.db, &account)
+    async fn dial_token_for(t: &crate::testing::TestState, runtime_id: &str) -> String {
+        let account = t.account.clone();
+        // Building the project is what creates its secret on first use.
+        let _ = t.state.projects.get(&account).await.unwrap();
+        let secret = crate::config::dial_secret_of(&t.state.shared.db, &account)
             .await
             .unwrap()
-            .expect("the account has a dial secret once it has been built");
+            .expect("the project has a dial secret once it has been built");
         horsie_support::dial_token::mint(
             &secret,
             &horsie_support::dial_token::DialClaims {
@@ -389,13 +568,21 @@ mod tests {
             .expect("mock is unclaimed in a fresh account");
     }
 
-    /// The bundle an unauthenticated request resolves to.
-    async fn services(state: &AppState) -> Arc<crate::users::UserServices> {
-        state
-            .users
-            .get(&state.shared.anonymous)
+    /// The bundle an unauthenticated request resolves to: the anonymous
+    /// account's default project.
+    async fn services(state: &AppState) -> Arc<crate::projects::ProjectServices> {
+        let project = state
+            .shared
+            .project_service
+            .default_project(&state.shared.anonymous)
             .await
-            .expect("the anonymous account builds")
+            .expect("the anonymous account has a default project")
+            .id;
+        state
+            .projects
+            .get(&project)
+            .await
+            .expect("the anonymous account's project builds")
     }
 
     /// `test_state` with authentication enabled and the admin account
@@ -404,14 +591,14 @@ mod tests {
     /// One database for the whole deployment, as in production: the auth tables
     /// live alongside the config tables, and a second pool for auth alone would
     /// hide any assertion that spans both.
-    async fn auth_state(tmp: &tempfile::TempDir) -> (AppState, String) {
-        let built = crate::testing::state(tmp.path())
+    async fn auth_state(tmp: &tempfile::TempDir) -> (crate::testing::TestState, String) {
+        let mut built = crate::testing::state(tmp.path())
             .auth(crate::auth::AuthMode::Password)
             .build()
             .await;
         publish_mock_vendor(&built.state).await;
-        let password = built.initial_password.expect("bootstrapped");
-        (built.state, password)
+        let password = built.initial_password.take().expect("bootstrapped");
+        (built, password)
     }
 
     /// The `Set-Cookie` session value from a login response.
@@ -500,17 +687,20 @@ mod tests {
             mod $module {
                 use super::*;
 
-                fn item() -> String {
-                    format!("{}/{}", $path, $name)
+                /// The item's URL, inside the project the harness built.
+                fn item(t: &crate::testing::TestState) -> String {
+                    format!("{}/{}", t.url($path), $name)
                 }
 
                 /// The app with the resource already created — the starting
                 /// point for every test below except the create ones.
-                async fn seeded(tmp: &tempfile::TempDir) -> axum::Router {
-                    let app = $app(tmp).await;
+                async fn seeded(
+                    tmp: &tempfile::TempDir,
+                ) -> (axum::Router, crate::testing::TestState) {
+                    let (app, t) = $app(tmp).await;
                     let res = app
                         .clone()
-                        .oneshot(post_json($path, &$create))
+                        .oneshot(post_json(&t.url($path), &$create))
                         .await
                         .unwrap();
                     assert_eq!(
@@ -518,14 +708,17 @@ mod tests {
                         StatusCode::CREATED,
                         "the fixture's own create must succeed"
                     );
-                    app
+                    (app, t)
                 }
 
                 #[tokio::test]
                 async fn creating_returns_201_and_the_stored_view() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = $app(&tmp).await;
-                    let res = app.oneshot(post_json($path, &$create)).await.unwrap();
+                    let (app, t) = $app(&tmp).await;
+                    let res = app
+                        .oneshot(post_json(&t.url($path), &$create))
+                        .await
+                        .unwrap();
                     assert_eq!(res.status(), StatusCode::CREATED);
                     let v: serde_json::Value = read_json(res).await;
                     assert_eq!(v["name"], serde_json::json!($name));
@@ -534,16 +727,19 @@ mod tests {
                 #[tokio::test]
                 async fn creating_the_same_name_twice_is_a_conflict() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.oneshot(post_json($path, &$create)).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app
+                        .oneshot(post_json(&t.url($path), &$create))
+                        .await
+                        .unwrap();
                     assert_eq!(res.status(), StatusCode::CONFLICT);
                 }
 
                 #[tokio::test]
                 async fn the_list_holds_what_was_created() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.oneshot(get($path)).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app.oneshot(get(&t.url($path))).await.unwrap();
                     assert_eq!(res.status(), StatusCode::OK);
                     let list: Vec<serde_json::Value> = read_json(res).await;
                     assert_eq!(list.len(), 1);
@@ -553,24 +749,27 @@ mod tests {
                 #[tokio::test]
                 async fn getting_it_by_name_returns_it() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.oneshot(get(&item())).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app.oneshot(get(&item(&t))).await.unwrap();
                     assert_eq!(res.status(), StatusCode::OK);
                 }
 
                 #[tokio::test]
                 async fn getting_a_name_that_does_not_exist_is_404() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.oneshot(get(&format!("{}/ghost", $path))).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app
+                        .oneshot(get(&format!("{}/ghost", t.url($path))))
+                        .await
+                        .unwrap();
                     assert_eq!(res.status(), StatusCode::NOT_FOUND);
                 }
 
                 #[tokio::test]
                 async fn replacing_it_returns_200_and_takes_effect() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.oneshot(put_json(&item(), &$replace)).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app.oneshot(put_json(&item(&t), &$replace)).await.unwrap();
                     assert_eq!(res.status(), StatusCode::OK);
                     let v: serde_json::Value = read_json(res).await;
                     #[allow(clippy::redundant_closure_call)]
@@ -580,11 +779,11 @@ mod tests {
                 #[tokio::test]
                 async fn replacing_a_name_that_does_not_exist_is_404() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
+                    let (app, t) = seeded(&tmp).await;
                     let mut body = $replace;
                     body["name"] = serde_json::json!("ghost");
                     let res = app
-                        .oneshot(put_json(&format!("{}/ghost", $path), &body))
+                        .oneshot(put_json(&format!("{}/ghost", t.url($path)), &body))
                         .await
                         .unwrap();
                     assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -596,20 +795,20 @@ mod tests {
                 #[tokio::test]
                 async fn replacing_with_a_body_that_renames_is_422() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
+                    let (app, t) = seeded(&tmp).await;
                     let mut body = $replace;
                     body["name"] = serde_json::json!("other");
-                    let res = app.oneshot(put_json(&item(), &body)).await.unwrap();
+                    let res = app.oneshot(put_json(&item(&t), &body)).await.unwrap();
                     assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
                 }
 
                 #[tokio::test]
                 async fn deleting_is_204_and_deleting_again_is_404() {
                     let tmp = tempfile::tempdir().unwrap();
-                    let app = seeded(&tmp).await;
-                    let res = app.clone().oneshot(delete(&item())).await.unwrap();
+                    let (app, t) = seeded(&tmp).await;
+                    let res = app.clone().oneshot(delete(&item(&t))).await.unwrap();
                     assert_eq!(res.status(), StatusCode::NO_CONTENT);
-                    let res = app.oneshot(delete(&item())).await.unwrap();
+                    let res = app.oneshot(delete(&item(&t))).await.unwrap();
                     assert_eq!(res.status(), StatusCode::NOT_FOUND);
                 }
             }
@@ -619,7 +818,8 @@ mod tests {
     #[tokio::test]
     async fn health_responds_ok() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         let res = app.oneshot(get("/api/health")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
@@ -627,7 +827,8 @@ mod tests {
     #[tokio::test]
     async fn create_list_get_message_lifecycle_over_http() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         // create — with the first message, which is the only shape there is
         let body = serde_json::json!({
             "agent": {"model": "mock"},
@@ -636,28 +837,28 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/sessions", &body))
+            .oneshot(post_json(&t.url("/sessions"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let created: CreateSessionResponse = read_json(res).await;
         let id = created.session.id;
         // list
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let list: ListSessionsResponse = read_json(res).await;
         assert_eq!(list.sessions.len(), 1);
         // get detail
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/sessions/{id}")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         // unknown session → 404
         let res = app
             .clone()
-            .oneshot(get("/api/sessions/00000000-0000-0000-0000-000000000000"))
+            .oneshot(get(&t.url("/sessions/00000000-0000-0000-0000-000000000000")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -667,13 +868,22 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                &format!("/api/sessions/{id}/messages"),
+                &t.url(&format!("/sessions/{id}/messages")),
                 &serde_json::json!({"text": "/fork try the other way"}),
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::ACCEPTED);
-        let ack: serde_json::Value = read_json(res).await;
+        let status = res.status();
+        let raw = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            status,
+            StatusCode::ACCEPTED,
+            "{}",
+            String::from_utf8_lossy(&raw)
+        );
+        let ack: serde_json::Value = serde_json::from_slice(&raw).unwrap();
         let fork = ack["forkedAgent"]
             .as_str()
             .expect("a fork command answers with the agent to open")
@@ -687,7 +897,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                &format!("/api/sessions/{id}/messages"),
+                &t.url(&format!("/sessions/{id}/messages")),
                 &serde_json::json!({"text": "just talking"}),
             ))
             .await
@@ -696,7 +906,7 @@ mod tests {
         assert!(ack["forkedAgent"].is_null(), "{ack}");
 
         // The fork lists under its session, from the registry.
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         let row = list
             .sessions
@@ -712,13 +922,13 @@ mod tests {
         // And can be removed, but only because somebody asked.
         let res = app
             .clone()
-            .oneshot(delete(&format!("/api/sessions/{id}/agents/{fork}")))
+            .oneshot(delete(&t.url(&format!("/sessions/{id}/agents/{fork}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let res = app
             .clone()
-            .oneshot(delete(&format!("/api/sessions/{id}/agents/{fork}")))
+            .oneshot(delete(&t.url(&format!("/sessions/{id}/agents/{fork}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "a fork goes once");
@@ -728,7 +938,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                &format!("/api/sessions/{id}/messages"),
+                &t.url(&format!("/sessions/{id}/messages")),
                 &serde_json::json!({"text": "hi"}),
             ))
             .await
@@ -738,7 +948,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                &format!("/api/sessions/{id}/agents/main/stop"),
+                &t.url(&format!("/sessions/{id}/agents/main/stop")),
                 &serde_json::json!({}),
             ))
             .await
@@ -746,12 +956,12 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let res = app
             .clone()
-            .oneshot(delete(&format!("/api/sessions/{id}")))
+            .oneshot(delete(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         // gone from the list
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert!(list.sessions.is_empty());
     }
@@ -762,12 +972,13 @@ mod tests {
     #[tokio::test]
     async fn chatgpt_login_rejects_unknown_and_non_chatgpt_providers() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/config/model-providers/ghost/chatgpt/login",
+                &t.url("/config/model-providers/ghost/chatgpt/login"),
                 &serde_json::json!({}),
             ))
             .await
@@ -777,7 +988,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/model-providers/p",
+                &t.url("/config/model-providers/p"),
                 &serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
             ))
             .await
@@ -787,7 +998,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/config/model-providers/p/chatgpt/login",
+                &t.url("/config/model-providers/p/chatgpt/login"),
                 &serde_json::json!({}),
             ))
             .await
@@ -799,7 +1010,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/model-providers/c",
+                &t.url("/config/model-providers/c"),
                 &serde_json::json!({"name": "c", "kind": "chatgpt"}),
             ))
             .await
@@ -808,7 +1019,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(get("/api/config/model-providers/c/chatgpt"))
+            .oneshot(get(&t.url("/config/model-providers/c/chatgpt")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -820,12 +1031,13 @@ mod tests {
     async fn config_get_and_per_resource_writes_round_trip() {
         use horsie_models::settings::SettingsView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         // GET: fresh DB — no models, and "local" falls back to being the
         // (unloaded) default since nothing has set a preference. The one vendor
         // listed is the fake agent `test_state` published into this account's
         // map, which is the same map the settings view reads.
-        let res = app.clone().oneshot(get("/api/config")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/config"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let view: SettingsView = read_json(res).await;
         assert_eq!(view.default_runtime_vendor, "local");
@@ -838,7 +1050,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/model-providers/p",
+                &t.url("/config/model-providers/p"),
                 &serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
             ))
             .await
@@ -847,14 +1059,14 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/models/m",
+                &t.url("/config/models/m"),
                 &serde_json::json!({"alias": "m", "provider": "p", "modelId": "id"}),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let res = app.clone().oneshot(get("/api/config")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/config"))).await.unwrap();
         let view: SettingsView = read_json(res).await;
         assert_eq!(view.models.len(), 1);
         assert!(view.providers[0].has_credential);
@@ -865,7 +1077,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/default-runtime-vendor",
+                &t.url("/config/default-runtime-vendor"),
                 &serde_json::json!({"vendor": "mock"}),
             ))
             .await
@@ -876,7 +1088,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/default-runtime-vendor"))
+            .oneshot(delete_req(&t.url("/config/default-runtime-vendor")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -886,7 +1098,7 @@ mod tests {
         // A model referencing a missing provider is a 422.
         let res = app
             .oneshot(put_json(
-                "/api/config/models/x",
+                &t.url("/config/models/x"),
                 &serde_json::json!({"alias": "x", "provider": "ghost", "modelId": "y"}),
             ))
             .await
@@ -897,14 +1109,15 @@ mod tests {
     #[tokio::test]
     async fn create_without_repos_gets_managed_workspace() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         let body = serde_json::json!({
             "agent": {"model": "mock"},
             "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "message": "hi"
         });
         let res = app
-            .oneshot(post_json("/api/sessions", &body))
+            .oneshot(post_json(&t.url("/sessions"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -916,7 +1129,8 @@ mod tests {
     #[tokio::test]
     async fn a_session_cannot_be_created_without_a_first_message() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         for body in [
             serde_json::json!({
                 "agent": {"model": "mock"},
@@ -930,13 +1144,13 @@ mod tests {
         ] {
             let res = app
                 .clone()
-                .oneshot(post_json("/api/sessions", &body))
+                .oneshot(post_json(&t.url("/sessions"), &body))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         }
         // …and nothing was created on the way to refusing.
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert!(list.sessions.is_empty());
     }
@@ -945,7 +1159,8 @@ mod tests {
     async fn create_with_repos_builds_provision_steps() {
         use horsie_models::session_api::GetSessionResponse;
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         let body = serde_json::json!({
             "agent": {"model": "mock"},
             "environment": {"type": "Runtime", "value": {"vendor": "mock", "repos": [
@@ -956,13 +1171,13 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/sessions", &body))
+            .oneshot(post_json(&t.url("/sessions"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let created: CreateSessionResponse = read_json(res).await;
         let res = app
-            .oneshot(get(&format!("/api/sessions/{}", created.session.id)))
+            .oneshot(get(&t.url(&format!("/sessions/{}", created.session.id))))
             .await
             .unwrap();
         let detail: GetSessionResponse = read_json(res).await;
@@ -973,11 +1188,11 @@ mod tests {
     }
 
     /// Create a session through the API and return its id.
-    async fn create_session_via_api(app: &Router) -> String {
+    async fn create_session_via_api(app: &Router, t: &crate::testing::TestState) -> String {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/sessions",
+                &t.url("/sessions"),
                 &serde_json::json!({
                     "agent": { "model": "mock" },
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
@@ -994,22 +1209,23 @@ mod tests {
     #[tokio::test]
     async fn annotations_ride_the_session_list_and_survive_a_removal() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
-        let id = create_session_via_api(&app).await;
+        let id = create_session_via_api(&app, &t).await;
 
         // Tag it; the list carries the annotation.
         let res = app
             .clone()
             .oneshot(put_json(
-                &format!("/api/sessions/{id}/annotations"),
+                &t.url(&format!("/sessions/{id}/annotations")),
                 &serde_json::json!({ "set": [{ "key": "tag.web", "value": "" }], "remove": [] }),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let body: serde_json::Value = read_json(res).await;
         assert_eq!(
             body["sessions"][0]["annotations"],
@@ -1021,7 +1237,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                &format!("/api/sessions/{id}/annotations"),
+                &t.url(&format!("/sessions/{id}/annotations")),
                 &serde_json::json!({ "set": [], "remove": ["tag.web"] }),
             ))
             .await
@@ -1029,7 +1245,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/sessions/{id}")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         let body: serde_json::Value = read_json(res).await;
@@ -1039,12 +1255,13 @@ mod tests {
     #[tokio::test]
     async fn annotations_on_unknown_session_are_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/sessions/nope/annotations",
+                &t.url("/sessions/nope/annotations"),
                 &serde_json::json!({ "set": [], "remove": ["tag.web"] }),
             ))
             .await
@@ -1056,12 +1273,13 @@ mod tests {
     async fn github_status_and_app_config_round_trip() {
         use horsie_models::github::{GitHubAppConfigView, GitHubStatus};
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         // Fresh deployment: nothing configured.
         let res = app
             .clone()
-            .oneshot(get("/api/github/status"))
+            .oneshot(get(&t.url("/github/status")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1077,7 +1295,7 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(put_json("/api/github/app-config", &body))
+            .oneshot(put_json(&t.url("/github/app-config"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1089,14 +1307,18 @@ mod tests {
         // Status now reports the app configured.
         let res = app
             .clone()
-            .oneshot(get("/api/github/status"))
+            .oneshot(get(&t.url("/github/status")))
             .await
             .unwrap();
         let s: GitHubStatus = read_json(res).await;
         assert!(s.app_configured);
 
         // Auth redirect points at GitHub with our client id.
-        let res = app.clone().oneshot(get("/api/github/auth")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get(&t.url("/github/auth")))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
         let loc = res.headers().get("location").unwrap().to_str().unwrap();
         assert!(loc.contains("client_id=cid"), "{loc}");
@@ -1109,7 +1331,8 @@ mod tests {
     #[tokio::test]
     async fn app_config_refuses_what_it_cannot_use() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         for body in [
             serde_json::json!({ "clientId": "" }),
@@ -1125,7 +1348,7 @@ mod tests {
         ] {
             let res = app
                 .clone()
-                .oneshot(put_json("/api/github/app-config", &body))
+                .oneshot(put_json(&t.url("/github/app-config"), &body))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1138,7 +1361,7 @@ mod tests {
         // And nothing was stored on the way through.
         let res = app
             .clone()
-            .oneshot(get("/api/github/status"))
+            .oneshot(get(&t.url("/github/status")))
             .await
             .unwrap();
         let s: horsie_models::github::GitHubStatus = read_json(res).await;
@@ -1148,8 +1371,12 @@ mod tests {
     #[tokio::test]
     async fn github_disconnect_without_credentials_is_ok() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-        let res = app.oneshot(delete("/api/github/disconnect")).await.unwrap();
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
+        let res = app
+            .oneshot(delete(&t.url("/github/disconnect")))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
     }
 
@@ -1157,12 +1384,13 @@ mod tests {
     async fn memory_spaces_and_memories_crud_over_http() {
         use horsie_models::memory::{MemorySpaceView, MemoryView};
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         // The migration seeds exactly one space.
         let res = app
             .clone()
-            .oneshot(get("/api/memory-spaces"))
+            .oneshot(get(&t.url("/memory-spaces")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1175,7 +1403,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/memories",
+                &t.url("/memories"),
                 &serde_json::json!({
                     "space": "default",
                     "name": "alpha",
@@ -1193,14 +1421,14 @@ mod tests {
         // It shows up in the listing, and the space's count follows.
         let res = app
             .clone()
-            .oneshot(get("/api/memories?space=default"))
+            .oneshot(get(&t.url("/memories?space=default")))
             .await
             .unwrap();
         let listed: Vec<MemoryView> = read_json(res).await;
         assert_eq!(listed.len(), 1);
         let res = app
             .clone()
-            .oneshot(get("/api/memory-spaces"))
+            .oneshot(get(&t.url("/memory-spaces")))
             .await
             .unwrap();
         let spaces: Vec<MemorySpaceView> = read_json(res).await;
@@ -1210,7 +1438,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                &format!("/api/memories/{id}"),
+                &t.url(&format!("/memories/{id}")),
                 &serde_json::json!({ "content": "new body" }),
             ))
             .await
@@ -1224,7 +1452,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/memories",
+                &t.url("/memories"),
                 &serde_json::json!({
                     "space": "default", "name": "Bad Name",
                     "description": "d", "content": "c"
@@ -1237,7 +1465,7 @@ mod tests {
         // A missing memory is a 404.
         let res = app
             .clone()
-            .oneshot(get("/api/memories/99999"))
+            .oneshot(get(&t.url("/memories/99999")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1245,11 +1473,11 @@ mod tests {
         // Deleting the space takes its memories with it.
         let res = app
             .clone()
-            .oneshot(delete("/api/memory-spaces/default"))
+            .oneshot(delete(&t.url("/memory-spaces/default")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        let res = app.oneshot(get("/api/memories")).await.unwrap();
+        let res = app.oneshot(get(&t.url("/memories"))).await.unwrap();
         let all: Vec<MemoryView> = read_json(res).await;
         assert!(all.is_empty());
     }
@@ -1265,7 +1493,8 @@ mod tests {
     #[tokio::test]
     async fn a_github_credential_is_refused_without_a_verifiable_dial_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state.clone());
 
         let uri = "/api/runtime/github-credential?host=github.com&path=o/r";
@@ -1292,7 +1521,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
         // This account's real token, but naming a session that does not exist.
-        let token = dial_token_for(&state, "no-such-session").await;
+        let token = dial_token_for(&t, "no-such-session").await;
         let req = Request::builder()
             .uri(uri)
             .header("authorization", format!("Bearer {token}"))
@@ -1322,7 +1551,8 @@ mod tests {
     #[tokio::test]
     async fn a_repository_the_session_never_checks_out_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let session = {
             let services = services(&state).await;
             let mut spec = crate::sessions::spec::SessionSpec::for_vendor("mock");
@@ -1347,7 +1577,7 @@ mod tests {
                 .unwrap()
                 .id
         };
-        let token = dial_token_for(&state, &session).await;
+        let token = dial_token_for(&t, &session).await;
         let app = app(state.clone());
 
         let req = Request::builder()
@@ -1398,12 +1628,13 @@ mod tests {
         git(&["commit", "-q", "-m", "i"]);
         let url = format!("file://{}", repo.display());
 
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let plugins = services(&state).await.plugins.clone();
         let app = app(state.clone());
 
         // Empty to start.
-        let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/plugins"))).await.unwrap();
         let list: Vec<PluginView> = read_json(res).await;
         assert!(list.is_empty());
 
@@ -1411,7 +1642,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/plugins",
+                &t.url("/plugins"),
                 &serde_json::json!({ "sourceUrl": url }),
             ))
             .await
@@ -1424,7 +1655,7 @@ mod tests {
         assert_eq!(view.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
 
         // Listed.
-        let res = app.clone().oneshot(get("/api/plugins")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/plugins"))).await.unwrap();
         let list: Vec<PluginView> = read_json(res).await;
         assert_eq!(list.len(), 1);
 
@@ -1438,7 +1669,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
-        let token = dial_token_for(&state, "rt-1").await;
+        let token = dial_token_for(&t, "rt-1").await;
         let req = Request::builder()
             .uri(format!("/api/plugin-artifacts/{hash}.zip"))
             .header("authorization", format!("Bearer {token}"))
@@ -1476,12 +1707,14 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
         // Delete.
-        let res = app.oneshot(delete("/api/plugins/demo")).await.unwrap();
+        let res = app.oneshot(delete(&t.url("/plugins/demo"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
     /// A two-entry catalogue as a `file://` repo, plus the app under test.
-    async fn app_with_catalogue(tmp: &tempfile::TempDir) -> (axum::Router, String) {
+    async fn app_with_catalogue(
+        tmp: &tempfile::TempDir,
+    ) -> (axum::Router, String, crate::testing::TestState) {
         let repo = tmp.path().join("market");
         std::fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
         std::fs::write(
@@ -1519,7 +1752,8 @@ mod tests {
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "i"]);
         let url = format!("file://{}", repo.display());
-        (app(test_state(tmp).await), url)
+        let t = test_state(tmp).await;
+        (app(t.state.clone()), url, t)
     }
 
     /// The one box: the same endpoint answers "installed it" and "here is a
@@ -1528,12 +1762,12 @@ mod tests {
     async fn posting_a_catalogue_url_returns_a_marketplace_outcome() {
         use horsie_models::plugins::{InstallOutcome, MarketplaceView, PluginView};
         let tmp = tempfile::tempdir().unwrap();
-        let (app, url) = app_with_catalogue(&tmp).await;
+        let (app, url, t) = app_with_catalogue(&tmp).await;
 
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/plugins",
+                &t.url("/plugins"),
                 &serde_json::json!({ "sourceUrl": url }),
             ))
             .await
@@ -1545,13 +1779,17 @@ mod tests {
         assert_eq!(view.name, "catalogue");
         assert_eq!(view.plugin_count, 2);
 
-        let res = app.clone().oneshot(get("/api/marketplaces")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get(&t.url("/marketplaces")))
+            .await
+            .unwrap();
         let list: Vec<MarketplaceView> = read_json(res).await;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].plugins.len(), 2);
 
         // Nothing was installed by registering the source.
-        let res = app.oneshot(get("/api/plugins")).await.unwrap();
+        let res = app.oneshot(get(&t.url("/plugins"))).await.unwrap();
         let bundles: Vec<PluginView> = read_json(res).await;
         assert!(bundles.is_empty());
     }
@@ -1560,9 +1798,9 @@ mod tests {
     #[tokio::test]
     async fn posting_an_empty_install_input_is_unprocessable() {
         let tmp = tempfile::tempdir().unwrap();
-        let (app, _url) = app_with_catalogue(&tmp).await;
+        let (app, _url, t) = app_with_catalogue(&tmp).await;
         let res = app
-            .oneshot(post_json("/api/plugins", &serde_json::json!({})))
+            .oneshot(post_json(&t.url("/plugins"), &serde_json::json!({})))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1573,11 +1811,11 @@ mod tests {
     async fn deleting_a_marketplace_keeps_its_installed_bundles() {
         use horsie_models::plugins::PluginView;
         let tmp = tempfile::tempdir().unwrap();
-        let (app, url) = app_with_catalogue(&tmp).await;
+        let (app, url, t) = app_with_catalogue(&tmp).await;
 
         app.clone()
             .oneshot(post_json(
-                "/api/plugins",
+                &t.url("/plugins"),
                 &serde_json::json!({ "sourceUrl": url }),
             ))
             .await
@@ -1585,7 +1823,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/plugins",
+                &t.url("/plugins"),
                 &serde_json::json!({ "marketplace": "catalogue", "pluginName": "alpha" }),
             ))
             .await
@@ -1594,12 +1832,12 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(delete("/api/marketplaces/catalogue"))
+            .oneshot(delete(&t.url("/marketplaces/catalogue")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
-        let res = app.oneshot(get("/api/plugins")).await.unwrap();
+        let res = app.oneshot(get(&t.url("/plugins"))).await.unwrap();
         let bundles: Vec<PluginView> = read_json(res).await;
         assert_eq!(bundles.len(), 1, "dropping a source keeps its software");
         assert_eq!(bundles[0].marketplace.as_deref(), Some("catalogue"));
@@ -1609,7 +1847,8 @@ mod tests {
     async fn mcp_server_crud_over_http() {
         use horsie_models::mcp::{McpAuthView, McpConnectResult, McpServerList, McpServerView};
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         // A body naming something else is a rename attempt, and the path is the
         // id of record — so it is refused rather than silently overridden. This
@@ -1621,7 +1860,7 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(put_json("/api/mcp/servers/acme", &mismatched))
+            .oneshot(put_json(&t.url("/mcp/servers/acme"), &mismatched))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1634,7 +1873,7 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(put_json("/api/mcp/servers/acme", &body))
+            .oneshot(put_json(&t.url("/mcp/servers/acme"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1647,7 +1886,11 @@ mod tests {
         }
 
         // List reflects it.
-        let res = app.clone().oneshot(get("/api/mcp/servers")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get(&t.url("/mcp/servers")))
+            .await
+            .unwrap();
         let list: McpServerList = read_json(res).await;
         assert_eq!(list.servers.len(), 1);
         assert_eq!(list.servers[0].name, "acme");
@@ -1656,7 +1899,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/mcp/servers/acme/test",
+                &t.url("/mcp/servers/acme/test"),
                 &serde_json::json!({}),
             ))
             .await
@@ -1669,11 +1912,11 @@ mod tests {
         // Delete.
         let res = app
             .clone()
-            .oneshot(delete("/api/mcp/servers/acme"))
+            .oneshot(delete(&t.url("/mcp/servers/acme")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        let res = app.oneshot(get("/api/mcp/servers")).await.unwrap();
+        let res = app.oneshot(get(&t.url("/mcp/servers"))).await.unwrap();
         let list: McpServerList = read_json(res).await;
         assert!(list.servers.is_empty());
     }
@@ -1690,9 +1933,10 @@ mod tests {
     #[tokio::test]
     async fn deleting_an_unknown_runtime_vendor_reports_the_miss() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         let res = app
-            .oneshot(delete("/api/runtime-vendors/never-existed"))
+            .oneshot(delete(&t.url("/runtime-vendors/never-existed")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1701,9 +1945,10 @@ mod tests {
     #[tokio::test]
     async fn deleting_an_unknown_mcp_server_is_silently_accepted() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
         let res = app
-            .oneshot(delete("/api/mcp/servers/never-existed"))
+            .oneshot(delete(&t.url("/mcp/servers/never-existed")))
             .await
             .unwrap();
         assert_eq!(
@@ -1717,7 +1962,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_connect_on_non_oauth_is_unprocessable_and_callback_needs_code() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         // A bearer server can't be OAuth-connected.
         let body = serde_json::json!({
@@ -1725,13 +1971,13 @@ mod tests {
             "auth": { "kind": "Bearer", "value": { "token": "t" } }
         });
         app.clone()
-            .oneshot(put_json("/api/mcp/servers/x", &body))
+            .oneshot(put_json(&t.url("/mcp/servers/x"), &body))
             .await
             .unwrap();
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/mcp/servers/x/connect",
+                &t.url("/mcp/servers/x/connect"),
                 &serde_json::json!({}),
             ))
             .await
@@ -1740,15 +1986,20 @@ mod tests {
 
         // The callback without a code redirects to Settings with an error.
         let res = app
-            .oneshot(get("/api/mcp/servers/x/oauth/callback"))
+            .oneshot(get(&t.url("/mcp/servers/x/oauth/callback")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::TEMPORARY_REDIRECT);
         let loc = res.headers().get("location").unwrap().to_str().unwrap();
         // The page that actually reads `mcp_error`. `/settings` redirects to
-        // `/settings/models` and drops the query on the way.
+        // `/settings/models` and drops the query on the way — and the page is
+        // inside the project, because the web router is rooted there, so a bare
+        // `/settings/…` would land on the project redirect and drop it too.
         assert!(
-            loc.starts_with("/settings/integrations?mcp_error="),
+            loc.starts_with(&format!(
+                "/p/{}/settings/integrations?mcp_error=",
+                t.account
+            )),
             "{loc}"
         );
     }
@@ -1757,7 +2008,8 @@ mod tests {
     async fn model_cards_public_prefix_search() {
         use horsie_models::model_cards::{ModelCard, ModelCardInput};
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let store = services(&state).await.model_cards.clone();
         let app = app(state);
 
@@ -1781,13 +2033,17 @@ mod tests {
             .await
             .unwrap();
 
-        let res = app.clone().oneshot(get("/api/model-cards")).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(get(&t.url("/model-cards")))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let all: Vec<ModelCard> = read_json(res).await;
         assert_eq!(all.len(), 3);
 
         let res = app
-            .oneshot(get("/api/model-cards?prefix=gpt-4"))
+            .oneshot(get(&t.url("/model-cards?prefix=gpt-4")))
             .await
             .unwrap();
         let hits: Vec<ModelCard> = read_json(res).await;
@@ -1801,12 +2057,13 @@ mod tests {
     async fn admin_model_cards_crud_over_http() {
         use horsie_models::model_cards::ModelCard;
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         // Empty catalog (test_state does not seed).
         let res = app
             .clone()
-            .oneshot(get("/api/admin/model-cards"))
+            .oneshot(get(&t.url("/admin/model-cards")))
             .await
             .unwrap();
         let list: Vec<ModelCard> = read_json(res).await;
@@ -1816,7 +2073,7 @@ mod tests {
         let body = serde_json::json!({"modelId": "m1", "name": "Model One", "contextWindow": 8192});
         let res = app
             .clone()
-            .oneshot(post_json("/api/admin/model-cards", &body))
+            .oneshot(post_json(&t.url("/admin/model-cards"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -1827,7 +2084,7 @@ mod tests {
         // Duplicate → 409.
         let res = app
             .clone()
-            .oneshot(post_json("/api/admin/model-cards", &body))
+            .oneshot(post_json(&t.url("/admin/model-cards"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
@@ -1836,7 +2093,7 @@ mod tests {
         let bad = serde_json::json!({"modelId": "", "name": "x"});
         let res = app
             .clone()
-            .oneshot(post_json("/api/admin/model-cards", &bad))
+            .oneshot(post_json(&t.url("/admin/model-cards"), &bad))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1845,7 +2102,7 @@ mod tests {
         let upd = serde_json::json!({"name": "Model 1 Renamed", "maxTokens": 2048});
         let res = app
             .clone()
-            .oneshot(put_json("/api/admin/model-cards/m1", &upd))
+            .oneshot(put_json(&t.url("/admin/model-cards/m1"), &upd))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -1856,7 +2113,7 @@ mod tests {
         // Update of unknown → 404.
         let res = app
             .clone()
-            .oneshot(put_json("/api/admin/model-cards/ghost", &upd))
+            .oneshot(put_json(&t.url("/admin/model-cards/ghost"), &upd))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1864,12 +2121,12 @@ mod tests {
         // Delete → 204; second delete → 404.
         let res = app
             .clone()
-            .oneshot(delete("/api/admin/model-cards/m1"))
+            .oneshot(delete(&t.url("/admin/model-cards/m1")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app
-            .oneshot(delete("/api/admin/model-cards/m1"))
+            .oneshot(delete(&t.url("/admin/model-cards/m1")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -1939,9 +2196,10 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_that_dials_in_is_reachable_on_its_own_topic() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let services = services(&state).await;
-        let account = services.user.as_str().to_string();
+        let account = services.project.as_str().to_string();
         let token = horsie_support::dial_token::mint(
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
@@ -1970,7 +2228,8 @@ mod tests {
     #[tokio::test]
     async fn a_runtime_with_no_token_is_refused_before_the_upgrade() {
         let tmp = tempfile::tempdir().unwrap();
-        let addr = serve_state(test_state(&tmp).await).await;
+        let t = test_state(&tmp).await;
+        let addr = serve_state(t.state.clone()).await;
         assert!(
             tokio_tungstenite::connect_async(format!("ws://{addr}/api/runtime/connect"))
                 .await
@@ -1984,9 +2243,10 @@ mod tests {
         // The property the token buys. Before it, whoever announced an id first
         // received that runtime's relayed tool calls.
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let services = services(&state).await;
-        let account = services.user.as_str().to_string();
+        let account = services.project.as_str().to_string();
         let token = horsie_support::dial_token::mint(
             &services.dial_secret,
             &horsie_support::dial_token::DialClaims {
@@ -2036,7 +2296,8 @@ mod tests {
             crate::auth::AuthMode::Delegated,
         ] {
             let tmp = tempfile::tempdir().unwrap();
-            let mut state = test_state(&tmp).await;
+            let t = test_state(&tmp).await;
+            let mut state = t.state.clone();
             state.auth = Arc::new(crate::auth::AuthService::new(
                 crate::auth::AuthStore::new(crate::db::testing::db().await),
                 crate::auth::AuthDeps {
@@ -2048,12 +2309,12 @@ mod tests {
             let token = horsie_support::dial_token::mint(
                 &services.dial_secret,
                 &horsie_support::dial_token::DialClaims {
-                    user_id: services.user.as_str().to_string(),
+                    user_id: services.project.as_str().to_string(),
                     runtime_id: "s1".to_string(),
                     incarnation: "i1".to_string(),
                 },
             );
-            let mut announced = listening_to(&state, services.user.as_str(), "s1").await;
+            let mut announced = listening_to(&state, services.project.as_str(), "s1").await;
             let addr = serve_state(state).await;
 
             let _ws = dial_runtime(addr, &token, "s1")
@@ -2073,10 +2334,11 @@ mod tests {
     /// out. Resolving the claim through the get-or-create registry meant a
     /// stranger could mint accounts by dialling in a loop with nonsense.
     #[tokio::test]
-    async fn a_token_for_an_account_that_does_not_exist_creates_nothing() {
+    async fn a_token_for_a_project_that_does_not_exist_creates_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
-        let users = state.users.clone();
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
+        let users = state.projects.clone();
         let addr = serve_state(state).await;
 
         assert!(
@@ -2084,15 +2346,16 @@ mod tests {
             "a token no secret can verify must never reach a websocket"
         );
         assert!(
-            !users.is_built(&crate::auth::UserId::new("ghost")),
-            "an unverified claim must not have built an account"
+            !users.is_built(&crate::projects::ProjectId::new("ghost")),
+            "an unverified claim must not have built a project"
         );
     }
 
     #[tokio::test]
     async fn a_connected_agent_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = test_state(&tmp).await;
+        let t = test_state(&tmp).await;
+        let state = t.state.clone();
         let agents = services(&state).await.connected_vendors.clone();
         let router = app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2108,7 +2371,7 @@ mod tests {
 
         let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
             .supports_provisioning(false)
-            .connect(&format!("ws://{addr}/api/vendor/connect"))
+            .connect(&format!("ws://{addr}{}", t.url("/vendor/connect")))
             .await
             .expect("agent connects");
 
@@ -2124,8 +2387,9 @@ mod tests {
     #[tokio::test]
     async fn with_auth_disabled_everything_is_reachable() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = app.oneshot(get("/api/auth/status")).await.unwrap();
@@ -2138,13 +2402,13 @@ mod tests {
     ///
     /// Built by hand rather than through `auth_state`: what makes this mode
     /// what it is, is that no credential of horsie's own exists.
-    async fn delegated_state(tmp: &tempfile::TempDir) -> AppState {
+    async fn delegated_state(tmp: &tempfile::TempDir) -> crate::testing::TestState {
         let built = crate::testing::state(tmp.path())
             .auth(crate::auth::AuthMode::Delegated)
             .build()
             .await;
         publish_mock_vendor(&built.state).await;
-        built.state
+        built
     }
 
     /// The failure that would not announce itself.
@@ -2156,9 +2420,10 @@ mod tests {
     #[tokio::test]
     async fn a_delegated_request_with_no_identity_is_refused_rather_than_anonymous() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(delegated_state(&tmp).await);
+        let t = delegated_state(&tmp).await;
+        let app = app(t.state.clone());
 
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         assert_eq!(
             res.status(),
             StatusCode::UNAUTHORIZED,
@@ -2171,7 +2436,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/sessions")
+                    .uri(t.url("/sessions"))
                     .header("authorization", "Bearer anything")
                     .body(Body::empty())
                     .unwrap(),
@@ -2190,11 +2455,11 @@ mod tests {
     #[tokio::test]
     async fn a_delegated_identity_resolves_to_that_account() {
         let tmp = tempfile::tempdir().unwrap();
-        let state = delegated_state(&tmp).await;
-        let anonymous = state.shared.anonymous.clone();
-        let app = app(state);
+        let t = delegated_state(&tmp).await;
+        let anonymous = t.state.shared.anonymous.clone();
+        let app = app(t.state.clone());
 
-        let mut req = get("/api/sessions");
+        let mut req = get(&t.url("/sessions"));
         req.extensions_mut()
             .insert(crate::http::auth::DelegatedIdentity(anonymous));
         let res = app.oneshot(req).await.unwrap();
@@ -2229,7 +2494,8 @@ mod tests {
         for path in paths {
             front = front.route(path, post(|| async { "front layer" }));
         }
-        let app = app(delegated_state(&tmp).await).merge(front);
+        let t = delegated_state(&tmp).await;
+        let app = app(t.state.clone()).merge(front);
 
         for path in paths {
             let res = app
@@ -2258,10 +2524,11 @@ mod tests {
     #[tokio::test]
     async fn with_auth_enabled_the_api_is_closed_but_health_and_status_are_not() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
         let res = app.clone().oneshot(get("/api/health")).await.unwrap();
@@ -2279,7 +2546,8 @@ mod tests {
     #[tokio::test]
     async fn login_sets_a_cookie_that_opens_the_api_and_logout_closes_it_again() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
         // Wrong password.
@@ -2318,7 +2586,7 @@ mod tests {
         // The cookie opens the API.
         let res = app
             .clone()
-            .oneshot(get_with_cookie("/api/sessions", &cookie))
+            .oneshot(get_with_cookie(&t.url("/sessions"), &cookie))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -2349,7 +2617,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let res = app
-            .oneshot(get_with_cookie("/api/sessions", &cookie))
+            .oneshot(get_with_cookie(&t.url("/sessions"), &cookie))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
@@ -2358,12 +2626,13 @@ mod tests {
     #[tokio::test]
     async fn a_bearer_token_is_accepted_and_a_bogus_one_is_not() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let secret = state.auth.login(&pw).await.unwrap();
         let app = app(state);
 
         let req = Request::builder()
-            .uri("/api/sessions")
+            .uri(t.url("/sessions"))
             .header("authorization", format!("Bearer {secret}"))
             .body(Body::empty())
             .unwrap();
@@ -2373,7 +2642,7 @@ mod tests {
         );
 
         let req = Request::builder()
-            .uri("/api/sessions")
+            .uri(t.url("/sessions"))
             .header("authorization", "Bearer hsk_web_notarealtoken")
             .body(Body::empty())
             .unwrap();
@@ -2386,7 +2655,8 @@ mod tests {
     #[tokio::test]
     async fn changing_the_password_requires_the_current_one_and_then_works() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
         let res = app
@@ -2457,7 +2727,8 @@ mod tests {
         std::fs::write(web.join("index.html"), "<html>app</html>").unwrap();
         std::fs::write(web.join("favicon.svg"), "<svg/>").unwrap();
 
-        let (mut state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let mut state = t.state.clone();
         state.web_dir = Some(web);
         let app = app(state);
 
@@ -2476,7 +2747,8 @@ mod tests {
         std::fs::write(web.join("index.html"), "<html>app</html>").unwrap();
         std::fs::write(web.join("favicon.svg"), "<svg/>").unwrap();
 
-        let (mut state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let mut state = t.state.clone();
         state.web_dir = Some(web);
         let app = app(state);
 
@@ -2508,18 +2780,18 @@ mod tests {
     /// Three requests rather than one, because each resource is addressed on
     /// its own now. Provider first: the model referencing it is validated
     /// against what is stored.
-    async fn put_mock_model(app: &axum::Router) {
+    async fn put_mock_model(app: &axum::Router, t: &crate::testing::TestState) {
         for (uri, body) in [
             (
-                "/api/config/model-providers/p",
+                &t.url("/config/model-providers/p"),
                 serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
             ),
             (
-                "/api/config/models/mock",
+                &t.url("/config/models/mock"),
                 serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
             ),
             (
-                "/api/config/default-runtime-vendor",
+                &t.url("/config/default-runtime-vendor"),
                 serde_json::json!({"vendor": "mock"}),
             ),
         ] {
@@ -2531,14 +2803,14 @@ mod tests {
     #[tokio::test]
     async fn an_agent_needs_a_slug_name_and_a_model_that_exists() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = agent_app(&tmp).await;
+        let (app, t) = agent_app(&tmp).await;
         for bad in [
             serde_json::json!({"name": "Bad Name", "model": "mock"}),
             serde_json::json!({"name": "x", "model": "ghost"}),
         ] {
             let res = app
                 .clone()
-                .oneshot(post_json("/api/agents", &bad))
+                .oneshot(post_json(&t.url("/agents"), &bad))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
@@ -2552,14 +2824,14 @@ mod tests {
     async fn replacing_an_agent_clears_the_plugins_it_omits() {
         use horsie_models::agents::AgentView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = agent_app(&tmp).await;
+        let (app, t) = agent_app(&tmp).await;
         let created = serde_json::json!({
             "name": "reviewer", "description": "reviews PRs", "model": "mock",
             "plugins": ["superpowers"], "memorySpaces": ["default"]
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/agents", &created))
+            .oneshot(post_json(&t.url("/agents"), &created))
             .await
             .unwrap();
         let v: AgentView = read_json(res).await;
@@ -2567,7 +2839,7 @@ mod tests {
 
         let res = app
             .oneshot(put_json(
-                "/api/agents/reviewer",
+                &t.url("/agents/reviewer"),
                 &serde_json::json!({"name": "reviewer", "model": "mock", "description": "v2"}),
             ))
             .await
@@ -2579,30 +2851,34 @@ mod tests {
     /// An app with a "mock" model and a "reviewer" agent preset on the
     /// connected "mock" vendor — everything a routine needs to be runnable.
     /// An app with a "mock" model, which is all an agent preset needs.
-    async fn agent_app(tmp: &tempfile::TempDir) -> axum::Router {
-        let app = app(test_state(tmp).await);
-        put_mock_model(&app).await;
-        app
+    async fn agent_app(tmp: &tempfile::TempDir) -> (axum::Router, crate::testing::TestState) {
+        let t = test_state(tmp).await;
+        let app = app(t.state.clone());
+        put_mock_model(&app, &t).await;
+        (app, t)
     }
 
     /// An app with nothing extra — what an environment needs.
-    async fn plain_app(tmp: &tempfile::TempDir) -> axum::Router {
-        app(test_state(tmp).await)
+    async fn plain_app(tmp: &tempfile::TempDir) -> (axum::Router, crate::testing::TestState) {
+        let t = test_state(tmp).await;
+        let app = app(t.state.clone());
+        (app, t)
     }
 
-    async fn routine_app(tmp: &tempfile::TempDir) -> axum::Router {
-        let app = app(test_state(tmp).await);
-        put_mock_model(&app).await;
+    async fn routine_app(tmp: &tempfile::TempDir) -> (axum::Router, crate::testing::TestState) {
+        let t = test_state(tmp).await;
+        let app = app(t.state.clone());
+        put_mock_model(&app, &t).await;
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/agents",
+                &t.url("/agents"),
                 &serde_json::json!({"name": "reviewer", "model": "mock"}),
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
-        app
+        (app, t)
     }
 
     fn workflow_body() -> serde_json::Value {
@@ -2633,7 +2909,7 @@ mod tests {
     #[tokio::test]
     async fn a_workflow_whose_graph_does_not_hold_together_is_422() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         for bad in [
             // start names no step
             serde_json::json!({"name": "b", "start": "nowhere",
@@ -2658,7 +2934,7 @@ mod tests {
         ] {
             let res = app
                 .clone()
-                .oneshot(post_json("/api/workflows", &bad))
+                .oneshot(post_json(&t.url("/workflows"), &bad))
                 .await
                 .unwrap();
             assert_eq!(
@@ -2676,9 +2952,9 @@ mod tests {
     async fn a_workflows_steps_and_transition_order_survive_the_wire() {
         use horsie_models::workflow::WorkflowView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         let res = app
-            .oneshot(post_json("/api/workflows", &workflow_body()))
+            .oneshot(post_json(&t.url("/workflows"), &workflow_body()))
             .await
             .unwrap();
         let v: WorkflowView = read_json(res).await;
@@ -2692,7 +2968,7 @@ mod tests {
     crud_over_http! {
         mod agents_contract,
         app: agent_app,
-        path: "/api/agents",
+        path: "/agents",
         name: "reviewer",
         create: serde_json::json!({
             "name": "reviewer", "description": "reviews PRs", "model": "mock",
@@ -2705,7 +2981,7 @@ mod tests {
     crud_over_http! {
         mod environments_contract,
         app: plain_app,
-        path: "/api/environments",
+        path: "/environments",
         name: "staging",
         create: serde_json::json!({
             "name": "staging", "description": "fly box", "vendor": "fly",
@@ -2720,7 +2996,7 @@ mod tests {
     crud_over_http! {
         mod routines_contract,
         app: routine_app,
-        path: "/api/routines",
+        path: "/routines",
         name: "nightly",
         create: routine_body(),
         replace: {
@@ -2734,7 +3010,7 @@ mod tests {
     crud_over_http! {
         mod workflows_contract,
         app: routine_app,
-        path: "/api/workflows",
+        path: "/workflows",
         name: "fix-bug",
         create: workflow_body(),
         replace: {
@@ -2757,7 +3033,7 @@ mod tests {
     #[tokio::test]
     async fn a_routine_needs_a_slug_name_a_real_agent_a_prompt_and_a_sane_interval() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         for bad in [
             serde_json::json!({"name": "Bad Name", "agent": "reviewer", "prompt": "x"}),
             serde_json::json!({"name": "b", "agent": "ghost", "prompt": "x"}),
@@ -2767,7 +3043,7 @@ mod tests {
         ] {
             let res = app
                 .clone()
-                .oneshot(post_json("/api/routines", &bad))
+                .oneshot(post_json(&t.url("/routines"), &bad))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
@@ -2780,10 +3056,10 @@ mod tests {
     async fn a_routines_schedule_is_armed_on_create_and_replaced_wholesale() {
         use horsie_models::routines::RoutineView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         let res = app
             .clone()
-            .oneshot(post_json("/api/routines", &routine_body()))
+            .oneshot(post_json(&t.url("/routines"), &routine_body()))
             .await
             .unwrap();
         let v: RoutineView = read_json(res).await;
@@ -2793,7 +3069,7 @@ mod tests {
 
         let res = app
             .oneshot(put_json(
-                "/api/routines/nightly",
+                &t.url("/routines/nightly"),
                 &serde_json::json!({
                     "name": "nightly", "agent": "reviewer", "prompt": "new prompt", "enabled": false,
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -2818,7 +3094,8 @@ mod tests {
     async fn runtime_vendors_crud_over_http() {
         use horsie_models::runtime_vendor::{RuntimeVendorConfigView, RuntimeVendorSettings};
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         let settings = |callback: &str| {
             // Unions are adjacently tagged across this protocol: a variant name
@@ -2847,7 +3124,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(put_json("/api/runtime-vendors/fly", &body))
+            .oneshot(put_json(&t.url("/runtime-vendors/fly"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -2864,7 +3141,7 @@ mod tests {
         // The token is never readable back, however it is asked for.
         let res = app
             .clone()
-            .oneshot(get("/api/runtime-vendors"))
+            .oneshot(get(&t.url("/runtime-vendors")))
             .await
             .unwrap();
         let list: Vec<RuntimeVendorConfigView> = read_json(res).await;
@@ -2881,7 +3158,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/runtime-vendors/fly",
+                &t.url("/runtime-vendors/fly"),
                 &serde_json::json!({
                     "name": "fly",
                     "settings": settings("wss://horsie.example.com/relay"),
@@ -2900,7 +3177,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/runtime-vendors/local-only",
+                &t.url("/runtime-vendors/local-only"),
                 &serde_json::json!({
                     "name": "local-only",
                     "settings": settings("ws://localhost:8080/api/runtime/connect"),
@@ -2917,7 +3194,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/runtime-vendors/fly/test",
+                &t.url("/runtime-vendors/fly/test"),
                 &serde_json::json!({}),
             ))
             .await
@@ -2931,7 +3208,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/runtime-vendors/nobody/test",
+                &t.url("/runtime-vendors/nobody/test"),
                 &serde_json::json!({}),
             ))
             .await
@@ -2940,12 +3217,12 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(delete("/api/runtime-vendors/fly"))
+            .oneshot(delete(&t.url("/runtime-vendors/fly")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app
-            .oneshot(delete("/api/runtime-vendors/fly"))
+            .oneshot(delete(&t.url("/runtime-vendors/fly")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -2954,7 +3231,7 @@ mod tests {
     #[tokio::test]
     async fn an_environment_needs_a_slug_name_and_a_real_vendor() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = plain_app(&tmp).await;
+        let (app, t) = plain_app(&tmp).await;
         for bad in [
             serde_json::json!({"name": "Bad Name", "vendor": "fly"}),
             serde_json::json!({"name": "b", "vendor": ""}),
@@ -2962,7 +3239,7 @@ mod tests {
         ] {
             let res = app
                 .clone()
-                .oneshot(post_json("/api/environments", &bad))
+                .oneshot(post_json(&t.url("/environments"), &bad))
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
@@ -2975,7 +3252,7 @@ mod tests {
     async fn an_environments_repos_env_vars_and_provision_round_trip() {
         use horsie_models::environments::EnvironmentView;
         let tmp = tempfile::tempdir().unwrap();
-        let app = plain_app(&tmp).await;
+        let (app, t) = plain_app(&tmp).await;
         let body = serde_json::json!({
             "name": "staging", "description": "fly box", "vendor": "fly",
             "repos": [{"url": "https://github.com/o/api", "gitRef": "dev"}],
@@ -2984,7 +3261,7 @@ mod tests {
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/environments", &body))
+            .oneshot(post_json(&t.url("/environments"), &body))
             .await
             .unwrap();
         let v: EnvironmentView = read_json(res).await;
@@ -2995,7 +3272,7 @@ mod tests {
 
         let res = app
             .oneshot(put_json(
-                "/api/environments/staging",
+                &t.url("/environments/staging"),
                 &serde_json::json!({"name": "staging", "vendor": "docker"}),
             ))
             .await
@@ -3008,16 +3285,16 @@ mod tests {
     async fn a_run_is_listed_under_its_routine_and_nowhere_else() {
         use horsie_models::routines::RoutineRunResponse;
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         app.clone()
-            .oneshot(post_json("/api/routines", &routine_body()))
+            .oneshot(post_json(&t.url("/routines"), &routine_body()))
             .await
             .unwrap();
 
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/routines/nightly/run",
+                &t.url("/routines/nightly/run"),
                 &serde_json::json!({}),
             ))
             .await
@@ -3030,7 +3307,7 @@ mod tests {
         // to it — a run is an ordinary session, so it is read like one.
         let res = app
             .clone()
-            .oneshot(get("/api/sessions?routine=nightly"))
+            .oneshot(get(&t.url("/sessions?routine=nightly")))
             .await
             .unwrap();
         let runs: ListSessionsResponse = read_json(res).await;
@@ -3039,7 +3316,7 @@ mod tests {
 
         // ...and deliberately not in the session list, though it is still
         // openable by id (that is how the run list links to it).
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert!(
             list.sessions.is_empty(),
@@ -3047,7 +3324,7 @@ mod tests {
         );
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/sessions/{id}")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -3055,7 +3332,10 @@ mod tests {
         // Running an unknown routine is a 404, not a silent no-op.
         let res = app
             .clone()
-            .oneshot(post_json("/api/routines/ghost/run", &serde_json::json!({})))
+            .oneshot(post_json(
+                &t.url("/routines/ghost/run"),
+                &serde_json::json!({}),
+            ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -3063,12 +3343,12 @@ mod tests {
         // Deleting the routine takes its runs with it: nothing else lists them.
         let res = app
             .clone()
-            .oneshot(delete("/api/routines/nightly"))
+            .oneshot(delete(&t.url("/routines/nightly")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = app
-            .oneshot(get(&format!("/api/sessions/{id}")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -3077,25 +3357,28 @@ mod tests {
     #[tokio::test]
     async fn an_agent_a_routine_uses_cannot_be_deleted() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = routine_app(&tmp).await;
+        let (app, t) = routine_app(&tmp).await;
         app.clone()
-            .oneshot(post_json("/api/routines", &routine_body()))
+            .oneshot(post_json(&t.url("/routines"), &routine_body()))
             .await
             .unwrap();
 
         let res = app
             .clone()
-            .oneshot(delete("/api/agents/reviewer"))
+            .oneshot(delete(&t.url("/agents/reviewer")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CONFLICT);
 
         // Freed by removing the routine.
         app.clone()
-            .oneshot(delete("/api/routines/nightly"))
+            .oneshot(delete(&t.url("/routines/nightly")))
             .await
             .unwrap();
-        let res = app.oneshot(delete("/api/agents/reviewer")).await.unwrap();
+        let res = app
+            .oneshot(delete(&t.url("/agents/reviewer")))
+            .await
+            .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
@@ -3104,14 +3387,15 @@ mod tests {
         use horsie_models::agents::AgentInvokeResponse;
         use horsie_models::session_api::{GetAgentResponse, GetSessionResponse};
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
-        put_mock_model(&app).await;
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
+        put_mock_model(&app, &t).await;
         let body = serde_json::json!({
             "name": "reviewer", "model": "mock", "memorySpaces": ["default"]
         });
         let res = app
             .clone()
-            .oneshot(post_json("/api/agents", &body))
+            .oneshot(post_json(&t.url("/agents"), &body))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
@@ -3120,7 +3404,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/agents/reviewer/invoke",
+                &t.url("/agents/reviewer/invoke"),
                 &serde_json::json!({
                     "message": "review the diff",
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -3133,12 +3417,12 @@ mod tests {
         let id = invoked.session.id;
 
         // The session exists with the preset's model/vendor and memory spaces.
-        let res = app.clone().oneshot(get("/api/sessions")).await.unwrap();
+        let res = app.clone().oneshot(get(&t.url("/sessions"))).await.unwrap();
         let list: ListSessionsResponse = read_json(res).await;
         assert_eq!(list.sessions.len(), 1);
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/sessions/{id}")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}"))))
             .await
             .unwrap();
         let detail: GetSessionResponse = read_json(res).await;
@@ -3147,7 +3431,7 @@ mod tests {
         // session's: they read off the main agent's document.
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/sessions/{id}/agents/main")))
+            .oneshot(get(&t.url(&format!("/sessions/{id}/agents/main"))))
             .await
             .unwrap();
         let agent: GetAgentResponse = read_json(res).await;
@@ -3158,7 +3442,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/agents/ghost/invoke",
+                &t.url("/agents/ghost/invoke"),
                 &serde_json::json!({
                     "message": "hi",
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -3170,7 +3454,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(post_json(
-                "/api/agents/reviewer/invoke",
+                &t.url("/agents/reviewer/invoke"),
                 &serde_json::json!({
                     "message": "   ",
                     "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -3185,17 +3469,17 @@ mod tests {
         // not, and the same preset stops being invocable.
         for (uri, body) in [
             (
-                "/api/config/model-providers/p",
+                &t.url("/config/model-providers/p"),
                 serde_json::json!({"name": "p", "kind": "anthropic", "baseUrl": "http://localhost:1", "apiKey": "sk-x"}),
             ),
             (
-                "/api/config/models/mock",
+                &t.url("/config/models/mock"),
                 serde_json::json!({"alias": "mock", "provider": "p", "modelId": "id"}),
             ),
             // A vendor no agent answers to: still accepted, because the agent
             // may dial in later.
             (
-                "/api/config/default-runtime-vendor",
+                &t.url("/config/default-runtime-vendor"),
                 serde_json::json!({"vendor": "ghost-vendor"}),
             ),
         ] {
@@ -3204,7 +3488,7 @@ mod tests {
         }
         let res = app
             .oneshot(post_json(
-                "/api/agents/reviewer/invoke",
+                &t.url("/agents/reviewer/invoke"),
                 &serde_json::json!({"message": "hi"}),
             ))
             .await
@@ -3216,7 +3500,8 @@ mod tests {
     async fn the_device_flow_issues_tokens_that_open_the_api() {
         use horsie_models::auth::{DeviceCodeResponse, TokenPair};
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
         // The CLI starts a device authorization without any credential.
@@ -3293,7 +3578,7 @@ mod tests {
 
         // The access token opens the API as a bearer.
         let req = Request::builder()
-            .uri("/api/sessions")
+            .uri(t.url("/sessions"))
             .header("authorization", format!("Bearer {}", pair.access_token))
             .body(Body::empty())
             .unwrap();
@@ -3330,7 +3615,8 @@ mod tests {
     async fn denying_a_device_code_reports_access_denied_to_the_poller() {
         use horsie_models::auth::DeviceCodeResponse;
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
         let res = app
@@ -3378,7 +3664,8 @@ mod tests {
     #[tokio::test]
     async fn approving_an_unknown_user_code_is_a_404() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
         let res = app
             .clone()
@@ -3405,13 +3692,13 @@ mod tests {
     }
 
     /// Bring up a real listener so vendor processes can dial a real WS upgrade.
-    async fn serve(router: axum::Router) -> String {
+    async fn serve(router: axum::Router, t: &crate::testing::TestState) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        format!("ws://{addr}/api/vendor/connect")
+        format!("ws://{addr}{}", t.url("/vendor/connect"))
     }
 
     async fn registered_within(
@@ -3430,9 +3717,10 @@ mod tests {
     #[tokio::test]
     async fn a_vendor_dial_without_a_credential_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let agents = services(&state).await.connected_vendors.clone();
-        let url = serve(app(state)).await;
+        let url = serve(app(state), &t).await;
 
         // The dial fails at the HTTP layer — a 401, not a completed upgrade
         // that closes, which an agent would retry forever.
@@ -3453,12 +3741,13 @@ mod tests {
     #[tokio::test]
     async fn a_browser_session_token_cannot_drive_a_vendor_link() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         // A valid credential of the wrong kind: right principal, but a cookie
         // has no business being a machine.
         let web = state.auth.login(&pw).await.unwrap();
         let agents = services(&state).await.connected_vendors.clone();
-        let url = serve(app(state)).await;
+        let url = serve(app(state), &t).await;
 
         let outcome = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
             .connect_with_token(&url, Some(&web))
@@ -3470,7 +3759,8 @@ mod tests {
     #[tokio::test]
     async fn an_agent_token_connects_and_becomes_a_selectable_vendor() {
         let tmp = tempfile::tempdir().unwrap();
-        let (state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let (secret, _view) = state
             .auth
             .mint_agent_token(
@@ -3480,7 +3770,7 @@ mod tests {
             .await
             .unwrap();
         let agents = services(&state).await.connected_vendors.clone();
-        let url = serve(app(state)).await;
+        let url = serve(app(state), &t).await;
 
         let _agent = crate::runtime_vendor::fake::FakeRuntimeVendor::builder("my-laptop")
             .supports_provisioning(false)
@@ -3494,7 +3784,8 @@ mod tests {
     async fn machine_tokens_are_created_listed_used_and_revoked() {
         use horsie_models::auth::{AgentTokenCreated, AgentTokenView};
         let tmp = tempfile::tempdir().unwrap();
-        let (state, pw) = auth_state(&tmp).await;
+        let (t, pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let app = app(state);
 
         // Minting needs a credential — otherwise anyone could mint one.
@@ -3564,7 +3855,7 @@ mod tests {
         // token used to answer `200` here — full session transcripts to a
         // credential minted for connecting a runtime.
         let req = Request::builder()
-            .uri("/api/sessions")
+            .uri(t.url("/sessions"))
             .header("authorization", format!("Bearer {}", created.token))
             .body(Body::empty())
             .unwrap();
@@ -3585,7 +3876,7 @@ mod tests {
             StatusCode::NO_CONTENT
         );
         let req = Request::builder()
-            .uri("/api/sessions")
+            .uri(t.url("/sessions"))
             .header("authorization", format!("Bearer {}", created.token))
             .body(Body::empty())
             .unwrap();
@@ -3639,7 +3930,8 @@ mod tests {
         // /api/auth/password`, and — worst — minting further machine tokens, so
         // revoking a leaked one did not lock the holder out.
         let tmp = tempfile::tempdir().unwrap();
-        let (state, _pw) = auth_state(&tmp).await;
+        let (t, _pw) = auth_state(&tmp).await;
+        let state = t.state.clone();
         let (secret, _view) = state
             .auth
             .mint_agent_token(
@@ -3662,20 +3954,20 @@ mod tests {
 
         for (method, uri) in [
             // A read, and the one that leaks most: whole transcripts.
-            ("GET", "/api/sessions"),
-            ("GET", "/api/config"),
-            ("GET", "/api/agents"),
+            ("GET", t.url("/sessions")),
+            ("GET", t.url("/config")),
+            ("GET", t.url("/agents")),
             // A write.
-            ("POST", "/api/agents"),
+            ("POST", t.url("/agents")),
             // Taking over the account outright.
-            ("POST", "/api/auth/password"),
+            ("POST", "/api/auth/password".to_string()),
             // Minting a successor, which is what made revocation useless.
-            ("POST", "/api/device/tokens"),
-            ("GET", "/api/device/tokens"),
+            ("POST", "/api/device/tokens".to_string()),
+            ("GET", "/api/device/tokens".to_string()),
         ] {
             let status = app
                 .clone()
-                .oneshot(bearer(method, uri))
+                .oneshot(bearer(method, &uri))
                 .await
                 .unwrap()
                 .status();
@@ -3700,12 +3992,13 @@ mod tests {
     #[tokio::test]
     async fn per_resource_config_routes_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
-        let app = app(test_state(&tmp).await);
+        let t = test_state(&tmp).await;
+        let app = app(t.state.clone());
 
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/model-providers/p",
+                &t.url("/config/model-providers/p"),
                 &serde_json::json!({"name": "p", "kind": "anthropic", "apiKey": "sk-x"}),
             ))
             .await
@@ -3717,7 +4010,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/model-providers/q",
+                &t.url("/config/model-providers/q"),
                 &serde_json::json!({"name": "q", "kind": "openai", "apiKey": "sk-y"}),
             ))
             .await
@@ -3726,7 +4019,7 @@ mod tests {
 
         let res = app
             .clone()
-            .oneshot(get("/api/config/model-providers"))
+            .oneshot(get(&t.url("/config/model-providers")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -3736,7 +4029,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/models/m",
+                &t.url("/config/models/m"),
                 &serde_json::json!({"alias": "m", "provider": "p", "modelId": "claude-x"}),
             ))
             .await
@@ -3747,7 +4040,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/models/bad",
+                &t.url("/config/models/bad"),
                 &serde_json::json!({"alias": "bad", "provider": "ghost", "modelId": "x"}),
             ))
             .await
@@ -3758,7 +4051,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(put_json(
-                "/api/config/models/m",
+                &t.url("/config/models/m"),
                 &serde_json::json!({"alias": "other", "provider": "p", "modelId": "x"}),
             ))
             .await
@@ -3769,21 +4062,21 @@ mod tests {
         // model is gone without ever being named.
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/model-providers/p"))
+            .oneshot(delete_req(&t.url("/config/model-providers/p")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/models/m"))
+            .oneshot(delete_req(&t.url("/config/models/m")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
         let res = app
             .clone()
-            .oneshot(delete_req("/api/config/models/ghost"))
+            .oneshot(delete_req(&t.url("/config/models/ghost")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);

@@ -68,7 +68,7 @@ pub async fn github_credential(
 
     let token = bearer(&headers).ok_or_else(refused)?;
     let account = horsie_support::dial_token::claimed_account(&token).ok_or_else(refused)?;
-    let account = crate::auth::UserId::new(account);
+    let account = crate::projects::ProjectId::new(account);
     let secret = crate::config::dial_secret_of(&state.shared.db, &account)
         .await
         .map_err(Api::internal)?
@@ -80,7 +80,7 @@ pub async fn github_credential(
     }
     let wanted = request.path.trim_matches('/').trim_end_matches(".git");
 
-    let services = state.users.get(&account).await.map_err(Api::internal)?;
+    let services = state.projects.get(&account).await.map_err(Api::internal)?;
 
     // The runtime id is the session id, so the runtime never has to tell us
     // which session it is — and could not lie about it if it tried, because the

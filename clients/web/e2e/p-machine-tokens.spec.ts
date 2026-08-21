@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { REPO_ROOT, WEB_DIR, freePort, waitFor } from "./harness";
+import { projectOf } from "./helpers";
 
 // Auth-enabled server of its own, as in n-auth-login / o-device-approval.
 let proc: ChildProcess | undefined;
@@ -59,9 +60,8 @@ test.afterAll(() => {
 test("a machine token is shown once, works as a credential, and can be revoked", async ({
   page,
 }) => {
-  await page.goto(`${baseURL}/settings/account`);
-  await page.getByTestId("login-password").fill(password);
-  await page.getByTestId("login-submit").click();
+  const project = await projectOf(page, baseURL, password);
+  await page.goto(`${baseURL}/p/${project}/settings/account`);
   await expect(page.getByTestId("machine-tokens")).toBeVisible();
 
   await page.getByTestId("token-label").fill("ci-box");
@@ -76,7 +76,12 @@ test("a machine token is shown once, works as a credential, and can be revoked",
   // It authenticates, and reaches only what a runtime vendor process needs:
   // 403 (not 401) is what says the token verified and was then refused this
   // route. It used to answer 200 here — full session transcripts.
-  const restricted = await fetch(`${baseURL}/api/sessions`, {
+  //
+  // The project in the path is deliberately not a real one: the credential gate
+  // runs ahead of `Scope`, so this asserts about the token rather than about
+  // which project it named — and a 404 here would mean the gate had stopped
+  // running at all.
+  const restricted = await fetch(`${baseURL}/api/p/any-project/sessions`, {
     headers: { authorization: `Bearer ${secret}` },
   });
   expect(restricted.status).toBe(403);
@@ -90,7 +95,7 @@ test("a machine token is shown once, works as a credential, and can be revoked",
   await page.getByTestId("token-revoke-ci-box").click();
   await page.getByTestId("confirm-accept").click();
   await expect(page.getByTestId("token-row-ci-box")).toHaveCount(0);
-  const dead = await fetch(`${baseURL}/api/sessions`, {
+  const dead = await fetch(`${baseURL}/api/p/any-project/sessions`, {
     headers: { authorization: `Bearer ${secret}` },
   });
   expect(dead.status).toBe(401);

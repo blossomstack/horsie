@@ -551,8 +551,8 @@ mod tests {
         let db = crate::db::testing::db().await;
         let artifacts = Arc::new(ArtifactStore::new(tmp.path().join("artifacts")));
         let svc = PluginService::new(
-            PluginStore::new(db.clone(), crate::auth::UserId::new("1")),
-            MarketplaceStore::new(db, crate::auth::UserId::new("1")),
+            PluginStore::new(db.clone(), crate::projects::ProjectId::new("1")),
+            MarketplaceStore::new(db, crate::projects::ProjectId::new("1")),
             artifacts.clone(),
         );
         (svc, artifacts, tmp)

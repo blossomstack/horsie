@@ -9,22 +9,28 @@ use crate::session::relative;
 use horsie_models::now_ms;
 use horsie_models::routines::{RoutineRunResponse, RoutineSchedule, RoutineView, Weekday};
 
-pub async fn list(server: &str) -> Result<(), CliError> {
-    let routines = ServerClient::new(server).await?.list_routines().await?;
+pub async fn list(server: &str, project: Option<&str>) -> Result<(), CliError> {
+    let routines = ServerClient::new(server, project)
+        .await?
+        .list_routines()
+        .await?;
     print!("{}", render_routine_table(&routines, now_ms()));
     Ok(())
 }
 
-pub async fn get(server: &str, name: &str) -> Result<(), CliError> {
-    let routine = ServerClient::new(server).await?.get_routine(name).await?;
+pub async fn get(server: &str, project: Option<&str>, name: &str) -> Result<(), CliError> {
+    let routine = ServerClient::new(server, project)
+        .await?
+        .get_routine(name)
+        .await?;
     print!("{}", render_routine_detail(&routine, now_ms()));
     Ok(())
 }
 
 /// Trigger a run now, whatever the schedule says; print the new session's id
 /// and web link — the same two-line shape as `horsie agent invoke`.
-pub async fn invoke(server: &str, name: &str) -> Result<(), CliError> {
-    let client = ServerClient::new(server).await?;
+pub async fn invoke(server: &str, project: Option<&str>, name: &str) -> Result<(), CliError> {
+    let client = ServerClient::new(server, project).await?;
     let RoutineRunResponse { session } = client.run_routine(name).await?;
     print!("{}", render_invoke(client.base(), &session.id));
     Ok(())

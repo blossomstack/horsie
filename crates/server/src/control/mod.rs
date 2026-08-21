@@ -6,7 +6,7 @@
 //! mounting it are the same act rather than two lists someone keeps in step.
 
 use crate::http::error::Api;
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use futures_util::future::BoxFuture;
 use horsie_agentcore::ToolCallError;
 use schemars::JsonSchema;
@@ -79,7 +79,7 @@ pub fn operations() -> Vec<Operation> {
 /// Lives here rather than in `http::handlers` because both surfaces need it and
 /// `ControlError` is the base vocabulary; `handlers::ask` is now a rendering of
 /// this into `Api`.
-pub(crate) async fn ask<T, F>(services: &UserServices, make: F) -> Result<T, ControlError>
+pub(crate) async fn ask<T, F>(services: &ProjectServices, make: F) -> Result<T, ControlError>
 where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> crate::sessions::supervisor::SessionSupervisorCommand,
     T: Send + 'static,
@@ -158,7 +158,7 @@ pub enum Success {
 }
 
 type Run = Arc<
-    dyn Fn(Arc<UserServices>, Value) -> BoxFuture<'static, Result<Value, ControlError>>
+    dyn Fn(Arc<ProjectServices>, Value) -> BoxFuture<'static, Result<Value, ControlError>>
         + Send
         + Sync,
 >;
@@ -190,7 +190,7 @@ pub struct Operation {
 impl Operation {
     pub async fn run(
         &self,
-        services: Arc<UserServices>,
+        services: Arc<ProjectServices>,
         input: Value,
     ) -> Result<Value, ControlError> {
         (self.run)(services, input).await
@@ -232,7 +232,7 @@ pub fn op<I, O, F, Fut>(
 where
     I: DeserializeOwned + JsonSchema + Send + 'static,
     O: Serialize + Send + 'static,
-    F: Fn(Arc<UserServices>, I) -> Fut + Clone + Send + Sync + 'static,
+    F: Fn(Arc<ProjectServices>, I) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<O, ControlError>> + Send + 'static,
 {
     Operation {
@@ -503,10 +503,10 @@ pub(crate) mod tests {
         op(
             "say",
             Method::Post,
-            "/api/greetings",
+            "/greetings",
             "Say hello.",
             Expose::ApiAndTool,
-            |_services: Arc<UserServices>, input: Greeting| async move {
+            |_services: Arc<ProjectServices>, input: Greeting| async move {
                 Ok::<String, ControlError>(format!("hello {}", input.who))
             },
         )

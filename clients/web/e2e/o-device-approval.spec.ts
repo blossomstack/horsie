@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { REPO_ROOT, WEB_DIR, freePort, waitFor } from "./harness";
+import { REPO_ROOT, WEB_DIR, freePort, waitFor, defaultProject } from "./harness";
 
 // A second server with authentication ON, as in n-auth-login: the shared one
 // from global-setup runs auth-disabled for every other spec.
@@ -92,7 +92,7 @@ test("approving a device code in the browser lets the waiting CLI collect tokens
   expect(pair.accessToken).toMatch(/^hsk_usr_/);
 
   // And that token opens the API.
-  const sessions = await fetch(`${baseURL}/api/sessions`, {
+  const sessions = await fetch(`${baseURL}/api/p/${await defaultProject(baseURL, pair.accessToken)}/sessions`, {
     headers: { authorization: `Bearer ${pair.accessToken}` },
   });
   expect(sessions.status).toBe(200);

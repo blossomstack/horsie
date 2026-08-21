@@ -40,8 +40,33 @@ fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
 
 // ── harness ──────────────────────────────────────────────────────────────────
 
-struct Server {
+/// One project's API base — what every URL in this suite is relative to.
+///
+/// Carried rather than assembled at each call site because the project is not a
+/// constant: a fresh deployment mints one, and only a database migrated by
+/// `0040_projects.sql` has the id that happens to equal its owner's.
+#[derive(Clone)]
+struct Api {
     addr: SocketAddr,
+    project: String,
+}
+
+impl Api {
+    /// The same base as a websocket URL, for the vendor socket.
+    fn ws(&self, path: &str) -> String {
+        format!("ws://{}/api/p/{}{path}", self.addr, self.project)
+    }
+}
+
+/// Renders `http://<addr>/api/p/<project>`, so a URL is `format!("{api}/…")`.
+impl std::fmt::Display for Api {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "http://{}/api/p/{}", self.addr, self.project)
+    }
+}
+
+struct Server {
+    api: Api,
     supervisor: horsie_server::sessions::addressing::SupervisorRef,
     vendors: Arc<horsie_server::runtime_vendor::RuntimeVendorRegistry>,
     task: tokio::task::JoinHandle<()>,
@@ -158,7 +183,10 @@ async fn start_server_on(
     let vendors = services.connected_vendors.clone();
     let (addr, task) = built.serve().await;
     Server {
-        addr,
+        api: Api {
+            addr,
+            project: built.account.as_str().to_string(),
+        },
         supervisor,
         vendors,
         task,
@@ -174,7 +202,7 @@ async fn start_server_on(
 /// is where that is established, once.
 async fn create_session(
     client: &reqwest::Client,
-    addr: &SocketAddr,
+    api: &Api,
     agent: &FakeRuntimeVendor,
     message: &str,
 ) -> String {
@@ -184,7 +212,7 @@ async fn create_session(
         "message": message
     });
     let res = client
-        .post(format!("http://{addr}/api/sessions"))
+        .post(format!("{api}/sessions"))
         .json(&body)
         .send()
         .await
@@ -199,7 +227,7 @@ async fn create_session(
 /// Like `create_session`, but with an explicit tool selection.
 async fn create_session_with_tools(
     client: &reqwest::Client,
-    addr: &SocketAddr,
+    api: &Api,
     agent: &FakeRuntimeVendor,
     tools: &[&str],
     message: &str,
@@ -213,7 +241,7 @@ async fn create_session_with_tools(
         "message": message
     });
     let res = client
-        .post(format!("http://{addr}/api/sessions"))
+        .post(format!("{api}/sessions"))
         .json(&body)
         .send()
         .await
@@ -229,7 +257,7 @@ async fn create_session_with_tools(
 /// shape a shared-local-vendor session must use (it provisions nothing).
 async fn create_session_for_vendor(
     client: &reqwest::Client,
-    addr: &SocketAddr,
+    api: &Api,
     vendor: &str,
     agent: &FakeRuntimeVendor,
     message: &str,
@@ -240,7 +268,7 @@ async fn create_session_for_vendor(
         "message": message
     });
     let res = client
-        .post(format!("http://{addr}/api/sessions"))
+        .post(format!("{api}/sessions"))
         .json(&body)
         .send()
         .await
@@ -260,23 +288,20 @@ async fn create_session_for_vendor(
 /// That used to need its own harness, because the old one built a vendor map
 /// separate from the one the config store handed out. An account's map is now
 /// the only one there is, so this is `start_server_with` with nothing in it.
-async fn start_server_with_live_vendors(
-    journal_dir: &Path,
-    mock_url: &str,
-) -> (Server, SocketAddr) {
+async fn start_server_with_live_vendors(journal_dir: &Path, mock_url: &str) -> (Server, Api) {
     let server = start_server_with(journal_dir, None, mock_url, None).await;
-    let addr = server.addr;
-    (server, addr)
+    let api = server.api.clone();
+    (server, api)
 }
 
 async fn send_message(
     client: &reqwest::Client,
-    addr: &SocketAddr,
+    api: &Api,
     id: &str,
     text: &str,
 ) -> reqwest::StatusCode {
     client
-        .post(format!("http://{addr}/api/sessions/{id}/messages"))
+        .post(format!("{api}/sessions/{id}/messages"))
         .json(&serde_json::json!({ "text": text }))
         .send()
         .await
@@ -284,9 +309,9 @@ async fn send_message(
         .status()
 }
 
-async fn get_detail(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> serde_json::Value {
+async fn get_detail(client: &reqwest::Client, api: &Api, id: &str) -> serde_json::Value {
     client
-        .get(format!("http://{addr}/api/sessions/{id}"))
+        .get(format!("{api}/sessions/{id}"))
         .send()
         .await
         .unwrap()
@@ -337,14 +362,12 @@ fn queued_texts(page: &serde_json::Value) -> Vec<String> {
 /// One agent's whole log, newest window, as a page.
 async fn messages_page(
     client: &reqwest::Client,
-    addr: &SocketAddr,
+    api: &Api,
     id: &str,
     aid: &str,
 ) -> serde_json::Value {
     client
-        .get(format!(
-            "http://{addr}/api/sessions/{id}/messages?aid={aid}&max=200"
-        ))
+        .get(format!("{api}/sessions/{id}/messages?aid={aid}&max=200"))
         .send()
         .await
         .unwrap()
@@ -358,12 +381,12 @@ async fn messages_page(
 /// The honest wait for "the turn produced this": a session's status is not it,
 /// because `Idle` is reported both when provisioning finishes and when the turn
 /// that followed it ends.
-async fn wait_for_reply(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &str) {
+async fn wait_for_reply(client: &reqwest::Client, api: &Api, id: &str, want: &str) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     let mut last = String::new();
     loop {
-        let page = messages_page(client, addr, id, "main").await;
+        let page = messages_page(client, api, id, "main").await;
         last = serde_json::to_string(&page_messages(&page)).unwrap_or(last);
         if last.contains(want) {
             return;
@@ -403,7 +426,7 @@ fn turns_ended(page: &serde_json::Value) -> usize {
 ///
 /// Counting turns has no such gap, and stating the number is itself the claim:
 /// a stray extra turn fails here rather than somewhere later and stranger.
-async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: usize) {
+async fn wait_turns(client: &reqwest::Client, api: &Api, id: &str, want: usize) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
@@ -413,7 +436,7 @@ async fn wait_turns(client: &reqwest::Client, addr: &SocketAddr, id: &str, want:
         // Handing it straight to `turns_ended`, which panics on a page with no
         // entries, made that transient fatal to the one helper written to
         // survive it.
-        let page = messages_page(client, addr, id, "main").await;
+        let page = messages_page(client, api, id, "main").await;
         let got = page["entries"].is_array().then(|| turns_ended(&page));
         if let Some(got) = got
             && got >= want
@@ -456,11 +479,11 @@ async fn wait_until<T>(what: &str, mut probe: impl AsyncFnMut() -> Option<T>) ->
 }
 
 /// Poll the main agent's log until its queue holds exactly `want` texts.
-async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &[&str]) {
+async fn wait_inbox(client: &reqwest::Client, api: &Api, id: &str, want: &[&str]) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
-        let got = queued_texts(&messages_page(client, addr, id, "main").await);
+        let got = queued_texts(&messages_page(client, api, id, "main").await);
         if got == want {
             return;
         }
@@ -471,9 +494,9 @@ async fn wait_inbox(client: &reqwest::Client, addr: &SocketAddr, id: &str, want:
     }
 }
 
-async fn get_status(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> Option<String> {
+async fn get_status(client: &reqwest::Client, api: &Api, id: &str) -> Option<String> {
     let res = client
-        .get(format!("http://{addr}/api/sessions/{id}"))
+        .get(format!("{api}/sessions/{id}"))
         .send()
         .await
         .unwrap();
@@ -492,17 +515,17 @@ async fn get_status(client: &reqwest::Client, addr: &SocketAddr, id: &str) -> Op
 }
 
 /// Poll the session detail until its status equals `want` or the deadline passes.
-async fn wait_status(client: &reqwest::Client, addr: &SocketAddr, id: &str, want: &str) {
+async fn wait_status(client: &reqwest::Client, api: &Api, id: &str, want: &str) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
     loop {
-        if let Some(s) = get_status(client, addr, id).await
+        if let Some(s) = get_status(client, api, id).await
             && s == want
         {
             return;
         }
         if start.elapsed() > deadline {
-            let got = get_status(client, addr, id).await;
+            let got = get_status(client, api, id).await;
             panic!("timed out waiting for status {want}; last = {got:?}");
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -685,7 +708,7 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
         "message": "hello"
     });
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&body)
         .send()
         .await
@@ -698,7 +721,7 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
         "a session is not idle before it has a runtime"
     );
 
-    wait_status(&client, &server.addr, &id, "Provisioning").await;
+    wait_status(&client, &server.api, &id, "Provisioning").await;
     assert!(
         !agent.signals().iter().any(|s| s.starts_with("get:")),
         "nothing may ask the vendor for a runtime it has not been told to build; saw {:?}",
@@ -712,7 +735,7 @@ async fn a_first_turn_waits_for_the_create_it_rides_on() {
     // turn has run. Wait for the reply itself, which is what this asserts.
     wait_for_reply(
         &client,
-        &server.addr,
+        &server.api,
         &id,
         "answered once the runtime was up",
     )
@@ -738,10 +761,10 @@ async fn create_message_sse_roundtrip() {
     // sees the create's own turn as well as the one it sends. That is the
     // change: there is no longer a "backfill, then subscribe" seam for a turn
     // to fall through, because the read and the stream are the same request.
-    let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "first").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
-    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
+    let url = format!("{}/sessions/{id}/messages?aid=main", server.api);
     let client2 = client.clone();
     let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
@@ -757,9 +780,7 @@ async fn create_message_sse_roundtrip() {
     });
     subscribed.await.expect("the reader subscribes");
     assert_eq!(
-        send_message(&client, &server.addr, &id, "hi")
-            .await
-            .as_u16(),
+        send_message(&client, &server.api, &id, "hi").await.as_u16(),
         202
     );
 
@@ -816,7 +837,7 @@ async fn create_message_sse_roundtrip() {
         "entry ids must strictly increase: {entry_seqs:?}"
     );
 
-    wait_turns(&client, &server.addr, &id, 2).await;
+    wait_turns(&client, &server.api, &id, 2).await;
     assert_eq!(
         agent.signals(),
         vec![
@@ -850,13 +871,13 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     // Running when the second message arrives. Armed before the create, since
     // the create is what starts that turn.
     let block = mock.blocking_response("first");
-    let id = create_session(&client, &server.addr, &agent, "one").await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
     block.wait_until_received().await;
 
     // Subscribe while the turn is in flight — this stands in for a second tab,
     // which must learn about the queue without reloading the page. The queue is
     // the agent's, so it rides that agent's log like everything else.
-    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
+    let url = format!("{}/sessions/{id}/messages?aid=main", server.api);
     let client2 = client.clone();
     let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
@@ -874,7 +895,7 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     subscribed.await.expect("the reader subscribes");
 
     assert_eq!(
-        send_message(&client, &server.addr, &id, "two")
+        send_message(&client, &server.api, &id, "two")
             .await
             .as_u16(),
         202,
@@ -884,8 +905,8 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     // The agent's own log is the durable source of the queue. The message that
     // created the session has already been taken into the turn in flight, so
     // only the one just sent is still owed.
-    wait_inbox(&client, &server.addr, &id, &["two"]).await;
-    let page = messages_page(&client, &server.addr, &id, "main").await;
+    wait_inbox(&client, &server.api, &id, &["two"]).await;
+    let page = messages_page(&client, &server.api, &id, "main").await;
     let ids: Vec<&str> = page["entries"]
         .as_array()
         .expect("entries")
@@ -914,7 +935,7 @@ async fn a_queued_message_is_visible_on_the_agents_log_and_its_stream() {
     // Letting the turn finish carries the message out of the queue.
     mock.queue_response("second");
     block.release();
-    wait_inbox(&client, &server.addr, &id, &[]).await;
+    wait_inbox(&client, &server.api, &id, &[]).await;
 
     server.shutdown().await;
 }
@@ -935,13 +956,13 @@ async fn prep_progressions_stream_during_a_turn() {
     // The session's own first turn is not the one under test: progression
     // frames are live-only, so this test needs a turn it can subscribe *before*,
     // and only a second message gives it one.
-    let id = create_session(&client, &server.addr, &agent, "warm up").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "warm up").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     // Subscribe before sending so the live progression frames are seen. Prep
     // is session-scoped, so it streams on the session — and the turn's end is
     // observed there as the status returning to Idle.
-    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
+    let url = format!("{}/sessions/{id}/messages?aid=main", server.api);
     let client2 = client.clone();
     let (ready, subscribed) = tokio::sync::oneshot::channel();
     let sse = tokio::spawn(async move {
@@ -951,7 +972,7 @@ async fn prep_progressions_stream_during_a_turn() {
         .await
     });
     subscribed.await.expect("the reader subscribes");
-    send_message(&client, &server.addr, &id, "hi").await;
+    send_message(&client, &server.api, &id, "hi").await;
 
     let events = sse.await.unwrap();
     // Preparation stages are `Preparing` entries in the log, before the reply.
@@ -998,17 +1019,17 @@ async fn history_endpoint_returns_windowed_messages() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
 
     // Two completed turns → user + assistant per turn = 4 messages. Poll the
     // history until both turns have landed (status can read `Idle` between the
     // 202 and the turn flipping to `Running`, so a bare `wait_status` races).
     let history = |limit: u32, before: Option<String>| {
         let client = client.clone();
-        let addr = server.addr;
+        let api = server.api.clone();
         let id = id.clone();
         async move {
-            let mut url = format!("http://{addr}/api/sessions/{id}/messages?aid=main&max={limit}");
+            let mut url = format!("{api}/sessions/{id}/messages?aid=main&max={limit}");
             if let Some(b) = before {
                 url.push_str(&format!("&before={b}"));
             }
@@ -1024,12 +1045,12 @@ async fn history_endpoint_returns_windowed_messages() {
     };
     let history_before = |limit: usize, before: u64| {
         let client = client.clone();
-        let addr = server.addr;
+        let api = server.api.clone();
         let id = id.clone();
         async move {
             client
                 .get(format!(
-                    "http://{addr}/api/sessions/{id}/messages?aid=main&max={limit}&before={before}"
+                    "{api}/sessions/{id}/messages?aid=main&max={limit}&before={before}"
                 ))
                 .send()
                 .await
@@ -1058,7 +1079,7 @@ async fn history_endpoint_returns_windowed_messages() {
     // queued and merged into the next turn, so wait for turn one — the one the
     // create started — to land its reply before sending turn two.
     wait_for(2).await;
-    send_message(&client, &server.addr, &id, "two").await;
+    send_message(&client, &server.api, &id, "two").await;
     wait_for(4).await;
 
     // Tail page with a small limit. A page is a window of *entries* now, not of
@@ -1153,13 +1174,13 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     let client = reqwest::Client::new();
 
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let id = create_session(&client, &server.addr, &agent, "one").await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
 
-    let usage = |addr: SocketAddr, id: String| {
+    let usage = |api: Api, id: String| {
         let client = client.clone();
         async move {
             client
-                .get(format!("http://{addr}/api/sessions/{id}/agents/main"))
+                .get(format!("{api}/sessions/{id}/agents/main"))
                 .send()
                 .await
                 .unwrap()
@@ -1174,30 +1195,30 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     // reading to take first — a session is created with a message, so it has
     // always spent something by the time anyone can read it.
     let after_one = loop {
-        let v = get_detail(&client, &server.addr, &id).await;
+        let v = get_detail(&client, &server.api, &id).await;
         if v["session"]["usageTotal"]["inputTokens"].as_u64().unwrap() > 0 {
             break v;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    wait_turns(&client, &server.addr, &id, 1).await;
+    wait_turns(&client, &server.api, &id, 1).await;
     let after_one_input = after_one["session"]["usageTotal"]["inputTokens"]
         .as_u64()
         .unwrap();
 
     // Turn two accumulates on top of turn one — the session-level total and
     // the (only) agent's own total must agree, since there's just one agent.
-    send_message(&client, &server.addr, &id, "two").await;
+    send_message(&client, &server.api, &id, "two").await;
     let after_two = loop {
-        let v = get_detail(&client, &server.addr, &id).await;
+        let v = get_detail(&client, &server.api, &id).await;
         let total = v["session"]["usageTotal"]["inputTokens"].as_u64().unwrap();
         if total > after_one_input {
             break v;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    wait_turns(&client, &server.addr, &id, 2).await;
-    let agent_doc = usage(server.addr, id.clone()).await;
+    wait_turns(&client, &server.api, &id, 2).await;
+    let agent_doc = usage(server.api.clone(), id.clone()).await;
     assert_eq!(
         after_two["session"]["usageTotal"], agent_doc["agent"]["usage"],
         "one agent: the session total must equal its own total: {after_two}"
@@ -1210,7 +1231,7 @@ async fn usage_endpoint_aggregates_across_turns_and_survives_restart() {
     // even been asked anything yet at this point.
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let after_restart = get_detail(&client, &server2.addr, &id).await;
+    let after_restart = get_detail(&client, &server2.api, &id).await;
     assert_eq!(
         after_restart["session"]["usageTotal"], after_two["session"]["usageTotal"],
         "session-level usage total must survive a restart unchanged: {after_restart}"
@@ -1235,37 +1256,32 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     // Stop only cancels a turn that is actually running, and cancelling is what
     // snapshots and compacts — so block the second turn mid-flight rather than
     // letting it finish, or this test would prove nothing.
     let block = mock.blocking_response("second");
-    send_message(&client, &server.addr, &id, "two").await;
+    send_message(&client, &server.api, &id, "two").await;
     block.wait_until_received().await;
 
     let res = client
-        .post(format!(
-            "http://{}/api/sessions/{id}/agents/main/stop",
-            server.addr
-        ))
+        .post(format!("{}/sessions/{id}/agents/main/stop", server.api))
         .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
     block.release();
-    wait_turns(&client, &server.addr, &id, 2).await;
+    wait_turns(&client, &server.api, &id, 2).await;
 
-    let history = |addr: std::net::SocketAddr| {
+    let history = |api: Api| {
         let client = client.clone();
         let id = id.clone();
         async move {
             client
-                .get(format!(
-                    "http://{addr}/api/sessions/{id}/messages?aid=main&max=100"
-                ))
+                .get(format!("{api}/sessions/{id}/messages?aid=main&max=100"))
                 .send()
                 .await
                 .unwrap()
@@ -1274,7 +1290,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
                 .unwrap()
         }
     };
-    let before = history(server.addr).await;
+    let before = history(server.api.clone()).await;
     let before_ids: Vec<String> = page_messages(&before)
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
@@ -1289,7 +1305,7 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     // because those events are gone.
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    let after = history(server2.addr).await;
+    let after = history(server2.api.clone()).await;
     let after_ids: Vec<String> = page_messages(&after)
         .iter()
         .map(|m| m["id"].as_str().unwrap().to_string())
@@ -1315,22 +1331,19 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     // Stop cancels the turn and nothing else: the runtime is the supervisor's
     // to release when the session goes cold, not the user's to destroy.
     let res = client
-        .post(format!(
-            "http://{}/api/sessions/{id}/agents/main/stop",
-            server.addr
-        ))
+        .post(format!("{}/sessions/{id}/agents/main/stop", server.api))
         .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
-    wait_turns(&client, &server.addr, &id, 1).await;
+    wait_turns(&client, &server.api, &id, 1).await;
     assert!(
         !agent.signals().contains(&format!("hibernate:{id}")),
         "stop must not hibernate: {:?}",
@@ -1339,12 +1352,12 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
 
     // A new message runs against the same runtime.
     assert_eq!(
-        send_message(&client, &server.addr, &id, "two")
+        send_message(&client, &server.api, &id, "two")
             .await
             .as_u16(),
         202
     );
-    wait_turns(&client, &server.addr, &id, 2).await;
+    wait_turns(&client, &server.api, &id, 2).await;
     assert!(agent.signals().contains(&format!("get:{id}")));
 
     server.shutdown().await;
@@ -1368,18 +1381,16 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     let stop = |target: String| {
         let client = client.clone();
-        let addr = server.addr;
+        let api = server.api.clone();
         let id = id.clone();
         async move {
             client
-                .post(format!(
-                    "http://{addr}/api/sessions/{id}/agents/{target}/stop"
-                ))
+                .post(format!("{api}/sessions/{id}/agents/{target}/stop"))
                 .json(&serde_json::json!({}))
                 .send()
                 .await
@@ -1398,7 +1409,7 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
     // to interrupt when the stop lands.
     let block = mock.blocking_response("the fork's turn");
     let res = client
-        .post(format!("http://{}/api/sessions/{id}/messages", server.addr))
+        .post(format!("{}/sessions/{id}/messages", server.api))
         .json(&serde_json::json!({ "text": "/fork try the other way" }))
         .send()
         .await
@@ -1419,8 +1430,8 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
     wait_until("the fork's turn ends as stopped", async || {
         let page: serde_json::Value = client
             .get(format!(
-                "http://{}/api/sessions/{id}/messages?aid={fork}&max=100",
-                server.addr
+                "{}/sessions/{id}/messages?aid={fork}&max=100",
+                server.api
             ))
             .send()
             .await
@@ -1435,7 +1446,7 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
             .then_some(())
     })
     .await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     server.shutdown().await;
 }
@@ -1454,7 +1465,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     // A blocking turn: the LLM request arrives, then hangs — the session is
     // Running when we simulate a crash. The session's first turn is that turn.
     let block = mock.blocking_response("never delivered");
-    let id = create_session(&client, &server.addr, &agent, "hang").await;
+    let id = create_session(&client, &server.api, &agent, "hang").await;
     block.wait_until_received().await;
     // Crash: stop the server core without letting the turn finish.
     server.shutdown().await;
@@ -1464,7 +1475,7 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     // calls no vendor.
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_turns(&client, &server2.addr, &id, 1).await;
+    wait_turns(&client, &server2.api, &id, 1).await;
     assert_eq!(
         agent.signals(),
         signals_before,
@@ -1474,12 +1485,12 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
     // A message then runs a fresh turn on the repaired history.
     mock.queue_response("resumed answer");
     assert_eq!(
-        send_message(&client, &server2.addr, &id, "continue")
+        send_message(&client, &server2.api, &id, "continue")
             .await
             .as_u16(),
         202
     );
-    wait_turns(&client, &server2.addr, &id, 2).await;
+    wait_turns(&client, &server2.api, &id, 2).await;
     assert!(agent.signals().iter().any(|s| s == &format!("get:{id}")));
 
     server2.shutdown().await;
@@ -1498,12 +1509,12 @@ async fn last_event_id_replay_is_gap_free() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
-    send_message(&client, &server.addr, &id, "two").await;
-    wait_turns(&client, &server.addr, &id, 2).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
+    send_message(&client, &server.api, &id, "two").await;
+    wait_turns(&client, &server.api, &id, 2).await;
 
-    let url = format!("http://{}/api/sessions/{id}/messages?aid=main", server.addr);
+    let url = format!("{}/sessions/{id}/messages?aid=main", server.api);
 
     // A connect with no cursor is live-only — it does not replay, because a
     // stream is not a log. So drive a third turn with the stream open to learn
@@ -1519,7 +1530,7 @@ async fn last_event_id_replay_is_gap_free() {
     });
     subscribed.await.expect("the reader subscribes");
     mock.queue_response("three");
-    send_message(&client, &server.addr, &id, "three").await;
+    send_message(&client, &server.api, &id, "three").await;
     let streamed = live.await.unwrap();
 
     // Journaled entries only. A live stream may also carry `N.M` cursors —
@@ -1579,7 +1590,7 @@ async fn repos_session_creates_and_reports_repos() {
         "message": "hi"
     });
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&body)
         .send()
         .await
@@ -1591,10 +1602,10 @@ async fn repos_session_creates_and_reports_repos() {
     // Provisioning runs the git_checkout step through the mock runtime and
     // lands the session Idle — a real (doubled) provisioning handshake, not
     // just a static echo of the request.
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_status(&client, &server.api, &id, "Idle").await;
 
     let detail: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .get(format!("{}/sessions/{id}", server.api))
         .send()
         .await
         .unwrap()
@@ -1624,7 +1635,7 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
     let client = reqwest::Client::new();
 
     let res = client
-        .post(format!("http://{}/api/environments", server.addr))
+        .post(format!("{}/environments", server.api))
         .json(&serde_json::json!({
             "name": "staging",
             "vendor": "mock",
@@ -1637,7 +1648,7 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
     assert_eq!(res.status().as_u16(), 201);
 
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&serde_json::json!({
             "agent": {"model": "mock"},
             "environment": {"type": "Named", "value": {"name": "staging"}},
@@ -1653,14 +1664,14 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
         .to_string();
     // The provisioning `Idle` is the one this wants, and no turn is waited for:
     // what follows reads the session's resolved environment, not its transcript.
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_status(&client, &server.api, &id, "Idle").await;
 
     let detail = |id: String| {
         let client = client.clone();
-        let addr = server.addr;
+        let api = server.api.clone();
         async move {
             client
-                .get(format!("http://{addr}/api/sessions/{id}"))
+                .get(format!("{api}/sessions/{id}"))
                 .send()
                 .await
                 .unwrap()
@@ -1680,7 +1691,7 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
     // Re-point the environment at a repo this session never had. The session
     // snapshotted, so nothing about it moves.
     let res = client
-        .put(format!("http://{}/api/environments/staging", server.addr))
+        .put(format!("{}/environments/staging", server.api))
         .json(&serde_json::json!({
             "name": "staging",
             "vendor": "mock",
@@ -1699,7 +1710,7 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
 
     // An environment nobody defined is the caller's mistake, not a 500.
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&serde_json::json!({
             "agent": {"model": "mock"},
             "environment": {"type": "Named", "value": {"name": "ghost"}},
@@ -1730,7 +1741,7 @@ async fn session_detail_echoes_full_config() {
         "message": "hi"
     });
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&body)
         .send()
         .await
@@ -1742,7 +1753,7 @@ async fn session_detail_echoes_full_config() {
         .to_string();
 
     let detail: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .get(format!("{}/sessions/{id}", server.api))
         .send()
         .await
         .unwrap()
@@ -1753,10 +1764,7 @@ async fn session_detail_echoes_full_config() {
     // Plugin enablement and MCP servers are the *agent's* configuration, read
     // off its own document — the session carries only the bundle union.
     let agent: serde_json::Value = client
-        .get(format!(
-            "http://{}/api/sessions/{id}/agents/main",
-            server.addr
-        ))
+        .get(format!("{}/sessions/{id}/agents/main", server.api))
         .send()
         .await
         .unwrap()
@@ -1785,10 +1793,7 @@ async fn session_detail_echoes_thinking_effort() {
     // configure it through the same per-resource routes settings uses. The
     // provider goes first: a model is validated against what is stored.
     let res = client
-        .put(format!(
-            "http://{}/api/config/model-providers/mock",
-            server.addr
-        ))
+        .put(format!("{}/config/model-providers/mock", server.api))
         .json(&serde_json::json!({
             "name": "mock",
             "kind": "anthropic",
@@ -1800,7 +1805,7 @@ async fn session_detail_echoes_thinking_effort() {
         .unwrap();
     assert_eq!(res.status().as_u16(), 200);
     let res = client
-        .put(format!("http://{}/api/config/models/mock", server.addr))
+        .put(format!("{}/config/models/mock", server.api))
         .json(&serde_json::json!({
             "alias": "mock",
             "provider": "mock",
@@ -1820,7 +1825,7 @@ async fn session_detail_echoes_thinking_effort() {
         "message": "hi"
     });
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&body)
         .send()
         .await
@@ -1832,7 +1837,7 @@ async fn session_detail_echoes_thinking_effort() {
         .to_string();
 
     let detail: serde_json::Value = client
-        .get(format!("http://{}/api/sessions/{id}", server.addr))
+        .get(format!("{}/sessions/{id}", server.api))
         .send()
         .await
         .unwrap()
@@ -1846,10 +1851,7 @@ async fn session_detail_echoes_thinking_effort() {
     );
     // The effort is the *agent's*: it reads off the main agent's document.
     let agent: serde_json::Value = client
-        .get(format!(
-            "http://{}/api/sessions/{id}/agents/main",
-            server.addr
-        ))
+        .get(format!("{}/sessions/{id}/agents/main", server.api))
         .send()
         .await
         .unwrap()
@@ -1869,7 +1871,7 @@ async fn session_detail_echoes_thinking_effort() {
         "message": "hi"
     });
     let res = client
-        .post(format!("http://{}/api/sessions", server.addr))
+        .post(format!("{}/sessions", server.api))
         .json(&body)
         .send()
         .await
@@ -1881,10 +1883,7 @@ async fn session_detail_echoes_thinking_effort() {
         .to_string();
 
     let agent: serde_json::Value = client
-        .get(format!(
-            "http://{}/api/sessions/{id}/agents/main",
-            server.addr
-        ))
+        .get(format!("{}/sessions/{id}/agents/main", server.api))
         .send()
         .await
         .unwrap()
@@ -1915,14 +1914,14 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
         let client = reqwest::Client::new();
         mock.queue_tool_call("bash", serde_json::json!({ "command": "echo hi" }));
         mock.queue_response("done anyway");
-        let id = create_session(&client, &server.addr, &agent, "first").await;
+        let id = create_session(&client, &server.api, &agent, "first").await;
 
         // The turn must reach a terminal state. Which one depends on where the
         // hangup lands, but "still Running forever" is the failure this guards:
         // #61 item 2 was a session pinning a transport that could never answer.
         let settled = wait_until(
             "the turn to leave Running after the agent hung up",
-            async || match get_status(&client, &server.addr, &id).await.as_deref() {
+            async || match get_status(&client, &server.api, &id).await.as_deref() {
                 Some("Running") | None => None,
                 Some(other) => Some(other.to_string()),
             },
@@ -1974,8 +1973,8 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
         let client = reqwest::Client::new();
         mock.queue_tool_call("bash", serde_json::json!({ "command": "sleep 999" }));
-        let id = create_session(&client, &server.addr, &agent, "run something slow").await;
-        wait_status(&client, &server.addr, &id, "Running").await;
+        let id = create_session(&client, &server.api, &agent, "run something slow").await;
+        wait_status(&client, &server.api, &id, "Running").await;
 
         // `Running` is reported at turn *start* — before the provider answers and
         // before any tool call reaches the runtime. Stopping there cancels an empty
@@ -1991,16 +1990,13 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         .await;
 
         let res = client
-            .post(format!(
-                "http://{}/api/sessions/{id}/agents/main/stop",
-                server.addr
-            ))
+            .post(format!("{}/sessions/{id}/agents/main/stop", server.api))
             .json(&serde_json::json!({}))
             .send()
             .await
             .unwrap();
         assert_eq!(res.status().as_u16(), 200);
-        wait_turns(&client, &server.addr, &id, 1).await;
+        wait_turns(&client, &server.api, &id, 1).await;
         agent.release_tool_calls();
 
         // The cancel was already written to the wire the instant `Stop`
@@ -2047,13 +2043,13 @@ async fn a_session_runs_a_turn_against_a_connected_vendor_agent() {
     let agent = horsie_server::runtime_vendor::fake::FakeRuntimeVendor::builder("agent-1")
         .supports_provisioning(true)
         .bash_stdout("from-the-agent")
-        .connect(&format!("ws://{}/api/vendor/connect", server.addr))
+        .connect(&server.api.ws("/vendor/connect"))
         .await
         .expect("agent connects");
     server.await_vendor("agent-1", true).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-1", &agent, "hi").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session_for_vendor(&client, &server.api, "agent-1", &agent, "hi").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     assert!(
         agent.signals().iter().any(|s| s.starts_with("create:")),
@@ -2083,8 +2079,8 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "hello").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "hello").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     let after_turn = agent.signals();
     assert_eq!(
@@ -2102,8 +2098,8 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     for _ in 0..3 {
         let page: serde_json::Value = client
             .get(format!(
-                "http://{}/api/sessions/{id}/messages?aid=main&max=50",
-                server.addr
+                "{}/sessions/{id}/messages?aid=main&max=50",
+                server.api
             ))
             .send()
             .await
@@ -2116,10 +2112,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
             "the resident agent still holds the transcript: {page}"
         );
         let usage: serde_json::Value = client
-            .get(format!(
-                "http://{}/api/sessions/{id}/agents/main",
-                server.addr
-            ))
+            .get(format!("{}/sessions/{id}/agents/main", server.api))
             .send()
             .await
             .unwrap()
@@ -2130,7 +2123,7 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
             usage["agent"]["usage"]["inputTokens"].as_u64().unwrap() > 0,
             "the agent document reports its own usage: {usage}"
         );
-        let _ = get_detail(&client, &server.addr, &id).await;
+        let _ = get_detail(&client, &server.api, &id).await;
     }
 
     assert_eq!(
@@ -2156,31 +2149,29 @@ async fn messages_queued_during_a_turn_are_merged_into_the_next_one() {
     let client = reqwest::Client::new();
 
     let block = mock.blocking_response("first");
-    let id = create_session(&client, &server.addr, &agent, "one").await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
     block.wait_until_received().await;
 
     for text in ["two", "three"] {
         assert_eq!(
-            send_message(&client, &server.addr, &id, text)
-                .await
-                .as_u16(),
+            send_message(&client, &server.api, &id, text).await.as_u16(),
             202,
             "a message sent during a run is accepted, never refused"
         );
     }
-    wait_inbox(&client, &server.addr, &id, &["two", "three"]).await;
+    wait_inbox(&client, &server.api, &id, &["two", "three"]).await;
 
     mock.queue_response("second");
     block.release();
-    wait_inbox(&client, &server.addr, &id, &[]).await;
-    wait_turns(&client, &server.addr, &id, 2).await;
+    wait_inbox(&client, &server.api, &id, &[]).await;
+    wait_turns(&client, &server.api, &id, 2).await;
 
     // One turn, one user message: consecutive user turns are not portable
     // across providers, so the queue is joined with a blank line instead.
     let page: serde_json::Value = client
         .get(format!(
-            "http://{}/api/sessions/{id}/messages?aid=main&max=100",
-            server.addr
+            "{}/sessions/{id}/messages?aid=main&max=100",
+            server.api
         ))
         .send()
         .await
@@ -2217,20 +2208,20 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     let client = reqwest::Client::new();
 
     let block = mock.blocking_response("never delivered");
-    let id = create_session(&client, &server.addr, &agent, "the turn that dies").await;
+    let id = create_session(&client, &server.api, &agent, "the turn that dies").await;
     block.wait_until_received().await;
-    send_message(&client, &server.addr, &id, "still owed an answer").await;
-    wait_inbox(&client, &server.addr, &id, &["still owed an answer"]).await;
+    send_message(&client, &server.api, &id, "still owed an answer").await;
+    wait_inbox(&client, &server.api, &id, &["still owed an answer"]).await;
 
     // Crash mid-turn, with the queue non-empty.
     server.shutdown().await;
 
     let signals_before = agent.signals();
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    wait_turns(&client, &server2.addr, &id, 1).await;
+    wait_turns(&client, &server2.api, &id, 1).await;
     // The queue survived: the session actor recovers it from its journal, and
     // recovering acquires no runtime.
-    wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
+    wait_inbox(&client, &server2.api, &id, &["still owed an answer"]).await;
     assert_eq!(
         agent.signals(),
         signals_before,
@@ -2244,8 +2235,8 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     // does *not* happen means giving it a window in which to happen. Every other
     // wait here is for an event, and none of them can stand in for this.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    wait_inbox(&client, &server2.addr, &id, &["still owed an answer"]).await;
-    wait_turns(&client, &server2.addr, &id, 1).await;
+    wait_inbox(&client, &server2.api, &id, &["still owed an answer"]).await;
+    wait_turns(&client, &server2.api, &id, 1).await;
 
     server2.shutdown().await;
 }
@@ -2267,13 +2258,13 @@ async fn a_gone_runtime_is_terminal_while_an_unreachable_vendor_is_not() {
     let client = reqwest::Client::new();
 
     mock.queue_response("never reached");
-    let id = create_session(&client, &server.addr, &agent, "hello").await;
-    wait_status(&client, &server.addr, &id, "Unrecoverable").await;
+    let id = create_session(&client, &server.api, &agent, "hello").await;
+    wait_status(&client, &server.api, &id, "Unrecoverable").await;
 
     // Terminal means terminal: further messages are refused rather than
     // silently rebuilding a workspace the user believes they still have.
     let res = client
-        .post(format!("http://{}/api/sessions/{id}/messages", server.addr))
+        .post(format!("{}/sessions/{id}/messages", server.api))
         .json(&serde_json::json!({ "text": "try again" }))
         .send()
         .await
@@ -2304,23 +2295,23 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
     let client = reqwest::Client::new();
 
     let (server, _local) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
-    let url = format!("ws://{}/api/vendor/connect", server.addr);
+    let url = server.api.ws("/vendor/connect");
     let agent = FakeRuntimeVendor::builder("agent-3")
         .connect(&url)
         .await
         .expect("agent connects");
     server.await_vendor("agent-3", true).await;
 
-    let id = create_session_for_vendor(&client, &server.addr, "agent-3", &agent, "first").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session_for_vendor(&client, &server.api, "agent-3", &agent, "first").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     // The vendor goes away between turns. Its runtime is not gone — nobody can
     // say either way — so the turn fails and the session stays usable.
     agent.disconnect();
     server.await_vendor("agent-3", false).await;
     mock.queue_response("never reached");
-    send_message(&client, &server.addr, &id, "while the vendor is down").await;
-    wait_status(&client, &server.addr, &id, "Failed").await;
+    send_message(&client, &server.api, &id, "while the vendor is down").await;
+    wait_status(&client, &server.api, &id, "Failed").await;
 
     // The vendor comes back, still owning the runtimes it created — a real
     // vendor's sandboxes outlive its agent process.
@@ -2332,12 +2323,12 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
     server.await_vendor("agent-3", true).await;
     mock.queue_response("back in business");
     assert_eq!(
-        send_message(&client, &server.addr, &id, "and now?")
+        send_message(&client, &server.api, &id, "and now?")
             .await
             .as_u16(),
         202
     );
-    wait_turns(&client, &server.addr, &id, 3).await;
+    wait_turns(&client, &server.api, &id, 3).await;
     let signals = agent2.signals();
     assert!(
         signals.iter().any(|s| s == &format!("get:{id}")),
@@ -2373,8 +2364,8 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     // Nothing happens on its own — the clock has not moved.
     let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
@@ -2399,15 +2390,15 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
     .await;
     // Unloading loses nothing a reader can see: opening the session again
     // reports the status its journal recorded.
-    wait_status(&client, &server.addr, &id, "Idle").await;
+    wait_status(&client, &server.api, &id, "Idle").await;
 
     assert_eq!(
-        send_message(&client, &server.addr, &id, "two")
+        send_message(&client, &server.api, &id, "two")
             .await
             .as_u16(),
         202
     );
-    wait_turns(&client, &server.addr, &id, 2).await;
+    wait_turns(&client, &server.api, &id, 2).await;
     assert_eq!(
         agent
             .signals()
@@ -2447,27 +2438,24 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
     let (server, _local_addr) = start_server_with_live_vendors(tmp.path(), &mock.url()).await;
     let agent = horsie_server::runtime_vendor::fake::FakeRuntimeVendor::builder("agent-2")
         .bash_stdout("ok")
-        .connect(&format!("ws://{}/api/vendor/connect", server.addr))
+        .connect(&server.api.ws("/vendor/connect"))
         .await
         .expect("agent connects");
     server.await_vendor("agent-2", true).await;
 
-    let a = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
-    let b = create_session_for_vendor(&client, &server.addr, "agent-2", &agent, "hi").await;
-    wait_turns(&client, &server.addr, &a, 1).await;
-    wait_turns(&client, &server.addr, &b, 1).await;
+    let a = create_session_for_vendor(&client, &server.api, "agent-2", &agent, "hi").await;
+    let b = create_session_for_vendor(&client, &server.api, "agent-2", &agent, "hi").await;
+    wait_turns(&client, &server.api, &a, 1).await;
+    wait_turns(&client, &server.api, &b, 1).await;
     assert_eq!(agent.live_runtimes().len(), 2, "one runtime per session");
 
     client
-        .post(format!(
-            "http://{}/api/sessions/{a}/agents/main/stop",
-            server.addr
-        ))
+        .post(format!("{}/sessions/{a}/agents/main/stop", server.api))
         .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();
-    wait_turns(&client, &server.addr, &a, 1).await;
+    wait_turns(&client, &server.api, &a, 1).await;
 
     // Hibernate is advisory and this agent declines it, so both runtimes are
     // still there. What matters is that stopping one session did not disturb
@@ -2477,13 +2465,13 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         "the untouched session must keep its runtime"
     );
     assert_eq!(
-        send_message(&client, &server.addr, &b, "again")
+        send_message(&client, &server.api, &b, "again")
             .await
             .as_u16(),
         202,
         "session b must be unaffected by a's stop"
     );
-    wait_turns(&client, &server.addr, &b, 2).await;
+    wait_turns(&client, &server.api, &b, 2).await;
 }
 
 // ── prompt-cache prefix stability ────────────────────────────────────────────
@@ -2536,17 +2524,15 @@ async fn the_request_prefix_only_ever_grows() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     for (n, text) in ["two", "three"].into_iter().enumerate() {
         assert_eq!(
-            send_message(&client, &server.addr, &id, text)
-                .await
-                .as_u16(),
+            send_message(&client, &server.api, &id, text).await.as_u16(),
             202
         );
-        wait_turns(&client, &server.addr, &id, n + 2).await;
+        wait_turns(&client, &server.api, &id, n + 2).await;
     }
 
     let bodies = received(&client, &mock).await;
@@ -2599,15 +2585,15 @@ async fn the_request_prefix_survives_a_restart() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "one").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
-    send_message(&client, &server.addr, &id, "two").await;
-    wait_turns(&client, &server.addr, &id, 2).await;
+    let id = create_session(&client, &server.api, &agent, "one").await;
+    wait_turns(&client, &server.api, &id, 1).await;
+    send_message(&client, &server.api, &id, "two").await;
+    wait_turns(&client, &server.api, &id, 2).await;
 
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
-    send_message(&client, &server2.addr, &id, "three").await;
-    wait_turns(&client, &server2.addr, &id, 3).await;
+    send_message(&client, &server2.api, &id, "three").await;
+    wait_turns(&client, &server2.api, &id, 3).await;
 
     let bodies = received(&client, &mock).await;
     let (before, after) = (&bodies[bodies.len() - 2], &bodies[bodies.len() - 1]);
@@ -2650,11 +2636,11 @@ async fn the_request_prefix_only_grows_across_tool_calls() {
         mock.queue_response("done");
     };
     script();
-    let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "first").await;
+    wait_turns(&client, &server.api, &id, 1).await;
     script();
-    send_message(&client, &server.addr, &id, "second").await;
-    wait_turns(&client, &server.addr, &id, 2).await;
+    send_message(&client, &server.api, &id, "second").await;
+    wait_turns(&client, &server.api, &id, 2).await;
 
     let bodies = received(&client, &mock).await;
     assert!(bodies.len() >= 6, "expected 6 calls, got {}", bodies.len());
@@ -2711,13 +2697,13 @@ async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
     let server = start_server_on(tmp.path(), Some(agent.link()), provider, None, None).await;
     let client = reqwest::Client::new();
     mock.queue_reasoning("weighing it up", "done");
-    let id = create_session(&client, &server.addr, &agent, "first").await;
-    wait_turns(&client, &server.addr, &id, 1).await;
+    let id = create_session(&client, &server.api, &agent, "first").await;
+    wait_turns(&client, &server.api, &id, 1).await;
 
     for (n, text) in ["second", "third"].into_iter().enumerate() {
         mock.queue_reasoning("weighing it up", "done");
-        send_message(&client, &server.addr, &id, text).await;
-        wait_turns(&client, &server.addr, &id, n + 2).await;
+        send_message(&client, &server.api, &id, text).await;
+        wait_turns(&client, &server.api, &id, n + 2).await;
     }
 
     let bodies = received(&client, &mock).await;
@@ -2791,13 +2777,13 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         .expect("fake agent");
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
-    let base = format!("http://{}", server.addr);
 
-    define_e2e_workflow(&client, &base, &mock.url()).await;
+    let api = server.api.clone();
+    define_e2e_workflow(&client, &api, &mock.url()).await;
 
     // Creating the run is what starts it: there is no message to send.
     let res = client
-        .post(format!("{base}/api/workflows/e2e-flow/runs"))
+        .post(format!("{api}/workflows/e2e-flow/runs"))
         .json(&serde_json::json!({
             "input": "the build is red",
             "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -2811,8 +2797,8 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
 
     // The graph is the run's document, and it hangs off the session because a
     // run *is* one.
-    let graph_url = format!("{base}/api/sessions/{id}/workflow");
-    let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
+    let graph_url = format!("{api}/sessions/{id}/workflow");
+    let graph = wait_for_run_status(&client, &server.api, &id, &graph_url, "Finished").await;
     let visited: Vec<&str> = graph["nodes"]
         .as_array()
         .unwrap()
@@ -2846,7 +2832,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     // A step is addressable as an agent, which is where its transcript is.
     let step_agent = graph["nodes"][0]["runs"][0]["agentId"].as_str().unwrap();
     let res = client
-        .get(format!("{base}/api/sessions/{id}/agents/{step_agent}"))
+        .get(format!("{api}/sessions/{id}/agents/{step_agent}"))
         .send()
         .await
         .unwrap();
@@ -2863,7 +2849,7 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         serde_json::json!("completed"),
         "a concluded step must not report itself as still running: {doc}"
     );
-    let page = messages_page(&client, &server.addr, &id, step_agent).await;
+    let page = messages_page(&client, &server.api, &id, step_agent).await;
     assert!(
         !page_messages(&page).is_empty(),
         "the step's transcript is what its page shows: {page}"
@@ -2871,13 +2857,13 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
 
     // Retrying appends an attempt rather than replacing one.
     let res = client
-        .post(format!("{base}/api/sessions/{id}/workflow/retry"))
+        .post(format!("{api}/sessions/{id}/workflow/retry"))
         .json(&serde_json::json!({"stepIndex": 1}))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status().as_u16(), 202, "retry one execution");
-    let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
+    let graph = wait_for_run_status(&client, &server.api, &id, &graph_url, "Finished").await;
     let fix = graph["nodes"]
         .as_array()
         .unwrap()
@@ -2902,9 +2888,9 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
 /// so all of it has to exist over the wire rather than be injected. Pointing the
 /// provider at the mock is what `provider_at` already does, so swapping the live
 /// registry changes nothing but the route.
-async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &str) {
+async fn define_e2e_workflow(client: &reqwest::Client, api: &Api, mock_url: &str) {
     let res = client
-        .put(format!("{base}/api/config/model-providers/p"))
+        .put(format!("{api}/config/model-providers/p"))
         .json(&serde_json::json!({
             "name": "p", "kind": "anthropic",
             "baseUrl": mock_url, "apiKey": "test-key"
@@ -2914,7 +2900,7 @@ async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &st
         .unwrap();
     assert_eq!(res.status().as_u16(), 200, "configure the provider");
     let res = client
-        .put(format!("{base}/api/config/models/mock"))
+        .put(format!("{api}/config/models/mock"))
         .json(&serde_json::json!({"alias": "mock", "provider": "p", "modelId": "m"}))
         .send()
         .await
@@ -2926,7 +2912,7 @@ async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &st
     );
 
     let res = client
-        .post(format!("{base}/api/agents"))
+        .post(format!("{api}/agents"))
         .json(&serde_json::json!({"name": "wf-step", "model": "mock"}))
         .send()
         .await
@@ -2934,7 +2920,7 @@ async fn define_e2e_workflow(client: &reqwest::Client, base: &str, mock_url: &st
     assert_eq!(res.status().as_u16(), 201, "the preset both steps run as");
 
     let res = client
-        .post(format!("{base}/api/workflows"))
+        .post(format!("{api}/workflows"))
         .json(&serde_json::json!({
             "name": "e2e-flow",
             "start": "triage",
@@ -2969,11 +2955,11 @@ async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
         .expect("fake agent");
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
-    let base = format!("http://{}", server.addr);
-    define_e2e_workflow(&client, &base, &mock.url()).await;
+    let api = server.api.clone();
+    define_e2e_workflow(&client, &api, &mock.url()).await;
 
     let res = client
-        .post(format!("{base}/api/workflows"))
+        .post(format!("{api}/workflows"))
         .json(&serde_json::json!({
             "name": "e2e-branch",
             "start": "triage",
@@ -3014,7 +3000,7 @@ async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
         );
 
         let res = client
-            .post(format!("{base}/api/workflows/e2e-branch/runs"))
+            .post(format!("{api}/workflows/e2e-branch/runs"))
             .json(&serde_json::json!({
                 "input": "the build is red",
                 "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -3026,8 +3012,8 @@ async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
         let v: serde_json::Value = res.json().await.unwrap();
         let id = v["session"]["id"].as_str().unwrap().to_string();
 
-        let graph_url = format!("{base}/api/sessions/{id}/workflow");
-        let graph = wait_for_run_status(&client, &base, &id, &graph_url, "Finished").await;
+        let graph_url = format!("{api}/sessions/{id}/workflow");
+        let graph = wait_for_run_status(&client, &server.api, &id, &graph_url, "Finished").await;
         let visited: Vec<&str> = graph["nodes"]
             .as_array()
             .unwrap()
@@ -3093,20 +3079,20 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     )
     .await;
     let client = reqwest::Client::new();
-    let base = format!("http://{}", server.addr);
-    define_e2e_workflow(&client, &base, &mock.url()).await;
+    let api = server.api.clone();
+    define_e2e_workflow(&client, &api, &mock.url()).await;
 
     // An ordinary conversation, so the filter has something to leave out.
-    let plain = create_session(&client, &server.addr, &agent, "hello").await;
+    let plain = create_session(&client, &server.api, &agent, "hello").await;
     // Waited out before the run starts, because the mock answers one shared
     // queue in order and the two want different answers: a conversation wants
     // prose, a step wants a `submit_result` call. `create_session` returns as
     // soon as the runtime exists, so without this the run's first step and this
     // turn race for whichever response is at the head.
-    wait_turns(&client, &server.addr, &plain, 1).await;
+    wait_turns(&client, &server.api, &plain, 1).await;
 
     let res = client
-        .post(format!("{base}/api/workflows/e2e-flow/runs"))
+        .post(format!("{api}/workflows/e2e-flow/runs"))
         .json(&serde_json::json!({
             "input": "the build is red",
             "environment": {"type": "Runtime", "value": {"vendor": "mock"}}
@@ -3117,7 +3103,7 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     assert_eq!(res.status().as_u16(), 201, "start a run");
     let v: serde_json::Value = res.json().await.unwrap();
     let id = v["session"]["id"].as_str().unwrap().to_string();
-    wait_for_session_status(&client, &base, &id, "Finished").await;
+    wait_for_session_status(&client, &server.api, &id, "Finished").await;
 
     // Let it go cold.
     clock.advance(Duration::from_secs(600));
@@ -3148,7 +3134,7 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     let before = signals_for_run(&agent);
 
     let res = client
-        .get(format!("{base}/api/sessions?workflow=e2e-flow"))
+        .get(format!("{api}/sessions?workflow=e2e-flow"))
         .send()
         .await
         .unwrap();
@@ -3180,11 +3166,7 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     );
 
     // The unfiltered list is every session a person started, runs included.
-    let res = client
-        .get(format!("{base}/api/sessions"))
-        .send()
-        .await
-        .unwrap();
+    let res = client.get(format!("{api}/sessions")).send().await.unwrap();
     let all: serde_json::Value = res.json().await.unwrap();
     let ids: Vec<&str> = all["sessions"]
         .as_array()
@@ -3204,10 +3186,10 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
 ///
 /// Replaces polling the run graph: the graph no longer carries a status,
 /// because a run's status is its session's.
-async fn wait_for_session_status(client: &reqwest::Client, base: &str, id: &str, want: &str) {
+async fn wait_for_session_status(client: &reqwest::Client, api: &Api, id: &str, want: &str) {
     wait_until(&format!("the run to reach {want}"), async || {
         let body: serde_json::Value = client
-            .get(format!("{base}/api/sessions/{id}"))
+            .get(format!("{api}/sessions/{id}"))
             .send()
             .await
             .ok()?
@@ -3226,12 +3208,12 @@ async fn wait_for_session_status(client: &reqwest::Client, base: &str, id: &str,
 /// state the run is in, the graph says where it got to.
 async fn wait_for_run_status(
     client: &reqwest::Client,
-    base: &str,
+    api: &Api,
     id: &str,
     graph_url: &str,
     want: &str,
 ) -> serde_json::Value {
-    wait_for_session_status(client, base, id, want).await;
+    wait_for_session_status(client, api, id, want).await;
     client
         .get(graph_url)
         .send()
@@ -3297,16 +3279,16 @@ async fn a_compacted_session_keeps_every_message_readable() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
-    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    let id = create_session(&client, &server.api, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the first thing").await;
     // The reply's text lands several entries before the turn's `TurnEnded`, so
     // waiting for it is not waiting for the turn. Snapshotting `before` in that
     // gap counts zero finished turns, which makes the `+ 1` below satisfied by
     // the *first* turn ending — and the compaction assertion then runs while
     // the second turn is still in flight, blaming compaction for not having
     // happened yet.
-    wait_turns(&client, &server.addr, &id, 1).await;
-    let before = messages_page(&client, &server.addr, &id, "main").await;
+    wait_turns(&client, &server.api, &id, 1).await;
+    let before = messages_page(&client, &server.api, &id, "main").await;
     let count_before = page_messages(&before).len();
     assert!(
         page_boundaries(&before).is_empty(),
@@ -3314,13 +3296,13 @@ async fn a_compacted_session_keeps_every_message_readable() {
     );
 
     assert!(
-        send_message(&client, &server.addr, &id, "the second thing I asked")
+        send_message(&client, &server.api, &id, "the second thing I asked")
             .await
             .is_success()
     );
-    wait_turns(&client, &server.addr, &id, turns_ended(&before) + 1).await;
+    wait_turns(&client, &server.api, &id, turns_ended(&before) + 1).await;
 
-    let after = messages_page(&client, &server.addr, &id, "main").await;
+    let after = messages_page(&client, &server.api, &id, "main").await;
     let boundaries = page_boundaries(&after);
     assert_eq!(
         boundaries.len(),
@@ -3378,22 +3360,22 @@ async fn a_typed_compact_command_compacts_without_prompting_the_model() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
-    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    let id = create_session(&client, &server.api, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the first thing").await;
     // Two turns, so there is a completed one to fold: a manual compaction keeps
     // the current turn, and a session holding only that has nothing to do.
     assert!(
-        send_message(&client, &server.addr, &id, "the second thing I asked")
+        send_message(&client, &server.api, &id, "the second thing I asked")
             .await
             .is_success()
     );
-    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
-    let before = messages_page(&client, &server.addr, &id, "main").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the second thing").await;
+    let before = messages_page(&client, &server.api, &id, "main").await;
     assert!(page_boundaries(&before).is_empty());
     let messages_before = page_messages(&before).len();
 
     assert!(
-        send_message(&client, &server.addr, &id, "/compact keep the paths")
+        send_message(&client, &server.api, &id, "/compact keep the paths")
             .await
             .is_success()
     );
@@ -3401,7 +3383,7 @@ async fn a_typed_compact_command_compacts_without_prompting_the_model() {
     // The boundary is the signal, not a turn count: `/compact` is not a turn.
     let mut boundaries = Vec::new();
     for _ in 0..200 {
-        let page = messages_page(&client, &server.addr, &id, "main").await;
+        let page = messages_page(&client, &server.api, &id, "main").await;
         boundaries = page_boundaries(&page);
         if !boundaries.is_empty() {
             break;
@@ -3421,7 +3403,7 @@ async fn a_typed_compact_command_compacts_without_prompting_the_model() {
         "the words after the command steer the summariser"
     );
 
-    let after = messages_page(&client, &server.addr, &id, "main").await;
+    let after = messages_page(&client, &server.api, &id, "main").await;
     let whole = serde_json::to_string(&page_messages(&after)).unwrap();
     assert!(
         !whole.contains("/compact keep the paths"),
@@ -3466,24 +3448,24 @@ async fn a_typed_compact_command_with_nothing_to_fold_says_so() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
-    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    let id = create_session(&client, &server.api, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the first thing").await;
     assert!(
-        send_message(&client, &server.addr, &id, "the second thing I asked")
+        send_message(&client, &server.api, &id, "the second thing I asked")
             .await
             .is_success()
     );
-    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the second thing").await;
 
     assert!(
-        send_message(&client, &server.addr, &id, "/compact")
+        send_message(&client, &server.api, &id, "/compact")
             .await
             .is_success()
     );
 
     let mut notices = Vec::new();
     for _ in 0..200 {
-        let page = messages_page(&client, &server.addr, &id, "main").await;
+        let page = messages_page(&client, &server.api, &id, "main").await;
         notices = page_compaction_skips(&page);
         if !notices.is_empty() {
             break;
@@ -3498,7 +3480,7 @@ async fn a_typed_compact_command_with_nothing_to_fold_says_so() {
         notices[0]
     );
 
-    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let page = messages_page(&client, &server.api, &id, "main").await;
     assert!(
         page_boundaries(&page).is_empty(),
         "nothing was folded: the conversation already fits, and summarising it \
@@ -3545,28 +3527,28 @@ async fn a_compact_only_turn_journals_no_empty_input_message() {
     .await;
     let client = reqwest::Client::new();
 
-    let id = create_session(&client, &server.addr, &agent, "the first thing I asked").await;
-    wait_for_reply(&client, &server.addr, &id, "an answer to the first thing").await;
+    let id = create_session(&client, &server.api, &agent, "the first thing I asked").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the first thing").await;
     assert!(
-        send_message(&client, &server.addr, &id, "the second thing I asked")
+        send_message(&client, &server.api, &id, "the second thing I asked")
             .await
             .is_success()
     );
-    wait_for_reply(&client, &server.addr, &id, "an answer to the second thing").await;
+    wait_for_reply(&client, &server.api, &id, "an answer to the second thing").await;
 
     assert!(
-        send_message(&client, &server.addr, &id, "/compact")
+        send_message(&client, &server.api, &id, "/compact")
             .await
             .is_success()
     );
     for _ in 0..200 {
-        if !page_boundaries(&messages_page(&client, &server.addr, &id, "main").await).is_empty() {
+        if !page_boundaries(&messages_page(&client, &server.api, &id, "main").await).is_empty() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let page = messages_page(&client, &server.api, &id, "main").await;
     let empty: Vec<_> = page_messages(&page)
         .iter()
         .filter(|m| m["parts"].as_array().is_some_and(std::vec::Vec::is_empty))
@@ -3579,11 +3561,11 @@ async fn a_compact_only_turn_journals_no_empty_input_message() {
 
     // And the session still runs: the next turn's prompt is well-formed.
     assert!(
-        send_message(&client, &server.addr, &id, "the third thing I asked")
+        send_message(&client, &server.api, &id, "the third thing I asked")
             .await
             .is_success()
     );
-    wait_for_reply(&client, &server.addr, &id, "an answer after the compaction").await;
+    wait_for_reply(&client, &server.api, &id, "an answer after the compaction").await;
 
     server.shutdown().await;
 }
@@ -3614,12 +3596,11 @@ async fn a_narrowed_selection_removes_tools_from_every_layer() {
     let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let client = reqwest::Client::new();
 
-    let id =
-        create_session_with_tools(&client, &server.addr, &agent, &["read_file"], "make a list")
-            .await;
-    wait_for_reply(&client, &server.addr, &id, "could not keep a list").await;
+    let id = create_session_with_tools(&client, &server.api, &agent, &["read_file"], "make a list")
+        .await;
+    wait_for_reply(&client, &server.api, &id, "could not keep a list").await;
 
-    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let page = messages_page(&client, &server.api, &id, "main").await;
     let text = serde_json::to_string(&page).unwrap();
     assert!(
         text.contains("not permitted"),

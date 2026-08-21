@@ -84,6 +84,7 @@ async fn authenticate(
 
 pub async fn vendor_connect(
     State(state): State<AppState>,
+    crate::http::ProjectPath(project): crate::http::ProjectPath,
     mut req: axum::extract::Request,
 ) -> Response {
     // Authenticate before anything else, and answer 401 rather than completing
@@ -111,22 +112,40 @@ pub async fn vendor_connect(
     };
     let accept = derive_accept_key(key.as_bytes());
 
-    // The agent publishes into *its owner's* vendor map, resolved here because
-    // this is the moment the owner is known and the upgrade has not completed.
-    // Two accounts can therefore each run `horsie connect --runtime-id main`,
-    // and neither one's sessions can select the other's runtime — the link is
-    // not in the map they read.
+    // The process publishes into *one project's* vendor map, named by the
+    // `/api/p/{project}` prefix this route is mounted under. Two projects can
+    // therefore each run `horsie connect --runtime-id main`, and neither one's
+    // sessions can select the other's runtime — the link is not in the map they
+    // read. That holds between two projects of one account as much as between
+    // two accounts.
+    //
+    // The project arrives through `ProjectPath` rather than `Scope` because this
+    // handler takes the whole `Request` — it needs the raw `OnUpgrade`, which no
+    // typed extractor gives back. Ownership is then checked here, in the same
+    // order `Scope` checks it: the row first, the bundle second.
     let owner_id = match &owner {
         Principal::Anonymous => state.shared.anonymous.clone(),
         Principal::User(id) => id.clone(),
     };
-    let agents = match state.users.get(&owner_id).await {
-        Ok(services) => services.connected_vendors.clone(),
+    match state.shared.project_service.store().get(&project).await {
+        Ok(Some(row)) if row.user_id == owner_id => {}
+        Ok(_) => return (StatusCode::NOT_FOUND, "no such project").into_response(),
         Err(e) => {
-            tracing::error!(user = %owner_id, error = %e, "resolving a vendor's account failed");
+            tracing::error!(%project, error = %e, "reading a project failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "could not resolve the account",
+                "could not resolve the project",
+            )
+                .into_response();
+        }
+    }
+    let agents = match state.projects.get(&project).await {
+        Ok(services) => services.connected_vendors.clone(),
+        Err(e) => {
+            tracing::error!(%project, error = %e, "resolving a vendor's project failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not resolve the project",
             )
                 .into_response();
         }

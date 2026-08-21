@@ -1,20 +1,22 @@
-//! One account's world, and the registry that builds it.
+//! One project's bundle, and the registry that builds it.
 //!
 //! [`Shared`] is what a deployment owns: the pool, the content-addressed
 //! artifact store, and the values resolved once at boot.
-//! [`UserServices`] is what an account owns — its session supervisor and every
-//! actor beneath it, its journal, its event channel, its vendor map, its
-//! provider clients, and every scoped store.
+//! [`ProjectServices`] is what a project owns — its session supervisor and
+//! every actor beneath it, its event channel, its vendor map, its provider
+//! clients, and every scoped store.
 //!
-//! Nothing here filters. Two accounts do not share a map with a `user_id` on
-//! the key or a channel with a `user_id` on the frame; they hold different
-//! objects, which is a boundary a forgotten line cannot cross.
+//! Nothing here filters. Two projects do not share a map with a `project_id` on
+//! the key or a channel with a `project_id` on the frame; they hold different
+//! objects, which is a boundary a forgotten line cannot cross. That is as true
+//! of two projects belonging to the *same* account as of two accounts.
 
 use crate::auth::UserId;
 use crate::config::{DbConfigStore, StoreDeps, model_cards};
 use crate::db::Db;
 use crate::db::journal::SqlJournal;
 use crate::plugins::ArtifactStore;
+use crate::projects::{ProjectId, ProjectStore};
 use crate::sessions::SessionRevisions;
 use crate::sessions::addressing::{SessionShard, SupervisorRef, SupervisorShard};
 use crate::sessions::session_actor::SessionActor;
@@ -69,6 +71,13 @@ pub struct Shared {
     pub bus: Arc<dyn crate::bus::Bus>,
     /// Bundle bytes, addressed by content and therefore shared by construction.
     pub artifacts: Arc<ArtifactStore>,
+    /// The `projects` table: who owns which scope, and how one is created or
+    /// destroyed.
+    ///
+    /// Deployment-wide rather than per project, because it is what *answers*
+    /// which project a request may use — a per-project copy would have to exist
+    /// before the question it settles.
+    pub project_service: Arc<crate::projects::ProjectService>,
     /// Read-only deployment paths, surfaced in every account's settings view.
     pub info: ServerInfo,
     /// The model-card catalogue every account is seeded from, plus the digest
@@ -102,10 +111,14 @@ pub struct Shared {
     pub fly_api_base: String,
 }
 
-/// Everything one account owns.
-pub struct UserServices {
-    pub user: UserId,
-    /// This account's session list, addressed rather than held. Resolving it
+/// Everything one project owns.
+pub struct ProjectServices {
+    pub project: ProjectId,
+    /// Who may reach this project. Read by [`crate::http::Scope`], which is the
+    /// only thing left in the system that asks a question about a *user* rather
+    /// than about a project.
+    pub owner: UserId,
+    /// This project's session list, addressed rather than held. Resolving it
     /// starts nothing: the supervisor comes into being on the first command
     /// sent through this, on whichever node the cluster puts it.
     pub supervisor: SupervisorRef,
@@ -152,24 +165,39 @@ pub struct UserServices {
     pub dial_secret: Arc<Vec<u8>>,
 }
 
-/// Build one account's services on the shared deployment tier.
+/// Build one project's services on the shared deployment tier.
 ///
-/// Lifted from what `main` used to do exactly once. Ordering matters in one
-/// place: the config store opens first because it builds the provider registry
-/// and the (empty) vendor map everything below reads.
-async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, String> {
+/// Lifted from what `main` used to do exactly once. Ordering matters in two
+/// places now: the row is read first, and the config store opens second because
+/// it builds the provider registry and the (empty) vendor map everything below
+/// reads.
+///
+/// The row comes first for two reasons that are really one — it is where the
+/// owner comes from, and a project with no row must not produce a bundle. An
+/// actor recovering on another node resolves its wiring from an id and nothing
+/// else, so this is the only place either can be established.
+async fn build_project(
+    project: ProjectId,
+    shared: &Shared,
+) -> Result<Arc<ProjectServices>, String> {
+    let owner = ProjectStore::new(shared.db.clone())
+        .get(&project)
+        .await?
+        .ok_or_else(|| format!("no such project: {project}"))?
+        .user_id;
+
     let opened = DbConfigStore::open_on(
         shared.db.clone(),
         StoreDeps {
             info: shared.info.clone(),
         },
-        user.clone(),
+        project.clone(),
     )
     .await?;
 
     let model_cards = Arc::new(model_cards::ModelCardStore::new(
         shared.db.clone(),
-        user.clone(),
+        project.clone(),
     ));
     // A database failure here warns rather than failing the build: an account
     // with an unseeded catalogue still works, and the admin API is what fixes
@@ -179,43 +207,43 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
         .seed_once(&shared.model_card_seed, &shared.model_card_seed_marker)
         .await
     {
-        tracing::warn!(user = %user, error = ?e, "seeding model cards failed");
+        tracing::warn!(project = %project, error = ?e, "seeding model cards failed");
     }
 
     let github = Arc::new(crate::github::GithubService::new(
-        crate::github::GithubStore::new(shared.db.clone(), user.clone()),
+        crate::github::GithubStore::new(shared.db.clone(), project.clone()),
         crate::github::GithubApi::new(),
     ));
     let mcp = Arc::new(crate::mcp::McpService::new(
-        crate::mcp::McpStore::new(shared.db.clone(), user.clone()),
+        crate::mcp::McpStore::new(shared.db.clone(), project.clone()),
         github.clone(),
     ));
     let plugins = Arc::new(crate::plugins::PluginService::new(
-        crate::plugins::PluginStore::new(shared.db.clone(), user.clone()),
-        crate::plugins::MarketplaceStore::new(shared.db.clone(), user.clone()),
+        crate::plugins::PluginStore::new(shared.db.clone(), project.clone()),
+        crate::plugins::MarketplaceStore::new(shared.db.clone(), project.clone()),
         shared.artifacts.clone(),
     ));
     let memory = Arc::new(crate::memory::MemoryService::new(
-        crate::memory::MemoryStore::new(shared.db.clone(), user.clone()),
+        crate::memory::MemoryStore::new(shared.db.clone(), project.clone()),
     ));
     let agents = Arc::new(crate::agents::AgentService::new(
-        crate::agents::AgentStore::new(shared.db.clone(), user.clone()),
+        crate::agents::AgentStore::new(shared.db.clone(), project.clone()),
         opened.store.clone(),
     ));
     let routines = Arc::new(crate::routines::RoutineService::new(
-        crate::routines::RoutineStore::new(shared.db.clone(), user.clone()),
+        crate::routines::RoutineStore::new(shared.db.clone(), project.clone()),
         agents.clone(),
     ));
     let environments = Arc::new(crate::environments::EnvironmentService::new(
-        crate::environments::EnvironmentStore::new(shared.db.clone(), user.clone()),
+        crate::environments::EnvironmentStore::new(shared.db.clone(), project.clone()),
     ));
     let workflows = Arc::new(crate::workflows::WorkflowService::new(
-        crate::workflows::WorkflowStore::new(shared.db.clone(), user.clone()),
+        crate::workflows::WorkflowStore::new(shared.db.clone(), project.clone()),
         agents.clone(),
     ));
     let chatgpt = Arc::new(crate::config::chatgpt_login::ChatGptLoginService::new(
         shared.db.clone(),
-        user.clone(),
+        project.clone(),
         opened.store.clone(),
     ));
 
@@ -224,7 +252,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     ));
     let runtime_vendors = Arc::new(
         crate::runtime_vendor::RuntimeVendorConfigService::new(
-            crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), user.clone()),
+            crate::runtime_vendor::RuntimeVendorStore::new(shared.db.clone(), project.clone()),
             opened.vendors.clone(),
             // The registry's own table, so the two publishers of one map can see
             // each other's names rather than silently overwriting them.
@@ -241,7 +269,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
             github_tokens: Some(github.clone()),
             plugins: Some(plugins.clone() as Arc<dyn crate::plugins::PluginProvisioner>),
             dial_secret: opened.dial_secret.clone(),
-            account: user.as_str().to_string(),
+            account: project.as_str().to_string(),
             bus: shared.bus.clone(),
         },
     ));
@@ -263,7 +291,7 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     // into being when the first command is addressed to it.
     let supervisor = SupervisorRef::new(
         shared.system.shard_actor_of::<SupervisorShard>(),
-        user.clone(),
+        project.clone(),
         shared.serving.clone(),
     );
 
@@ -278,13 +306,13 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     {
         let supervisor = supervisor.clone();
         let runtime_vendors = runtime_vendors.clone();
-        let user = user.clone();
+        let project = project.clone();
         tokio::spawn(async move {
             let Ok(sessions) = supervisor
                 .ask(|reply| SessionSupervisorCommand::List { reply })
                 .await
             else {
-                tracing::warn!(user = %user, "orphan sweep skipped: the session list is unreadable");
+                tracing::warn!(project = %project, "orphan sweep skipped: the session list is unreadable");
                 return;
             };
             let live = sessions.into_iter().map(|(id, _)| id).collect();
@@ -303,9 +331,10 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
 
     // The same account form the runtime topics use, because both name topics on
     // the one bus this deployment shares.
-    let account = user.as_str().to_string();
-    Ok(Arc::new(UserServices {
-        user,
+    let account = project.as_str().to_string();
+    Ok(Arc::new(ProjectServices {
+        project,
+        owner,
         supervisor,
         deps,
         revisions: Arc::new(SessionRevisions::new(&account, shared.bus.clone())),
@@ -329,27 +358,29 @@ async fn build_user(user: UserId, shared: &Shared) -> Result<Arc<UserServices>, 
     }))
 }
 
-/// Every account's services, built on first touch and kept for the process
+/// Every project's services, built on first touch and kept for the process
 /// lifetime.
 ///
 /// Not unloaded when idle, deliberately. A bundle is a handful of `Arc`s, one
-/// actor and one channel, and the supervisor already unloads its own idle
-/// sessions — so a dormant account costs about what a dormant deployment cost
-/// before this existed. Unloading a bundle whose session is mid-turn is a bug
+/// addressed actor and one channel, and the supervisor already unloads its own
+/// idle sessions — so a dormant project costs about what a dormant account cost
+/// before projects existed. An account with several of them therefore costs
+/// several of those, which is the price of the isolation being structural
+/// rather than filtered. Unloading a bundle whose session is mid-turn is a bug
 /// worth not inventing before anything has measured the need for it.
-pub struct UserRegistry {
+pub struct ProjectRegistry {
     shared: Arc<Shared>,
-    /// The `OnceCell` is load-bearing, not tidiness. A bundle is what an
-    /// account's actors resolve their wiring from, and two concurrent first
-    /// requests that each ran `build_user` would leave the account with two of
+    /// The `OnceCell` is load-bearing, not tidiness. A bundle is what a
+    /// project's actors resolve their wiring from, and two concurrent first
+    /// requests that each ran `build_project` would leave the project with two of
     /// them — two runtime managers over one set of sandboxes, two vendor maps,
     /// two event channels, and a reader watching whichever one it happened to
     /// resolve. The write lock is taken only to insert the empty cell, so the
     /// build itself never runs under it.
-    users: RwLock<HashMap<UserId, Arc<OnceCell<Arc<UserServices>>>>>,
+    projects: RwLock<HashMap<ProjectId, Arc<OnceCell<Arc<ProjectServices>>>>>,
 }
 
-/// One account's bundle, for an actor resolving its own wiring at recovery.
+/// One project's bundle, for an actor resolving its own wiring at recovery.
 ///
 /// The failure branches are logged rather than handled because neither is
 /// reachable from a running deployment: a reference to one of this account's
@@ -357,17 +388,17 @@ pub struct UserRegistry {
 /// build one never had anything to address. What is left is a process on its
 /// way down, whose registry has already gone.
 pub async fn resolve(
-    users: &std::sync::Weak<UserRegistry>,
-    user: &UserId,
-) -> Option<Arc<UserServices>> {
-    let Some(registry) = users.upgrade() else {
-        tracing::warn!(user = %user, "the account registry is gone; the process is shutting down");
+    projects: &std::sync::Weak<ProjectRegistry>,
+    project: &ProjectId,
+) -> Option<Arc<ProjectServices>> {
+    let Some(registry) = projects.upgrade() else {
+        tracing::warn!(project = %project, "the account registry is gone; the process is shutting down");
         return None;
     };
-    match registry.get(user).await {
+    match registry.get(project).await {
         Ok(services) => Some(services),
         Err(e) => {
-            tracing::error!(user = %user, error = %e, "could not resolve the account's services");
+            tracing::error!(project = %project, error = %e, "could not resolve the account's services");
             None
         }
     }
@@ -383,10 +414,10 @@ pub async fn resolve(
 /// A recipe is synchronous and infallible, so neither of these resolves a
 /// bundle here. Each actor does that in `on_recovery_complete`, which is async
 /// and runs before any command it is sent.
-pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> {
-    let system = &users.shared().system;
-    let config = users.shared().supervisor.clone();
-    let registry = Arc::downgrade(users);
+pub fn register_session_shards(projects: &Arc<ProjectRegistry>) -> Result<(), String> {
+    let system = &projects.shared().system;
+    let config = projects.shared().supervisor.clone();
+    let registry = Arc::downgrade(projects);
     system
         .shard::<SupervisorShard>()
         .register(move |system, entity| {
@@ -398,7 +429,7 @@ pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> 
         })
         .map_err(|e| format!("could not register the session supervisor: {e}"))?;
 
-    let registry = Arc::downgrade(users);
+    let registry = Arc::downgrade(projects);
     system
         .shard::<SessionShard>()
         .register(move |system, entity| {
@@ -410,7 +441,7 @@ pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> 
             // The gate belongs on the reference a *request* arrives through.
             let supervisor = SupervisorRef::new(
                 system.shard_actor_of::<SupervisorShard>(),
-                entity.entity_id.account.clone(),
+                entity.entity_id.project.clone(),
                 None,
             );
             system.persistent(SessionActor::new(
@@ -422,12 +453,12 @@ pub fn register_session_shards(users: &Arc<UserRegistry>) -> Result<(), String> 
         .map_err(|e| format!("could not register the session type: {e}"))
 }
 
-impl UserRegistry {
+impl ProjectRegistry {
     #[must_use]
     pub fn new(shared: Arc<Shared>) -> Self {
         Self {
             shared,
-            users: RwLock::new(HashMap::new()),
+            projects: RwLock::new(HashMap::new()),
         }
     }
 
@@ -441,27 +472,29 @@ impl UserRegistry {
     /// For assertions about what a request *did not* build: every other way of
     /// asking would build the thing being asked about.
     #[must_use]
-    pub fn is_built(&self, user: &UserId) -> bool {
-        self.users
+    pub fn is_built(&self, project: &ProjectId) -> bool {
+        self.projects
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(user)
+            .contains_key(project)
     }
 
-    /// This account's services, building them if this is its first touch.
+    /// This project's services, building them if this is its first touch.
     ///
-    /// **Get-or-create.** Every caller has to have established that the account
-    /// is real first — a request that reaches here with an unverified,
-    /// caller-supplied id is a way to spawn a supervisor per stranger.
-    pub async fn get(&self, user: &UserId) -> Result<Arc<UserServices>, String> {
+    /// **Get-or-*build*, not get-or-create.** An id with no `projects` row is an
+    /// error rather than a fresh bundle, so a stranger cannot spawn a supervisor
+    /// by naming one. That is necessary and not sufficient: an id belonging to
+    /// *another account* is real, so a caller must also have checked ownership —
+    /// which [`crate::http::Scope`] does, before it gets here.
+    pub async fn get(&self, project: &ProjectId) -> Result<Arc<ProjectServices>, String> {
         let cell = {
-            let mut users = self
-                .users
+            let mut projects = self
+                .projects
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            users.entry(user.clone()).or_default().clone()
+            projects.entry(project.clone()).or_default().clone()
         };
-        cell.get_or_try_init(|| build_user(user.clone(), &self.shared))
+        cell.get_or_try_init(|| build_project(project.clone(), &self.shared))
             .await
             .cloned()
     }
@@ -488,12 +521,13 @@ mod tests {
         }
     }
 
-    async fn registry(tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
+    async fn registry(tmp: &tempfile::TempDir) -> Arc<ProjectRegistry> {
         let db = crate::db::testing::db().await;
-        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+        let users = Arc::new(ProjectRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: node_system(&db, None),
             serving: None,
+            project_service: Arc::new(crate::projects::ProjectService::new(db.clone())),
             db,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: test_info(),
@@ -508,7 +542,21 @@ mod tests {
         users
     }
 
-    /// The assertion the `OnceCell` exists for. Two callers racing an account's
+    /// A real project, of its own account.
+    ///
+    /// A bare `ProjectId::generate()` is not enough any more, and that is the
+    /// point: an id with no row builds no bundle, so a stranger cannot spawn a
+    /// supervisor by naming one.
+    async fn a_project(reg: &ProjectRegistry) -> ProjectId {
+        reg.shared()
+            .project_service
+            .default_project(&UserId::generate())
+            .await
+            .expect("a fresh account gets a default project")
+            .id
+    }
+
+    /// The assertion the `OnceCell` exists for. Two callers racing a project's
     /// first request must get the same bundle — a second one would mean a
     /// second `SessionSupervisor` on the same persistence id, two
     /// event-sourced actors writing one journal.
@@ -516,13 +564,15 @@ mod tests {
     async fn concurrent_first_touches_build_one_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = registry(&tmp).await;
-        let user = UserId::generate();
+        let project = a_project(&reg).await;
 
         let mut tasks = Vec::new();
         for _ in 0..8 {
             let reg = reg.clone();
-            let user = user.clone();
-            tasks.push(tokio::spawn(async move { reg.get(&user).await.unwrap() }));
+            let project = project.clone();
+            tasks.push(tokio::spawn(
+                async move { reg.get(&project).await.unwrap() },
+            ));
         }
         let mut built = Vec::new();
         for t in tasks {
@@ -553,9 +603,9 @@ mod tests {
         let reg = registry(&tmp).await;
         let before = reg.shared().system.hosted();
 
-        let (a, b) = (UserId::generate(), UserId::generate());
-        for user in [&a, &b] {
-            reg.get(user)
+        let (a, b) = (a_project(&reg).await, a_project(&reg).await);
+        for project in [&a, &b] {
+            reg.get(project)
                 .await
                 .unwrap()
                 .supervisor
@@ -571,12 +621,13 @@ mod tests {
         );
     }
 
-    /// Two accounts share the pool and nothing above it.
+    /// Two projects share the pool and nothing above it — whether or not they
+    /// belong to the same account.
     #[tokio::test]
-    async fn two_accounts_get_separate_supervisors_and_channels() {
+    async fn two_projects_get_separate_supervisors_and_channels() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = registry(&tmp).await;
-        let (a, b) = (UserId::generate(), UserId::generate());
+        let (a, b) = (a_project(&reg).await, a_project(&reg).await);
         let (sa, sb) = (reg.get(&a).await.unwrap(), reg.get(&b).await.unwrap());
 
         assert!(!Arc::ptr_eq(&sa, &sb));
@@ -597,14 +648,14 @@ mod tests {
         );
     }
 
-    /// A dormant account costs nothing until something asks for it.
+    /// A dormant project costs nothing until something asks for it.
     #[tokio::test]
-    async fn an_untouched_account_is_never_built() {
+    async fn an_untouched_project_is_never_built() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = registry(&tmp).await;
-        let user = UserId::generate();
-        assert!(reg.users.read().unwrap().is_empty());
-        let _ = reg.get(&user).await.unwrap();
-        assert_eq!(reg.users.read().unwrap().len(), 1);
+        let project = a_project(&reg).await;
+        assert!(reg.projects.read().unwrap().is_empty());
+        let _ = reg.get(&project).await.unwrap();
+        assert_eq!(reg.projects.read().unwrap().len(), 1);
     }
 }

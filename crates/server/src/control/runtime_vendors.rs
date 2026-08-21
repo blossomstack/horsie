@@ -5,8 +5,8 @@
 //! delete about a process someone else is running.
 
 use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
+use crate::projects::ProjectServices;
 use crate::runtime_vendor::config::VendorConfigError;
-use crate::users::UserServices;
 use horsie_models::runtime_vendor::RuntimeVendorConfigInput;
 use std::sync::Arc;
 
@@ -39,11 +39,11 @@ impl Resource for RuntimeVendors {
             op(
                 "list",
                 Method::Get,
-                "/api/runtime-vendors",
+                "/runtime-vendors",
                 "Every configured runtime vendor. A stored credential shows only as \
              `hasCredential` — the token itself never leaves the server.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.runtime_vendors.list_views().await.map_err(control_error)
                 },
             ),
@@ -54,13 +54,13 @@ impl Resource for RuntimeVendors {
             op(
                 "save",
                 Method::Put,
-                "/api/runtime-vendors/{name}",
+                "/runtime-vendors/{name}",
                 "Create or fully replace a configured runtime vendor. One verb \
              rather than POST-then-PUT: a vendor row is a connection setting keyed \
              by its name, and re-saving one is how a rotated token is applied. Omit \
              the credential to keep the stored one.",
                 Expose::Api,
-                |s: Arc<UserServices>, i: RuntimeVendorConfigInput| async move {
+                |s: Arc<ProjectServices>, i: RuntimeVendorConfigInput| async move {
                     let name = i.name.clone();
                     s.runtime_vendors
                         .save_input(&name, i)
@@ -71,12 +71,12 @@ impl Resource for RuntimeVendors {
             op(
                 "test",
                 Method::Post,
-                "/api/runtime-vendors/{name}/test",
+                "/runtime-vendors/{name}/test",
                 "Ask the substrate whether this vendor is usable right now, without \
              creating anything. The substrate saying no is `ok: false` with a \
              message, not an error — the request itself succeeded.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     // A name nothing is configured under is a different thing
                     // entirely from a vendor that answered badly, so it 404s.
                     s.runtime_vendors
@@ -91,10 +91,10 @@ impl Resource for RuntimeVendors {
             op(
                 "delete",
                 Method::Delete,
-                "/api/runtime-vendors/{name}",
+                "/runtime-vendors/{name}",
                 "Delete a configured runtime vendor.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.runtime_vendors
                         .delete_named(&i.name)
                         .await

@@ -67,8 +67,15 @@ fn locate_runtime_bin() -> Option<PathBuf> {
 /// hand, and hand back the framed stream.
 ///
 /// Plain HTTP requests are answered and skipped rather than treated as a failed
-/// upgrade: `horsie connect` probes `/api/auth/status` before dialing, and a
-/// stand-in that panicked on it would be testing the harness, not the agent.
+/// upgrade: `horsie connect` probes `/api/auth/status` and `/api/projects`
+/// before dialing, and a stand-in that panicked on either would be testing the
+/// harness, not the agent.
+///
+/// `/api/projects` is answered with a real one-project list, not a stub body: a
+/// vendor process publishes into one project, and resolving which — with no
+/// `--project` given, as here — is part of the chain this drives. Answering it
+/// wrongly does not fail loudly; the CLI exits and this function waits forever
+/// for a dial that will never come.
 async fn accept_vendor_agent(listener: TcpListener) -> WebSocketStream<tokio::net::TcpStream> {
     loop {
         let (mut stream, _) = listener.accept().await.expect("accept agent");
@@ -80,9 +87,13 @@ async fn accept_vendor_agent(listener: TcpListener) -> WebSocketStream<tokio::ne
                 .await
                 .expect("websocket handshake");
         }
-        // Answer as a server with authentication disabled, then wait for the
-        // real dial.
-        let body = br#"{"enabled":false,"authenticated":false,"mustChangePassword":false}"#;
+        // Answer as a server with authentication disabled, holding one
+        // project, then wait for the real dial.
+        let body: &[u8] = if head.starts_with("GET /api/projects") {
+            br#"[{"id":"p1","name":"Default","isDefault":true,"createdAt":"","updatedAt":""}]"#
+        } else {
+            br#"{"enabled":false,"authenticated":false,"mustChangePassword":false}"#
+        };
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()

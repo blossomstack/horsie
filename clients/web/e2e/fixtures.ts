@@ -97,11 +97,25 @@ export class MockLlm {
 
 export const test = base.extend<{
   appBase: string;
+  apiBase: string;
   mock: MockLlm;
   marketplaceUrl: string;
 }>({
+  /**
+   * The app, rooted at the account's default project.
+   *
+   * Every page in horsie lives under `/p/<project>`, and the router's basename
+   * is that prefix — so a test that navigated to the bare origin would land on
+   * the redirect rather than on the page it asked for.
+   */
   appBase: async ({}, use) => {
-    await use(readRuntimeInfo().baseURL);
+    const { baseURL, project } = readRuntimeInfo();
+    await use(`${baseURL}/p/${project}`);
+  },
+  /** The API, rooted at the same project. */
+  apiBase: async ({}, use) => {
+    const { baseURL, project } = readRuntimeInfo();
+    await use(`${baseURL}/api/p/${project}`);
   },
   marketplaceUrl: async ({}, use) => {
     await use(readRuntimeInfo().marketplaceUrl);

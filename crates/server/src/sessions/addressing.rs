@@ -18,7 +18,7 @@
 //! no per-shard state to bound, so bucketing would buy a shorter address segment
 //! and cost a number two nodes could disagree about.
 
-use crate::auth::UserId;
+use crate::projects::ProjectId;
 use crate::sessions::session_actor::SessionCommand;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use horsie_actor::{ActorRef, ReplyTo, Shard, TellError};
@@ -60,13 +60,13 @@ const SEP: char = '|';
 /// it against.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionEntityId {
-    pub account: UserId,
+    pub project: ProjectId,
     pub session: Uuid,
 }
 
 impl fmt::Display for SessionEntityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{SEP}{}", self.account, self.session)
+        write!(f, "{}{SEP}{}", self.project, self.session)
     }
 }
 
@@ -83,7 +83,7 @@ pub struct Addressed<Id, C> {
 }
 
 /// What a supervisor's mailbox accepts: a command, and whose list it is for.
-pub type SupervisorInbox = Addressed<UserId, SessionSupervisorCommand>;
+pub type SupervisorInbox = Addressed<ProjectId, SessionSupervisorCommand>;
 
 /// What a session's mailbox accepts: a command, and which session it is for.
 pub type SessionInbox = Addressed<SessionEntityId, SessionCommand>;
@@ -93,17 +93,17 @@ pub struct SupervisorShard;
 
 impl Shard for SupervisorShard {
     type Command = SupervisorInbox;
-    type EntityId = UserId;
+    type EntityId = ProjectId;
     /// The account, which is the same as the entity: an account has exactly one
     /// supervisor, so there is nothing coarser to group it with.
-    type ShardId = UserId;
+    type ShardId = ProjectId;
     const TYPE: &'static str = "session-supervisor";
 
-    fn entity_id(cmd: &Self::Command) -> UserId {
+    fn entity_id(cmd: &Self::Command) -> ProjectId {
         cmd.entity.clone()
     }
 
-    fn shard_id(cmd: &Self::Command) -> UserId {
+    fn shard_id(cmd: &Self::Command) -> ProjectId {
         cmd.entity.clone()
     }
 }
@@ -128,32 +128,32 @@ impl Shard for SessionShard {
     }
 }
 
-/// One account's supervisor, addressed rather than held.
+/// One project's supervisor, addressed rather than held.
 ///
 /// Wraps once, here, so the places that send the supervisor a command keep
-/// sending it a command. Each of them already had the account in hand — it is
+/// sending it a command. Each of them already had the project in hand — it is
 /// what they resolved this reference from — so repeating it at every call site
 /// would be ceremony that can be got wrong over a value that cannot.
 #[derive(Clone)]
 pub struct SupervisorRef {
     shard: ActorRef<SupervisorInbox>,
-    account: UserId,
+    project: ProjectId,
     serving: Serving,
 }
 
 impl SupervisorRef {
     #[must_use]
-    pub fn new(shard: ActorRef<SupervisorInbox>, account: UserId, serving: Serving) -> Self {
+    pub fn new(shard: ActorRef<SupervisorInbox>, project: ProjectId, serving: Serving) -> Self {
         Self {
             shard,
-            account,
+            project,
             serving,
         }
     }
 
     #[must_use]
-    pub fn account(&self) -> &UserId {
-        &self.account
+    pub fn project(&self) -> &ProjectId {
+        &self.project
     }
 
     /// # Errors
@@ -202,7 +202,7 @@ impl SupervisorRef {
 
     fn addressed(&self, cmd: SessionSupervisorCommand) -> SupervisorInbox {
         Addressed {
-            entity: self.account.clone(),
+            entity: self.project.clone(),
             cmd,
         }
     }
@@ -225,13 +225,13 @@ impl SessionRef {
     #[must_use]
     pub fn new(
         shard: ActorRef<SessionInbox>,
-        account: UserId,
+        project: ProjectId,
         session: Uuid,
         serving: Serving,
     ) -> Self {
         Self {
             shard,
-            entity: SessionEntityId { account, session },
+            entity: SessionEntityId { project, session },
             serving,
         }
     }

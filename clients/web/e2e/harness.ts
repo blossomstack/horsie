@@ -23,12 +23,34 @@ export interface RuntimeInfo {
   tmpDir: string;
   /** `file://` URL of a two-entry git marketplace fixture (group U). */
   marketplaceUrl: string;
+  /**
+   * The account's default project — the scope every URL in this suite carries.
+   *
+   * Resolved from the server at setup rather than assumed: a fresh deployment
+   * mints one, and only a database migrated by `0040_projects.sql` has the id
+   * that happens to equal its owner's.
+   */
+  project: string;
   /** PIDs of the spawned processes (mock, server, runtime) to kill at teardown. */
   pids: number[];
 }
 
 export function readRuntimeInfo(): RuntimeInfo {
   return JSON.parse(fs.readFileSync(RUNTIME_FILE, "utf8")) as RuntimeInfo;
+}
+
+/** The account's default project, from a server that is already answering. */
+export async function defaultProject(
+  baseURL: string,
+  token?: string,
+): Promise<string> {
+  const res = await fetch(`${baseURL}/api/projects`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  const projects = (await res.json()) as { id: string; isDefault: boolean }[];
+  const found = projects.find((p) => p.isDefault) ?? projects[0];
+  if (!found) throw new Error(`${baseURL} reports no projects`);
+  return found.id;
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -82,17 +104,18 @@ async function putJson(url: string, body: unknown): Promise<void> {
  */
 export async function seedConfig(
   baseURL: string,
+  project: string,
   cfg: { providers?: { name: string }[]; models?: { alias: string }[] },
 ): Promise<void> {
   for (const p of cfg.providers ?? []) {
     await putJson(
-      `${baseURL}/api/config/model-providers/${encodeURIComponent(p.name)}`,
+      `${baseURL}/api/p/${project}/config/model-providers/${encodeURIComponent(p.name)}`,
       p,
     );
   }
   for (const m of cfg.models ?? []) {
     await putJson(
-      `${baseURL}/api/config/models/${encodeURIComponent(m.alias)}`,
+      `${baseURL}/api/p/${project}/config/models/${encodeURIComponent(m.alias)}`,
       m,
     );
   }
@@ -101,7 +124,8 @@ export async function seedConfig(
 /** Set the vendor new sessions default to; throws on non-2xx. */
 export async function setDefaultRuntimeVendor(
   baseURL: string,
+  project: string,
   vendor: string,
 ): Promise<void> {
-  await putJson(`${baseURL}/api/config/default-runtime-vendor`, { vendor });
+  await putJson(`${baseURL}/api/p/${project}/config/default-runtime-vendor`, { vendor });
 }

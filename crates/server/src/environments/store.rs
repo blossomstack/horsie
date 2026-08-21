@@ -3,8 +3,8 @@
 //! `session_api::RepoConfig`, `executor::EnvVar`, and `executor::ProvisionStep`
 //! (protocol types are not storage types).
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
@@ -59,17 +59,17 @@ pub struct EnvironmentRow {
 pub struct EnvironmentStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl EnvironmentStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<EnvironmentRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM environments WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM environments WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -80,7 +80,7 @@ impl EnvironmentStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<EnvironmentRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM environments WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM environments WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -94,7 +94,7 @@ impl EnvironmentStore {
     /// would discard the existing environment).
     pub async fn insert(&self, row: &EnvironmentRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO environments (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO environments (project_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -115,7 +115,7 @@ impl EnvironmentStore {
     pub async fn replace(&self, row: &EnvironmentRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
             "UPDATE environments SET description = ?, vendor = ?, repos = ?, \
-             env_vars = ?, provision = ?, updated_at = ? WHERE user_id = ? AND name = ?",
+             env_vars = ?, provision = ?, updated_at = ? WHERE project_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.vendor)
@@ -135,7 +135,7 @@ impl EnvironmentStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM environments WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM environments WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -176,7 +176,7 @@ mod tests {
     async fn store() -> (EnvironmentStore, Db) {
         let db = crate::db::testing::db().await;
         (
-            EnvironmentStore::new(db.clone(), crate::auth::UserId::new("1")),
+            EnvironmentStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             db,
         )
     }

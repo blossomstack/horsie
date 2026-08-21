@@ -74,6 +74,13 @@ impl RuntimeHandle for StubHandle {
     }
 }
 
+/// The path a vendor process dials in production.
+///
+/// Inert in this suite — the listener below accepts any path — but written out
+/// rather than left at the pre-projects `/api/vendor/connect`, which would read
+/// as a statement about the endpoint and be wrong.
+const VENDOR_SOCKET: &str = "/api/p/p1/vendor/connect";
+
 /// The server end: accept agents, hand each one to a real link, publish it.
 async fn serve_vendor_connections(registry: Arc<RuntimeVendorRegistry>) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -218,7 +225,7 @@ async fn a_vendor_agent_reconnects_after_its_link_drops_and_keeps_its_runtimes()
     ));
 
     let cancel = CancellationToken::new();
-    let endpoint = format!("ws://{}/api/vendor/connect", wire.addr);
+    let endpoint = format!("ws://{}{VENDOR_SOCKET}", wire.addr);
     let agent_cancel = cancel.clone();
     let agent_task =
         tokio::spawn(async move { agent.run(&endpoint, no_credential(), agent_cancel).await });
@@ -301,7 +308,7 @@ async fn a_held_runtime_client_keeps_working_across_a_reconnect() {
     ));
 
     let cancel = CancellationToken::new();
-    let endpoint = format!("ws://{}/api/vendor/connect", wire.addr);
+    let endpoint = format!("ws://{}{VENDOR_SOCKET}", wire.addr);
     let agent_cancel = cancel.clone();
     let agent_task =
         tokio::spawn(async move { agent.run(&endpoint, no_credential(), agent_cancel).await });
@@ -356,7 +363,7 @@ async fn a_second_agent_claiming_a_live_name_is_refused_and_stops() {
     let server = serve_vendor_connections(registry.clone()).await;
 
     let tmp = tempfile::tempdir().unwrap();
-    let endpoint = format!("ws://{server}/api/vendor/connect");
+    let endpoint = format!("ws://{server}{VENDOR_SOCKET}");
     let root = tmp.path().to_path_buf();
     let build = move |dir: &str| -> RuntimeVendorClient {
         let root = root.clone();

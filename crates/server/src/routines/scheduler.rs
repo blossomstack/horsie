@@ -11,11 +11,11 @@
 //! on the scope audit's allowlist for this reason, and each routine is then
 //! armed and run *as its owner*.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
+use crate::projects::ProjectRegistry;
 use crate::routines::service::next_run_at;
 use crate::routines::store::{RoutineRow, RoutineStore};
-use crate::users::UserRegistry;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,13 +25,13 @@ pub const TICK_INTERVAL: Duration = Duration::from_secs(15);
 
 pub struct RoutineScheduler {
     db: Db,
-    users: Arc<UserRegistry>,
+    projects: Arc<ProjectRegistry>,
 }
 
 impl RoutineScheduler {
     #[must_use]
-    pub fn new(db: Db, users: Arc<UserRegistry>) -> Self {
-        Self { db, users }
+    pub fn new(db: Db, projects: Arc<ProjectRegistry>) -> Self {
+        Self { db, projects }
     }
 
     /// Fire every routine due at `now_ms`, whoever owns it.
@@ -57,8 +57,8 @@ impl RoutineScheduler {
         }
     }
 
-    async fn fire(&self, owner: &UserId, routine: RoutineRow, now_ms: u64) {
-        let services = match self.users.get(owner).await {
+    async fn fire(&self, owner: &ProjectId, routine: RoutineRow, now_ms: u64) {
+        let services = match self.projects.get(owner).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::error!(
@@ -104,9 +104,9 @@ impl RoutineScheduler {
 )]
 mod tests {
     use super::*;
+    use crate::projects::{ProjectServices, Shared};
     use crate::routines::runner::tests::sessions;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
-    use crate::users::{Shared, UserServices};
     use horsie_models::agents::AgentPresetInput;
     use horsie_models::routines::{
         EverySchedule, OnceSchedule, RoutineInput, RoutineSchedule, Weekday, WeeklySchedule,
@@ -117,7 +117,7 @@ mod tests {
     /// session: a provider, a model, an agent preset, and a `mock` vendor process
     /// published in *its own* map.
     struct Account {
-        services: Arc<UserServices>,
+        services: Arc<ProjectServices>,
         /// Kept alive: dropping it closes the fake vendor's transport.
         _vendor: Option<FakeRuntimeVendor>,
     }
@@ -133,11 +133,33 @@ mod tests {
         }
     }
 
-    fn registry(db: Db, tmp: &tempfile::TempDir) -> Arc<UserRegistry> {
-        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+    /// A project of the bootstrap account, which is what the scheduler fires
+    /// for. Through `default_project`, so the id is minted the way production
+    /// mints it.
+    async fn another_project(reg: &ProjectRegistry, name: &str) -> ProjectId {
+        reg.shared()
+            .project_service
+            .create(&crate::auth::UserId::bootstrap(), name)
+            .await
+            .expect("a second project is created")
+            .id
+    }
+
+    async fn a_project(reg: &ProjectRegistry) -> ProjectId {
+        reg.shared()
+            .project_service
+            .default_project(&crate::auth::UserId::bootstrap())
+            .await
+            .expect("the bootstrap account gets a default project")
+            .id
+    }
+
+    fn registry(db: Db, tmp: &tempfile::TempDir) -> Arc<ProjectRegistry> {
+        let users = Arc::new(ProjectRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
-            system: crate::users::node_system(&db, None),
+            system: crate::projects::node_system(&db, None),
             serving: None,
+            project_service: Arc::new(crate::projects::ProjectService::new(db.clone())),
             db,
             artifacts: Arc::new(crate::plugins::ArtifactStore::new(
                 tmp.path().join("artifacts"),
@@ -145,18 +167,18 @@ mod tests {
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
-            anonymous: UserId::bootstrap(),
+            anonymous: crate::auth::UserId::bootstrap(),
             supervisor: crate::sessions::supervisor::SupervisorConfig::default(),
             deps: None,
             fly_api_base: crate::testing::UNREACHABLE_FLY_API.to_string(),
         })));
-        crate::users::register_session_shards(&users).unwrap();
+        crate::projects::register_session_shards(&users).unwrap();
         users
     }
 
     /// `connected` false leaves the account's vendor map empty, which is how a
     /// routine whose runtime is offline is tested.
-    async fn account(users: &UserRegistry, user: &UserId, connected: bool) -> Account {
+    async fn account(users: &ProjectRegistry, user: &ProjectId, connected: bool) -> Account {
         let services = users.get(user).await.unwrap();
         // Through the trait object, so the per-resource calls rather than the
         // concrete store's test seed helper.
@@ -240,7 +262,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let users = registry(db.clone(), &tmp);
-        let a = account(&users, &UserId::bootstrap(), true).await;
+        let a = account(&users, &a_project(&users).await, true).await;
         let scheduler = RoutineScheduler::new(db, users);
 
         a.services
@@ -295,7 +317,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let users = registry(db.clone(), &tmp);
-        let a = account(&users, &UserId::bootstrap(), true).await;
+        let a = account(&users, &a_project(&users).await, true).await;
         let scheduler = RoutineScheduler::new(db, users);
 
         a.services
@@ -326,7 +348,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let users = registry(db.clone(), &tmp);
-        let a = account(&users, &UserId::bootstrap(), false).await;
+        let a = account(&users, &a_project(&users).await, false).await;
         let scheduler = RoutineScheduler::new(db.clone(), users);
 
         a.services
@@ -360,7 +382,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let users = registry(db.clone(), &tmp);
-        let a = account(&users, &UserId::bootstrap(), true).await;
+        let a = account(&users, &a_project(&users).await, true).await;
         let scheduler = RoutineScheduler::new(db, users);
 
         // 1970-01-01T00:00:01Z is a Thursday; Mon/Wed/Fri 09:00 UTC → Friday 09:00.
@@ -417,11 +439,14 @@ mod tests {
     /// owner's runtime. The scoped read this replaced would have seen only one
     /// of these two.
     #[tokio::test]
-    async fn every_account_gets_its_tick() {
+    async fn every_project_gets_its_tick() {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let users = registry(db.clone(), &tmp);
-        let (one, two) = (UserId::generate(), UserId::generate());
+        let (one, two) = (
+            a_project(&users).await,
+            another_project(&users, "second").await,
+        );
         let a = account(&users, &one, true).await;
         let b = account(&users, &two, true).await;
         let scheduler = RoutineScheduler::new(db, users);

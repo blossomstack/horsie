@@ -24,6 +24,16 @@ use std::path::PathBuf;
     about = "Session-server client: run this machine as a runtime vendor, and inspect sessions, agents and workflows"
 )]
 struct Cli {
+    /// The project to act in, by id or by name.
+    ///
+    /// Global rather than per-subcommand because every server-facing command
+    /// needs one, and because it is the same answer for all of them. Omitted →
+    /// the account's default project, resolved from the server: there is
+    /// nothing to guess, and a stale id stored locally would be a worse failure
+    /// than a round trip.
+    #[arg(long, global = true, value_name = "ID_OR_NAME")]
+    project: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -355,7 +365,7 @@ impl ConfigKey {
     }
 }
 
-async fn dispatch(command: Command) -> Result<i32, CliError> {
+async fn dispatch(command: Command, project: Option<&str>) -> Result<i32, CliError> {
     match command {
         Command::Auth { action } => match action {
             AuthAction::Login {
@@ -385,39 +395,47 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 agent,
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                session::tail(&server, &session_id, &output, events, agent.as_deref()).await?;
+                session::tail(
+                    &server,
+                    project,
+                    &session_id,
+                    &output,
+                    events,
+                    agent.as_deref(),
+                )
+                .await?;
                 Ok(0)
             }
             SessionAction::List { server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                session::list(&server).await?;
+                session::list(&server, project).await?;
                 Ok(0)
             }
             SessionAction::Status { session_id, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                session::status(&server, &session_id).await?;
+                session::status(&server, project, &session_id).await?;
                 Ok(0)
             }
         },
         Command::Workflow { action } => match action {
             WorkflowAction::List { server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::list(&server).await?;
+                workflow::list(&server, project).await?;
                 Ok(0)
             }
             WorkflowAction::Get { name, json, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::get(&server, &name, json).await?;
+                workflow::get(&server, project, &name, json).await?;
                 Ok(0)
             }
             WorkflowAction::Apply { file, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::apply(&server, &file).await?;
+                workflow::apply(&server, project, &file).await?;
                 Ok(0)
             }
             WorkflowAction::Delete { name, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::delete(&server, &name).await?;
+                workflow::delete(&server, project, &name).await?;
                 Ok(0)
             }
             WorkflowAction::Run {
@@ -432,12 +450,12 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let server = horsie::config::resolve_server(server, None)?;
                 let environment =
                     horsie::environment::environment_from_flags(environment, vendor, repo)?;
-                workflow::run(&server, &name, input, environment, session_name).await?;
+                workflow::run(&server, project, &name, input, environment, session_name).await?;
                 Ok(0)
             }
             WorkflowAction::Status { session_id, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::status(&server, &session_id).await?;
+                workflow::status(&server, project, &session_id).await?;
                 Ok(0)
             }
             WorkflowAction::Retry {
@@ -446,19 +464,19 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 server,
             } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                workflow::retry(&server, &session_id, step_index).await?;
+                workflow::retry(&server, project, &session_id, step_index).await?;
                 Ok(0)
             }
         },
         Command::Agent { action } => match action {
             AgentAction::List { server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                agent::list(&server).await?;
+                agent::list(&server, project).await?;
                 Ok(0)
             }
             AgentAction::Get { name, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                agent::get(&server, &name).await?;
+                agent::get(&server, project, &name).await?;
                 Ok(0)
             }
             AgentAction::Invoke {
@@ -473,24 +491,24 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
                 let server = horsie::config::resolve_server(server, None)?;
                 let environment =
                     horsie::environment::environment_from_flags(environment, vendor, repo)?;
-                agent::invoke(&server, &name, message, environment, session_name).await?;
+                agent::invoke(&server, project, &name, message, environment, session_name).await?;
                 Ok(0)
             }
         },
         Command::Routine { action } => match action {
             RoutineAction::List { server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                horsie::routines::list(&server).await?;
+                horsie::routines::list(&server, project).await?;
                 Ok(0)
             }
             RoutineAction::Get { name, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                horsie::routines::get(&server, &name).await?;
+                horsie::routines::get(&server, project, &name).await?;
                 Ok(0)
             }
             RoutineAction::Invoke { name, server } => {
                 let server = horsie::config::resolve_server(server, None)?;
-                horsie::routines::invoke(&server, &name).await?;
+                horsie::routines::invoke(&server, project, &name).await?;
                 Ok(0)
             }
         },
@@ -549,6 +567,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
             connect::run(
                 &runtime_bin,
                 &server,
+                project,
                 &workspace,
                 &name,
                 background,
@@ -564,7 +583,7 @@ async fn dispatch(command: Command) -> Result<i32, CliError> {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    let code = match dispatch(cli.command).await {
+    let code = match dispatch(cli.command, cli.project.as_deref()).await {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{e}");

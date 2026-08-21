@@ -145,7 +145,7 @@ pub(crate) struct StepResultDef {
 /// should carry — the same rule that keeps session-metadata tools off them.
 fn build_control_layer(
     base: Arc<dyn Toolbox>,
-    services: Option<&Arc<crate::users::UserServices>>,
+    services: Option<&Arc<crate::projects::ProjectServices>>,
     settings: &AgentSettings,
     kind: SessionAgentKind,
 ) -> (Arc<dyn Toolbox>, String) {
@@ -295,7 +295,7 @@ pub(super) struct SessionContextProvider {
     /// reach agents, routines and environments alike, so unlike `memory` there
     /// is no single service to hold. `None` wherever the control plane is not
     /// wired, which is every test that does not exercise it.
-    pub(super) services: Option<Arc<crate::users::UserServices>>,
+    pub(super) services: Option<Arc<crate::projects::ProjectServices>>,
     pub(super) settings: AgentSettings,
     /// What a workflow step promises to return, and whether it may ask. Empty
     /// and false for every other kind of agent, which never gets the
@@ -1760,7 +1760,7 @@ mod tests {
                 &horsie_actor::ActorSystem::new(Arc::new(horsie_actor::InMemoryJournal::new())),
                 RecordingSession(seen.clone()),
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             id,
             None,
         );

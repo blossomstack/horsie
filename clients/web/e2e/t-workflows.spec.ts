@@ -7,7 +7,7 @@
 // `ask_user` tool rather than a second meaning on the finishing one.
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
-import { expectStatus } from "./helpers";
+import { expectStatus, projectRoot } from "./helpers";
 
 const WORKFLOW = "e2e-workflow";
 const ASK_WORKFLOW = "e2e-workflow-ask";
@@ -19,19 +19,19 @@ interface WorkflowBody {
 }
 
 /** The agent preset both steps run as, on the connected vendor. */
-async function seedAgent(page: Page, appBase: string): Promise<void> {
-  const cfg = (await (await page.request.get(`${appBase}/api/config`)).json()) as {
+async function seedAgent(page: Page, apiBase: string): Promise<void> {
+  const cfg = (await (await page.request.get(`${apiBase}/config`)).json()) as {
     models: { alias: string }[];
     vendors: { name: string }[];
   };
-  const res = await page.request.post(`${appBase}/api/agents`, {
+  const res = await page.request.post(`${apiBase}/agents`, {
     data: { name: AGENT, model: cfg.models[0]?.alias, vendor: cfg.vendors[0]?.name },
   });
   expect([201, 409]).toContain(res.status());
 }
 
-async function fetchWorkflow(page: Page, appBase: string): Promise<WorkflowBody> {
-  const res = await page.request.get(`${appBase}/api/workflows/${WORKFLOW}`);
+async function fetchWorkflow(page: Page, apiBase: string): Promise<WorkflowBody> {
+  const res = await page.request.get(`${apiBase}/workflows/${WORKFLOW}`);
   expect(res.status()).toBe(200);
   return (await res.json()) as WorkflowBody;
 }
@@ -39,15 +39,16 @@ async function fetchWorkflow(page: Page, appBase: string): Promise<WorkflowBody>
 test("T1: the sidebar links to the workflows page", async ({ page, appBase }) => {
   await page.goto(appBase);
   await page.getByTestId("workflows-link").click();
-  await page.waitForURL((url) => url.pathname === "/workflows");
+  await page.waitForURL((url) => url.pathname === projectRoot() + "/workflows");
   await expect(page.getByTestId("workflows-page")).toBeVisible();
 });
 
 test("T2: the editor builds, reorders and visualizes a definition", async ({
   page,
   appBase,
+  apiBase,
 }) => {
-  await seedAgent(page, appBase);
+  await seedAgent(page, apiBase);
   await page.goto(`${appBase}/workflows`);
   await page.getByTestId("new-workflow-button").click();
   await expect(page.getByTestId("workflow-edit-page")).toBeVisible();
@@ -91,11 +92,11 @@ test("T2: the editor builds, reorders and visualizes a definition", async ({
   await expect(rows.nth(1)).toHaveAttribute("data-step-name", "start");
 
   await page.getByTestId("save-workflow").click();
-  await page.waitForURL((url) => url.pathname === `/workflows/${WORKFLOW}`);
+  await page.waitForURL((url) => url.pathname === projectRoot() + `/workflows/${WORKFLOW}`);
   await expect(page.getByTestId("workflow-graph")).toBeVisible();
 
   // The reorder is what was saved, and it did not disturb the start step.
-  const saved = await fetchWorkflow(page, appBase);
+  const saved = await fetchWorkflow(page, apiBase);
   expect(saved.steps.map((s) => s.name)).toEqual(["step-2", "start"]);
   expect(saved.start).toBe("start");
   expect(saved.steps.every((s) => s.agent === AGENT)).toBe(true);
@@ -105,6 +106,7 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
   page,
   appBase,
   mock,
+  apiBase,
 }) => {
   await mock.reset();
   // One submission per step: a step ends by calling `submit_result`, and both
@@ -183,8 +185,8 @@ test("T3: Run hands the workflow to the new-session page, which starts it", asyn
 
 /** A one-step workflow whose step may ask. `interactive` is what grants
  * `ask_user`; without it the step has no way to ask at all. */
-async function seedAskWorkflow(page: Page, appBase: string): Promise<void> {
-  await seedAgent(page, appBase);
+async function seedAskWorkflow(page: Page, apiBase: string): Promise<void> {
+  await seedAgent(page, apiBase);
   const body = {
     name: ASK_WORKFLOW,
     description: "from e2e",
@@ -202,9 +204,9 @@ async function seedAskWorkflow(page: Page, appBase: string): Promise<void> {
       },
     ],
   };
-  const res = await page.request.post(`${appBase}/api/workflows`, { data: body });
+  const res = await page.request.post(`${apiBase}/workflows`, { data: body });
   if (res.status() === 201) return;
-  const put = await page.request.put(`${appBase}/api/workflows/${ASK_WORKFLOW}`, {
+  const put = await page.request.put(`${apiBase}/workflows/${ASK_WORKFLOW}`, {
     data: body,
   });
   expect(put.status()).toBe(200);
@@ -214,9 +216,10 @@ test("T4: a step's question and its answer stand in the step's transcript", asyn
   page,
   appBase,
   mock,
+  apiBase,
 }) => {
   await mock.reset();
-  await seedAskWorkflow(page, appBase);
+  await seedAskWorkflow(page, apiBase);
   // The step does some work and *then* asks. That is the shape that matters:
   // a question sharing a turn with other tool calls used to be folded into the
   // collapsed "Ran 2 tools" row, so neither it nor the answer was readable.

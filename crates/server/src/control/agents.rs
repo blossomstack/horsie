@@ -4,10 +4,10 @@ use crate::control::{
     ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, ask, op,
 };
 use crate::http::handlers;
+use crate::projects::ProjectServices;
 use crate::sessions::builder::build_session_spec;
 use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
-use crate::users::UserServices;
 use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView};
 use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
@@ -38,31 +38,31 @@ impl Resource for Agents {
             op(
                 "list",
                 Method::Get,
-                "/api/agents",
+                "/agents",
                 "Every saved agent preset.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     Ok::<Vec<AgentView>, ControlError>(s.agents.list().await?)
                 },
             ),
             op(
                 "get",
                 Method::Get,
-                "/api/agents/{name}",
+                "/agents/{name}",
                 "One agent preset by slug.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     Ok::<AgentView, ControlError>(s.agents.get(&i.name).await?)
                 },
             ),
             op(
                 "create",
                 Method::Post,
-                "/api/agents",
+                "/agents",
                 "Save a new agent preset. `model` must be a configured alias — list \
              the models first if you are unsure.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: AgentPresetInput| async move {
+                |s: Arc<ProjectServices>, i: AgentPresetInput| async move {
                     Ok::<AgentView, ControlError>(s.agents.create(i).await?)
                 },
             )
@@ -70,11 +70,11 @@ impl Resource for Agents {
             op(
                 "replace",
                 Method::Put,
-                "/api/agents/{name}",
+                "/agents/{name}",
                 "Replace a preset wholesale. Omitted fields are reset, not kept. The \
              name is immutable — it is the id of record.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: AgentPresetInput| async move {
+                |s: Arc<ProjectServices>, i: AgentPresetInput| async move {
                     let name = i.name.clone();
                     Ok::<AgentView, ControlError>(s.agents.replace(&name, i).await?)
                 },
@@ -82,20 +82,20 @@ impl Resource for Agents {
             op(
                 "delete",
                 Method::Delete,
-                "/api/agents/{name}",
+                "/agents/{name}",
                 "Delete a preset. Refused while a routine still names it.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move { delete(&s, &i.name).await },
+                |s: Arc<ProjectServices>, i: NameRef| async move { delete(&s, &i.name).await },
             )
             .no_content(),
             op(
                 "invoke",
                 Method::Post,
-                "/api/agents/{name}/invoke",
+                "/agents/{name}/invoke",
                 "Create a session from a preset and queue its first message. Returns \
              as soon as both are accepted; the turn runs in the background.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: InvokeAgent| async move { invoke(&s, i).await },
+                |s: Arc<ProjectServices>, i: InvokeAgent| async move { invoke(&s, i).await },
             )
             .created(),
         ]
@@ -105,7 +105,7 @@ impl Resource for Agents {
 /// Refused while a routine names this preset: a routine's whole configuration
 /// is the agent it points at, so deleting one out from under it turns a
 /// scheduled job into a timer that fails every firing.
-async fn delete(services: &UserServices, name: &str) -> Result<(), ControlError> {
+async fn delete(services: &ProjectServices, name: &str) -> Result<(), ControlError> {
     let used_by = services
         .routines
         .using_agent(name)
@@ -122,7 +122,7 @@ async fn delete(services: &UserServices, name: &str) -> Result<(), ControlError>
 }
 
 async fn invoke(
-    services: &UserServices,
+    services: &ProjectServices,
     input: InvokeAgent,
 ) -> Result<AgentInvokeResponse, ControlError> {
     let InvokeAgent { name, request } = input;
@@ -239,7 +239,7 @@ mod tests {
 
     /// An account with one provider and one model alias, so a preset can be
     /// saved: `AgentService::create` validates its model against the config.
-    async fn account() -> (Arc<UserServices>, tempfile::TempDir) {
+    async fn account() -> (Arc<ProjectServices>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::testing::state(dir.path()).build().await;
         let services = state.services().await;

@@ -47,6 +47,8 @@ import type {
   PasswordChangeRequest,
   CatalogEntryView,
   PluginView,
+  ProjectInput,
+  ProjectView,
   ToolCatalog,
   RoutineInput,
   RoutineRunResponse,
@@ -70,6 +72,44 @@ import type {
 // the session server (default http://127.0.0.1:3789); in prod the UI is served
 // same-origin, so a relative base works everywhere.
 const BASE = "/api";
+
+/**
+ * The project every scoped request goes to.
+ *
+ * Module state rather than an argument on eighty functions, and rather than a
+ * React context this non-React module cannot read: a browser tab is in exactly
+ * one project at a time, and the `/p/:project` route is what says which.
+ * `ProjectScope` sets it while rendering — before any query below runs — and
+ * clears React Query's cache when it changes, so a switch refetches rather than
+ * painting the previous project's data under the new project's name.
+ */
+let currentProject: string | null = null;
+
+export function setCurrentProject(id: string): void {
+  currentProject = id;
+}
+
+export function getCurrentProject(): string | null {
+  return currentProject;
+}
+
+/**
+ * A scoped path, prefixed with the project.
+ *
+ * Throws rather than falling back to some default when no project is set: a
+ * default would make a routing bug look like an empty account, which is the
+ * failure mode this whole design is built to avoid.
+ */
+function scoped(path: string): string {
+  if (!currentProject) {
+    throw new ApiRequestError(
+      0,
+      "no_project",
+      "No project selected — this is a routing bug, not something to retry.",
+    );
+  }
+  return `${BASE}/p/${currentProject}${path}`;
+}
 
 // The ChatGPT sign-in bodies are declared here rather than in a `.fl` schema:
 // they are three small admin-only shapes with no other client, and adding them
@@ -103,10 +143,23 @@ export class ApiRequestError extends Error {
   }
 }
 
+/** A scoped request: `path` is relative to the current project. */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  return send<T>(scoped(path), init);
+}
+
+/**
+ * A request that belongs to no project: the credential routes, and `/projects`
+ * itself — which is how a client learns what may go in the scoped prefix.
+ */
+async function unscoped<T>(path: string, init?: RequestInit): Promise<T> {
+  return send<T>(BASE + path, init);
+}
+
+async function send<T>(url: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(BASE + path, {
+    res = await fetch(url, {
       headers: { "Content-Type": "application/json", ...init?.headers },
       ...init,
     });
@@ -160,45 +213,70 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const MAIN_AGENT = "main";
 
 export const api = {
-  health: (): Promise<{ ok: boolean }> => request("/health"),
+  health: (): Promise<{ ok: boolean }> => unscoped("/health"),
 
   auth: {
-    status: (): Promise<AuthStatus> => request("/auth/status"),
+    status: (): Promise<AuthStatus> => unscoped("/auth/status"),
 
     login: (password: string): Promise<AuthStatus> =>
-      request("/auth/login", {
+      unscoped("/auth/login", {
         method: "POST",
         body: JSON.stringify({ password } satisfies LoginRequest),
       }),
 
     logout: (): Promise<AuthStatus> =>
-      request("/auth/logout", { method: "POST", body: "{}" }),
+      unscoped("/auth/logout", { method: "POST", body: "{}" }),
 
     changePassword: (body: PasswordChangeRequest): Promise<AuthStatus> =>
-      request("/auth/password", { method: "POST", body: JSON.stringify(body) }),
+      unscoped("/auth/password", { method: "POST", body: JSON.stringify(body) }),
 
     approveDevice: (userCode: string): Promise<void> =>
-      request("/device/approve", {
+      unscoped("/device/approve", {
         method: "POST",
         body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
       }),
 
     denyDevice: (userCode: string): Promise<void> =>
-      request("/device/deny", {
+      unscoped("/device/deny", {
         method: "POST",
         body: JSON.stringify({ userCode } satisfies DeviceApprovalRequest),
       }),
 
-    listTokens: (): Promise<AgentTokenView[]> => request("/device/tokens"),
+    listTokens: (): Promise<AgentTokenView[]> => unscoped("/device/tokens"),
 
     createToken: (label: string): Promise<AgentTokenCreated> =>
-      request("/device/tokens", {
+      unscoped("/device/tokens", {
         method: "POST",
         body: JSON.stringify({ label } satisfies AgentTokenCreateInput),
       }),
 
     deleteToken: (id: string): Promise<void> =>
-      request(`/device/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      unscoped(`/device/tokens/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  },
+
+  /**
+   * An account's projects — the one resource that is not inside one.
+   *
+   * `list` is also what creates the default project on an account's first
+   * visit, which is why the router calls it before anything else.
+   */
+  projects: {
+    list: (): Promise<ProjectView[]> => unscoped("/projects"),
+
+    create: (name: string): Promise<ProjectView> =>
+      unscoped("/projects", {
+        method: "POST",
+        body: JSON.stringify({ name } satisfies ProjectInput),
+      }),
+
+    rename: (id: string, name: string): Promise<ProjectView> =>
+      unscoped(`/projects/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        body: JSON.stringify({ name } satisfies ProjectInput),
+      }),
+
+    remove: (id: string): Promise<void> =>
+      unscoped(`/projects/${encodeURIComponent(id)}`, { method: "DELETE" }),
   },
 
   sessions: {
@@ -594,7 +672,7 @@ export const api = {
     status: (): Promise<GitHubStatus> => request("/github/status"),
 
     /** Browser navigation target (not fetch) — starts the OAuth flow. */
-    authUrl: (): string => `${BASE}/github/auth`,
+    authUrl: (): string => scoped(`/github/auth`),
 
     appConfig: (): Promise<GitHubAppConfigView> =>
       request("/github/app-config"),
@@ -622,7 +700,10 @@ export const api = {
    * MCP tools are not here: they are chosen by selecting the server.
    */
   tools: {
-    catalog: (): Promise<ToolCatalog> => request("/tools"),
+    // Unscoped: the catalogue is a table compiled into the server binary, the
+    // same for every project. Asking for it under a project would be asking a
+    // question about the build in a place that answers questions about data.
+    catalog: (): Promise<ToolCatalog> => unscoped("/tools"),
   },
 
   plugins: {
@@ -752,8 +833,8 @@ export const api = {
    * nothing has to be ordered against a second source. Every frame carries an
    * SSE id, so the browser's own `Last-Event-ID` is the resume cursor. */
   messagesUrl: (id: string, agentId: string): string =>
-    `${BASE}/sessions/${encodeURIComponent(id)}/messages?aid=${encodeURIComponent(agentId)}`,
+    scoped(`/sessions/${encodeURIComponent(id)}/messages?aid=${encodeURIComponent(agentId)}`),
 
   /** SSE URL for the global session-status feed. */
-  globalEventsUrl: (): string => `${BASE}/events`,
+  globalEventsUrl: (): string => scoped(`/events`),
 };

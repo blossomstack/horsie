@@ -5,7 +5,7 @@
 //! design turns on; a second way in would be a second thing to keep consistent.
 
 use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use std::sync::Arc;
 
 /// Registered plugin catalogues and what each one offers.
@@ -21,11 +21,11 @@ impl Resource for Marketplaces {
             op(
                 "list",
                 Method::Get,
-                "/api/marketplaces",
+                "/marketplaces",
                 "Every registered source and its cached catalogue. The entries \
                  ride along, so picking a plugin needs no second call.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.plugins
                         .list_marketplaces()
                         .await
@@ -35,10 +35,10 @@ impl Resource for Marketplaces {
             op(
                 "refresh",
                 Method::Post,
-                "/api/marketplaces/{name}/refresh",
+                "/marketplaces/{name}/refresh",
                 "Re-clone a source and re-read its index.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.plugins
                         .refresh_marketplace(&i.name)
                         .await
@@ -48,10 +48,10 @@ impl Resource for Marketplaces {
             op(
                 "remove",
                 Method::Delete,
-                "/api/marketplaces/{name}",
+                "/marketplaces/{name}",
                 "Drop a source. Bundles installed from it stay installed.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.plugins
                         .remove_marketplace(&i.name)
                         .await

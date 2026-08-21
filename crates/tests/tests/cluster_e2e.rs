@@ -48,20 +48,34 @@ struct Node {
     /// placed on node 2 picks its runtime from node 2's map.
     _vendor: FakeRuntimeVendor,
     state: horsie_server::http::AppState,
+    /// The project every scoped request below names. One per cluster, not one
+    /// per node: the nodes share a database, so they share its projects.
+    project: String,
 }
 
 impl Node {
+    /// A raw path, for the routes that belong to no project — `/api/health` is
+    /// the only one this suite asks for.
     fn url(&self, path: &str) -> String {
         format!("http://{}{path}", self.http)
     }
 
-    async fn get(&self, path: &str) -> reqwest::Response {
+    /// A path inside the project, which is every other route.
+    fn api(&self, path: &str) -> String {
+        format!("http://{}/api/p/{}{path}", self.http, self.project)
+    }
+
+    async fn get_raw(&self, path: &str) -> reqwest::Response {
         self.client.get(self.url(path)).send().await.unwrap()
+    }
+
+    async fn get(&self, path: &str) -> reqwest::Response {
+        self.client.get(self.api(path)).send().await.unwrap()
     }
 
     async fn post(&self, path: &str, body: &serde_json::Value) -> reqwest::Response {
         self.client
-            .post(self.url(path))
+            .post(self.api(path))
             .json(body)
             .send()
             .await
@@ -148,7 +162,7 @@ impl Node {
     /// Every entry of one agent's transcript, read rather than streamed.
     async fn transcript(&self, id: &str) -> serde_json::Value {
         let res = self
-            .get_when_serving(&format!("/api/sessions/{id}/messages?max=200"))
+            .get_when_serving(&format!("/sessions/{id}/messages?max=200"))
             .await;
         assert_eq!(res.status(), 200, "a transcript should be readable");
         res.json().await.unwrap()
@@ -380,10 +394,17 @@ async fn start_node(
         .serve_in_process()
         .await
         .expect("fake vendor");
-    let account = booted.state.shared.anonymous.clone();
+    let account = booted
+        .state
+        .shared
+        .project_service
+        .default_project(&booted.state.shared.anonymous)
+        .await
+        .expect("the anonymous account has a default project")
+        .id;
     booted
         .state
-        .users
+        .projects
         .get(&account)
         .await
         .unwrap()
@@ -404,6 +425,7 @@ async fn start_node(
         _task: task,
         _vendor: vendor,
         state,
+        project: account.as_str().to_string(),
     }
 }
 
@@ -426,7 +448,7 @@ async fn three_nodes_form_a_cluster_and_all_report_ready() {
             c.node(i).state.shared.serving.is_some(),
             "node {i} should have joined a cluster"
         );
-        let res = c.node(i).get("/api/health").await;
+        let res = c.node(i).get_raw("/api/health").await;
         assert_eq!(res.status(), 200, "node {i} should be ready");
     }
 }
@@ -446,7 +468,7 @@ async fn a_session_created_on_one_node_is_readable_on_another() {
     let created = c
         .node(0)
         .post_when_serving(
-            "/api/sessions",
+            "/sessions",
             &serde_json::json!({
                 "agent": { "model": "mock", "use_plugins": false },
                 "environment": {"type": "Runtime", "value": {"vendor": "main"}},
@@ -466,10 +488,7 @@ async fn a_session_created_on_one_node_is_readable_on_another() {
 
     // Read it from a *different* node. The session actor is placed by the
     // cluster, so this either resolves across hosts or it does not resolve.
-    let read = c
-        .node(1)
-        .get_when_serving(&format!("/api/sessions/{id}"))
-        .await;
+    let read = c.node(1).get_when_serving(&format!("/sessions/{id}")).await;
     assert_eq!(
         read.status(),
         200,
@@ -494,7 +513,7 @@ async fn every_node_lists_the_same_sessions() {
 
     c.node(0)
         .post_when_serving(
-            "/api/sessions",
+            "/sessions",
             &serde_json::json!({
                 "agent": { "model": "mock", "use_plugins": false },
                 "environment": {"type": "Runtime", "value": {"vendor": "main"}},
@@ -504,7 +523,7 @@ async fn every_node_lists_the_same_sessions() {
         .await;
 
     for i in 0..3 {
-        let res = c.node(i).get_when_serving("/api/sessions").await;
+        let res = c.node(i).get_when_serving("/sessions").await;
         assert_eq!(res.status(), 200, "node {i} should list sessions");
         let page: serde_json::Value = res.json().await.unwrap();
         let count = page["sessions"].as_array().map_or(0, Vec::len);
@@ -527,7 +546,7 @@ async fn a_session_created_on_one_node_wakes_a_list_reader_on_another() {
         return;
     };
 
-    let mut frames = c.node(1).subscribe("/api/events").await;
+    let mut frames = c.node(1).subscribe("/events").await;
     // The opening frame, and the reason this test cannot pass by accident: it
     // establishes that node 1 is listening, and that it is listening to an
     // empty list, before node 0 is touched at all.
@@ -540,7 +559,7 @@ async fn a_session_created_on_one_node_wakes_a_list_reader_on_another() {
 
     let created = c
         .node(0)
-        .post_when_serving("/api/sessions", &new_session("hi"))
+        .post_when_serving("/sessions", &new_session("hi"))
         .await;
     // The body before the status, so a create that failed says why rather than
     // leaving a bare number to guess from.
@@ -578,7 +597,7 @@ async fn a_turn_on_one_node_moves_a_message_reader_on_another() {
 
     let created = c
         .node(0)
-        .post_when_serving("/api/sessions", &new_session("hi"))
+        .post_when_serving("/sessions", &new_session("hi"))
         .await;
     // The body before the status, so a create that failed says why rather than
     // leaving a bare number to guess from.
@@ -600,7 +619,7 @@ async fn a_turn_on_one_node_moves_a_message_reader_on_another() {
     // so neither is necessarily the node it runs on, which is the point.
     let mut frames = c
         .node(2)
-        .subscribe(&format!("/api/sessions/{id}/messages"))
+        .subscribe(&format!("/sessions/{id}/messages"))
         .await;
     frames
         .find("the transcript so far", |frame| {
@@ -612,7 +631,7 @@ async fn a_turn_on_one_node_moves_a_message_reader_on_another() {
     let sent = c
         .node(0)
         .post_when_serving(
-            &format!("/api/sessions/{id}/messages"),
+            &format!("/sessions/{id}/messages"),
             &serde_json::json!({ "text": marker }),
         )
         .await;

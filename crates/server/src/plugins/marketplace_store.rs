@@ -3,8 +3,8 @@
 //! browsing a 276-entry catalogue is then a local read, and a refresh is what
 //! puts a git clone back on the path.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_support::plugin::MarketplaceEntry;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -29,17 +29,17 @@ pub struct MarketplaceRow {
 pub struct MarketplaceStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl MarketplaceStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<MarketplaceRow>, String> {
         let sql = self.db.q(&format!(
-            "SELECT {COLS} FROM marketplaces WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM marketplaces WHERE project_id = ? ORDER BY name"
         ));
         let rows = sqlx::query(&sql)
             .bind(self.user.as_str())
@@ -51,7 +51,7 @@ impl MarketplaceStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<MarketplaceRow>, String> {
         let sql = self.db.q(&format!(
-            "SELECT {COLS} FROM marketplaces WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM marketplaces WHERE project_id = ? AND name = ?"
         ));
         let row = sqlx::query(&sql)
             .bind(self.user.as_str())
@@ -67,9 +67,9 @@ impl MarketplaceStore {
         let entries = serde_json::to_string(&row.entries).map_err(|e| e.to_string())?;
         let skipped = serde_json::to_string(&row.skipped).map_err(|e| e.to_string())?;
         let sql = self.db.q(
-            "INSERT INTO marketplaces (user_id, name, source_url, source_ref, sha, entries, skipped, \
+            "INSERT INTO marketplaces (project_id, name, source_url, source_ref, sha, entries, skipped, \
              created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id, name) DO UPDATE SET source_url = excluded.source_url, \
+             ON CONFLICT(project_id, name) DO UPDATE SET source_url = excluded.source_url, \
              source_ref = excluded.source_ref, sha = excluded.sha, \
              entries = excluded.entries, skipped = excluded.skipped, \
              updated_at = excluded.updated_at",
@@ -93,7 +93,7 @@ impl MarketplaceStore {
     pub async fn delete(&self, name: &str) -> Result<(), String> {
         let sql = self
             .db
-            .q("DELETE FROM marketplaces WHERE user_id = ? AND name = ?");
+            .q("DELETE FROM marketplaces WHERE project_id = ? AND name = ?");
         sqlx::query(&sql)
             .bind(self.user.as_str())
             .bind(name)
@@ -175,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn entries_round_trip_through_json() {
-        let s = MarketplaceStore::new(testing::db().await, UserId::new("1"));
+        let s = MarketplaceStore::new(testing::db().await, ProjectId::new("1"));
         assert!(s.list().await.unwrap().is_empty());
         s.upsert(&fixture()).await.unwrap();
         let got = s.get("official").await.unwrap().unwrap();
@@ -196,9 +196,9 @@ mod tests {
     #[tokio::test]
     async fn an_unreadable_cache_reports_itself_instead_of_failing() {
         let db = testing::db().await;
-        let s = MarketplaceStore::new(db.clone(), UserId::new("1"));
+        let s = MarketplaceStore::new(db.clone(), ProjectId::new("1"));
         s.upsert(&fixture()).await.unwrap();
-        sqlx::query(&db.q("UPDATE marketplaces SET entries = ? WHERE user_id = ? AND name = ?"))
+        sqlx::query(&db.q("UPDATE marketplaces SET entries = ? WHERE project_id = ? AND name = ?"))
             .bind("{not json")
             .bind("1")
             .bind("official")

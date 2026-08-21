@@ -16,11 +16,11 @@
 //! cannot occur.
 
 use crate::agent_loop::Cursor;
-use crate::http::Scope;
 use crate::http::error::Api;
+use crate::http::{Scope, Scoped};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -73,7 +73,7 @@ fn last_event_id(headers: &HeaderMap) -> Option<String> {
 
 pub async fn read_messages(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
     Query(params): Query<MessagesParams>,
     headers: HeaderMap,
 ) -> Result<Response, Api> {
@@ -108,7 +108,7 @@ pub async fn read_messages(
 /// surfaces clamp differently (a model's context is not a browser's) and only
 /// one of them has a `Response` to build.
 pub(crate) async fn read_page(
-    services: &crate::users::UserServices,
+    services: &crate::projects::ProjectServices,
     id: String,
     agent_id: String,
     before: Option<u64>,
@@ -139,7 +139,7 @@ pub(crate) async fn read_page(
 }
 
 async fn page(
-    state: &crate::users::UserServices,
+    state: &crate::projects::ProjectServices,
     id: String,
     agent_id: String,
     before: Option<u64>,
@@ -154,7 +154,7 @@ async fn page(
 
 /// The stream form: everything after the cursor, then live.
 async fn stream(
-    state: std::sync::Arc<crate::users::UserServices>,
+    state: std::sync::Arc<crate::projects::ProjectServices>,
     id: String,
     agent_id: String,
     after: Option<Cursor>,

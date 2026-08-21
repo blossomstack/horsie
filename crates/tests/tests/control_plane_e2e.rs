@@ -34,6 +34,8 @@ fn provider_at(url: &str) -> Arc<dyn LlmProvider> {
 
 struct Harness {
     addr: SocketAddr,
+    /// The project every path below is relative to.
+    project: String,
     client: reqwest::Client,
     _vendor: FakeRuntimeVendor,
     _dir: tempfile::TempDir,
@@ -86,9 +88,11 @@ impl Harness {
             .insert_provider("mock", provider_at(&mock.url()))
             .await;
         built.publish_vendor("mock", vendor.link()).await;
+        let project = built.account.as_str().to_string();
         let (addr, task) = built.serve().await;
         Self {
             addr,
+            project,
             client: reqwest::Client::new(),
             _vendor: vendor,
             _dir: dir,
@@ -132,7 +136,7 @@ impl Harness {
         });
         let res = self
             .client
-            .post(format!("http://{}/api/sessions", self.addr))
+            .post(self.url("/sessions"))
             .json(&body)
             .send()
             .await
@@ -142,13 +146,13 @@ impl Harness {
         v["session"]["id"].as_str().unwrap().to_string()
     }
 
+    /// `path` is relative to the project, as every scoped route is.
+    fn url(&self, path: &str) -> String {
+        format!("http://{}/api/p/{}{path}", self.addr, self.project)
+    }
+
     async fn get(&self, path: &str) -> (u16, serde_json::Value) {
-        let res = self
-            .client
-            .get(format!("http://{}{path}", self.addr))
-            .send()
-            .await
-            .unwrap();
+        let res = self.client.get(self.url(path)).send().await.unwrap();
         let status = res.status().as_u16();
         (status, res.json().await.unwrap_or(serde_json::Value::Null))
     }
@@ -164,7 +168,7 @@ impl Harness {
         let mut last = String::new();
         loop {
             let (_, page) = self
-                .get(&format!("/api/sessions/{id}/messages?aid=main&max=100"))
+                .get(&format!("/sessions/{id}/messages?aid=main&max=100"))
                 .await;
             last = serde_json::to_string(&page).unwrap_or(last);
             if last.contains(want) {
@@ -192,7 +196,7 @@ async fn the_agents_tool_creates_a_preset() {
     let id = h.session(true, "make me a preset").await;
     h.wait_for_reply(&id, "saved the preset").await;
 
-    let (status, agent) = h.get("/api/agents/made-by-agent").await;
+    let (status, agent) = h.get("/agents/made-by-agent").await;
     assert_eq!(status, 200, "the tool call must have reached the service");
     assert_eq!(agent["model"], "sonnet");
 }
@@ -210,7 +214,7 @@ async fn the_environments_tool_creates_an_environment() {
     let id = h.session(true, "make me an environment").await;
     h.wait_for_reply(&id, "made the environment").await;
 
-    let (status, env) = h.get("/api/environments/scratch").await;
+    let (status, env) = h.get("/environments/scratch").await;
     assert_eq!(status, 200, "the tool call must have reached the service");
     assert_eq!(env["name"], "scratch");
 }
@@ -228,7 +232,7 @@ async fn the_routines_tool_reads_through_to_the_service() {
     let id = h.session(true, "what routines exist?").await;
     h.wait_for_reply(&id, "there are no routines").await;
 
-    let (status, routines) = h.get("/api/routines").await;
+    let (status, routines) = h.get("/routines").await;
     assert_eq!(status, 200);
     assert_eq!(routines.as_array().map(Vec::len), Some(0));
 }
@@ -249,7 +253,7 @@ async fn a_bad_action_comes_back_to_the_model_rather_than_ending_the_turn() {
     let id = h.session(true, "do something impossible").await;
     h.wait_for_reply(&id, "that action does not exist").await;
 
-    let (_, agents) = h.get("/api/agents").await;
+    let (_, agents) = h.get("/agents").await;
     assert_eq!(agents.as_array().map(Vec::len), Some(0));
 }
 
@@ -266,7 +270,7 @@ async fn a_session_without_the_grant_never_gets_the_tools() {
     let id = h.session(false, "make me a preset").await;
     h.wait_for_reply(&id, "could not do that").await;
 
-    let (status, _) = h.get("/api/agents/sneaky").await;
+    let (status, _) = h.get("/agents/sneaky").await;
     assert_eq!(
         status, 404,
         "a session that was never granted the control plane must not be able to \
@@ -295,7 +299,7 @@ async fn the_workflows_tool_creates_a_definition() {
     // A workflow's steps name presets, and the service resolves them at save.
     let res = h
         .client
-        .post(format!("http://{}/api/agents", h.addr))
+        .post(h.url("/agents"))
         .json(&serde_json::json!({"name": "reviewer", "model": "sonnet"}))
         .send()
         .await
@@ -305,7 +309,7 @@ async fn the_workflows_tool_creates_a_definition() {
     let id = h.session(true, "make me a workflow").await;
     h.wait_for_reply(&id, "saved the workflow").await;
 
-    let (status, workflow) = h.get("/api/workflows/nightly").await;
+    let (status, workflow) = h.get("/workflows/nightly").await;
     assert_eq!(status, 200, "the tool call must have reached the service");
     assert_eq!(workflow["start"], "review");
 }
@@ -322,7 +326,7 @@ async fn the_sessions_tool_lists_and_reads_its_own_transcript() {
 
     // The tool answered from the same supervisor the API reads, and the
     // session it ran in is in that answer.
-    let (status, sessions) = h.get("/api/sessions").await;
+    let (status, sessions) = h.get("/sessions").await;
     assert_eq!(status, 200);
     assert!(
         sessions["sessions"]

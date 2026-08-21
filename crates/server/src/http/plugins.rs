@@ -44,14 +44,14 @@ pub async fn get_artifact(
     // or an artifact exists.
     let refused = || Api::forbidden("not authorized for this artifact");
     let account = horsie_support::dial_token::claimed_account(&token).ok_or_else(refused)?;
-    let account = crate::auth::UserId::new(account);
+    let account = crate::projects::ProjectId::new(account);
     let secret = crate::config::dial_secret_of(&state.shared.db, &account)
         .await
         .map_err(Api::internal)?
         .ok_or_else(refused)?;
     horsie_support::dial_token::verify(&secret, &token).map_err(|_| refused())?;
 
-    let services = state.users.get(&account).await.map_err(Api::internal)?;
+    let services = state.projects.get(&account).await.map_err(Api::internal)?;
     let installed = services
         .plugins
         .installed_hashes()

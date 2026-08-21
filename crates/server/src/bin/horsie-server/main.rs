@@ -212,10 +212,24 @@ mod tests {
     /// nothing in the tree ran this function. It asserts the parts that were
     /// broken then — the server comes up, and the account it bootstrapped can
     /// see the rows the migrations left for it.
+    ///
+    /// Since `0040_projects.sql` the chain has one more link and this covers it
+    /// too: the rows belong to a *project*, and the account's default project
+    /// has to be the one the migration seeded rather than a freshly minted one.
+    /// A fresh one would leave a healthy, empty deployment holding all its data
+    /// — the exact shape of the #217 near-miss, one level down.
     #[tokio::test]
     async fn a_fresh_deployment_boots_and_its_account_owns_its_data() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state = boot_in(&dir).await;
+        let project = state
+            .shared
+            .project_service
+            .default_project(&state.shared.anonymous)
+            .await
+            .expect("the bootstrapped account resolves a default project")
+            .id;
+        let url = |path: &str| format!("/api/p/{project}{path}");
         let app = app(state.clone());
 
         let res = app
@@ -237,7 +251,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/memory-spaces")
+                    .uri(url("/memory-spaces"))
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -248,7 +262,8 @@ mod tests {
         assert_eq!(
             spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
             ["default"],
-            "the bootstrapped account must own what the migrations backfilled"
+            "the bootstrapped account's default project must own what the \
+             migrations backfilled"
         );
 
         // Seeding moved off the boot path and onto the account's first touch,
@@ -256,7 +271,7 @@ mod tests {
         let res = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/model-cards")
+                    .uri(url("/model-cards"))
                     .body(Body::empty())
                     .expect("request"),
             )

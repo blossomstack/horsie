@@ -1,17 +1,18 @@
-//! Two accounts, the same names, and no way for either to see the other.
+//! Two projects, the same names, and no way for either to see the other.
 //!
-//! This is the load-bearing test of the whole scoping design. No HTTP route in
-//! this repo creates a second account — provisioning accounts is left to the
-//! deployment — so this file is the only thing that exercises the isolation
-//! guarantees at all. If it rots, they rot silently with it.
+//! This is the load-bearing test of the whole scoping design. It matters more
+//! since projects than it did before: an account can now have several, and two
+//! projects of *one* account are exactly as separate as two accounts' — the
+//! stores below cannot tell the two situations apart, because a project id is
+//! all any of them binds.
 //!
 //! It is also the half the CI scope audit (`db/scope_audit.rs`) cannot do: that
-//! one reads the SQL, this one runs it. A statement that says `user_id = ?` and
-//! forgets to `.bind()` the value passes the audit and fails here — which has
-//! already happened once, in `MemoryStore::list_memories`.
+//! one reads the SQL, this one runs it. A statement that says `project_id = ?`
+//! and forgets to `.bind()` the value passes the audit and fails here — which
+//! has already happened once, in `MemoryStore::list_memories`.
 //!
 //! Every store that binds a scope gets a case here. The shape is always the
-//! same three questions: can the other account *read* it, can it *clobber* it
+//! same three questions: can the other project *read* it, can it *clobber* it
 //! by reusing the name, and can it *delete* it.
 //!
 //! The journal is the one exception: it binds no scope at all any more, so its
@@ -29,14 +30,22 @@
     clippy::disallowed_methods
 )]
 
-use horsie_server::auth::UserId;
 use horsie_server::db::Db;
 use horsie_server::db::testing;
+use horsie_server::projects::ProjectId;
 
-/// Two accounts that are not each other, and are not `'1'` by accident — the
-/// bootstrap account's id, which every backfilled row carries.
-fn two() -> (UserId, UserId) {
-    (UserId::generate(), UserId::generate())
+/// Two projects that are not each other, and are not `'1'` by accident — the
+/// id `0040_projects.sql` gives a migrated deployment's first project, which
+/// every backfilled row carries.
+///
+/// No `projects` rows behind them, deliberately. A store binds an id and
+/// nothing else, so what is under test here is the binding; whether the id
+/// names a real project is [`ProjectRegistry`]'s question and
+/// `project_isolation_http.rs`'s.
+///
+/// [`ProjectRegistry`]: horsie_server::projects::ProjectRegistry
+fn two() -> (ProjectId, ProjectId) {
+    (ProjectId::generate(), ProjectId::generate())
 }
 
 const T: &str = "2026-01-01 00:00:00";
@@ -61,7 +70,7 @@ async fn memory_spaces_and_memories_are_isolated() {
     assert!(theirs.get_space("notes").await.unwrap().is_none());
     assert!(theirs.list_spaces().await.unwrap().is_empty());
 
-    // Write: the same name is free for the other account.
+    // Write: the same name is free for the other project.
     theirs.create_space(&space("theirs")).await.unwrap();
     assert_eq!(
         mine.get_space("notes").await.unwrap().unwrap().description,
@@ -122,7 +131,7 @@ async fn model_cards_are_isolated() {
     assert!(theirs.list().await.unwrap().is_empty());
     assert!(theirs.search_by_prefix("claude").await.unwrap().is_empty());
 
-    // The same model id is free for the other account.
+    // The same model id is free for the other project.
     theirs.insert(&card("theirs")).await.unwrap();
     assert_eq!(
         mine.get("claude-opus-5").await.unwrap().unwrap().name,
@@ -163,7 +172,7 @@ async fn agents_are_isolated() {
     theirs.insert(&agent("theirs")).await.unwrap();
     assert_eq!(mine.get("reviewer").await.unwrap().unwrap().model, "mine");
 
-    // A replace against a name the other account owns matches nothing.
+    // A replace against a name the other project owns matches nothing.
     assert!(theirs.replace(&agent("clobbered")).await.unwrap());
     assert_eq!(mine.get("reviewer").await.unwrap().unwrap().model, "mine");
 
@@ -258,7 +267,7 @@ async fn mcp_servers_are_isolated() {
         "https://mine.example"
     );
 
-    // A status write against the other account's name changes nothing.
+    // A status write against the other project's name changes nothing.
     theirs
         .set_status("jira", true, Some(7), None)
         .await
@@ -309,7 +318,7 @@ async fn github_credentials_are_isolated_but_the_app_is_shared() {
     assert_eq!(
         theirs.app_config().await.unwrap().unwrap().client_id,
         "Iv1.deployment",
-        "the App registration is the deployment's, not an account's"
+        "the App registration is the deployment's, not an project's"
     );
 }
 
@@ -377,10 +386,10 @@ async fn plugin_bundles_are_isolated() {
 /// The two reads that are deliberately unscoped, asserted to *stay* that way.
 ///
 /// Both destroy data if "fixed": scoping the GC keep-set deletes bundle bytes
-/// another account still references, and scoping the scheduler's read stops
-/// every other account's routines from ever firing.
+/// another project still references, and scoping the scheduler's read stops
+/// every other project's routines from ever firing.
 #[tokio::test]
-async fn the_deliberate_exceptions_still_cross_accounts() {
+async fn the_deliberate_exceptions_still_cross_projects() {
     use horsie_server::plugins::PluginStore;
     use horsie_server::routines::RoutineStore;
     let db = testing::db().await;
@@ -393,7 +402,7 @@ async fn the_deliberate_exceptions_still_cross_accounts() {
     let keep = mine.referenced_hashes().await.unwrap();
     assert!(
         keep.contains("hash-a") && keep.contains("hash-b"),
-        "artifact GC must see every account's hashes: {keep:?}"
+        "artifact GC must see every project's hashes: {keep:?}"
     );
 
     let my_routines = RoutineStore::new(db.clone(), a.clone());
@@ -405,22 +414,22 @@ async fn the_deliberate_exceptions_still_cross_accounts() {
         .await
         .unwrap();
     let owners: Vec<&str> = due.iter().map(|(u, _)| u.as_str()).collect();
-    assert_eq!(due.len(), 2, "one timer serves every account: {owners:?}");
+    assert_eq!(due.len(), 2, "one timer serves every project: {owners:?}");
     assert!(owners.contains(&a.as_str()) && owners.contains(&b.as_str()));
 
     // The scoped read still sees only its own.
     assert_eq!(my_routines.list().await.unwrap().len(), 1);
 }
 
-/// The journal is the one table here that gave its `user_id` up, and what
-/// separates two accounts' logs now is the id itself.
+/// The journal is the one table here that gave its `project_id` up, and what
+/// separates two projects' logs now is the id itself.
 ///
 /// A `Journal` method receives a `PersistenceId` and nothing else, and that id
 /// is fixed when its actor is constructed — before a byte of its history has
-/// been read — so an account could only reach the journal by being packed into
-/// the id. What the column bought was that another account's log stayed
+/// been read — so an project could only reach the journal by being packed into
+/// the id. What the column bought was that another project's log stayed
 /// unreachable even given its id; that is now bought by the id being a uuid
-/// nothing hands out. Deleting an account's data walks its supervisor's session
+/// nothing hands out. Deleting an project's data walks its supervisor's session
 /// list and clears each log, so what has to hold is that clearing one log
 /// touches nothing else, not that a filter caught it.
 #[tokio::test]
@@ -430,7 +439,7 @@ async fn journal_logs_are_separated_by_their_id_alone() {
     use horsie_server::db::journal::SqlJournal;
     let db: Db = testing::db().await;
     let journal = SqlJournal::new(db);
-    // Two sessions of two accounts: distinct because a session id is a uuid,
+    // Two sessions of two projects: distinct because a session id is a uuid,
     // which is the whole of the protection.
     let mine = PersistenceId::new("session", "6f1e3f1c-0d2a-4a4e-9d1b-2f8c5a7e0001");
     let theirs = PersistenceId::new("session", "b3d9c0a2-77f4-4f6d-8c31-19ae4b620002");
@@ -455,7 +464,7 @@ async fn journal_logs_are_separated_by_their_id_alone() {
     assert_eq!(read(&journal, &mine).await, vec![b"mine".to_vec()]);
     assert_eq!(read(&journal, &theirs).await, vec![b"theirs".to_vec()]);
 
-    // The account-deletion path: clearing one log leaves every other one whole.
+    // The project-deletion path: clearing one log leaves every other one whole.
     journal.clear(&theirs).await.unwrap();
     assert_eq!(read(&journal, &mine).await, vec![b"mine".to_vec()]);
     assert_eq!(journal.last_seq(&mine).await.unwrap(), 1);
