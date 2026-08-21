@@ -36,15 +36,15 @@ See [MCP servers](/using/mcp-servers/).
 
 **Tools** — which of horsie's built-in tools the agent may call, grouped: files
 and shell, workspace, planning, timers, subagents, workflows, session, and
-Horsie itself. Each tool is marked **read** or **write**, and the quick actions
+horsie itself. Each tool is marked **read** or **write**, and the quick actions
 at the top select all of them, the read-only ones, or none.
 
-It starts on **Default** — every group except Horsie. That is not the same as
+It starts on **Default** — every group except horsie. That is not the same as
 ticking every box: it defers to the server, so a preset saved today follows a
 later horsie's idea of a sensible default instead of freezing this one's list.
 Touch anything and the selection becomes exactly what you chose.
 
-The **Horsie** group is how you let an agent manage this server — its agents,
+The **horsie** group is how you let an agent manage this server — its agents,
 workflows, routines, environments, models and runtimes. Selecting one of those
 tools *is* the grant, which is why none of them is in the default set: changes
 take effect immediately and are not confirmed with you first.

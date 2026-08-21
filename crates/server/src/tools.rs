@@ -171,7 +171,10 @@ fn control_group() -> ToolGroupView {
     }
     ToolGroupView {
         key: GROUP_CONTROL.to_string(),
-        label: "Horsie".to_string(),
+        // Lowercase, like the product name everywhere else — the heading is
+        // rendered uppercase by the picker's own styling, so this is the
+        // written form, and the docs lint holds prose to the same rule.
+        label: "horsie".to_string(),
         description:
             "Manage this horsie server — its agents, workflows, routines, environments, models \
              and runtimes. Changes take effect immediately and are not confirmed first, so this \

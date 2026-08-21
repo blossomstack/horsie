@@ -132,7 +132,7 @@ const toolCatalog: ToolCatalog = {
     },
     {
       key: "control",
-      label: "Horsie",
+      label: "horsie",
       description: "Manage this server.",
       tools: [
         {
