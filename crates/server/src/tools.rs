@@ -23,8 +23,10 @@
 //!
 //! The alternative — a hand-maintained never-filter list — has to be remembered
 //! every time a layer is added. This way round, forgetting means a new tool is
-//! ungovernable, which [`tests::every_advertised_tool_is_accounted_for`] fails
-//! on.
+//! ungovernable, which [`tests::every_tool_constant_is_catalogued_or_excused`]
+//! fails on: it scans the crate for tool constants rather than trusting anyone
+//! to have added one to a list, because a constant nobody thought about is
+//! precisely the case a list cannot cover.
 
 use horsie_models::tools::{ToolAccess, ToolCatalog, ToolGroupView, ToolView};
 use std::collections::HashSet;
@@ -405,6 +407,86 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    /// Tools that are advertised but deliberately not selectable, with the
+    /// reason. Adding a name here is a decision; the scan below is what forces
+    /// it to be made.
+    const UNGOVERNED: &[(&str, &str)] = &[(
+        "submit_result",
+        "how a workflow step returns at all — a run whose step cannot submit \
+         does not fail, it hangs",
+    )];
+
+    /// Every tool constant in this crate is either catalogued or excused.
+    ///
+    /// Read from the source rather than from a composed toolbox, because
+    /// composing one needs a runtime, a session and an account — and the
+    /// failure this is for happens long before any of those exist: somebody
+    /// adds a layer with a new tool and never learns that tool selection is a
+    /// thing. The list-of-constants test above cannot catch that, since a
+    /// constant nobody thought to add to it is exactly the case. Coarse, like
+    /// `control::http::tests::every_route_is_classified`, and for the same
+    /// reason.
+    #[test]
+    fn every_tool_constant_is_catalogued_or_excused() {
+        let catalogued = governed();
+        let excused: HashSet<&str> = UNGOVERNED.iter().map(|(name, _)| *name).collect();
+        let mut missing = Vec::new();
+
+        for path in rust_sources(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")) {
+            let source = std::fs::read_to_string(&path).expect("read source");
+            for name in tool_constants(&source) {
+                if !catalogued.contains(&name) && !excused.contains(name.as_str()) {
+                    missing.push(format!("{name} ({})", path.display()));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these tools are advertised to models but no selection governs them. \
+             Add a row to the catalogue, or name them in UNGOVERNED with the \
+             reason: {missing:?}"
+        );
+    }
+
+    /// Every `.rs` under `dir`.
+    fn rust_sources(dir: std::path::PathBuf) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).expect("read dir").flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|e| e == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// The values of `const <NAME>_TOOL: &str = "...";` declarations.
+    fn tool_constants(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line
+                    .strip_prefix("pub const ")
+                    .or(line.strip_prefix("const "))?;
+                let (name, rest) = rest.split_once(": &str = ")?;
+                if !name.ends_with("_TOOL") {
+                    return None;
+                }
+                rest.trim()
+                    .strip_prefix('"')?
+                    .split('"')
+                    .next()
+                    .map(str::to_string)
+            })
+            .collect()
     }
 
     /// The other half of the contract: these must stay *out*, or narrowing a
