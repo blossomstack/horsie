@@ -430,12 +430,13 @@ impl SessionActor {
 
     /// Start whatever this fork's mode needs before it can be seeded.
     ///
-    /// A `Copy` has everything already and goes straight to the handover. A
-    /// `Summary` needs a provider call over the source's history, and that call
-    /// is *the source's own turn*: queued on its inbox, so accepting the command
-    /// and the source becoming busy are one event. Nothing can append to the
-    /// history between the branch marker and the summary, which is what makes
-    /// the two describe the same conversation.
+    /// A `Copy` has everything already and goes straight to the handover, and
+    /// so does a `Fresh`, which carries nothing. A `Summary` needs a provider
+    /// call over the source's history, and that call is *the source's own turn*:
+    /// queued on its inbox, so accepting the command and the source becoming
+    /// busy are one event. Nothing can append to the history between the branch
+    /// marker and the summary, which is what makes the two describe the same
+    /// conversation.
     ///
     /// Running it out of band instead — the first version — left the source
     /// `Idle` and answering, so a reply sent in that window landed after the
@@ -459,7 +460,8 @@ impl SessionActor {
             return;
         };
         match rec.mode {
-            ForkMode::Copy => self.copy_into_fork(ctx, state, id),
+            ForkMode::Copy => self.seed_fork_with(ctx, state, id, ForkSeed::Copy),
+            ForkMode::Fresh => self.seed_fork_with(ctx, state, id, ForkSeed::Fresh),
             ForkMode::Summary => self.ask_source_to_summarise(ctx, state, id, parent),
         }
     }
@@ -500,11 +502,7 @@ impl SessionActor {
         id: Uuid,
         summary: String,
     ) {
-        self.seed_fork_with(ctx, state, id, Some(summary));
-    }
-
-    fn copy_into_fork(&mut self, ctx: &ActorContext<SessionInbox>, state: &SessionState, id: Uuid) {
-        self.seed_fork_with(ctx, state, id, None);
+        self.seed_fork_with(ctx, state, id, ForkSeed::Summary(summary));
     }
 
     /// Build a fork's initial state and hand it over, off the mailbox.
@@ -513,15 +511,12 @@ impl SessionActor {
     /// the session's mailbox for it would stall every other agent in the
     /// session. [`ForkedAgents::busy`] is what keeps the session loaded
     /// meanwhile.
-    ///
-    /// `summary` present means the history is not copied at all — a summary fork
-    /// starts small, which is the entire point of asking for one.
     fn seed_fork_with(
         &mut self,
         ctx: &ActorContext<SessionInbox>,
         state: &SessionState,
         id: Uuid,
-        summary: Option<String>,
+        seed: ForkSeed,
     ) {
         // Everything this needs is on the record, and the record is what a
         // re-seed after a crash reads too — so taking it from there is what
@@ -553,11 +548,11 @@ impl SessionActor {
                 id: format!("fork-message:{id}"),
                 text: message,
             };
-            let cmd =
-                match seed_fork(&source, &fork, summary, source_seq, &source_title, queued).await {
-                    Ok(()) => ForkCommand::Seeded { id },
-                    Err(error) => ForkCommand::SeedFailed { id, error },
-                };
+            let cmd = match seed_fork(&source, &fork, seed, source_seq, &source_title, queued).await
+            {
+                Ok(()) => ForkCommand::Seeded { id },
+                Err(error) => ForkCommand::SeedFailed { id, error },
+            };
             let _ = self_ref.tell(SessionCommand::Fork(cmd)).await;
         });
     }
@@ -609,42 +604,53 @@ fn forkable(main: Uuid, state: &SessionState, parent: Uuid, message: &str) -> Re
     Ok(())
 }
 
+/// What a fork's history is built from — [`ForkMode`] with the summary in hand.
+///
+/// A separate enum because the mode is what the journal records and this is
+/// what one seeding run needs: the summary exists only between the source's
+/// turn producing it and the fork's write, and has no business on the record.
+enum ForkSeed {
+    /// The source's log, copied to the branch point.
+    Copy,
+    /// A summary of it, produced by the source's own turn.
+    Summary(String),
+    /// Nothing. The brief queued behind this seed is the whole history.
+    Fresh,
+}
+
 /// Build a fork's history from its source and hand it over.
 ///
-/// Both modes end with one synthetic `Role::User` message carrying a `fork:`
+/// Every mode ends with one synthetic `Role::User` message carrying a `fork:`
 /// id — the device compaction already uses for `compaction:{n}`, so
 /// `prompt_messages` needs no change and a client special-cases an id prefix it
 /// already special-cases.
 async fn seed_fork(
     source: &ActorRef<AgentCommand>,
     fork: &ActorRef<AgentCommand>,
-    summary: Option<String>,
+    seed: ForkSeed,
     source_seq: u64,
     source_title: &str,
     message: Incoming,
 ) -> Result<(), String> {
-    // A summary fork copies nothing: it starts small, which is the entire point
-    // of asking for one. Only a copy reads the source, and only at the branch
-    // point — the source goes on appending while this runs, and a copy to the
-    // log's end would hand the fork its own creation marker.
-    let (state, summary) = match summary {
-        Some(summary) => (Box::new(AgentState::default()), summary),
-        None => {
-            let state = source
-                .ask(|reply| AgentCommand::ForkSeed {
-                    at_seq: source_seq,
-                    reply,
-                })
-                .await
-                .map_err(|e| format!("read the conversation to fork: {e}"))?;
-            (state, String::new())
-        }
+    // Only a copy reads the source, and only at the branch point — the source
+    // goes on appending while this runs, and a copy to the log's end would hand
+    // the fork its own creation marker. The other two start on an empty state,
+    // which is the entire point of asking for either.
+    let state = match seed {
+        ForkSeed::Summary(_) | ForkSeed::Fresh => Box::new(AgentState::default()),
+        ForkSeed::Copy => source
+            .ask(|reply| AgentCommand::ForkSeed {
+                at_seq: source_seq,
+                reply,
+            })
+            .await
+            .map_err(|e| format!("read the conversation to fork: {e}"))?,
     };
     let seed = Message {
         id: format!("fork:{}", Uuid::new_v4()),
         role: Role::User,
         parts: vec![ContentPart::Text(TextPart {
-            text: fork_seed_text(source_title, &summary),
+            text: fork_seed_text(source_title, &seed),
         })],
         created_at_ms: now_ms(),
         started_at_ms: None,
@@ -664,12 +670,23 @@ async fn seed_fork(
 /// The title instruction rides here rather than in the system prompt: a prompt
 /// section is re-sent every turn and would go on nagging long after the fork
 /// was named.
-fn fork_seed_text(source_title: &str, summary: &str) -> String {
-    let mut out = format!(
-        "This conversation was forked from \"{source_title}\". The message that \
-         follows sets a new direction — call set_session_title once it is clear."
-    );
-    if !summary.is_empty() {
+fn fork_seed_text(source_title: &str, seed: &ForkSeed) -> String {
+    // A `Fresh` fork says so plainly. It has no history to scroll back into,
+    // and a model told it was "forked, carrying this conversation" would go
+    // looking for one — then answer around a gap instead of asking.
+    let mut out = match seed {
+        ForkSeed::Fresh => format!(
+            "This conversation was started from \"{source_title}\", which is working in \
+             the same place. You carry none of its history: the message that follows was \
+             written for you and is all you have been given. Call set_session_title once \
+             the direction is clear."
+        ),
+        ForkSeed::Copy | ForkSeed::Summary(_) => format!(
+            "This conversation was forked from \"{source_title}\". The message that \
+             follows sets a new direction — call set_session_title once it is clear."
+        ),
+    };
+    if let ForkSeed::Summary(summary) = seed {
         out.push_str("\n\n# Summary of the conversation this was forked from\n\n");
         out.push_str(summary);
     }
@@ -1310,15 +1327,14 @@ mod tests {
         );
     }
 
-    /// The model forks itself, mid-turn, with `fork_conversation`.
+    /// The model hands work to a second conversation with `fork_conversation`.
     ///
-    /// The path the composer's `/fork` never takes: the branch point falls
-    /// *inside* a turn, so the copy ends on the assistant message carrying the
-    /// very call that asked for the fork, with no result. The same turn-start
-    /// sanitization a parked fork relies on is what keeps that history
-    /// well-formed — see the test below.
+    /// Mid-turn, which the composer's `/fork` never is — and the reason the
+    /// tool's fork carries no history: a copy cut here would end on the
+    /// assistant message holding the very call that asked for it, unanswered.
+    /// A `Fresh` fork starts on the brief instead, and there is nothing to cut.
     #[tokio::test]
-    async fn the_model_can_fork_its_own_conversation() {
+    async fn the_model_can_hand_work_to_a_new_conversation() {
         use horsie_agentcore::{
             StopReason,
             testkit::{MockProvider, Script},
@@ -1331,7 +1347,7 @@ mod tests {
                     horsie_agentcore::ToolCallPart {
                         id: "fork-1".into(),
                         name: crate::sessions::fork_tool::FORK_CONVERSATION_TOOL.into(),
-                        input: serde_json::json!({"message": "try the materialised view"}),
+                        input: serde_json::json!({"task": "try the materialised view"}),
                     },
                 )],
                 stop_reason: StopReason::ToolUse,
@@ -1362,7 +1378,7 @@ mod tests {
         .await;
         let fork_id = state.forest.fork_ids()[0];
         let rec = state.forest.fork(fork_id).unwrap();
-        assert_eq!(rec.mode, ForkMode::Copy);
+        assert_eq!(rec.mode, ForkMode::Fresh);
         assert_eq!(rec.message, "try the materialised view");
         assert_eq!(
             state.forest.owner_of_agent(fork_id).unwrap().1.parent,
@@ -1370,15 +1386,18 @@ mod tests {
             "a fork the main agent asked for is rooted on the main agent"
         );
 
-        // The fork runs on the history it was handed — the proof that a copy
-        // cut mid-turn, ending on an unanswered `fork_conversation` call, is
-        // one a provider accepts.
+        // The fork runs on the brief it was handed, and on nothing else: the
+        // source said "start" and the fork's transcript never mentions it.
         for _ in 0..200 {
             let t = transcript(&session, Some(fork_id.to_string())).await;
             if t.contains("answered") {
                 assert!(
                     t.contains("try the materialised view"),
-                    "the fork was given its instruction: {t}"
+                    "the fork was given its brief: {t}"
+                );
+                assert!(
+                    !t.contains("\"start\""),
+                    "a fresh fork carries none of the source's history: {t}"
                 );
                 return;
             }
@@ -1534,13 +1553,30 @@ mod tests {
     /// carries a summary, because only it discarded the history.
     #[test]
     fn the_seed_frames_the_source_and_carries_a_summary_only_when_there_is_one() {
-        let copy = fork_seed_text("Migrate the journal", "");
+        let copy = fork_seed_text("Migrate the journal", &ForkSeed::Copy);
         assert!(copy.contains("forked from \"Migrate the journal\""));
         assert!(copy.contains("set_session_title"));
         assert!(!copy.contains("# Summary"));
 
-        let summarised = fork_seed_text("Migrate the journal", "We chose sqlx::Any.");
+        let summarised = fork_seed_text(
+            "Migrate the journal",
+            &ForkSeed::Summary("We chose sqlx::Any.".to_string()),
+        );
         assert!(summarised.contains("# Summary"));
         assert!(summarised.contains("We chose sqlx::Any."));
+    }
+
+    /// A `Fresh` fork must not be told it carries a history it does not have —
+    /// a model that believes it does answers around the gap instead of asking.
+    #[test]
+    fn a_fresh_fork_is_told_it_carries_nothing() {
+        let fresh = fork_seed_text("Migrate the journal", &ForkSeed::Fresh);
+        assert!(
+            fresh.contains("started from \"Migrate the journal\""),
+            "{fresh}"
+        );
+        assert!(fresh.contains("carry none of its history"), "{fresh}");
+        assert!(fresh.contains("set_session_title"), "{fresh}");
+        assert!(!fresh.contains("# Summary"), "{fresh}");
     }
 }

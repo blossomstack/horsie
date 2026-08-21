@@ -24,13 +24,21 @@ describe("ForkMarker", () => {
     );
   });
 
-  /* The two modes give the fork genuinely different histories, so the marker
-     says which — otherwise "forked from here" means two things. */
+  /* The modes give the fork genuinely different histories, so the marker says
+     which — otherwise "forked from here" means three things. */
   it("says when the fork got a summary rather than the history", () => {
     renderMarker("summary");
     expect(screen.getByRole("link").textContent).toMatch(/summary/);
     cleanup();
     renderMarker("copy");
     expect(screen.getByRole("link").textContent).not.toMatch(/summary/);
+  });
+
+  /* A fresh fork carries nothing from here, so "forked from here" would claim
+     a history it does not have. */
+  it("says a fresh fork was handed off rather than forked", () => {
+    renderMarker("fresh");
+    expect(screen.getByRole("link").textContent).toMatch(/handed off/);
+    expect(screen.getByRole("link").textContent).not.toMatch(/forked/);
   });
 });

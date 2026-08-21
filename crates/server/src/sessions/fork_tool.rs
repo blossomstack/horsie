@@ -1,9 +1,15 @@
-//! `fork_conversation`: `/fork` and `/summary-n-fork` addressed to the model
-//! rather than typed into the composer, so a conversation can branch itself.
+//! `fork_conversation`: the tool a conversation hands work to a second one
+//! with. `/fork` and `/summary-n-fork` are the composer's forms of the same
+//! feature — this is the model's, and it carries no history at all.
+//!
+//! Nothing is copied or summarised because the agent calling it already holds
+//! the context and can say what matters in a sentence, exactly as it does when
+//! spawning a subagent. A copy would hand the new conversation the transcript
+//! of work it is not doing, and a summary would spend a turn producing one.
 //!
 //! Layered onto conversations only — the main agent and forks — because only a
-//! conversation has a branch to take, and never onto an unattended session,
-//! whose fork would be a second conversation with nobody in it.
+//! conversation has somewhere to hand work *to*, and never onto an unattended
+//! session, whose fork would be a conversation with nobody in it.
 //!
 //! Routes through the session's mailbox exactly as the composer's `/fork` does,
 //! so both entry points meet the same guards and write the same event. Nothing
@@ -24,31 +30,26 @@ pub const FORK_CONVERSATION_TOOL: &str = "fork_conversation";
 fn fork_conversation_spec() -> ToolSpec {
     ToolSpec {
         name: FORK_CONVERSATION_TOOL.to_string(),
-        description: "Branch this conversation into a second one, carrying its history, and \
-            give the new conversation its first instruction. Use it when the work splits into \
-            a direction the user will want to steer on its own, or when this conversation has \
-            grown long and the next stretch should start from a summary of it. \
-            \n\nA fork is not a subagent: it shares this session's workspace but has its own \
-            history, talks to the user directly, and never reports back to you. Nothing is \
-            delivered to you when it finishes — so fork to hand work off, and spawn_agent to \
-            get an answer back. Returns the new conversation's id once it exists."
+        description: "Start a second conversation in this session and hand it a task. Use it \
+            when the work splits into a direction the user will want to steer on its own, or \
+            when what comes next has little to do with what this conversation has been about. \
+            \n\nThe new conversation shares this session's workspace — the same checkout, the \
+            same edits — but starts with none of this conversation's history, so write the \
+            task the way you would write one for a subagent: self-contained, including \
+            whatever it needs to know. \
+            \n\nIt is not a subagent, though. It talks to the user directly and never reports \
+            back to you: nothing is delivered here when it finishes. Fork to hand work off, \
+            spawn_agent to get an answer back. Returns the new conversation's id."
             .to_string(),
         input_schema: json!({
             "type": "object",
-            "required": ["message"],
+            "required": ["task"],
             "properties": {
-                "message": {
+                "task": {
                     "type": "string",
-                    "description": "The first message of the new conversation — what it \
-                        should do next. It reads this after the history it was given."
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["copy", "summary"],
-                    "description": "How the new conversation starts. 'copy' (the default) \
-                        carries this conversation's history verbatim. 'summary' carries a \
-                        summary of it instead, costing one extra turn here and starting the \
-                        fork with a far smaller context."
+                    "description": "The complete, self-contained task for the new \
+                        conversation — what it should do, and everything it needs to know \
+                        to start. It is the first thing the new conversation reads."
                 }
             }
         }),
@@ -71,18 +72,6 @@ impl ForkToolbox {
             caller,
         }
     }
-
-    /// Which seeding the caller asked for. Rejected here rather than at the
-    /// session, because this is the layer that advertised the two spellings.
-    fn resolve_mode(input: &Value) -> Result<ForkMode, ToolCallError> {
-        match input.get("mode").and_then(Value::as_str).map(str::trim) {
-            None | Some("") | Some("copy") => Ok(ForkMode::Copy),
-            Some("summary") => Ok(ForkMode::Summary),
-            Some(other) => Err(ToolCallError::InvalidInput(format!(
-                "no fork mode '{other}'; modes are copy, summary"
-            ))),
-        }
-    }
 }
 
 #[async_trait]
@@ -102,18 +91,17 @@ impl Toolbox for ForkToolbox {
         if name != FORK_CONVERSATION_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
-        let message = input
-            .get("message")
+        let task = input
+            .get("task")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolCallError::InvalidInput("missing 'message'".to_string()))?;
-        let mode = Self::resolve_mode(&input)?;
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'task'".to_string()))?;
         let id = self
             .session
             .ask(|reply| {
                 SessionCommand::Fork(ForkCommand::Create {
                     parent: self.caller,
-                    mode,
-                    message: message.to_string(),
+                    mode: ForkMode::Fresh,
+                    message: task.to_string(),
                     reply,
                 })
             })
@@ -121,8 +109,8 @@ impl Toolbox for ForkToolbox {
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
             .map_err(ToolCallError::ExecutionFailed)?;
         Ok(ToolOutcome::Result(Value::String(format!(
-            "Forked into a new conversation: {id}. It carries on with the user from here; \
-             you will hear nothing back from it."
+            "Started a new conversation: {id}. It carries on with the user from here; you \
+             will hear nothing back from it."
         ))))
     }
 }
@@ -228,25 +216,33 @@ mod tests {
         assert_eq!(names, vec![FORK_CONVERSATION_TOOL.to_string()]);
     }
 
-    /// The one thing a model must not take from this tool is that a fork
-    /// reports back the way a subagent does.
+    /// Two things a model must not take from this tool: that a fork reports
+    /// back the way a subagent does, and that it can see what was said here.
     #[test]
-    fn the_description_says_nothing_comes_back() {
+    fn the_description_says_nothing_comes_back_and_nothing_goes_with_it() {
         let spec = fork_conversation_spec();
         assert!(spec.description.contains("never reports back"), "{spec:?}");
         assert!(spec.description.contains("spawn_agent"), "{spec:?}");
+        assert!(
+            spec.description
+                .contains("none of this conversation's history"),
+            "{spec:?}"
+        );
+        assert!(spec.description.contains("self-contained"), "{spec:?}");
     }
 
     /// A fork is attributed to the conversation that asked for it, not to the
-    /// session — which is what makes forking a fork nest.
+    /// session — which is what makes forking a fork nest. And it is always
+    /// `Fresh`: the tool has no way to ask for a copy, because the brief it
+    /// carries is the point.
     #[tokio::test]
-    async fn a_call_forks_the_calling_conversation() {
+    async fn a_call_hands_a_brief_to_a_fork_of_the_calling_conversation() {
         let h = harness(Ok(Uuid::new_v4()));
         let out = h
             .toolbox
             .execute(
                 FORK_CONVERSATION_TOOL,
-                json!({"message": "try the other migration"}),
+                json!({"task": "try the other migration"}),
                 "tc1",
             )
             .await
@@ -255,7 +251,7 @@ mod tests {
             *h.seen.lock().unwrap(),
             vec![(
                 h.caller,
-                ForkMode::Copy,
+                ForkMode::Fresh,
                 "try the other migration".to_string()
             )]
         );
@@ -268,39 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_mode_asks_for_a_summary_seed() {
-        let h = harness(Ok(Uuid::new_v4()));
-        h.toolbox
-            .execute(
-                FORK_CONVERSATION_TOOL,
-                json!({"message": "write it up", "mode": "summary"}),
-                "tc1",
-            )
-            .await
-            .unwrap();
-        assert_eq!(h.seen.lock().unwrap()[0].1, ForkMode::Summary);
-    }
-
-    /// Rejected here, where the two spellings were advertised, so the error
-    /// can name them — and without troubling the session at all.
-    #[tokio::test]
-    async fn an_unknown_mode_is_rejected_without_reaching_the_session() {
-        let h = harness(Ok(Uuid::new_v4()));
-        let err = h
-            .toolbox
-            .execute(
-                FORK_CONVERSATION_TOOL,
-                json!({"message": "go", "mode": "branch"}),
-                "tc1",
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ToolCallError::InvalidInput(ref m) if m.contains("copy, summary")));
-        assert!(h.seen.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_missing_message_is_rejected() {
+    async fn a_missing_task_is_rejected() {
         let h = harness(Ok(Uuid::new_v4()));
         let err = h
             .toolbox
@@ -318,7 +282,7 @@ mod tests {
         let h = harness(Err("a workflow run cannot be forked".to_string()));
         let err = h
             .toolbox
-            .execute(FORK_CONVERSATION_TOOL, json!({"message": "go"}), "tc1")
+            .execute(FORK_CONVERSATION_TOOL, json!({"task": "go"}), "tc1")
             .await
             .unwrap_err();
         assert!(
@@ -334,7 +298,7 @@ mod tests {
             .execute("read_file", json!({}), "tc1")
             .await
             .unwrap_err();
-        assert!(!matches!(err, ToolCallError::InvalidInput(ref m) if m.contains("message")));
+        assert!(!matches!(err, ToolCallError::InvalidInput(ref m) if m.contains("task")));
         assert!(h.seen.lock().unwrap().is_empty());
     }
 }

@@ -2,6 +2,22 @@ import { Link } from "react-router-dom";
 import type { RenderedFork } from "../hooks/useSessionStream";
 
 /**
+ * What the new conversation was given. A `fresh` fork carries none of this
+ * transcript — the agent wrote it a brief instead — so calling it "forked"
+ * without qualification would suggest a history it does not have.
+ */
+function forkLabel(mode: string) {
+  switch (mode) {
+    case "summary":
+      return "forked from here, with a summary";
+    case "fresh":
+      return "handed off from here";
+    default:
+      return "forked from here";
+  }
+}
+
+/**
  * Where a conversation branched off, in the transcript of the one it left.
  *
  * A marker rather than a divider: a compaction boundary separates two working
@@ -29,9 +45,7 @@ export function ForkMarker({
         to={`/sessions/${sessionId}/agents/${value.id}`}
         className="legend whitespace-nowrap hover:text-legend"
       >
-        {value.mode === "summary"
-          ? "forked from here, with a summary"
-          : "forked from here"}
+        {forkLabel(value.mode)}
         {" →"}
       </Link>
       <span className="h-px flex-1 bg-[var(--rule)]" />
