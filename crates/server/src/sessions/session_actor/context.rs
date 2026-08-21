@@ -921,13 +921,13 @@ impl ContextProvider for SessionContextProvider {
         // An unattended session is excluded for the reason it has no `ask_user`:
         // a fork is a conversation, and nobody is there to have one.
         let with_spawn: Arc<dyn Toolbox> = match self.kind {
-            SessionAgentKind::Main | SessionAgentKind::Fork(_) if !self.unattended => {
-                Arc::new(crate::sessions::fork_tool::ForkToolbox::new(
+            SessionAgentKind::Main | SessionAgentKind::Fork(_) if !self.unattended => Arc::new(
+                crate::sessions::conversation_tool::ConversationToolbox::new(
                     with_spawn,
                     self.session.clone(),
                     caller,
-                ))
-            }
+                ),
+            ),
             SessionAgentKind::Main
             | SessionAgentKind::Fork(_)
             | SessionAgentKind::Step(_)

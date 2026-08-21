@@ -1,6 +1,11 @@
-//! `fork_conversation`: the tool a conversation hands work to a second one
-//! with. `/fork` and `/summary-n-fork` are the composer's forms of the same
-//! feature — this is the model's, and it carries no history at all.
+//! `spawn_conversation`: the tool one conversation hands work to another with.
+//!
+//! Named for what it does, not for what it makes. The thing it creates is a
+//! *fork* everywhere else — `ForkMode`, the rail, the docs, the `/fork` a
+//! person types — but the model-facing name has to survive being read on its
+//! own, and "fork" promises a history this carries none of. It pairs with
+//! `spawn_agent` instead: same shape, one self-contained brief, differing only
+//! in where the result goes.
 //!
 //! Nothing is copied or summarised because the agent calling it already holds
 //! the context and can say what matters in a sentence, exactly as it does when
@@ -24,22 +29,23 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Name of the built-in conversation-forking tool.
-pub const FORK_CONVERSATION_TOOL: &str = "fork_conversation";
+/// Name of the built-in conversation hand-off tool.
+pub const SPAWN_CONVERSATION_TOOL: &str = "spawn_conversation";
 
-fn fork_conversation_spec() -> ToolSpec {
+fn spawn_conversation_spec() -> ToolSpec {
     ToolSpec {
-        name: FORK_CONVERSATION_TOOL.to_string(),
-        description: "Start a second conversation in this session and hand it a task. Use it \
-            when the work splits into a direction the user will want to steer on its own, or \
-            when what comes next has little to do with what this conversation has been about. \
+        name: SPAWN_CONVERSATION_TOOL.to_string(),
+        description: "Start a second conversation in this session and hand it a task \
+            — the tool form of the `/fork` a person types. Use it when the work splits into \
+            a direction the user will want to steer on its own, or when what comes next has \
+            little to do with what this conversation has been about. \
             \n\nThe new conversation shares this session's workspace — the same checkout, the \
             same edits — but starts with none of this conversation's history, so write the \
             task the way you would write one for a subagent: self-contained, including \
             whatever it needs to know. \
             \n\nIt is not a subagent, though. It talks to the user directly and never reports \
-            back to you: nothing is delivered here when it finishes. Fork to hand work off, \
-            spawn_agent to get an answer back. Returns the new conversation's id."
+            back to you: nothing is delivered here when it finishes. Use this to hand work \
+            off, spawn_agent to get an answer back. Returns the new conversation's id."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -56,15 +62,15 @@ fn fork_conversation_spec() -> ToolSpec {
     }
 }
 
-/// Wraps a conversation's toolbox, adding `fork_conversation`.
-pub struct ForkToolbox {
+/// Wraps a conversation's toolbox, adding `spawn_conversation`.
+pub struct ConversationToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
     /// The conversation that branches — the main agent's id is the session's.
     caller: Uuid,
 }
 
-impl ForkToolbox {
+impl ConversationToolbox {
     pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef, caller: Uuid) -> Self {
         Self {
             inner,
@@ -75,10 +81,10 @@ impl ForkToolbox {
 }
 
 #[async_trait]
-impl Toolbox for ForkToolbox {
+impl Toolbox for ConversationToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.push(fork_conversation_spec());
+        specs.push(spawn_conversation_spec());
         specs
     }
 
@@ -88,7 +94,7 @@ impl Toolbox for ForkToolbox {
         input: Value,
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
-        if name != FORK_CONVERSATION_TOOL {
+        if name != SPAWN_CONVERSATION_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
         let task = input
@@ -178,7 +184,7 @@ mod tests {
     }
 
     struct Harness {
-        toolbox: ForkToolbox,
+        toolbox: ConversationToolbox,
         caller: Uuid,
         seen: Arc<Mutex<Vec<(Uuid, ForkMode, String)>>>,
     }
@@ -199,7 +205,7 @@ mod tests {
         );
         let caller = Uuid::new_v4();
         Harness {
-            toolbox: ForkToolbox::new(Arc::new(EmptyToolbox), session, caller),
+            toolbox: ConversationToolbox::new(Arc::new(EmptyToolbox), session, caller),
             caller,
             seen,
         }
@@ -213,14 +219,14 @@ mod tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names, vec![FORK_CONVERSATION_TOOL.to_string()]);
+        assert_eq!(names, vec![SPAWN_CONVERSATION_TOOL.to_string()]);
     }
 
     /// Two things a model must not take from this tool: that a fork reports
     /// back the way a subagent does, and that it can see what was said here.
     #[test]
     fn the_description_says_nothing_comes_back_and_nothing_goes_with_it() {
-        let spec = fork_conversation_spec();
+        let spec = spawn_conversation_spec();
         assert!(spec.description.contains("never reports back"), "{spec:?}");
         assert!(spec.description.contains("spawn_agent"), "{spec:?}");
         assert!(
@@ -229,6 +235,9 @@ mod tests {
             "{spec:?}"
         );
         assert!(spec.description.contains("self-contained"), "{spec:?}");
+        // The name no longer says "fork", so the description is the only place
+        // a model learns this is what a user typing `/fork` is asking for.
+        assert!(spec.description.contains("`/fork`"), "{spec:?}");
     }
 
     /// A fork is attributed to the conversation that asked for it, not to the
@@ -241,7 +250,7 @@ mod tests {
         let out = h
             .toolbox
             .execute(
-                FORK_CONVERSATION_TOOL,
+                SPAWN_CONVERSATION_TOOL,
                 json!({"task": "try the other migration"}),
                 "tc1",
             )
@@ -268,7 +277,7 @@ mod tests {
         let h = harness(Ok(Uuid::new_v4()));
         let err = h
             .toolbox
-            .execute(FORK_CONVERSATION_TOOL, json!({}), "tc1")
+            .execute(SPAWN_CONVERSATION_TOOL, json!({}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
@@ -282,7 +291,7 @@ mod tests {
         let h = harness(Err("a workflow run cannot be forked".to_string()));
         let err = h
             .toolbox
-            .execute(FORK_CONVERSATION_TOOL, json!({"task": "go"}), "tc1")
+            .execute(SPAWN_CONVERSATION_TOOL, json!({"task": "go"}), "tc1")
             .await
             .unwrap_err();
         assert!(

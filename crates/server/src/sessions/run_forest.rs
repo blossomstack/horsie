@@ -206,7 +206,7 @@ pub enum ForkMode {
     Copy,
     /// `/summary-n-fork` — a summary of the source, produced out of band.
     Summary,
-    /// `fork_conversation` — no history at all. The agent that asked for the
+    /// `spawn_conversation` — no history at all. The agent that asked for the
     /// fork already knows the context and writes the brief itself, so there is
     /// nothing to carry and nothing to summarise.
     Fresh,

@@ -172,7 +172,7 @@ appears in the rail nested under the session it belongs to, with its own status
 lamp. Forking a fork nests one level deeper.
 
 The agent can also start one on its own, without waiting to be asked. Its
-`fork_conversation` tool hands a *task* to a new conversation — no copy, no
+`spawn_conversation` tool hands a *task* to a new conversation — no copy, no
 summary. The agent already knows the context, so it writes the brief itself, the
 same way it writes one for a subagent. When the work splits into a direction you
 will want to steer separately, it can give that direction its own conversation

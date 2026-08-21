@@ -583,7 +583,7 @@ impl SessionActor {
 /// What every fork must be true of, whoever asked for one.
 ///
 /// Here rather than at the two callers — the composer's `/fork` and the
-/// `fork_conversation` tool — because this is the one place a fork is written,
+/// `spawn_conversation` tool — because this is the one place a fork is written,
 /// and an invariant checked anywhere else is one a third caller will miss.
 fn forkable(main: Uuid, state: &SessionState, parent: Uuid, message: &str) -> Result<(), String> {
     if message.trim().is_empty() {
@@ -715,7 +715,7 @@ mod tests {
     }
 
     /// The invariants live at the write, so the composer's `/fork` and the
-    /// `fork_conversation` tool cannot disagree about what a fork may be.
+    /// `spawn_conversation` tool cannot disagree about what a fork may be.
     #[test]
     fn a_fork_needs_a_message_saying_what_to_do() {
         let mut state = SessionState::default();
@@ -1327,7 +1327,7 @@ mod tests {
         );
     }
 
-    /// The model hands work to a second conversation with `fork_conversation`.
+    /// The model hands work to a second conversation with `spawn_conversation`.
     ///
     /// Mid-turn, which the composer's `/fork` never is — and the reason the
     /// tool's fork carries no history: a copy cut here would end on the
@@ -1346,7 +1346,7 @@ mod tests {
                 parts: vec![horsie_agentcore::ContentPart::ToolCall(
                     horsie_agentcore::ToolCallPart {
                         id: "fork-1".into(),
-                        name: crate::sessions::fork_tool::FORK_CONVERSATION_TOOL.into(),
+                        name: crate::sessions::conversation_tool::SPAWN_CONVERSATION_TOOL.into(),
                         input: serde_json::json!({"task": "try the materialised view"}),
                     },
                 )],
