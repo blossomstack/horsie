@@ -10,7 +10,7 @@
 //! for every tool call, so nothing here may touch the database.
 
 use crate::control::{Expose, Operation};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
@@ -23,7 +23,7 @@ const PREFIX: &str = "horsie_";
 
 pub struct ControlToolbox {
     inner: Arc<dyn Toolbox>,
-    services: Arc<UserServices>,
+    services: Arc<ProjectServices>,
     /// resource -> action -> operation, built once at spawn.
     by_resource: BTreeMap<&'static str, BTreeMap<&'static str, Operation>>,
 }
@@ -31,7 +31,7 @@ pub struct ControlToolbox {
 impl ControlToolbox {
     pub fn new(
         inner: Arc<dyn Toolbox>,
-        services: Arc<UserServices>,
+        services: Arc<ProjectServices>,
         operations: Vec<Operation>,
     ) -> Self {
         let mut by_resource: BTreeMap<&'static str, BTreeMap<&'static str, Operation>> =
@@ -166,7 +166,7 @@ mod tests {
     use super::*;
     use horsie_agentcore::EmptyToolbox;
 
-    async fn toolbox() -> (ControlToolbox, Arc<UserServices>, tempfile::TempDir) {
+    async fn toolbox() -> (ControlToolbox, Arc<ProjectServices>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::testing::state(dir.path()).build().await;
         let services = state.services().await;

@@ -38,6 +38,8 @@ import { AdminLayout } from "./pages/admin/AdminLayout";
 import { ModelCardsPage } from "./pages/admin/ModelCardsPage";
 import { GithubAppPage } from "./pages/admin/GithubAppPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { ProjectRedirect, projectFromPath } from "./pages/ProjectScope";
+import { ProjectsSettings } from "./pages/settings/ProjectsSettings";
 
 const client = new QueryClient({
   // Every failed write reports itself. Handled here rather than at each call
@@ -98,12 +100,26 @@ function AuthGate({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-export default function App() {
+/**
+ * The app, rooted at one project.
+ *
+ * The project lives in the router's **basename** rather than in a route
+ * parameter, and that is what lets every `to="/agents"` in the tree stay
+ * written the way it was: under a basename of `/p/<id>`, an absolute path is
+ * absolute *within the project*. The alternative was prefixing forty-eight link
+ * targets by hand, each of which would be a silent escape from the scope if it
+ * were missed.
+ *
+ * It also makes switching projects a full page load, which is the right shape
+ * rather than a compromise: nothing carries over — no query cache, no component
+ * state, no in-flight request against the project just left. The client's
+ * isolation ends up as structural as the server's.
+ */
+function ProjectApp({ project }: { project: string }) {
   return (
-    <QueryClientProvider client={client}>
-      <BrowserRouter>
-        <AuthGate>
-          <Routes>
+    <BrowserRouter basename={`/p/${project}`}>
+      <AuthGate>
+        <Routes>
             <Route path="/" element={<SessionsLayout />}>
               <Route index element={<NewSessionView />} />
               <Route path="sessions/:id" element={<SessionView />} />
@@ -130,7 +146,6 @@ export default function App() {
                 path="routines/:name/edit"
                 element={<RoutineEditPage />}
               />
-              <Route path="auth/device" element={<DeviceApprovalPage />} />
               <Route path="settings" element={<SettingsLayout />}>
                 <Route index element={<Navigate to="models" replace />} />
                 <Route path="models" element={<ModelsSettings />} />
@@ -140,16 +155,13 @@ export default function App() {
                 <Route path="integrations" element={<IntegrationsSettings />} />
                 <Route path="appearance" element={<AppearanceSettings />} />
                 <Route path="account" element={<AccountSettings />} />
+                <Route path="projects" element={<ProjectsSettings />} />
               </Route>
-              {/* Pre-redesign paths, kept so old bookmarks keep working. */}
-              <Route
-                path="skills"
-                element={<Navigate to="/settings/skills" replace />}
-              />
-              <Route
-                path="memory"
-                element={<Navigate to="/settings/memory" replace />}
-              />
+              {/* Pre-redesign paths, kept so old bookmarks keep working.
+                  Relative targets, because the settings page they point at is
+                  inside this project rather than at the root. */}
+              <Route path="skills" element={<Navigate to="settings/skills" replace />} />
+              <Route path="memory" element={<Navigate to="settings/memory" replace />} />
               <Route path="admin" element={<AdminLayout />}>
                 <Route index element={<Navigate to="model-cards" replace />} />
                 <Route path="model-cards" element={<ModelCardsPage />} />
@@ -158,12 +170,45 @@ export default function App() {
               {/* Inside the layout, so an unmatched route keeps the rail.
                 Without this, anything unrouted rendered an empty document. */}
               <Route path="*" element={<NotFoundPage />} />
-            </Route>
-          </Routes>
-        </AuthGate>
-        <MutationErrors />
-        <ConfirmDialog />
-      </BrowserRouter>
+          </Route>
+        </Routes>
+      </AuthGate>
+      <MutationErrors />
+      <ConfirmDialog />
+    </BrowserRouter>
+  );
+}
+
+/**
+ * The pages that belong to the account rather than to a project: approving a
+ * device code, and choosing which project to open.
+ *
+ * Rooted at `/` with no basename, because the device-approval link is printed
+ * by the CLI from the server's own origin (`{base}/auth/device`) and has no
+ * project to name — the person following it has not chosen one yet.
+ */
+function AccountApp() {
+  return (
+    <BrowserRouter>
+      <AuthGate>
+        <Routes>
+          <Route path="/auth/device" element={<DeviceApprovalPage />} />
+          <Route path="*" element={<ProjectRedirect />} />
+        </Routes>
+      </AuthGate>
+      <MutationErrors />
+      <ConfirmDialog />
+    </BrowserRouter>
+  );
+}
+
+export default function App() {
+  // Read once, from the URL this document was loaded with. A project switch is
+  // a navigation, so this runs again with the new one.
+  const project = projectFromPath(window.location.pathname);
+  return (
+    <QueryClientProvider client={client}>
+      {project ? <ProjectApp project={project} /> : <AccountApp />}
     </QueryClientProvider>
   );
 }

@@ -14,10 +14,15 @@ use std::collections::{BTreeMap, HashMap};
 
 /// The routes that are deliberately *not* operations, with why.
 ///
-/// Every route under `/api` is either folded out of the operation table or
-/// listed here. `every_route_is_classified` reads `http/mod.rs` and fails if a
+/// Every route in `http/mod.rs` is either folded out of the operation table or
+/// listed here. `every_route_is_classified` reads that file and fails if a
 /// third possibility appears — which is the whole mechanism: a route added
 /// without a decision is a route the control plane silently cannot see.
+///
+/// Paths are written exactly as `http/mod.rs` writes them, which means two
+/// shapes. A route inside `scoped()` is relative to `/api/p/{project}`, because
+/// that is the prefix the router nests it under and an operation has never had
+/// a scope in its path. Everything else is absolute.
 pub const NON_OPERATIONS: &[(&str, &str)] = &[
     // Liveness, before anything is resolved.
     ("/api/health", "no account, no state, nothing to manage"),
@@ -38,39 +43,33 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
     ("/api/device/tokens", "credential surface"),
     ("/api/device/tokens/{id}", "credential surface"),
     // Third-party sign-in: browser redirects and polling, not JSON operations.
-    ("/api/github/status", "oauth flow"),
-    ("/api/github/auth", "oauth flow"),
-    ("/api/github/callback", "oauth redirect"),
+    ("/github/status", "oauth flow"),
+    ("/github/auth", "oauth flow"),
+    ("/github/callback", "oauth redirect"),
     (
-        "/api/github/app-config",
+        "/github/app-config",
         "oauth configuration, carries a client secret",
     ),
-    ("/api/github/disconnect", "oauth flow"),
+    ("/github/disconnect", "oauth flow"),
     (
-        "/api/github/repos",
+        "/github/repos",
         "reads a third-party API with the user's token",
     ),
     (
-        "/api/github/repos/branches",
+        "/github/repos/branches",
         "reads a third-party API with the user's token",
     ),
-    ("/api/config/model-providers/{name}/chatgpt", "login flow"),
+    ("/config/model-providers/{name}/chatgpt", "login flow"),
+    ("/config/model-providers/{name}/chatgpt/login", "login flow"),
+    ("/config/model-providers/{name}/chatgpt/poll", "login flow"),
     (
-        "/api/config/model-providers/{name}/chatgpt/login",
-        "login flow",
-    ),
-    (
-        "/api/config/model-providers/{name}/chatgpt/poll",
-        "login flow",
-    ),
-    (
-        "/api/mcp/servers/{name}/connect",
+        "/mcp/servers/{name}/connect",
         "builds a redirect_uri from the request's own Host",
     ),
-    ("/api/mcp/servers/{name}/oauth/callback", "oauth redirect"),
+    ("/mcp/servers/{name}/oauth/callback", "oauth redirect"),
     // Streams and sockets: no request/response body to be an operation over.
-    ("/api/events", "server-sent events"),
-    ("/api/vendor/connect", "websocket upgrade"),
+    ("/events", "server-sent events"),
+    ("/vendor/connect", "websocket upgrade"),
     ("/api/runtime/connect", "websocket upgrade"),
     (
         "/api/runtime/github-credential",
@@ -81,51 +80,57 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
     // Session traffic that is a conversation rather than management. A tool
     // that could message a session could talk to itself.
     (
-        "/api/sessions",
+        "/sessions",
         "POST creates a session; the GET half is an operation",
     ),
     (
-        "/api/sessions/{id}/messages",
+        "/sessions/{id}/messages",
         "POST sends a message, GET is the stream",
     ),
+    ("/sessions/{id}/answers", "answers an ask, mid-conversation"),
+    ("/sessions/{id}/annotations", "conversation metadata"),
     (
-        "/api/sessions/{id}/answers",
-        "answers an ask, mid-conversation",
-    ),
-    ("/api/sessions/{id}/annotations", "conversation metadata"),
-    (
-        "/api/sessions/{id}/agents/{agent_id}",
+        "/sessions/{id}/agents/{agent_id}",
         "reads or deletes one agent of a live session",
     ),
     (
-        "/api/sessions/{id}/workflow",
+        "/sessions/{id}/workflow",
         "a run projected onto its graph, hung off the session",
     ),
     (
-        "/api/sessions/{id}/workflow/retry",
+        "/sessions/{id}/workflow/retry",
         "retries a step of a live run",
     ),
     // Individual memories. Agents reach these through `MemoryToolbox`, which
     // scopes them to the session's declared spaces; a second, unscoped door
     // would defeat that.
     (
-        "/api/memories",
+        "/memories",
         "MemoryToolbox owns this, scoped to the session's spaces",
     ),
     (
-        "/api/memories/{id}",
+        "/memories/{id}",
         "MemoryToolbox owns this, scoped to the session's spaces",
     ),
     // Deployment-wide catalogue, not an account's to manage.
-    ("/api/admin/model-cards", "deployment administration"),
-    (
-        "/api/admin/model-cards/{model_id}",
-        "deployment administration",
-    ),
+    ("/admin/model-cards", "deployment administration"),
+    ("/admin/model-cards/{model_id}", "deployment administration"),
     // The 404 catch-all.
     (
         "/api/{*rest}",
         "unmatched paths answer JSON rather than the SPA shell",
+    ),
+    // An account's projects, which is what puts an id in every other route's
+    // `{project}` segment. Not an operation on purpose: an operation runs
+    // *inside* a project, and one that could create or delete them would be
+    // reaching outside the scope everything else here exists to hold.
+    (
+        "/api/projects",
+        "an account's scopes, not a project's contents",
+    ),
+    (
+        "/api/projects/{id}",
+        "an account's scopes, not a project's contents",
     ),
 ];
 
@@ -170,8 +175,14 @@ fn handler_for(operation: Operation) -> MethodRouter<AppState> {
                 serde_json::from_slice(&body)
                     .map_err(|e| Api::unprocessable(format!("malformed JSON body: {e}")))?
             };
+            // `{project}` comes from the prefix the router nests these under,
+            // not from the operation's own path, so it is dropped rather than
+            // merged: an operation's input describes what to do *inside* a
+            // scope that is already resolved, and every one of them would
+            // otherwise reject an unknown field it never declared.
             let path_params: Vec<(String, String)> = params
                 .iter()
+                .filter(|(key, _)| *key != crate::http::PROJECT_PARAM)
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect();
             let mut conflicts = merge_params(&mut input, path_params.into_iter());
@@ -312,7 +323,7 @@ mod tests {
             .filter(|path| operation_paths.contains(path))
             .collect();
         split.sort_unstable();
-        assert_eq!(split, ["/api/sessions"]);
+        assert_eq!(split, ["/sessions"]);
     }
 
     #[test]
@@ -370,7 +381,7 @@ mod tests {
             op(
                 "list",
                 Method::Get,
-                "/api/ghosts",
+                "/ghosts",
                 "List ghosts.",
                 Expose::ApiAndTool,
                 |_s, _i: NoInput| async move { Ok::<Value, ControlError>(json!(["casper"])) },
@@ -378,7 +389,7 @@ mod tests {
             op(
                 "create",
                 Method::Post,
-                "/api/ghosts",
+                "/ghosts",
                 "Summon a ghost.",
                 Expose::ApiAndTool,
                 |_s, i: NameRef| async move { Ok::<Value, ControlError>(json!({"name": i.name})) },
@@ -386,7 +397,7 @@ mod tests {
             op(
                 "peek",
                 Method::Get,
-                "/api/ghosts/hidden",
+                "/ghosts/hidden",
                 "Never routed.",
                 Expose::ToolOnly,
                 |_s, _i: NoInput| async move { Ok::<Value, ControlError>(json!({})) },
@@ -394,11 +405,19 @@ mod tests {
         ]
     }
 
-    async fn call(request: Request<Body>) -> (StatusCode, Value) {
+    /// Mounted under the project prefix, exactly as `http::app` mounts it —
+    /// the fold is nested there, and `Scope` reads the segment, so a fixture
+    /// router mounted flat would 500 on every request for the right reason.
+    async fn call(method: &str, path: &str, body: &'static str) -> (StatusCode, Value) {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::testing::state(dir.path()).build().await;
-        let app = router(&fixture()).with_state(state.state.clone());
-        let response = app.oneshot(request).await.unwrap();
+        let app = axum::Router::new()
+            .nest("/api/p/{project}", router(&fixture()))
+            .with_state(state.state.clone());
+        let response = app
+            .oneshot(request(method, &state.url(path), body))
+            .await
+            .unwrap();
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -421,42 +440,42 @@ mod tests {
 
     #[tokio::test]
     async fn both_methods_on_one_path_are_mounted() {
-        let (status, body) = call(request("GET", "/api/ghosts", "")).await;
+        let (status, body) = call("GET", "/ghosts", "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!(["casper"]));
 
-        let (status, body) = call(request("POST", "/api/ghosts", r#"{"name":"slimer"}"#)).await;
+        let (status, body) = call("POST", "/ghosts", r#"{"name":"slimer"}"#).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!({"name": "slimer"}));
     }
 
     #[tokio::test]
     async fn a_tool_only_operation_is_not_mounted() {
-        let (status, _) = call(request("GET", "/api/ghosts/hidden", "")).await;
+        let (status, _) = call("GET", "/ghosts/hidden", "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn a_query_param_reaches_the_input() {
-        let (status, body) = call(request("POST", "/api/ghosts?name=query", "")).await;
+        let (status, body) = call("POST", "/ghosts?name=query", "").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, json!({"name": "query"}));
     }
 
     #[tokio::test]
     async fn a_malformed_body_is_a_422_not_a_500() {
-        let (status, _) = call(request("POST", "/api/ghosts", "{not json")).await;
+        let (status, _) = call("POST", "/ghosts", "{not json").await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn an_input_that_does_not_deserialize_is_a_422() {
-        let (status, _) = call(request("POST", "/api/ghosts", "{}")).await;
+        let (status, _) = call("POST", "/ghosts", "{}").await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     /// Unused in the fixture but proves the signature compiles for the real
-    /// resources, which all take `Arc<UserServices>`.
+    /// resources, which all take `Arc<ProjectServices>`.
     #[allow(dead_code)]
-    fn typed_services(_: Arc<crate::users::UserServices>) {}
+    fn typed_services(_: Arc<crate::projects::ProjectServices>) {}
 }

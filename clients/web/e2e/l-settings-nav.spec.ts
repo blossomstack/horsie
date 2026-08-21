@@ -94,7 +94,9 @@ test.describe("settings navigation", () => {
 
     // And it is a dead end no longer.
     await page.getByRole("link", { name: "your sessions" }).click();
-    await expect(page).toHaveURL(`${appBase}/`);
+    // No trailing slash: under the project basename, react-router renders
+    // `to="/"` as the basename itself.
+    await expect(page).toHaveURL(appBase);
   });
 
   // `callback_base` is the only override for a wrong OAuth `redirect_uri`, and

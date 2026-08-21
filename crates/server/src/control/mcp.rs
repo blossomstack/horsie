@@ -6,7 +6,7 @@
 //! origin to hand back to a browser at all.
 
 use crate::control::{ControlError, Expose, Method, NameRef, NoInput, Operation, Resource, op};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use horsie_models::mcp::{McpServerInput, McpServerList};
 use std::sync::Arc;
 
@@ -23,11 +23,11 @@ impl Resource for Mcp {
             op(
                 "list",
                 Method::Get,
-                "/api/mcp/servers",
+                "/mcp/servers",
                 "Every configured MCP server, with its tokens redacted to a \
                  has-token flag.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     let servers = s.mcp.list().await.map_err(ControlError::Internal)?;
                     // The route answers an object, not a bare array.
                     Ok::<McpServerList, ControlError>(McpServerList { servers })
@@ -36,19 +36,19 @@ impl Resource for Mcp {
             op(
                 "upsert",
                 Method::Put,
-                "/api/mcp/servers/{name}",
+                "/mcp/servers/{name}",
                 "Create or replace a server. The name is the id of record. \
                  Omitting a secret keeps the stored one; an empty string clears \
                  it.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: McpServerInput| async move {
+                |s: Arc<ProjectServices>, i: McpServerInput| async move {
                     s.mcp.upsert(i).await.map_err(ControlError::Invalid)
                 },
             ),
             op(
                 "delete",
                 Method::Delete,
-                "/api/mcp/servers/{name}",
+                "/mcp/servers/{name}",
                 "Forget a server.",
                 Expose::ApiAndTool,
                 // 200 with an empty result rather than 204, and a name that was
@@ -56,7 +56,7 @@ impl Resource for Mcp {
                 // cannot say whether a row matched, so there is nothing to turn
                 // into a miss. `deleting_an_unknown_mcp_server_is_silently_accepted`
                 // pins the asymmetry with `/api/runtime-vendors`.
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     s.mcp
                         .delete(&i.name)
                         .await
@@ -67,12 +67,12 @@ impl Resource for Mcp {
             op(
                 "test",
                 Method::Post,
-                "/api/mcp/servers/{name}/test",
+                "/mcp/servers/{name}/test",
                 "Connect to a server, record the outcome, and return it. A \
                  connection that fails is a result with `ok: false`, not an \
                  error — only a server that is not configured at all is a miss.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: NameRef| async move {
+                |s: Arc<ProjectServices>, i: NameRef| async move {
                     let outcome = s.mcp.test(&i.name).await.map_err(ControlError::Internal)?;
                     outcome.ok_or_else(|| {
                         ControlError::NotFound(format!("no MCP server '{}'", i.name))

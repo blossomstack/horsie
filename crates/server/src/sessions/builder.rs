@@ -273,7 +273,7 @@ mod tests {
                     version: "test".into(),
                 },
             },
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )
         .await
         .unwrap();
@@ -303,7 +303,7 @@ mod tests {
             .unwrap();
         let envs = EnvironmentService::new(crate::environments::EnvironmentStore::new(
             db,
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         ));
         (opened.store as Arc<dyn ConfigStore>, envs)
     }

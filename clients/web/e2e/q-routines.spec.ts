@@ -1,3 +1,4 @@
+import { projectRoot } from "./helpers";
 // Group Q — routines: the /routines page creates a routine over an agent
 // preset seeded here, runs it from its detail page, and shows the run there
 // while the sidebar's session list deliberately does not grow.
@@ -9,23 +10,23 @@ import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
 
 /** Create the agent preset a routine points at, on the connected vendor. */
-async function seedAgent(page: Page, appBase: string, name: string): Promise<void> {
+async function seedAgent(page: Page, apiBase: string, name: string): Promise<void> {
   const cfg = (await (
-    await page.request.get(`${appBase}/api/config`)
+    await page.request.get(`${apiBase}/config`)
   ).json()) as { models: { alias: string }[]; vendors: { name: string }[] };
   const model = cfg.models[0]?.alias;
   const vendor = cfg.vendors[0]?.name;
   expect(model, "the e2e harness seeds at least one model").toBeTruthy();
   expect(vendor, "the e2e harness connects at least one vendor").toBeTruthy();
-  const res = await page.request.post(`${appBase}/api/agents`, {
+  const res = await page.request.post(`${apiBase}/agents`, {
     data: { name, model, vendor },
   });
   expect(res.status()).toBe(201);
 }
 
 /** How many sessions the sidebar would list right now. */
-async function sessionCount(page: Page, appBase: string): Promise<number> {
-  const res = await page.request.get(`${appBase}/api/sessions`);
+async function sessionCount(page: Page, apiBase: string): Promise<number> {
+  const res = await page.request.get(`${apiBase}/sessions`);
   const body = (await res.json()) as { sessions: unknown[] };
   return body.sessions.length;
 }
@@ -36,7 +37,7 @@ test("Q1: the sidebar links to the routines page", async ({
 }) => {
   await page.goto(appBase);
   await page.getByTestId("routines-link").click();
-  await page.waitForURL((url) => url.pathname === "/routines");
+  await page.waitForURL((url) => url.pathname === projectRoot() + "/routines");
   await expect(page.getByTestId("routines-page")).toBeVisible();
 });
 
@@ -44,11 +45,12 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
   page,
   appBase,
   mock,
+  apiBase,
 }) => {
   await mock.reset();
   await mock.queueText("done");
-  await seedAgent(page, appBase, "e2e-routine-agent");
-  const before = await sessionCount(page, appBase);
+  await seedAgent(page, apiBase, "e2e-routine-agent");
+  const before = await sessionCount(page, apiBase);
 
   // Create through the form.
   await page.goto(`${appBase}/routines`);
@@ -68,7 +70,7 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
   await page.getByTestId("save-routine-button").click();
 
   // Lands on the detail page, showing the definition.
-  await page.waitForURL((url) => url.pathname === "/routines/e2e-routine");
+  await page.waitForURL((url) => url.pathname === projectRoot() + "/routines/e2e-routine");
   const detail = page.getByTestId("routine-detail-page");
   await expect(detail).toContainText("e2e-routine-agent");
   await expect(detail).toContainText("say hello");
@@ -77,7 +79,7 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
   // Run it: exactly one run appears here, and the session list does not grow.
   await page.getByTestId("run-routine-button").click();
   await expect(page.getByTestId("routine-run-row")).toHaveCount(1);
-  expect(await sessionCount(page, appBase)).toBe(before);
+  expect(await sessionCount(page, apiBase)).toBe(before);
 
   // The list page shows it, and the run opens as an ordinary session.
   await page.getByTestId("routines-link").click();
@@ -93,9 +95,10 @@ test("Q2: a routine is created, run, and its run is listed only under it", async
 test("Q3: deleting a routine takes its runs with it", async ({
   page,
   appBase,
+  apiBase,
 }) => {
-  await seedAgent(page, appBase, "e2e-doomed-agent");
-  const created = await page.request.post(`${appBase}/api/routines`, {
+  await seedAgent(page, apiBase, "e2e-doomed-agent");
+  const created = await page.request.post(`${apiBase}/routines`, {
     data: {
       name: "e2e-doomed",
       agent: "e2e-doomed-agent",
@@ -105,7 +108,7 @@ test("Q3: deleting a routine takes its runs with it", async ({
   });
   expect(created.status()).toBe(201);
   const run = await page.request.post(
-    `${appBase}/api/routines/e2e-doomed/run`,
+    `${apiBase}/routines/e2e-doomed/run`,
     { data: {} },
   );
   expect(run.status()).toBe(201);
@@ -118,6 +121,6 @@ test("Q3: deleting a routine takes its runs with it", async ({
     page.locator('[data-testid="routine-row"][data-routine-name="e2e-doomed"]'),
   ).toHaveCount(0);
 
-  const gone = await page.request.get(`${appBase}/api/sessions/${session.id}`);
+  const gone = await page.request.get(`${apiBase}/sessions/${session.id}`);
   expect(gone.status()).toBe(404);
 });

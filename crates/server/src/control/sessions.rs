@@ -8,9 +8,9 @@
 
 use crate::control::{ControlError, Expose, Method, Operation, Resource, ask, op};
 use crate::http::handlers;
+use crate::projects::ProjectServices;
 use crate::sessions::supervisor::RenameSessionError;
 use crate::sessions::supervisor::SessionSupervisorCommand;
-use crate::users::UserServices;
 use horsie_models::session::SessionSummary;
 use horsie_models::session_api::{Ack, GetSessionResponse, ListSessionsResponse, MessagesPage};
 use std::sync::Arc;
@@ -88,19 +88,19 @@ impl Resource for Sessions {
             op(
                 "list",
                 Method::Get,
-                "/api/sessions",
+                "/sessions",
                 "Sessions, newest first. Routine runs are excluded unless you \
                  name a routine.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: ListSessions| async move { list(&s, i).await },
+                |s: Arc<ProjectServices>, i: ListSessions| async move { list(&s, i).await },
             ),
             op(
                 "get",
                 Method::Get,
-                "/api/sessions/{id}",
+                "/sessions/{id}",
                 "One session in detail: its status, settings and agents.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: SessionRef| async move {
+                |s: Arc<ProjectServices>, i: SessionRef| async move {
                     let (rec, snapshot) = ask(&s, |reply| SessionSupervisorCommand::Get {
                         id: i.id.clone(),
                         reply,
@@ -117,19 +117,19 @@ impl Resource for Sessions {
             op(
                 "rename",
                 Method::Put,
-                "/api/sessions/{id}/name",
+                "/sessions/{id}/name",
                 "Retitle a session.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: RenameSession| async move { rename(&s, i).await },
+                |s: Arc<ProjectServices>, i: RenameSession| async move { rename(&s, i).await },
             ),
             op(
                 "stop",
                 Method::Post,
-                "/api/sessions/{id}/agents/{agent_id}/stop",
+                "/sessions/{id}/agents/{agent_id}/stop",
                 "Cancel one agent's turn. An agent that is not working answers \
                  fine — nothing to stop is not a failure.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: StopAgent| async move {
+                |s: Arc<ProjectServices>, i: StopAgent| async move {
                     ask(&s, |reply| SessionSupervisorCommand::Stop {
                         id: i.id,
                         agent_id: i.agent_id,
@@ -143,10 +143,10 @@ impl Resource for Sessions {
             op(
                 "delete",
                 Method::Delete,
-                "/api/sessions/{id}",
+                "/sessions/{id}",
                 "Delete a session and everything it recorded.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: SessionRef| async move {
+                |s: Arc<ProjectServices>, i: SessionRef| async move {
                     ask(&s, |reply| SessionSupervisorCommand::Delete {
                         id: i.id,
                         reply,
@@ -163,13 +163,13 @@ impl Resource for Sessions {
             op(
                 "read",
                 Method::Get,
-                "/api/sessions/{id}/messages",
+                "/sessions/{id}/messages",
                 "Read one agent's transcript, newest entries first. Use this to \
                  find out what a session actually did. Ask for a small page and \
                  use `before` to go further back — the whole transcript will not \
                  fit in your context.",
                 Expose::ToolOnly,
-                |s: Arc<UserServices>, i: ReadSession| async move { read(&s, i).await },
+                |s: Arc<ProjectServices>, i: ReadSession| async move { read(&s, i).await },
             ),
         ]
     }
@@ -181,7 +181,7 @@ impl Resource for Sessions {
 /// filtered or ordered differently from the route would have a reader replace
 /// its list with a set it could never have fetched.
 pub(crate) async fn list(
-    services: &UserServices,
+    services: &ProjectServices,
     input: ListSessions,
 ) -> Result<ListSessionsResponse, ControlError> {
     let all = ask(services, |reply| SessionSupervisorCommand::List { reply }).await?;
@@ -199,7 +199,7 @@ pub(crate) async fn list(
     Ok(ListSessionsResponse { sessions })
 }
 
-async fn rename(services: &UserServices, input: RenameSession) -> Result<Ack, ControlError> {
+async fn rename(services: &ProjectServices, input: RenameSession) -> Result<Ack, ControlError> {
     ask(services, |reply| {
         SessionSupervisorCommand::SetSessionTitle {
             id: input.id,
@@ -215,7 +215,10 @@ async fn rename(services: &UserServices, input: RenameSession) -> Result<Ack, Co
     Ok(Ack {})
 }
 
-async fn read(services: &UserServices, input: ReadSession) -> Result<MessagesPage, ControlError> {
+async fn read(
+    services: &ProjectServices,
+    input: ReadSession,
+) -> Result<MessagesPage, ControlError> {
     let max = input
         .max
         .unwrap_or(TOOL_PAGE_DEFAULT)

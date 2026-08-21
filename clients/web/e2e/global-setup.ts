@@ -16,6 +16,7 @@ import {
   waitFor,
   seedConfig,
   setDefaultRuntimeVendor,
+  defaultProject,
   type RuntimeInfo,
 } from "./harness";
 
@@ -219,7 +220,11 @@ export default async function globalSetup(): Promise<void> {
     });
 
     log("seeding providers 'mock' (anthropic) + 'mock-openai' (openai) and their models");
-    await seedConfig(baseURL, {
+    // Before anything scoped: listing is what creates the account's default
+    // project, and every URL below carries it.
+    const project = await defaultProject(baseURL);
+
+    await seedConfig(baseURL, project, {
       providers: [
         { name: "mock", kind: "anthropic", baseUrl: mockUrl, apiKey: "test-key" },
         // Same mock server, OpenAI wire — the provider appends /v1/chat/completions.
@@ -260,7 +265,7 @@ export default async function globalSetup(): Promise<void> {
     // specs that assert on plugin content ask for it via
     // `createSession(..., { skills: ["e2e-plugin"] })`.
     log("installing the e2e-plugin bundle");
-    const installed = await fetch(`${baseURL}/api/plugins`, {
+    const installed = await fetch(`${baseURL}/api/p/${project}/plugins`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sourceUrl: pluginUrl }),
@@ -289,6 +294,9 @@ export default async function globalSetup(): Promise<void> {
         "connect",
         "--server",
         `http://127.0.0.1:${serverPort}`,
+        // A vendor process publishes into one project's map, so it says which.
+        "--project",
+        project,
         "--name",
         "e2e",
         "--workspace",
@@ -300,7 +308,7 @@ export default async function globalSetup(): Promise<void> {
     );
     await waitFor(
       async () => {
-        const cfg = (await (await fetch(`${baseURL}/api/config`)).json()) as {
+        const cfg = (await (await fetch(`${baseURL}/api/p/${project}/config`)).json()) as {
           vendors?: { name: string }[];
         };
         // Every listed vendor is a connected agent — there is no inactive state.
@@ -310,13 +318,14 @@ export default async function globalSetup(): Promise<void> {
     );
 
     log("setting defaultRuntimeVendor=e2e");
-    await setDefaultRuntimeVendor(baseURL, "e2e");
+    await setDefaultRuntimeVendor(baseURL, project, "e2e");
 
     const info: RuntimeInfo = {
       baseURL,
       mockUrl,
       tmpDir,
       marketplaceUrl,
+      project,
       pids: children.map((c) => c.pid).filter((p): p is number => typeof p === "number"),
     };
     fs.writeFileSync(RUNTIME_FILE, JSON.stringify(info, null, 2));

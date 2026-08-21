@@ -38,19 +38,29 @@ pub async fn auth(Scope(state): Scope, headers: HeaderMap) -> Result<Redirect, A
 /// them to.
 pub(crate) const SETTINGS_PAGE: &str = "/settings/integrations";
 
+/// That page, inside a project.
+///
+/// The web router is rooted at `/p/<project>`, so a bare `/settings/…` is not a
+/// route it serves — it lands on the project redirect, which drops the query
+/// string these callbacks carry their whole result in.
+pub(crate) fn settings_page(project: &crate::projects::ProjectId) -> String {
+    format!("/p/{project}{SETTINGS_PAGE}")
+}
+
 pub async fn callback(
     Scope(state): Scope,
     Query(q): Query<CallbackQuery>,
     headers: HeaderMap,
 ) -> Redirect {
     let base = crate::http::request_base(&headers);
+    let page = settings_page(&state.project);
     let dest = match q.code {
         Some(code) => match state.github.handle_callback(&code, &base).await {
-            Ok(()) => format!("{SETTINGS_PAGE}?github_connected=1"),
-            Err(e) => format!("{SETTINGS_PAGE}?github_error={}", urlencode(&e)),
+            Ok(()) => format!("{page}?github_connected=1"),
+            Err(e) => format!("{page}?github_error={}", urlencode(&e)),
         },
         None => format!(
-            "{SETTINGS_PAGE}?github_error={}",
+            "{page}?github_error={}",
             urlencode(
                 &q.error_description
                     .or(q.error)

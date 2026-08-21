@@ -303,7 +303,7 @@ mod tests {
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 StubSession { spawn_result },
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             Uuid::new_v4(),
             None,
         );

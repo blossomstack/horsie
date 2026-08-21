@@ -11,11 +11,11 @@
 //! `invoke_workflow` tool resolve through here, which is what keeps a run
 //! created mid-session identical to one created by a request.
 
+use crate::projects::ProjectServices;
 use crate::sessions::spec::AgentSettings;
 use crate::sessions::workflow::{
     DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec, outcomes_or_default,
 };
-use crate::users::UserServices;
 use crate::workflows::{WorkflowError, WorkflowRow};
 use horsie_models::agents::AgentView;
 use std::collections::BTreeMap;
@@ -71,7 +71,7 @@ pub struct ResolvedRun {
 ///
 /// After this the run is self-contained; nothing about it re-reads a store.
 pub async fn resolve_run_spec(
-    services: &UserServices,
+    services: &ProjectServices,
     name: &str,
     input: &str,
 ) -> Result<ResolvedRun, ResolveRunError> {

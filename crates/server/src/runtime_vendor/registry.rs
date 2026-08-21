@@ -216,7 +216,7 @@ impl RuntimeVendorRegistry {
 )]
 mod tests {
     use super::*;
-    use crate::auth::{Principal, UserId};
+    use crate::auth::Principal;
     use crate::runtime_vendor::fake::FakeRuntimeVendor;
     use std::collections::HashMap;
     use std::sync::RwLock;
@@ -315,7 +315,7 @@ mod tests {
         let registry = RuntimeVendorRegistry::new(vendors.clone());
 
         let mine = FakeRuntimeVendor::builder("my-laptop")
-            .owned_by(Principal::User(UserId::new("1")))
+            .owned_by(Principal::User(crate::auth::UserId::new("1")))
             .serve_in_process()
             .await
             .expect("agent");
@@ -324,7 +324,7 @@ mod tests {
         // The hole this closes: before ownership, this silently replaced the
         // live link and started receiving its tool calls.
         let attacker = FakeRuntimeVendor::builder("my-laptop")
-            .owned_by(Principal::User(UserId::new("2")))
+            .owned_by(Principal::User(crate::auth::UserId::new("2")))
             .serve_in_process()
             .await
             .expect("agent");
@@ -338,7 +338,10 @@ mod tests {
         // ...and the original is untouched: still exactly one entry, still
         // owned by the principal that claimed it.
         assert_eq!(registry.connected_names(), vec!["my-laptop".to_string()]);
-        assert_eq!(mine.link().owner(), &Principal::User(UserId::new("1")));
+        assert_eq!(
+            mine.link().owner(),
+            &Principal::User(crate::auth::UserId::new("1"))
+        );
     }
 
     #[tokio::test]
@@ -347,7 +350,7 @@ mod tests {
         let registry = RuntimeVendorRegistry::new(vendors.clone());
 
         let mine = FakeRuntimeVendor::builder("horsie-local")
-            .owned_by(Principal::User(UserId::new("7")))
+            .owned_by(Principal::User(crate::auth::UserId::new("7")))
             .serve_in_process()
             .await
             .expect("agent");
@@ -357,7 +360,7 @@ mod tests {
         // the newcomer displaced the incumbent, whose agent then re-dialled and
         // displaced the newcomer, forever, in silence.
         let second = FakeRuntimeVendor::builder("horsie-local")
-            .owned_by(Principal::User(UserId::new("7")))
+            .owned_by(Principal::User(crate::auth::UserId::new("7")))
             .serve_in_process()
             .await
             .expect("agent");
@@ -489,14 +492,14 @@ mod tests {
         let registry = RuntimeVendorRegistry::new(vendors.clone());
 
         let first = FakeRuntimeVendor::builder("same-name")
-            .owned_by(Principal::User(UserId::new("7")))
+            .owned_by(Principal::User(crate::auth::UserId::new("7")))
             .serve_in_process()
             .await
             .expect("agent");
         registry.register(first.link()).expect("first");
 
         let second = FakeRuntimeVendor::builder("same-name")
-            .owned_by(Principal::User(UserId::new("7")))
+            .owned_by(Principal::User(crate::auth::UserId::new("7")))
             .resuming(&first)
             .serve_in_process()
             .await
@@ -515,7 +518,7 @@ mod tests {
         let registry = RuntimeVendorRegistry::new(vendors.clone());
         for (name, who) in [("laptop-a", "1"), ("laptop-b", "2")] {
             let agent = FakeRuntimeVendor::builder(name)
-                .owned_by(Principal::User(UserId::new(who)))
+                .owned_by(Principal::User(crate::auth::UserId::new(who)))
                 .serve_in_process()
                 .await
                 .expect("agent");

@@ -288,7 +288,7 @@ mod tests {
     async fn service() -> EnvironmentService {
         EnvironmentService::new(EnvironmentStore::new(
             crate::db::testing::db().await,
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         ))
     }
 

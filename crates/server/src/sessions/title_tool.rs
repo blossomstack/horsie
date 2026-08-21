@@ -211,7 +211,7 @@ mod tests {
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 TitleActor,
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             uuid::Uuid::new_v4(),
             None,
         );
@@ -240,7 +240,7 @@ mod tests {
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 TitleActor,
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             uuid::Uuid::new_v4(),
             None,
         );
@@ -266,7 +266,7 @@ mod tests {
                 &horsie_actor::ActorSystem::new(Arc::new(InMemoryJournal::new())),
                 TitleActor,
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             uuid::Uuid::new_v4(),
             None,
         );

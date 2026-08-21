@@ -4,8 +4,8 @@
 //! wire unions, one JSON column each. A row whose JSON cannot be read back as a
 //! legal value is an error, never a silently-defaulted one.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_models::environments::EnvironmentSpec;
 use horsie_models::routines::RoutineSchedule;
 use sqlx::Row;
@@ -45,17 +45,17 @@ pub struct RoutineRow {
 pub struct RoutineStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl RoutineStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<RoutineRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM routines WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM routines WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -66,7 +66,7 @@ impl RoutineStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<RoutineRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM routines WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM routines WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -91,9 +91,9 @@ impl RoutineStore {
     pub async fn due_across_all_users(
         db: &Db,
         now_ms: u64,
-    ) -> Result<Vec<(UserId, RoutineRow)>, String> {
+    ) -> Result<Vec<(ProjectId, RoutineRow)>, String> {
         let rows = sqlx::query(&db.q(&format!(
-            "SELECT user_id, {COLS} FROM routines \
+            "SELECT project_id, {COLS} FROM routines \
              WHERE enabled = 1 AND next_run_at_ms IS NOT NULL AND next_run_at_ms <= ? \
              ORDER BY next_run_at_ms"
         )))
@@ -104,9 +104,9 @@ impl RoutineStore {
         rows.iter()
             .map(|r| {
                 let owner = r
-                    .try_get::<String, _>("user_id")
+                    .try_get::<String, _>("project_id")
                     .map_err(|e| e.to_string())?;
-                Ok((UserId::new(owner), row_to_routine(r)?))
+                Ok((ProjectId::new(owner), row_to_routine(r)?))
             })
             .collect()
     }
@@ -116,7 +116,7 @@ impl RoutineStore {
         let rows = sqlx::query(
             &self
                 .db
-                .q("SELECT name FROM routines WHERE user_id = ? AND agent = ? ORDER BY name"),
+                .q("SELECT name FROM routines WHERE project_id = ? AND agent = ? ORDER BY name"),
         )
         .bind(self.user.as_str())
         .bind(agent)
@@ -132,7 +132,7 @@ impl RoutineStore {
     /// would discard the existing routine).
     pub async fn insert(&self, row: &RoutineRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO routines (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO routines (project_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -161,7 +161,7 @@ impl RoutineStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE routines SET description = ?, agent = ?, environment = ?, prompt = ?, schedule = ?, \
              enabled = ?, next_run_at_ms = ?, updated_at = ? \
-             WHERE user_id = ? AND name = ?",
+             WHERE project_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.agent)
@@ -183,7 +183,7 @@ impl RoutineStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM routines WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM routines WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -200,7 +200,7 @@ impl RoutineStore {
         sqlx::query(
             &self
                 .db
-                .q("UPDATE routines SET next_run_at_ms = ? WHERE user_id = ? AND name = ?"),
+                .q("UPDATE routines SET next_run_at_ms = ? WHERE project_id = ? AND name = ?"),
         )
         .bind(next_run_at_ms.map(|v| v as i64))
         .bind(self.user.as_str())
@@ -226,7 +226,7 @@ impl RoutineStore {
         };
         sqlx::query(&self.db.q(
             "UPDATE routines SET last_run_at_ms = ?, last_session_id = ?, last_error = ? \
-             WHERE user_id = ? AND name = ?",
+             WHERE project_id = ? AND name = ?",
         ))
         .bind(at_ms as i64)
         .bind(session)
@@ -281,7 +281,7 @@ mod tests {
     async fn store() -> (RoutineStore, Db) {
         let db = crate::db::testing::db().await;
         (
-            RoutineStore::new(db.clone(), crate::auth::UserId::new("1")),
+            RoutineStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             db,
         )
     }
@@ -494,7 +494,7 @@ mod tests {
             s.insert(r).await.unwrap();
         }
 
-        let names = |rows: Vec<(crate::auth::UserId, RoutineRow)>| {
+        let names = |rows: Vec<(crate::projects::ProjectId, RoutineRow)>| {
             rows.into_iter().map(|(_, r)| r.name).collect::<Vec<_>>()
         };
         let due = async |at| RoutineStore::due_across_all_users(&db, at).await.unwrap();
@@ -602,7 +602,7 @@ mod tests {
 
         sqlx::query(
             "CREATE TABLE routines (
-                user_id         TEXT    NOT NULL,
+                project_id         TEXT    NOT NULL,
                 name            TEXT    NOT NULL,
                 description     TEXT    NOT NULL DEFAULT '',
                 agent           TEXT    NOT NULL,
@@ -617,14 +617,14 @@ mod tests {
                 last_error      TEXT,
                 created_at      TEXT    NOT NULL,
                 updated_at      TEXT    NOT NULL,
-                PRIMARY KEY (user_id, name)
+                PRIMARY KEY (project_id, name)
             )",
         )
         .execute(pool)
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO routines (user_id, name, description, agent, prompt, schedule_kind, \
+            "INSERT INTO routines (project_id, name, description, agent, prompt, schedule_kind, \
              interval_secs, at_ms, enabled, next_run_at_ms, created_at, updated_at) VALUES \
              ('1', 'manual', '', 'a', 'p', 'manual', NULL, NULL, 1, NULL, '1', '1'), \
              ('1', 'hourly', '', 'a', 'p', 'every', 3600, NULL, 1, 3601000, '1', '1'), \

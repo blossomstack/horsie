@@ -5,10 +5,9 @@
 //! password and no callback route exists to be reached from outside.
 
 use crate::config::chatgpt_login::{LoginError, PollOutcome};
-use crate::http::Scope;
 use crate::http::error::Api;
+use crate::http::{Scope, Scoped};
 use axum::Json;
-use axum::extract::Path;
 use axum::http::StatusCode;
 use serde::Serialize;
 
@@ -57,7 +56,7 @@ pub struct StatusBody {
 /// `POST /api/config/model-providers/:name/chatgpt/login`
 pub async fn start(
     Scope(state): Scope,
-    Path(name): Path<String>,
+    Scoped(name): Scoped<String>,
 ) -> Result<Json<StartedLoginBody>, Api> {
     let started = state.chatgpt.start(&name).await?;
     Ok(Json(StartedLoginBody {
@@ -68,7 +67,10 @@ pub async fn start(
 }
 
 /// `POST /api/config/model-providers/:name/chatgpt/poll`
-pub async fn poll(Scope(state): Scope, Path(name): Path<String>) -> Result<Json<PollBody>, Api> {
+pub async fn poll(
+    Scope(state): Scope,
+    Scoped(name): Scoped<String>,
+) -> Result<Json<PollBody>, Api> {
     Ok(Json(match state.chatgpt.poll(&name).await? {
         PollOutcome::Pending => PollBody {
             status: "pending",
@@ -84,7 +86,7 @@ pub async fn poll(Scope(state): Scope, Path(name): Path<String>) -> Result<Json<
 /// `GET /api/config/model-providers/:name/chatgpt`
 pub async fn status(
     Scope(state): Scope,
-    Path(name): Path<String>,
+    Scoped(name): Scoped<String>,
 ) -> Result<Json<StatusBody>, Api> {
     let account_id = state.chatgpt.account_id(&name).await?;
     Ok(Json(StatusBody {
@@ -94,7 +96,10 @@ pub async fn status(
 }
 
 /// `DELETE /api/config/model-providers/:name/chatgpt/login`
-pub async fn sign_out(Scope(state): Scope, Path(name): Path<String>) -> Result<StatusCode, Api> {
+pub async fn sign_out(
+    Scope(state): Scope,
+    Scoped(name): Scoped<String>,
+) -> Result<StatusCode, Api> {
     state.chatgpt.sign_out(&name).await?;
     Ok(StatusCode::NO_CONTENT)
 }

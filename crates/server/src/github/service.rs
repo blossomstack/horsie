@@ -4,6 +4,7 @@
 //! token to the caller except `mint_token_for`, whose scoped token goes only
 //! into a runtime's env.
 
+use crate::projects::ProjectId;
 use std::time::{Duration, Instant};
 
 use horsie_agentcore::Secret;
@@ -109,7 +110,7 @@ impl GithubService {
             .await?
             .filter(|a| !a.client_id.is_empty())
             .ok_or_else(|| "GitHub App is not configured".to_string())?;
-        let redirect_uri = callback_url(&app, request_base);
+        let redirect_uri = callback_url(&app, request_base, self.store.project());
         Ok(self.api.authorize_url(&app.client_id, &redirect_uri))
     }
 
@@ -125,7 +126,7 @@ impl GithubService {
             .client_secret
             .as_ref()
             .ok_or_else(|| "GitHub App client secret is not set".to_string())?;
-        let redirect_uri = callback_url(&app, request_base);
+        let redirect_uri = callback_url(&app, request_base, self.store.project());
         let exchanged = self
             .api
             .exchange_code(&app.client_id, client_secret.expose(), code, &redirect_uri)
@@ -318,14 +319,22 @@ fn needs_refresh(expires_at: Option<&str>) -> bool {
 
 /// The OAuth callback URL: a configured `callback_base` overrides the request
 /// host (behind a proxy the request host may be wrong).
-fn callback_url(app: &AppConfigRow, request_base: &str) -> String {
+/// The `redirect_uri` GitHub sends the browser back to.
+///
+/// Carries the project, because the route that receives it is inside one. That
+/// makes the URL vary per project, which matters for whoever registers the App:
+/// a GitHub App accepts several callback URLs, and each project you connect
+/// needs its own listed. `callback_base` still overrides the origin — it is
+/// there for a deployment behind a proxy whose public name differs from the
+/// Host header — but not the path, which is the server's to decide.
+fn callback_url(app: &AppConfigRow, request_base: &str, project: &ProjectId) -> String {
     let base = app
         .callback_base
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(request_base)
         .trim_end_matches('/');
-    format!("{base}/api/github/callback")
+    format!("{base}/api/p/{project}/github/callback")
 }
 
 /// The GitHub repository short name (used to scope an installation token) from

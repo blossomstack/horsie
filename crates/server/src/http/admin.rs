@@ -4,10 +4,9 @@
 //! localhost-bound deployment).
 
 use crate::config::model_cards::ModelCardError;
-use crate::http::Scope;
 use crate::http::error::Api;
+use crate::http::{Scope, Scoped};
 use axum::Json;
-use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::model_cards::{ModelCard, ModelCardInput, ModelCardUpdate};
 
@@ -51,7 +50,7 @@ pub async fn create_card(
 /// itself is immutable (rename = delete + create).
 pub async fn update_card(
     Scope(state): Scope,
-    Path(model_id): Path<String>,
+    Scoped(model_id): Scoped<String>,
     Json(update): Json<ModelCardUpdate>,
 ) -> Result<Json<ModelCard>, Api> {
     state
@@ -65,7 +64,7 @@ pub async fn update_card(
 /// `DELETE /api/admin/model-cards/:model_id` — 204 on success, 404 when absent.
 pub async fn delete_card(
     Scope(state): Scope,
-    Path(model_id): Path<String>,
+    Scoped(model_id): Scoped<String>,
 ) -> Result<StatusCode, Api> {
     state
         .model_cards

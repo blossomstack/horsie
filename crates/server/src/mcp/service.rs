@@ -257,10 +257,17 @@ impl McpService {
     }
 
     /// The OAuth callback URL for a server (mirrors the github convention).
+    ///
+    /// Carries the project for the same reason github's does: the route that
+    /// receives it is inside one. A server registered dynamically records this
+    /// URL as its `redirect_uris`, so the same MCP server configured in two
+    /// projects registers twice — which is correct, since the two hold
+    /// different credentials for it.
     fn callback_url(&self, name: &str, request_base: &str) -> String {
         format!(
-            "{}/api/mcp/servers/{}/oauth/callback",
+            "{}/api/p/{}/mcp/servers/{}/oauth/callback",
             request_base.trim_end_matches('/'),
+            self.store.project(),
             name
         )
     }
@@ -448,11 +455,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
         let github = Arc::new(GithubService::new(
-            GithubStore::new(pool.clone(), crate::auth::UserId::new("1")),
+            GithubStore::new(pool.clone(), crate::projects::ProjectId::new("1")),
             GithubApi::new(),
         ));
         (
-            McpService::new(McpStore::new(pool, crate::auth::UserId::new("1")), github),
+            McpService::new(
+                McpStore::new(pool, crate::projects::ProjectId::new("1")),
+                github,
+            ),
             tmp,
         )
     }

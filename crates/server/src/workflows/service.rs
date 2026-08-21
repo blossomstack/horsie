@@ -382,7 +382,7 @@ mod tests {
                     version: "test".into(),
                 },
             },
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )
         .await
         .unwrap();
@@ -411,7 +411,7 @@ mod tests {
             .await
             .unwrap();
         let agents = Arc::new(AgentService::new(
-            crate::agents::AgentStore::new(db.clone(), crate::auth::UserId::new("1")),
+            crate::agents::AgentStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             opened.store.clone(),
         ));
         for name in ["bug-triager", "coder", "writer"] {
@@ -432,7 +432,7 @@ mod tests {
                 .unwrap();
         }
         WorkflowService::new(
-            WorkflowStore::new(db, crate::auth::UserId::new("1")),
+            WorkflowStore::new(db, crate::projects::ProjectId::new("1")),
             agents,
         )
     }

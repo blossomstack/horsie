@@ -10,6 +10,7 @@ export * from "../generated/executor";
 export * from "../generated/github";
 export * from "../generated/hooks";
 export * from "../generated/mcp";
+export * from "../generated/projects";
 export * from "../generated/memory";
 export * from "../generated/model_cards";
 export * from "../generated/plugins";

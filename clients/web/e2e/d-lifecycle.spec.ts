@@ -2,7 +2,7 @@
 // switching, LLM-error surfacing, and journal replay across a reload.
 
 import { test, expect } from "./fixtures";
-import { createSession, sendMessage, expectStatus } from "./helpers";
+import { createSession, sendMessage, expectStatus, projectRoot } from "./helpers";
 
 test.beforeEach(async ({ mock }) => {
   await mock.reset();
@@ -38,7 +38,7 @@ test("D2: delete a session removes it and navigates away", async ({ page, appBas
   await page.getByTestId("session-delete").click();
   await page.getByTestId("confirm-accept").click();
 
-  await page.waitForURL((url) => url.pathname === "/");
+  await page.waitForURL((url) => url.pathname === projectRoot());
   await expect(
     page.locator(`[data-testid="session-row"][data-session-id="${id}"]`),
   ).toHaveCount(0);
@@ -154,6 +154,7 @@ test("D8: a session id the server will not serve says so instead of offering a c
   page,
   appBase,
   mock,
+  apiBase,
 }) => {
   // A dead id used to render the whole session chrome: the title fell back to
   // "New session", the status was unknown-and-therefore-sendable, and the feed
@@ -174,7 +175,7 @@ test("D8: a session id the server will not serve says so instead of offering a c
   await createSession(page, appBase);
   const id = await sendMessage(page, "about to vanish");
   await expect(page.getByTestId("assistant-text")).toContainText("ok");
-  const res = await page.request.delete(`${appBase}/api/sessions/${id}`);
+  const res = await page.request.delete(`${apiBase}/sessions/${id}`);
   expect(res.ok()).toBe(true);
 
   await page.goto(`${appBase}/sessions/${id}`);

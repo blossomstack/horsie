@@ -1,8 +1,8 @@
 //! REST handlers over the `SessionSupervisor`. Bodies are fluorite wire types;
 //! errors are the uniform `ApiError` envelope.
 
-use crate::http::Scope;
 use crate::http::error::Api;
+use crate::http::{Scope, Scoped};
 use crate::sessions::UserMessageError;
 use crate::sessions::builder::build_session_spec;
 use crate::sessions::session_actor::{AgentEntry, AskAnswer};
@@ -69,7 +69,7 @@ pub async fn health(
 ///
 /// The HTTP rendering of [`crate::control::ask`], which both surfaces share —
 /// including its 503 for a node that has stood down.
-pub(crate) async fn ask<T, F>(state: &crate::users::UserServices, make: F) -> Result<T, Api>
+pub(crate) async fn ask<T, F>(state: &crate::projects::ProjectServices, make: F) -> Result<T, Api>
 where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> SessionSupervisorCommand,
     T: Send + 'static,
@@ -227,7 +227,7 @@ pub struct AgentParam {
 /// anyway, and would leave a `tool_use` on the wire with no result.
 pub async fn answer_asks(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
     Query(agent): Query<AgentParam>,
     Json(req): Json<AnswerAsksRequest>,
 ) -> Result<impl IntoResponse, Api> {
@@ -285,7 +285,9 @@ fn to_wire_usage(u: crate::agent_loop::UsageTotal) -> UsageView {
 /// it accumulates; the log is `/history`.
 pub async fn get_agent(
     Scope(state): Scope,
-    Path((id, agent_id)): Path<(String, String)>,
+    // Two of this route's own, so the project is written out: `Path`
+    // deserializes a flat sequence and `Scoped` only drops one segment.
+    Path((_project, id, agent_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, Api> {
     let detail = ask(&state, |reply| SessionSupervisorCommand::AgentDetail {
         id: id.clone(),
@@ -343,7 +345,7 @@ pub async fn get_agent(
 /// holding a `202` holds a promise that survives a crash.
 pub async fn send_message(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
     Query(agent): Query<AgentParam>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<impl IntoResponse, Api> {
@@ -377,7 +379,9 @@ pub async fn send_message(
 /// record. A fork is a conversation somebody started and can be done with.
 pub async fn delete_fork(
     Scope(state): Scope,
-    Path((id, agent_id)): Path<(String, String)>,
+    // Two of this route's own, so the project is written out: `Path`
+    // deserializes a flat sequence and `Scoped` only drops one segment.
+    Path((_project, id, agent_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, Api> {
     let fork = uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such fork"))?;
     let result = ask(&state, |reply| SessionSupervisorCommand::DeleteFork {

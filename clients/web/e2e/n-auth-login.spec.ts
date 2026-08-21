@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { REPO_ROOT, WEB_DIR, freePort, waitFor } from "./harness";
+import { projectOf } from "./helpers";
 
 // A second server with authentication ON, on its own state/data dirs: the
 // shared one from global-setup runs auth-disabled for every other spec, which
@@ -82,12 +83,8 @@ test("an unauthenticated browser gets the login form, and the right password ope
 });
 
 test("signing out returns the login form", async ({ page }) => {
-  await page.goto(baseURL);
-  await page.getByTestId("login-password").fill(password);
-  await page.getByTestId("login-submit").click();
-  await expect(page.getByTestId("login-form")).toHaveCount(0);
-
-  await page.goto(`${baseURL}/settings/account`);
+  const project = await projectOf(page, baseURL, password);
+  await page.goto(`${baseURL}/p/${project}/settings/account`);
   await expect(page.getByTestId("account-must-change")).toBeVisible();
   await page.getByTestId("logout").click();
   await expect(page.getByTestId("login-form")).toBeVisible();

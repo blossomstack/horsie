@@ -5,13 +5,12 @@
 //! not, because they hang off a *session* rather than a workflow — they move
 //! when the session resource does.
 
-use super::Scope;
 use super::error::Api;
 use super::handlers;
+use super::{Scope, Scoped};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::workflow::{StepRun, StepStatus, WorkflowRunSpec, WorkflowRunState};
 use axum::Json;
-use axum::extract::Path;
 use axum::http::StatusCode;
 use horsie_models::workflow::{
     RunEdge, RunNode, StepCancelled, StepConcluded, StepFailed, StepRunStatus, StepRunView,
@@ -26,7 +25,7 @@ use std::collections::HashMap;
 /// draws the whole graph and lights up what happened.
 pub async fn get_run_graph(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
 ) -> Result<Json<WorkflowRunGraph>, Api> {
     let (rec, _) = handlers::ask(&state, |reply| SessionSupervisorCommand::Get {
         id: id.clone(),
@@ -58,7 +57,7 @@ pub async fn get_run_graph(
 /// POST /api/sessions/:id/workflow/retry — re-run one execution.
 pub async fn retry_step(
     Scope(state): Scope,
-    Path(id): Path<String>,
+    Scoped(id): Scoped<String>,
     Json(req): Json<WorkflowRetryRequest>,
 ) -> Result<StatusCode, Api> {
     handlers::ask(&state, |reply| SessionSupervisorCommand::RetryStep {

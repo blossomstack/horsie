@@ -238,6 +238,11 @@ pub mod environments {
 }
 
 #[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod projects {
+    include!(concat!(env!("OUT_DIR"), "/projects/mod.rs"));
+}
+
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
 pub mod routines {
     include!(concat!(env!("OUT_DIR"), "/routines/mod.rs"));
 }

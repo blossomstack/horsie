@@ -3,8 +3,8 @@
 //! The graph lives in one JSON column: a definition is only ever read and
 //! written whole, so rows per step would buy joins nobody performs.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_models::workflow::WorkflowStepDef;
 use sqlx::Row;
 use sqlx::any::AnyRow;
@@ -29,17 +29,17 @@ pub struct WorkflowRow {
 pub struct WorkflowStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl WorkflowStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<WorkflowRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM workflows WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM workflows WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -50,7 +50,7 @@ impl WorkflowStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<WorkflowRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM workflows WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM workflows WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -64,7 +64,7 @@ impl WorkflowStore {
     /// would discard the existing graph).
     pub async fn insert(&self, row: &WorkflowRow) -> Result<(), String> {
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO workflows (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO workflows (project_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -84,7 +84,7 @@ impl WorkflowStore {
     pub async fn replace(&self, row: &WorkflowRow) -> Result<bool, String> {
         let res = sqlx::query(&self.db.q(
             "UPDATE workflows SET description = ?, start = ?, steps = ?, max_steps = ?, \
-             updated_at = ? WHERE user_id = ? AND name = ?",
+             updated_at = ? WHERE project_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.start)
@@ -103,7 +103,7 @@ impl WorkflowStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM workflows WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM workflows WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -146,7 +146,7 @@ mod tests {
     async fn store() -> WorkflowStore {
         WorkflowStore::new(
             crate::db::testing::db().await,
-            crate::auth::UserId::new("1"),
+            crate::projects::ProjectId::new("1"),
         )
     }
 

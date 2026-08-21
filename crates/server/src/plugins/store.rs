@@ -2,8 +2,8 @@
 //! store's database. No secrets — bundles are public artifacts, so this is a
 //! plain metadata store (mirrors `github::store` without the `Secret` wrapping).
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::collections::HashSet;
@@ -44,16 +44,16 @@ pub struct PluginRow {
 pub struct PluginStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl PluginStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<PluginRow>, String> {
-        let statement = format!("SELECT {COLS} FROM plugins WHERE user_id = ? ORDER BY name");
+        let statement = format!("SELECT {COLS} FROM plugins WHERE project_id = ? ORDER BY name");
         let sql = self.db.q(&statement);
         let rows = sqlx::query(&sql)
             .bind(self.user.as_str())
@@ -64,7 +64,7 @@ impl PluginStore {
     }
 
     pub async fn get(&self, name: &str) -> Result<Option<PluginRow>, String> {
-        let statement = format!("SELECT {COLS} FROM plugins WHERE user_id = ? AND name = ?");
+        let statement = format!("SELECT {COLS} FROM plugins WHERE project_id = ? AND name = ?");
         let sql = self.db.q(&statement);
         let row = sqlx::query(&sql)
             .bind(self.user.as_str())
@@ -78,11 +78,11 @@ impl PluginStore {
     /// Insert or replace a bundle by name.
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
         let sql = self.db.q(
-            "INSERT INTO plugins (user_id, name, source_kind, source_url, source_ref, source_subpath, \
+            "INSERT INTO plugins (project_id, name, source_kind, source_url, source_ref, source_subpath, \
              version, description, catalog, has_hooks, artifact_hash, artifact_size, \
              enabled_default, marketplace, marketplace_entry, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(user_id, name) DO UPDATE SET source_kind = excluded.source_kind, \
+             ON CONFLICT(project_id, name) DO UPDATE SET source_kind = excluded.source_kind, \
              source_url = excluded.source_url, source_ref = excluded.source_ref, \
              source_subpath = excluded.source_subpath, \
              version = excluded.version, description = excluded.description, \
@@ -118,7 +118,7 @@ impl PluginStore {
     pub async fn set_default(&self, name: &str, enabled: bool) -> Result<(), String> {
         let sql = self
             .db
-            .q("UPDATE plugins SET enabled_default = ? WHERE user_id = ? AND name = ?");
+            .q("UPDATE plugins SET enabled_default = ? WHERE project_id = ? AND name = ?");
         sqlx::query(&sql)
             .bind(i64::from(enabled))
             .bind(self.user.as_str())
@@ -132,7 +132,7 @@ impl PluginStore {
     pub async fn delete(&self, name: &str) -> Result<(), String> {
         let sql = self
             .db
-            .q("DELETE FROM plugins WHERE user_id = ? AND name = ?");
+            .q("DELETE FROM plugins WHERE project_id = ? AND name = ?");
         sqlx::query(&sql)
             .bind(self.user.as_str())
             .bind(name)
@@ -146,7 +146,7 @@ impl PluginStore {
     /// mark them rather than offering them again.
     pub async fn installed_entries(&self, marketplace: &str) -> Result<HashSet<String>, String> {
         let sql = self.db.q("SELECT marketplace_entry FROM plugins \
-             WHERE user_id = ? AND marketplace = ? AND marketplace_entry IS NOT NULL");
+             WHERE project_id = ? AND marketplace = ? AND marketplace_entry IS NOT NULL");
         let rows = sqlx::query(&sql)
             .bind(self.user.as_str())
             .bind(marketplace)
@@ -257,7 +257,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_get_list_default_delete_roundtrip() {
         {
-            let s = PluginStore::new(testing::db().await, UserId::new("1"));
+            let s = PluginStore::new(testing::db().await, ProjectId::new("1"));
             assert!(s.list().await.unwrap().is_empty());
             s.upsert(&row("demo", "h1")).await.unwrap();
             let got = s.get("demo").await.unwrap().unwrap();
@@ -287,7 +287,7 @@ mod tests {
     /// entry it never came from.
     #[tokio::test]
     async fn provenance_survives_and_lists_installed_entries() {
-        let s = PluginStore::new(testing::db().await, UserId::new("1"));
+        let s = PluginStore::new(testing::db().await, ProjectId::new("1"));
         let mut r = row("api-security-testing", "h1");
         r.marketplace = Some("official".into());
         // The index's name for an entry is not always the name it installs as.

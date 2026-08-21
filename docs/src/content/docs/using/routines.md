@@ -102,7 +102,7 @@ webhook receiver triggers one:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $HORSIE_TOKEN" \
-  https://horsie.example.com/api/routines/nightly-triage/run
+  https://horsie.example.com/api/p/<project>/routines/nightly-triage/run
 ```
 
 **The timer**, if the routine has one and is not paused.

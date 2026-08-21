@@ -17,6 +17,7 @@
 //! command is addressed to it, and stops again once it has been idle for
 //! [`SupervisorConfig::idle_timeout`].
 
+use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::addressing::{SessionRef, SessionShard, SupervisorInbox, SupervisorRef};
 use crate::sessions::clock::{Clock, SystemClock};
 use crate::sessions::session_actor::{
@@ -27,7 +28,6 @@ use crate::sessions::session_actor::{
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
-use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
 use horsie_models::session::ForkView;
@@ -52,7 +52,7 @@ const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(10);
 /// type in the cluster, and the two are deliberately not the same constant: one
 /// is a durability contract and the other an address, and only one of them can
 /// be changed.
-const SUPERVISOR_KIND: &str = "session-supervisor";
+pub(crate) const SUPERVISOR_KIND: &str = "session-supervisor";
 
 /// How long a reader's poll parks before being answered with no news.
 ///
@@ -427,15 +427,15 @@ pub struct SessionSupervisorState {
 pub struct SessionSupervisor {
     /// The account this supervisor is the session list of. Its only job is to
     /// key the persistence id — every scoped *store* binds its own copy.
-    user: crate::auth::UserId,
+    user: crate::projects::ProjectId,
     /// Where this account's bundle is resolved from, and the reason a recipe
     /// can stay synchronous: building one is async, so it happens at recovery
     /// rather than at construction.
-    users: Weak<UserRegistry>,
+    projects: Weak<ProjectRegistry>,
     /// This account's bundle. `None` means exactly one thing — recovery has not
     /// run — and [`Self::services`] is what turns that into a fact the rest of
     /// the file does not have to restate.
-    services: Option<Arc<UserServices>>,
+    services: Option<Arc<ProjectServices>>,
     config: SupervisorConfig,
     /// When each loaded session was last spoken to, which is the whole of the
     /// idle policy. A session is in here for exactly as long as this supervisor
@@ -445,13 +445,13 @@ pub struct SessionSupervisor {
 
 impl SessionSupervisor {
     pub fn new(
-        user: crate::auth::UserId,
-        users: Weak<UserRegistry>,
+        user: crate::projects::ProjectId,
+        projects: Weak<ProjectRegistry>,
         config: SupervisorConfig,
     ) -> Self {
         Self {
             user,
-            users,
+            projects,
             services: None,
             config,
             last_activity: BTreeMap::new(),
@@ -467,7 +467,7 @@ impl SessionSupervisor {
         clippy::expect_used,
         reason = "recovery runs before any command, so this cannot be None"
     )]
-    fn services(&self) -> &Arc<UserServices> {
+    fn services(&self) -> &Arc<ProjectServices> {
         self.services
             .as_ref()
             .expect("a supervisor handles no command before recovery has resolved its account")
@@ -1294,7 +1294,7 @@ impl EventSourcedActor for SessionSupervisor {
         _state: &SessionSupervisorState,
         ctx: &mut ActorContext<SupervisorInbox>,
     ) {
-        self.services = resolve(&self.users, &self.user).await;
+        self.services = resolve(&self.projects, &self.user).await;
 
         if let Some(interval) = self.config.tick_interval {
             // This instance's own mailbox, not the shard reference: a tick sent
@@ -1810,7 +1810,7 @@ mod tests {
             .unwrap();
         let pid = PersistenceId::new(
             "session-supervisor",
-            crate::auth::UserId::bootstrap().as_str(),
+            crate::projects::ProjectId::generate().as_str(),
         );
         let before = journal_len(&journal, &pid).await;
 
@@ -2058,7 +2058,7 @@ mod tests {
         .await
         .unwrap();
         wait_for_forks(&sup, &id).await;
-        let pid = PersistenceId::new(SUPERVISOR_KIND, sup.account().as_str());
+        let pid = PersistenceId::new(SUPERVISOR_KIND, sup.project().as_str());
         let after_first = journal.last_seq(&pid).await.unwrap();
 
         sup.tell(SessionSupervisorCommand::ForksChanged {
@@ -2243,13 +2243,24 @@ mod tests {
     /// anything the original caller had would compile and then fail in exactly
     /// the situation clustering exists for.
     #[tokio::test]
-    async fn a_supervisor_can_be_built_from_its_account_id_alone() {
+    async fn a_supervisor_can_be_built_from_its_project_id_alone() {
         let f = fixture().await;
-        let account = crate::auth::UserId::new("some-account");
+        // A real project, because a bundle is what a recipe resolves and an id
+        // with no row resolves to nothing. That is the guard, not an obstacle:
+        // it is what stops a stranger's id from spawning a supervisor.
+        let account = f
+            .node
+            .projects
+            .shared()
+            .project_service
+            .create(&crate::auth::UserId::bootstrap(), "second")
+            .await
+            .expect("a second project is created")
+            .id;
         let reference = || {
             SupervisorRef::new(
                 f.node
-                    .users
+                    .projects
                     .shared()
                     .system
                     .shard_actor_of::<SupervisorShard>(),
@@ -2258,8 +2269,8 @@ mod tests {
             )
         };
 
-        // Nothing has built this account: the first command is what does, from
-        // the id in the command and the recipe this node registered.
+        // Nothing has built this project's bundle: the first command is what
+        // does, from the id in the command and the recipe this node registered.
         let id = create(&reference()).await;
 
         // A second, independently resolved reference names the same actor
@@ -2548,7 +2559,7 @@ mod tests {
             await_signal(&f.agent, &format!("hibernate:{id}")).await,
             "the session must actually unload for this test to mean anything"
         );
-        let cold = f.node.users.shared().system.hosted();
+        let cold = f.node.projects.shared().system.hosted();
 
         sup.ask(|reply| SessionSupervisorCommand::SetSessionTitle {
             id: id.clone(),
@@ -2560,7 +2571,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            f.node.users.shared().system.hosted(),
+            f.node.projects.shared().system.hosted(),
             cold,
             "renaming must not bring the session back"
         );

@@ -4,16 +4,20 @@
 //! running inside this server has no listener of its own, so its runtimes come
 //! back here: one port, and TLS and reverse proxies for free.
 //!
-//! The bearer is self-describing — `<account>.<runtime>.<tag>`, signed with the
-//! account's dial secret — so this handler knows which secret to check it
-//! against. A sandbox learning its own account id is not a disclosure: it is
-//! that account's own sandbox.
+//! The bearer is self-describing — `<project>.<runtime>.<tag>`, signed with the
+//! project's dial secret — so this handler knows which secret to check it
+//! against. A sandbox learning its own project id is not a disclosure: it is
+//! that project's own sandbox.
+//!
+//! This route stays *outside* the `/api/p/{project}` prefix for that reason:
+//! the token already names the scope, and a path segment beside it would be a
+//! second answer to one question, checkable only against the first.
 //!
 //! **The secret is per account, so verification is two-phase.** The account has
 //! to be read out of the token before the secret that validates it can be
 //! fetched, which means the id is *claimed* until the tag checks out. The only
 //! thing done with the claim is a bare settings read for that account's secret
-//! — deliberately not [`UserRegistry::get`], which builds the account when it
+//! — deliberately not [`ProjectRegistry::get`], which builds the account when it
 //! is absent, and would let any stranger's `Bearer whatever.x.y` spawn a
 //! supervisor, a dial secret and a sweep task per request. Nothing else touches
 //! the account until the tag has checked out.
@@ -24,7 +28,7 @@
 //! session credential — answered 401 to every dial-back on any deployment with
 //! authentication turned on.
 //!
-//! [`UserRegistry::get`]: crate::users::UserRegistry::get
+//! [`ProjectRegistry::get`]: crate::projects::ProjectRegistry::get
 //!
 //! A *raw* WebSocket upgrade rather than axum's `WebSocketUpgrade`, whose
 //! `WebSocket` type cannot be handed to `tokio_tungstenite` — the same
@@ -68,7 +72,7 @@ pub async fn runtime_connect(
     let Some(account) = horsie_support::dial_token::claimed_account(&token) else {
         return refused();
     };
-    let account = crate::auth::UserId::new(account);
+    let account = crate::projects::ProjectId::new(account);
 
     // An unknown account, an account that has never owned a runtime, and a bad
     // signature are all the same answer on the wire: none tells a stranger

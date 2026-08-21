@@ -8,9 +8,9 @@
 //! eight-character user code — so nothing needs a callback URL, an inbound
 //! route, or a proxy change.
 
-use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use horsie_llm_providers::responses::chatgpt::{
     ChatGptAuth, DeviceLogin, DeviceLoginPoll, poll_device_login, start_device_login,
 };
@@ -47,7 +47,7 @@ pub enum LoginError {
 pub struct ChatGptLoginService {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
     config: Arc<dyn ConfigStore>,
     http: reqwest::Client,
     auth: ChatGptAuth,
@@ -59,7 +59,7 @@ pub struct ChatGptLoginService {
 
 impl ChatGptLoginService {
     #[must_use]
-    pub fn new(db: Db, user: UserId, config: Arc<dyn ConfigStore>) -> Self {
+    pub fn new(db: Db, user: ProjectId, config: Arc<dyn ConfigStore>) -> Self {
         Self {
             db,
             user,
@@ -82,7 +82,7 @@ impl ChatGptLoginService {
         let row = sqlx::query(
             &self
                 .db
-                .q("SELECT kind FROM providers WHERE user_id = ? AND name = ?"),
+                .q("SELECT kind FROM providers WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(provider)
@@ -182,7 +182,7 @@ impl ChatGptLoginService {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"),
+                .q("DELETE FROM provider_oauth WHERE project_id = ? AND provider = ?"),
         )
         .bind(self.user.as_str())
         .bind(provider)
@@ -201,7 +201,7 @@ impl ChatGptLoginService {
         let row = sqlx::query(
             &self
                 .db
-                .q("SELECT account_id FROM provider_oauth WHERE user_id = ? AND provider = ?"),
+                .q("SELECT account_id FROM provider_oauth WHERE project_id = ? AND provider = ?"),
         )
         .bind(self.user.as_str())
         .bind(provider)
@@ -314,14 +314,14 @@ mod tests {
                     version: "test".into(),
                 },
             },
-            UserId::new("1"),
+            ProjectId::new("1"),
         )
         .await
         .unwrap();
 
         let issuer = mock_issuer(approve_after_first_poll).await;
         let service =
-            ChatGptLoginService::new(opened.db.clone(), UserId::new("1"), opened.store.clone())
+            ChatGptLoginService::new(opened.db.clone(), ProjectId::new("1"), opened.store.clone())
                 .with_issuer(issuer);
 
         Fixture {

@@ -6,8 +6,8 @@
 //! The relationship is enforced here: `create_memory` checks the space exists,
 //! and `delete_space` / `rename_space` fix up children inside a transaction.
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
@@ -40,11 +40,11 @@ pub struct MemoryStore {
     db: Db,
     /// Bound once, here, rather than passed per call: there is then no call
     /// site that *can* hand a method the wrong account.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl MemoryStore {
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
@@ -52,7 +52,7 @@ impl MemoryStore {
 
     pub async fn list_spaces(&self) -> Result<Vec<MemorySpaceRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {SPACE_COLS} FROM memory_spaces WHERE user_id = ? ORDER BY name"
+            "SELECT {SPACE_COLS} FROM memory_spaces WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -63,7 +63,7 @@ impl MemoryStore {
 
     pub async fn get_space(&self, name: &str) -> Result<Option<MemorySpaceRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {SPACE_COLS} FROM memory_spaces WHERE user_id = ? AND name = ?"
+            "SELECT {SPACE_COLS} FROM memory_spaces WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -77,7 +77,7 @@ impl MemoryStore {
     /// overwrite would discard the existing description).
     pub async fn create_space(&self, row: &MemorySpaceRow) -> Result<(), String> {
         sqlx::query(&self.db.q(
-            "INSERT INTO memory_spaces (user_id, name, description, created_at, updated_at) \
+            "INSERT INTO memory_spaces (project_id, name, description, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
@@ -102,7 +102,7 @@ impl MemoryStore {
             &self
                 .db
                 .q("UPDATE memory_spaces SET description = ?, updated_at = ? \
-                    WHERE user_id = ? AND name = ?"),
+                    WHERE project_id = ? AND name = ?"),
         )
         .bind(description)
         .bind(updated_at)
@@ -120,7 +120,7 @@ impl MemoryStore {
     pub async fn rename_space(&self, old: &str, new: &str, updated_at: &str) -> Result<(), String> {
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let existing = sqlx::query(&self.db.q(&format!(
-            "SELECT {SPACE_COLS} FROM memory_spaces WHERE user_id = ? AND name = ?"
+            "SELECT {SPACE_COLS} FROM memory_spaces WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(old)
@@ -134,7 +134,7 @@ impl MemoryStore {
             .ok_or_else(|| format!("unknown memory space '{old}'"))?;
 
         sqlx::query(&self.db.q(
-            "INSERT INTO memory_spaces (user_id, name, description, created_at, updated_at) \
+            "INSERT INTO memory_spaces (project_id, name, description, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
@@ -149,7 +149,7 @@ impl MemoryStore {
         sqlx::query(
             &self
                 .db
-                .q("UPDATE memories SET space = ? WHERE user_id = ? AND space = ?"),
+                .q("UPDATE memories SET space = ? WHERE project_id = ? AND space = ?"),
         )
         .bind(new)
         .bind(self.user.as_str())
@@ -161,7 +161,7 @@ impl MemoryStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM memory_spaces WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM memory_spaces WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(old)
@@ -179,7 +179,7 @@ impl MemoryStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM memories WHERE user_id = ? AND space = ?"),
+                .q("DELETE FROM memories WHERE project_id = ? AND space = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -189,7 +189,7 @@ impl MemoryStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM memory_spaces WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM memory_spaces WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -207,7 +207,7 @@ impl MemoryStore {
         let rows = match space {
             Some(s) => {
                 sqlx::query(&self.db.q(&format!(
-                    "SELECT {MEMORY_COLS} FROM memories WHERE user_id = ? AND space = ? ORDER BY space, name"
+                    "SELECT {MEMORY_COLS} FROM memories WHERE project_id = ? AND space = ? ORDER BY space, name"
                 )))
                 .bind(self.user.as_str())
                 .bind(s)
@@ -216,7 +216,7 @@ impl MemoryStore {
             }
             None => {
                 sqlx::query(&self.db.q(&format!(
-                    "SELECT {MEMORY_COLS} FROM memories WHERE user_id = ? ORDER BY space, name"
+                    "SELECT {MEMORY_COLS} FROM memories WHERE project_id = ? ORDER BY space, name"
                 )))
                 .bind(self.user.as_str())
                 .fetch_all(self.db.pool())
@@ -235,7 +235,7 @@ impl MemoryStore {
         }
         let placeholders = vec!["?"; spaces.len()].join(", ");
         let sql = format!(
-            "SELECT {MEMORY_COLS} FROM memories WHERE user_id = ? AND space IN ({placeholders}) \
+            "SELECT {MEMORY_COLS} FROM memories WHERE project_id = ? AND space IN ({placeholders}) \
              ORDER BY space, name"
         );
         let rewritten = self.db.q(&sql);
@@ -252,7 +252,7 @@ impl MemoryStore {
 
     pub async fn get_memory(&self, id: i64) -> Result<Option<MemoryRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {MEMORY_COLS} FROM memories WHERE user_id = ? AND id = ?"
+            "SELECT {MEMORY_COLS} FROM memories WHERE project_id = ? AND id = ?"
         )))
         .bind(self.user.as_str())
         .bind(id)
@@ -268,7 +268,7 @@ impl MemoryStore {
         name: &str,
     ) -> Result<Option<MemoryRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {MEMORY_COLS} FROM memories WHERE user_id = ? AND space = ? AND name = ?"
+            "SELECT {MEMORY_COLS} FROM memories WHERE project_id = ? AND space = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(space)
@@ -286,7 +286,7 @@ impl MemoryStore {
         let space = sqlx::query(
             &self
                 .db
-                .q("SELECT name FROM memory_spaces WHERE user_id = ? AND name = ?"),
+                .q("SELECT name FROM memory_spaces WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(&row.space)
@@ -299,7 +299,7 @@ impl MemoryStore {
         // `RETURNING id` rather than a follow-up `last_insert_id`: sqlx's Any
         // driver reports that as NULL on SQLite regardless of the backend.
         let inserted = sqlx::query(&self.db.q(
-            "INSERT INTO memories (user_id, space, name, description, content, created_at, updated_at) \
+            "INSERT INTO memories (project_id, space, name, description, content, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
         ))
         .bind(self.user.as_str())
@@ -331,7 +331,7 @@ impl MemoryStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE memories SET description = COALESCE(?, description), \
              content = COALESCE(?, content), updated_at = ? \
-             WHERE user_id = ? AND id = ?",
+             WHERE project_id = ? AND id = ?",
         ))
         .bind(description)
         .bind(content)
@@ -348,7 +348,7 @@ impl MemoryStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM memories WHERE user_id = ? AND id = ?"),
+                .q("DELETE FROM memories WHERE project_id = ? AND id = ?"),
         )
         .bind(self.user.as_str())
         .bind(id)
@@ -390,7 +390,7 @@ mod tests {
     async fn store() -> (MemoryStore, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
-        (MemoryStore::new(pool, UserId::new("1")), tmp)
+        (MemoryStore::new(pool, ProjectId::new("1")), tmp)
     }
 
     fn mem(space: &str, name: &str) -> MemoryRow {

@@ -1,7 +1,7 @@
 // Group J — the inline new-session draft flow: config toolbar, gating, and the
 // read-only config bar on an existing session.
 import { test, expect } from "./fixtures";
-import { createSession, sendMessage } from "./helpers";
+import { createSession, sendMessage, projectRoot } from "./helpers";
 
 test.beforeEach(async ({ mock }) => {
   await mock.reset();
@@ -10,7 +10,7 @@ test.beforeEach(async ({ mock }) => {
 test("J1: the New button opens an editable draft at /", async ({ page, appBase }) => {
   await page.goto(appBase);
   await page.getByTestId("new-session-button").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await page.waitForURL((url) => url.pathname === projectRoot());
   await expect(page.getByTestId("session-config-bar")).toHaveAttribute("data-mode", "draft");
   await expect(page.getByTestId("config-environment")).toBeVisible();
   await expect(page.getByTestId("config-model")).toBeVisible();
@@ -114,7 +114,7 @@ test("J8: the Tools picker collapses to groups, and read/write only filters", as
 }) => {
   await page.goto(appBase);
   await page.getByTestId("new-session-button").click();
-  await page.waitForURL((url) => url.pathname === "/");
+  await page.waitForURL((url) => url.pathname === projectRoot());
 
   const tools = page.getByTestId("config-tools");
   await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);

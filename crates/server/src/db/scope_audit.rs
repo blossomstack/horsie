@@ -1,5 +1,5 @@
 //! A test that reads this crate's own source and fails any SQL that touches a
-//! scoped table without naming `user_id`.
+//! scoped table without naming `project_id`.
 //!
 //! This is affordable only because two invariants already hold, both stated in
 //! [`crate::db`]: every statement is a literal written in this repo, and
@@ -12,30 +12,23 @@
 //! RLS could only ever be defence in depth on one deployment shape, never the
 //! mechanism. This is the mechanism.
 //!
-//! What it does *not* catch: a statement that names `user_id` but forgets to
+//! What it does *not* catch: a statement that names `project_id` but forgets to
 //! `.bind()` it. That is the isolation harness's job
-//! (`tests/tests/user_isolation.rs`), and it has caught one already.
+//! (`tests/tests/project_isolation.rs`), and it has caught one already.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-/// Every table with a `user_id` column, per `0024_user_scoping.sql`.
-const SCOPED: &[&str] = &[
-    "providers",
-    "models",
-    "settings",
-    "mcp_servers",
-    "plugins",
-    "memory_spaces",
-    "agents",
-    "routines",
-    "environments",
-    "workflows",
-    "provider_oauth",
-    "marketplaces",
-    "model_cards",
-    "memories",
-    "github_credentials",
-];
+/// Every table with a `project_id` column.
+///
+/// [`SCOPED_TABLES`] is the list, and `the_scoped_table_list_matches_the_schema`
+/// below is what stops it going stale: it reads the migrations and fails if the
+/// schema has a scoped table this does not. A hardcoded list in a drift test is
+/// blind to exactly the case the test exists for — and this one already was.
+/// `runtime_vendors` gained a scope in `0030` and was never audited, which is
+/// how it stayed unaudited for ten migrations.
+///
+/// [`SCOPED_TABLES`]: crate::projects::SCOPED_TABLES
+use crate::projects::SCOPED_TABLES as SCOPED;
 
 /// Statements that touch a scoped table and must *not* be scoped, each with the
 /// reason. Matched as a substring of the offending line, so the marker is
@@ -53,9 +46,14 @@ const ALLOWED: &[(&str, &str)] = &[
          bytes another account still references",
     ),
     (
-        "SELECT user_id, {COLS} FROM routines",
-        "one timer serves the deployment; each routine is then armed and run as \
-         whoever owns it, and the row carries its owner for exactly that",
+        "SELECT project_id, {COLS} FROM routines",
+        "one timer serves the deployment; each routine is then armed and run in \
+         the project that owns it, and the row carries that for exactly this",
+    ),
+    (
+        "DELETE FROM {table} WHERE project_id = ?",
+        "deleting a project clears every scoped table by name; the table comes \
+         from SCOPED_TABLES and the predicate is right there",
     ),
 ];
 
@@ -73,12 +71,12 @@ fn every_statement_against_a_scoped_table_names_the_scope() {
             if ALLOWED.iter().any(|(needle, _)| statement.contains(needle)) {
                 continue;
             }
-            if statement.contains("user_id") {
+            if statement.contains("project_id") {
                 continue;
             }
             if let Some(table) = SCOPED.iter().find(|t| mentions_table(&statement, t)) {
                 offences.push(format!(
-                    "{}:{line_no}: touches `{table}` without `user_id`\n    {statement}",
+                    "{}:{line_no}: touches `{table}` without `project_id`\n    {statement}",
                     file.display()
                 ));
             }
@@ -177,6 +175,98 @@ fn mentions_table(statement: &str, table: &str) -> bool {
     statement
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .any(|w| w == table)
+}
+
+/// The list this file audits against must be the schema's list.
+///
+/// Asked of a *migrated database* rather than parsed out of the migration
+/// files, for the reason 0024 learned the hard way: a constraint or a column
+/// added by a later `ALTER` is invisible to anyone reading the migration that
+/// created the table. The schema is the only thing that knows the schema.
+///
+/// SQLite only, deliberately. `db::migrations_are_in_parity` already pins that
+/// the two dialects have the same migration set, so what is left here is a
+/// question about shape, and asking it twice would buy nothing for the cost of
+/// a second dialect's catalogue query.
+#[tokio::test]
+async fn the_scoped_table_list_matches_the_schema() {
+    let db = crate::db::testing::sqlite().await;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+
+    let mut scoped = std::collections::BTreeSet::new();
+    for name in names {
+        // The name comes from the catalogue, never from input, and PRAGMA takes
+        // no bind parameters.
+        let columns: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT name FROM pragma_table_info('{name}')"
+        )))
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        if columns.iter().any(|c| c == "project_id") {
+            scoped.insert(name);
+        }
+    }
+
+    let declared: std::collections::BTreeSet<String> =
+        SCOPED.iter().map(|t| (*t).to_string()).collect();
+    assert_eq!(
+        scoped,
+        declared,
+        "the schema and `projects::SCOPED_TABLES` disagree.\n\
+         In the schema only: {:?}\n\
+         In the list only:   {:?}\n\
+         A table missing from the list is unaudited SQL *and* rows that outlive \
+         the project they belonged to.",
+        scoped.difference(&declared).collect::<Vec<_>>(),
+        declared.difference(&scoped).collect::<Vec<_>>(),
+    );
+}
+
+/// Nothing outside `projects` may still be keyed by an account.
+///
+/// The other half of the split: `project_id` is the scope and `user_id` is an
+/// identity, so a `user_id` on a table that is neither `projects` nor an auth
+/// table means a resource escaped the move — and it would be *silently*
+/// unreachable rather than loud, because every store now binds the other
+/// column.
+#[tokio::test]
+async fn only_identity_tables_are_still_keyed_by_a_user() {
+    const IDENTITY: &[&str] = &["projects", "auth_users", "auth_tokens", "auth_device_codes"];
+
+    let db = crate::db::testing::sqlite().await;
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+
+    let mut offenders = Vec::new();
+    for name in names {
+        if IDENTITY.contains(&name.as_str()) {
+            continue;
+        }
+        // The name comes from the catalogue, never from input.
+        let columns: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT name FROM pragma_table_info('{name}')"
+        )))
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        if columns.iter().any(|c| c == "user_id") {
+            offenders.push(name);
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these tables are still scoped by account rather than by project: {offenders:?}"
+    );
 }
 
 #[cfg(test)]

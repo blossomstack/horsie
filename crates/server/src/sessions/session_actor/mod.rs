@@ -52,6 +52,7 @@ use turns::Turns;
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
+use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
     orchestrator::{AgentAction, Delivery},
@@ -59,7 +60,6 @@ use crate::sessions::{
     spec::{AgentSettings, ServerDeps, SessionKind, SessionSpec, SessionStatus},
     supervisor::{ForkRow, SessionSupervisorCommand},
 };
-use crate::users::{UserRegistry, UserServices, resolve};
 use async_trait::async_trait;
 use context::{SessionAgentKind, SessionContextProvider};
 use horsie_actor::{ActorContext, ActorRef, CommandEffect, EventSourcedActor, PersistenceId};
@@ -169,16 +169,16 @@ pub struct SessionActor {
     /// keyed by its uuid alone — but a recipe is handed it, because resolving
     /// the account's wiring is the one thing a session cannot do from its own
     /// id.
-    account: crate::auth::UserId,
+    account: crate::projects::ProjectId,
     /// What this session is. `None` until its own log says, or until the
     /// `RecordSpec` that brought this actor into being is handled — which is
     /// the first thing in the mailbox of a session that has no log yet.
     spec: Option<SessionSpec>,
     /// Where this account's bundle is resolved from. A shard recipe is
     /// synchronous, so nothing below can be handed in at construction.
-    users: Weak<UserRegistry>,
+    projects: Weak<ProjectRegistry>,
     /// This account's bundle, resolved at recovery. See [`Self::services`].
-    services: Option<Arc<UserServices>>,
+    services: Option<Arc<ProjectServices>>,
     /// This session's supervisor, given at construction.
     ///
     /// A *name* with a warm cache rather than a handle to one mailbox, so a
@@ -204,13 +204,13 @@ impl SessionActor {
     pub fn new(
         entity: SessionEntityId,
         supervisor: SupervisorRef,
-        users: Weak<UserRegistry>,
+        projects: Weak<ProjectRegistry>,
     ) -> Self {
         Self {
             id: entity.session,
-            account: entity.account,
+            account: entity.project,
             spec: None,
-            users,
+            projects,
             services: None,
             supervisor,
             agents: SessionAgents::new(entity.session),
@@ -237,7 +237,7 @@ impl SessionActor {
         clippy::expect_used,
         reason = "recovery runs before any command, so this cannot be None"
     )]
-    fn services(&self) -> &Arc<UserServices> {
+    fn services(&self) -> &Arc<ProjectServices> {
         self.services
             .as_ref()
             .expect("a session handles no command before recovery has resolved its account")
@@ -1194,7 +1194,7 @@ impl EventSourcedActor for SessionActor {
         state: &SessionState,
         ctx: &mut ActorContext<SessionInbox>,
     ) {
-        self.services = resolve(&self.users, &self.account).await;
+        self.services = resolve(&self.projects, &self.account).await;
 
         // The journal is the truth about this session, and a session with
         // nothing in it has not been created yet: the `RecordSpec` that brought

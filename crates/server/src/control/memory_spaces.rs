@@ -6,7 +6,7 @@
 //! to guess which one a session had.
 
 use crate::control::{ControlError, Expose, Method, NoInput, Operation, Resource, op};
-use crate::users::UserServices;
+use crate::projects::ProjectServices;
 use horsie_models::memory::{MemorySpaceCreateInput, MemorySpaceUpdateInput};
 use std::sync::Arc;
 
@@ -43,21 +43,21 @@ impl Resource for MemorySpaces {
             op(
                 "list",
                 Method::Get,
-                "/api/memory-spaces",
+                "/memory-spaces",
                 "Every memory space, with how many memories each holds.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, _i: NoInput| async move {
+                |s: Arc<ProjectServices>, _i: NoInput| async move {
                     s.memory.list_spaces().await.map_err(ControlError::Internal)
                 },
             ),
             op(
                 "create",
                 Method::Post,
-                "/api/memory-spaces",
+                "/memory-spaces",
                 "Create a memory space. The name must be a slug: lowercase letters, \
              digits, '.', '_' and '-', starting with a letter or digit.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: MemorySpaceCreateInput| async move {
+                |s: Arc<ProjectServices>, i: MemorySpaceCreateInput| async move {
                     s.memory
                         .create_space(i)
                         .await
@@ -68,11 +68,11 @@ impl Resource for MemorySpaces {
             op(
                 "update",
                 Method::Put,
-                "/api/memory-spaces/{space}",
+                "/memory-spaces/{space}",
                 "Rename a space and/or change its description. Omitted fields are \
              left as they are; a rename carries the space's memories across.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: UpdateSpace| async move {
+                |s: Arc<ProjectServices>, i: UpdateSpace| async move {
                     s.memory
                         .update_space(&i.space, i.changes)
                         .await
@@ -82,10 +82,10 @@ impl Resource for MemorySpaces {
             op(
                 "delete",
                 Method::Delete,
-                "/api/memory-spaces/{space}",
+                "/memory-spaces/{space}",
                 "Delete a memory space and every memory in it.",
                 Expose::ApiAndTool,
-                |s: Arc<UserServices>, i: SpaceRef| async move {
+                |s: Arc<ProjectServices>, i: SpaceRef| async move {
                     s.memory
                         .delete_space(&i.space)
                         .await

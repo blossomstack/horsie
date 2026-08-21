@@ -6,10 +6,10 @@
 //! an operation is handed only its input.
 
 use crate::github::urlencode;
-use crate::http::Scope;
 use crate::http::error::Api;
+use crate::http::{Scope, Scoped};
 use axum::Json;
-use axum::extract::{Path, Query};
+use axum::extract::Query;
 use axum::http::HeaderMap;
 use axum::response::Redirect;
 use horsie_models::mcp::McpAuthorizeUrl;
@@ -20,7 +20,7 @@ use serde::Deserialize;
 /// the browser to navigate to. Non-oauth servers use `/test` instead.
 pub async fn connect(
     Scope(state): Scope,
-    Path(name): Path<String>,
+    Scoped(name): Scoped<String>,
     headers: HeaderMap,
 ) -> Result<Json<McpAuthorizeUrl>, Api> {
     let base = crate::http::request_base(&headers);
@@ -36,11 +36,12 @@ pub async fn connect(
 /// back into the Settings UI with the outcome (mirrors the github callback).
 pub async fn oauth_callback(
     Scope(state): Scope,
-    Path(name): Path<String>,
+    Scoped(name): Scoped<String>,
     Query(q): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
 ) -> Redirect {
     let base = crate::http::request_base(&headers);
+    let page = crate::http::github::settings_page(&state.project);
     let dest = match (q.code, q.state) {
         (Some(code), Some(st)) => {
             match state
@@ -48,21 +49,12 @@ pub async fn oauth_callback(
                 .handle_oauth_callback(&name, &code, &st, &base)
                 .await
             {
-                Ok(()) => format!(
-                    "{}?mcp_connected={}",
-                    crate::http::github::SETTINGS_PAGE,
-                    urlencode(&name)
-                ),
-                Err(e) => format!(
-                    "{}?mcp_error={}",
-                    crate::http::github::SETTINGS_PAGE,
-                    urlencode(&e)
-                ),
+                Ok(()) => format!("{page}?mcp_connected={}", urlencode(&name)),
+                Err(e) => format!("{page}?mcp_error={}", urlencode(&e)),
             }
         }
         _ => format!(
-            "{}?mcp_error={}",
-            crate::http::github::SETTINGS_PAGE,
+            "{page}?mcp_error={}",
             urlencode(
                 &q.error_description
                     .or(q.error)

@@ -20,9 +20,9 @@
 //! [`RuntimeVendorRegistry`]: crate::runtime_vendor::RuntimeVendorRegistry
 //! [`RuntimeVendorConfigService`]: crate::runtime_vendor::RuntimeVendorConfigService
 
-use crate::auth::UserId;
 use crate::config::ConfigStore;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use crate::sessions::spec::{RuntimeVendorMap, SharedProviderRegistry};
 use async_trait::async_trait;
 use horsie_agentcore::{LlmProvider, Secret, ThinkingDialect, ThinkingEffort};
@@ -95,7 +95,7 @@ pub struct DbConfigStore {
     db: Db,
     /// Bound once, here, rather than passed per call: there is then no call
     /// site that *can* hand a method the wrong account.
-    user: UserId,
+    user: ProjectId,
     registry: SharedProviderRegistry,
     /// The name new sessions prefer. A preference, not a validated reference:
     /// the agent that answers to it may connect long after boot.
@@ -109,7 +109,11 @@ pub struct DbConfigStore {
 impl DbConfigStore {
     /// Open (creating if absent) the database, run migrations, and build the
     /// live registry + vendors from it.
-    pub async fn open(db_url: &str, deps: StoreDeps, user: UserId) -> Result<OpenedConfig, String> {
+    pub async fn open(
+        db_url: &str,
+        deps: StoreDeps,
+        user: ProjectId,
+    ) -> Result<OpenedConfig, String> {
         Self::open_with(db_url, DEFAULT_MAX_CONNECTIONS, deps, user).await
     }
 
@@ -118,7 +122,7 @@ impl DbConfigStore {
         db_url: &str,
         max_connections: u32,
         deps: StoreDeps,
-        user: UserId,
+        user: ProjectId,
     ) -> Result<OpenedConfig, String> {
         Self::open_on(Db::open(db_url, max_connections).await?, deps, user).await
     }
@@ -127,7 +131,7 @@ impl DbConfigStore {
     ///
     /// The seam tests use, so they exercise whichever backend the run selected
     /// rather than a hardcoded SQLite URL.
-    pub async fn open_on(db: Db, deps: StoreDeps, user: UserId) -> Result<OpenedConfig, String> {
+    pub async fn open_on(db: Db, deps: StoreDeps, user: ProjectId) -> Result<OpenedConfig, String> {
         let provs = read_providers(&db, db.pool(), &user)
             .await
             .map_err(|e| e.to_string())?;
@@ -269,8 +273,8 @@ impl ConfigStore for DbConfigStore {
 
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         sqlx::query(&self.db.q(
-            "INSERT INTO settings (user_id, key, value) VALUES (?, 'default_vendor', ?) \
-             ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO settings (project_id, key, value) VALUES (?, 'default_vendor', ?) \
+             ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value",
         ))
         .bind(self.user.as_str())
         .bind(vendor)
@@ -291,7 +295,7 @@ impl ConfigStore for DbConfigStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM settings WHERE user_id = ? AND key = 'default_vendor'"),
+                .q("DELETE FROM settings WHERE project_id = ? AND key = 'default_vendor'"),
         )
         .bind(self.user.as_str())
         .execute(&mut *tx)
@@ -342,7 +346,7 @@ impl ConfigStore for DbConfigStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM providers WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM providers WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(&name)
@@ -351,7 +355,7 @@ impl ConfigStore for DbConfigStore {
         .map_err(|e| e.to_string())?;
 
         sqlx::query(&self.db.q(
-            "INSERT INTO providers (user_id, name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO providers (project_id, name, kind, base_url, api_key, keep_thinking_signature) VALUES (?, ?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
         .bind(&name)
@@ -392,7 +396,7 @@ impl ConfigStore for DbConfigStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM models WHERE user_id = ? AND provider = ?"),
+                .q("DELETE FROM models WHERE project_id = ? AND provider = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -403,7 +407,7 @@ impl ConfigStore for DbConfigStore {
         let affected = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM providers WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM providers WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -431,7 +435,7 @@ impl ConfigStore for DbConfigStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM models WHERE user_id = ? AND alias = ?"),
+                .q("DELETE FROM models WHERE project_id = ? AND alias = ?"),
         )
         .bind(self.user.as_str())
         .bind(&alias)
@@ -440,7 +444,7 @@ impl ConfigStore for DbConfigStore {
         .map_err(|e| e.to_string())?;
 
         sqlx::query(&self.db.q(
-            "INSERT INTO models (user_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO models (project_id, alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ))
         .bind(self.user.as_str())
         .bind(&alias)
@@ -476,7 +480,7 @@ impl ConfigStore for DbConfigStore {
         let affected = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM models WHERE user_id = ? AND alias = ?"),
+                .q("DELETE FROM models WHERE project_id = ? AND alias = ?"),
         )
         .bind(self.user.as_str())
         .bind(alias)
@@ -738,7 +742,7 @@ struct DbTokenStore {
     db: Db,
     /// Whose credential this is. A refreshed token must land back in the
     /// account it was refreshed for.
-    user: UserId,
+    user: ProjectId,
     provider: String,
 }
 
@@ -758,7 +762,7 @@ impl TokenStore for DbTokenStore {
 }
 
 /// The credential store one ChatGPT provider refreshes through.
-pub(crate) fn token_store(db: &Db, user: &UserId, provider: &str) -> Arc<dyn TokenStore> {
+pub(crate) fn token_store(db: &Db, user: &ProjectId, provider: &str) -> Arc<dyn TokenStore> {
     Arc::new(DbTokenStore {
         db: db.clone(),
         user: user.clone(),
@@ -769,7 +773,7 @@ pub(crate) fn token_store(db: &Db, user: &UserId, provider: &str) -> Arc<dyn Tok
 /// Upsert one provider's credential.
 pub(crate) async fn write_provider_oauth(
     db: &Db,
-    user: &UserId,
+    user: &ProjectId,
     provider: &str,
     tokens: &StoredTokens,
 ) -> Result<(), sqlx::Error> {
@@ -781,9 +785,9 @@ pub(crate) async fn write_provider_oauth(
     )
     .unwrap_or(i64::MAX);
     sqlx::query(&db.q(
-        "INSERT INTO provider_oauth (user_id, provider, access, refresh, expires_at, account_id, updated_at) \
+        "INSERT INTO provider_oauth (project_id, provider, access, refresh, expires_at, account_id, updated_at) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
-         ON CONFLICT(user_id, provider) DO UPDATE SET access = excluded.access, \
+         ON CONFLICT(project_id, provider) DO UPDATE SET access = excluded.access, \
          refresh = excluded.refresh, expires_at = excluded.expires_at, \
          account_id = excluded.account_id, updated_at = excluded.updated_at",
     ))
@@ -831,12 +835,12 @@ fn stored_tokens_from_row(row: &sqlx::any::AnyRow) -> Result<StoredTokens, sqlx:
 /// One provider's credential, as the refresh path re-reads it.
 async fn read_one_provider_oauth(
     db: &Db,
-    user: &UserId,
+    user: &ProjectId,
     provider: &str,
 ) -> Result<Option<StoredTokens>, sqlx::Error> {
     let sql = db.q(
         "SELECT access, refresh, expires_at, account_id FROM provider_oauth \
-         WHERE user_id = ? AND provider = ?",
+         WHERE project_id = ? AND provider = ?",
     );
     sqlx::query(&sql)
         .bind(user.as_str())
@@ -851,7 +855,7 @@ async fn read_one_provider_oauth(
 /// Build the live `ChatGptTokens` for every stored credential.
 fn live_chatgpt_tokens(
     db: &Db,
-    user: &UserId,
+    user: &ProjectId,
     stored: HashMap<String, StoredTokens>,
 ) -> HashMap<String, Arc<ChatGptTokens>> {
     stored
@@ -945,10 +949,10 @@ fn validate_model(input: &ModelInput) -> Result<String, String> {
 async fn delete_provider_oauth(
     db: &Db,
     tx: &mut sqlx::AnyConnection,
-    user: &UserId,
+    user: &ProjectId,
     name: &str,
 ) -> Result<(), String> {
-    sqlx::query(&db.q("DELETE FROM provider_oauth WHERE user_id = ? AND provider = ?"))
+    sqlx::query(&db.q("DELETE FROM provider_oauth WHERE project_id = ? AND provider = ?"))
         .bind(user.as_str())
         .bind(name)
         .execute(tx)
@@ -1046,14 +1050,14 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 async fn read_provider_oauth<'e, E>(
     db: &Db,
     ex: E,
-    user: &UserId,
+    user: &ProjectId,
 ) -> Result<HashMap<String, StoredTokens>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
         "SELECT provider, access, refresh, expires_at, account_id FROM provider_oauth \
-         WHERE user_id = ?",
+         WHERE project_id = ?",
     );
     let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = HashMap::with_capacity(rows.len());
@@ -1069,14 +1073,14 @@ where
 async fn read_providers<'e, E>(
     db: &Db,
     ex: E,
-    user: &UserId,
+    user: &ProjectId,
 ) -> Result<Vec<ProviderRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
         "SELECT name, kind, base_url, api_key, keep_thinking_signature FROM providers \
-         WHERE user_id = ? ORDER BY name",
+         WHERE project_id = ? ORDER BY name",
     );
     let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1092,12 +1096,12 @@ where
     Ok(out)
 }
 
-async fn read_models<'e, E>(db: &Db, ex: E, user: &UserId) -> Result<Vec<ModelRow>, sqlx::Error>
+async fn read_models<'e, E>(db: &Db, ex: E, user: &ProjectId) -> Result<Vec<ModelRow>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
     let sql = db.q(
-        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models WHERE user_id = ? ORDER BY alias",
+        "SELECT alias, provider, model_id, max_tokens, context_window, thinking_efforts, thinking_effort, thinking_dialect, forced_tools_disable_thinking FROM models WHERE project_id = ? ORDER BY alias",
     );
     let rows = sqlx::query(&sql).bind(user.as_str()).fetch_all(ex).await?;
     let mut out = Vec::with_capacity(rows.len());
@@ -1124,7 +1128,7 @@ where
 /// absent, and a deferred transaction that upgrades to a write that late loses
 /// to any writer that committed in between — SQLite answers `database is
 /// locked` and no busy timeout retries it.
-async fn load_or_create_dial_secret(db: &Db, user: &UserId) -> Result<Arc<Vec<u8>>, String> {
+async fn load_or_create_dial_secret(db: &Db, user: &ProjectId) -> Result<Arc<Vec<u8>>, String> {
     let mut tx = db.begin_write().await.map_err(|e| e.to_string())?;
     if let Some(existing) = read_setting(db, &mut *tx, user, RUNTIME_DIAL_SECRET_KEY)
         .await
@@ -1137,8 +1141,8 @@ async fn load_or_create_dial_secret(db: &Db, user: &UserId) -> Result<Arc<Vec<u8
     let mut secret = vec![0u8; 32];
     rand::fill(&mut secret[..]);
     let sql = db.q(
-        "INSERT INTO settings (user_id, key, value) VALUES (?, ?, ?) \
-         ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value",
+        "INSERT INTO settings (project_id, key, value) VALUES (?, ?, ?) \
+         ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value",
     );
     sqlx::query(&sql)
         .bind(user.as_str())
@@ -1166,7 +1170,7 @@ const RUNTIME_DIAL_SECRET_KEY: &str = "runtime_dial_secret";
 ///
 /// `None` means "no such account, or one that has never had a runtime", and
 /// both answer the caller the same way: refuse.
-pub async fn dial_secret_of(db: &Db, user: &UserId) -> Result<Option<Arc<Vec<u8>>>, String> {
+pub async fn dial_secret_of(db: &Db, user: &ProjectId) -> Result<Option<Arc<Vec<u8>>>, String> {
     let Some(hex) = read_setting(db, db.pool(), user, RUNTIME_DIAL_SECRET_KEY)
         .await
         .map_err(|e| e.to_string())?
@@ -1182,13 +1186,13 @@ pub async fn dial_secret_of(db: &Db, user: &UserId) -> Result<Option<Arc<Vec<u8>
 async fn read_setting<'e, E>(
     db: &Db,
     ex: E,
-    user: &UserId,
+    user: &ProjectId,
     key: &str,
 ) -> Result<Option<String>, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
 {
-    let sql = db.q("SELECT value FROM settings WHERE user_id = ? AND key = ?");
+    let sql = db.q("SELECT value FROM settings WHERE project_id = ? AND key = ?");
     let row = sqlx::query(&sql)
         .bind(user.as_str())
         .bind(key)
@@ -1228,7 +1232,7 @@ mod tests {
         DbConfigStore::open_on(
             crate::db::testing::db().await,
             StoreDeps { info: info() },
-            UserId::new("1"),
+            ProjectId::new("1"),
         )
         .await
         .unwrap()
@@ -1367,7 +1371,7 @@ mod tests {
 
         write_provider_oauth(
             &o.db,
-            &UserId::new("1"),
+            &ProjectId::new("1"),
             "p",
             &StoredTokens {
                 access_token: "a".into(),
@@ -1450,7 +1454,7 @@ mod tests {
 
         write_provider_oauth(
             &o.db,
-            &UserId::new("1"),
+            &ProjectId::new("1"),
             "p",
             &StoredTokens {
                 access_token: "a".into(),
@@ -1473,7 +1477,7 @@ mod tests {
             .expect("update ok");
         assert!(!view.providers[0].has_credential);
         assert!(
-            read_provider_oauth(&o.db, o.db.pool(), &UserId::new("1"))
+            read_provider_oauth(&o.db, o.db.pool(), &ProjectId::new("1"))
                 .await
                 .unwrap()
                 .is_empty(),
@@ -1493,7 +1497,7 @@ mod tests {
             .expect("update ok");
         write_provider_oauth(
             &o.db,
-            &UserId::new("1"),
+            &ProjectId::new("1"),
             "p",
             &StoredTokens {
                 access_token: "a".into(),
@@ -1511,7 +1515,7 @@ mod tests {
             .await
             .expect("provider deleted");
 
-        let left = read_provider_oauth(&o.db, o.db.pool(), &UserId::new("1"))
+        let left = read_provider_oauth(&o.db, o.db.pool(), &ProjectId::new("1"))
             .await
             .unwrap();
         assert!(
@@ -1966,7 +1970,7 @@ mod tests {
             .unwrap();
         write_provider_oauth(
             &o.db,
-            &UserId::new("1"),
+            &ProjectId::new("1"),
             "p",
             &StoredTokens {
                 access_token: "a".into(),

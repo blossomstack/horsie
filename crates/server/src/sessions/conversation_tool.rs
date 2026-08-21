@@ -199,7 +199,7 @@ mod tests {
                     seen: Arc::clone(&seen),
                 },
             ),
-            crate::auth::UserId::bootstrap(),
+            crate::projects::ProjectId::generate(),
             Uuid::new_v4(),
             None,
         );

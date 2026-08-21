@@ -6,12 +6,12 @@
 //! The real composition root, on a throwaway deployment.
 //!
 //! Every suite that drives horsie over HTTP needs the same thing: a `Shared`, a
-//! `UserRegistry`, an `AuthService`, and an `AppState` wired together the way
+//! `ProjectRegistry`, an `AuthService`, and an `AppState` wired together the way
 //! `boot` wires them. Four suites used to assemble that by hand, which meant
 //! four places to update when the root gained a field and four slightly
 //! different deployments to reason about when one of them failed alone.
 //!
-//! Deliberately built *through* [`UserRegistry`] rather than by assembling a
+//! Deliberately built *through* [`ProjectRegistry`] rather than by assembling a
 //! bundle directly: what these tests exercise is what a request actually
 //! resolves, including the lazy per-account build.
 
@@ -19,38 +19,66 @@ use crate::auth::{AuthDeps, AuthMode, AuthService, AuthStore, UserId};
 use crate::db::Db;
 use crate::http::AppState;
 use crate::plugins::ArtifactStore;
+use crate::projects::{
+    ProjectId, ProjectRegistry, ProjectServices, Shared, register_session_shards,
+};
 use crate::sessions::supervisor::SupervisorConfig;
-use crate::users::{Shared, UserRegistry, UserServices, register_session_shards};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// A built deployment: the state a request resolves through, and the account it
-/// resolves to when nothing else says otherwise.
+/// A built deployment: the state a request resolves through, the account it
+/// resolves to when nothing else says otherwise, and that account's default
+/// project.
 pub struct TestState {
     pub state: AppState,
     /// The bootstrap account. Unauthenticated requests resolve here, and it is
     /// the one a single-account suite means by "the user".
-    pub account: UserId,
+    pub user: UserId,
+    /// [`Self::user`]'s default project: the scope every URL in a
+    /// single-project suite carries, and what [`Self::url`] builds a path from.
+    pub account: ProjectId,
     /// The password `bootstrap` generated, for a suite that logs in with it.
     /// `None` if the database already held an account.
     pub initial_password: Option<String>,
 }
 
 impl TestState {
+    /// The path a request for [`Self::account`] goes to.
+    ///
+    /// `path` is relative to the project, exactly as `http::scoped` writes it:
+    /// `state.url("/sessions")`. A suite that hardcoded `/api/sessions` would
+    /// still compile and would 404, which is why this exists.
+    #[must_use]
+    pub fn url(&self, path: &str) -> String {
+        format!("/api/p/{}{path}", self.account)
+    }
+
     /// The bundle a request for [`Self::account`] resolves to.
-    pub async fn services(&self) -> Arc<UserServices> {
+    pub async fn services(&self) -> Arc<ProjectServices> {
         self.services_of(&self.account).await
     }
 
-    /// The bundle a request for `account` resolves to, building it if this is
+    /// The bundle a request for `project` resolves to, building it if this is
     /// the first time anything has asked.
-    pub async fn services_of(&self, account: &UserId) -> Arc<UserServices> {
+    pub async fn services_of(&self, project: &ProjectId) -> Arc<ProjectServices> {
         self.state
-            .users
-            .get(account)
+            .projects
+            .get(project)
             .await
-            .expect("an account's services build")
+            .expect("a project's services build")
+    }
+
+    /// A second project of [`Self::user`], for a suite asserting that two of
+    /// one account's projects cannot see each other.
+    pub async fn second_project(&self, name: &str) -> ProjectId {
+        self.state
+            .shared
+            .project_service
+            .create(&self.user, name)
+            .await
+            .expect("a second project is created")
+            .id
     }
 
     /// Publish a connected vendor process under `name` for [`Self::account`].
@@ -187,36 +215,47 @@ impl TestStateBuilder {
             },
         ));
         let initial_password = auth.bootstrap().await.expect("bootstrap the first account");
-        let account = auth
+        let user = auth
             .sole_user()
             .await
             .expect("read the bootstrapped account")
             .expect("bootstrap leaves exactly one account");
 
+        let project_service = Arc::new(crate::projects::ProjectService::new(db.clone()));
+        // Through the same call a first request makes, rather than by inserting
+        // a row: a suite that got its default project a different way from
+        // production would not notice production's way breaking.
+        let account = project_service
+            .default_project(&user)
+            .await
+            .expect("the bootstrap account gets a default project")
+            .id;
         let shared = Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
-            system: crate::users::node_system(&db, None),
+            system: crate::projects::node_system(&db, None),
             serving: None,
             db,
+            project_service,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
-            anonymous: account.clone(),
+            anonymous: user.clone(),
             supervisor: self.supervisor,
             deps: None,
             fly_api_base: UNREACHABLE_FLY_API.to_string(),
         });
-        let users = Arc::new(UserRegistry::new(shared.clone()));
-        register_session_shards(&users).expect("a fresh system has no shard types yet");
+        let projects = Arc::new(ProjectRegistry::new(shared.clone()));
+        register_session_shards(&projects).expect("a fresh system has no shard types yet");
         let state = AppState {
             auth,
-            users,
+            projects,
             shared,
             web_dir: None,
         };
         TestState {
             state,
+            user,
             account,
             initial_password,
         }
@@ -243,12 +282,14 @@ fn info() -> horsie_models::settings::ServerInfo {
 /// everything else from its account, so a test that wants one has to have an
 /// account for it to resolve — and an account only exists inside a registry.
 pub struct Deployment {
-    pub users: Arc<UserRegistry>,
+    pub projects: Arc<ProjectRegistry>,
     /// Every actor's log. In memory, so a test can read what was persisted and
     /// a restart is [`Self::restart`] rather than a second process.
     pub journal: Arc<dyn horsie_actor::Journal>,
-    /// The one account everything here belongs to.
-    pub account: UserId,
+    /// The one project everything here belongs to, and the account that owns
+    /// it. `account` is the scope: it is what an actor address renders.
+    pub account: ProjectId,
+    pub user: UserId,
     _tmp: tempfile::TempDir,
 }
 
@@ -273,33 +314,42 @@ impl Deployment {
         supervisor: SupervisorConfig,
     ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let account = UserId::bootstrap();
-        let users = Arc::new(UserRegistry::new(Arc::new(Shared {
+        let db = crate::db::testing::db().await;
+        let project_service = Arc::new(crate::projects::ProjectService::new(db.clone()));
+        let user = UserId::bootstrap();
+        let account = project_service
+            .default_project(&user)
+            .await
+            .expect("the bootstrap account gets a default project")
+            .id;
+        let projects = Arc::new(ProjectRegistry::new(Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: horsie_actor::ActorSystem::new(journal.clone()),
             serving: None,
-            db: crate::db::testing::db().await,
+            db,
+            project_service,
             artifacts: Arc::new(ArtifactStore::new(tmp.path().join("artifacts"))),
             info: info(),
             model_card_seed: Arc::new(Vec::new()),
             model_card_seed_marker: crate::config::model_cards::seed_marker(&[]),
-            anonymous: account.clone(),
+            anonymous: user.clone(),
             supervisor,
             deps: Some(deps),
             fly_api_base: UNREACHABLE_FLY_API.to_string(),
         })));
-        crate::users::register_session_shards(&users)
+        crate::projects::register_session_shards(&projects)
             .expect("a fresh system has no shard types yet");
         Self {
-            users,
+            projects,
             journal,
             account,
+            user,
             _tmp: tmp,
         }
     }
 
-    pub async fn services(&self) -> Arc<UserServices> {
-        self.users
+    pub async fn services(&self) -> Arc<ProjectServices> {
+        self.projects
             .get(&self.account)
             .await
             .expect("an account's services build")
@@ -313,7 +363,7 @@ impl Deployment {
     /// One session of this account, whether or not it is loaded.
     pub fn session(&self, id: uuid::Uuid) -> crate::sessions::addressing::SessionRef {
         crate::sessions::addressing::SessionRef::new(
-            self.users
+            self.projects
                 .shared()
                 .system
                 .shard_actor_of::<crate::sessions::addressing::SessionShard>(),
@@ -327,7 +377,7 @@ impl Deployment {
     /// them is concerned. The next command addressed to one rebuilds it from
     /// its journal, which is the only way to reach recovery.
     pub async fn restart(&self) {
-        self.users
+        self.projects
             .shared()
             .system
             .stop(&horsie_actor::ActorPath::root())

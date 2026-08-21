@@ -15,8 +15,11 @@ use horsie_models::workflow::{
     StepRunView, WorkflowInput, WorkflowRunGraph, WorkflowRunRequest, WorkflowView,
 };
 
-pub async fn list(server: &str) -> Result<(), CliError> {
-    let workflows = ServerClient::new(server).await?.list_workflows().await?;
+pub async fn list(server: &str, project: Option<&str>) -> Result<(), CliError> {
+    let workflows = ServerClient::new(server, project)
+        .await?
+        .list_workflows()
+        .await?;
     print!("{}", render_table(&workflows));
     Ok(())
 }
@@ -24,8 +27,16 @@ pub async fn list(server: &str) -> Result<(), CliError> {
 /// Show one workflow. `--json` prints the definition itself, which is what
 /// `apply` takes back — so the pair is a round-trip and there is no second
 /// format to keep in step.
-pub async fn get(server: &str, name: &str, json: bool) -> Result<(), CliError> {
-    let workflow = ServerClient::new(server).await?.get_workflow(name).await?;
+pub async fn get(
+    server: &str,
+    project: Option<&str>,
+    name: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let workflow = ServerClient::new(server, project)
+        .await?
+        .get_workflow(name)
+        .await?;
     match json {
         true => println!("{}", to_json(&to_input(&workflow))?),
         false => print!("{}", render_detail(&workflow)),
@@ -39,13 +50,13 @@ pub async fn get(server: &str, name: &str, json: bool) -> Result<(), CliError> {
 /// match this" is the only intent, and having to know whether the name is taken
 /// first is friction with no purpose. The name comes from the file, because the
 /// file is the definition.
-pub async fn apply(server: &str, path: &str) -> Result<(), CliError> {
+pub async fn apply(server: &str, project: Option<&str>, path: &str) -> Result<(), CliError> {
     let body = std::fs::read_to_string(path)
         .map_err(|e| CliError::Config(format!("cannot read {path}: {e}")))?;
     let input: WorkflowInput = serde_json::from_str(&body)
         .map_err(|e| CliError::Config(format!("{path} is not a workflow definition: {e}")))?;
     let name = input.name.clone();
-    let client = ServerClient::new(server).await?;
+    let client = ServerClient::new(server, project).await?;
     // Which verb this is depends on whether it exists, and only the server
     // knows. A missing one is the ordinary case for a first apply, not an error
     // worth relaying.
@@ -62,8 +73,8 @@ pub async fn apply(server: &str, path: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn delete(server: &str, name: &str) -> Result<(), CliError> {
-    ServerClient::new(server)
+pub async fn delete(server: &str, project: Option<&str>, name: &str) -> Result<(), CliError> {
+    ServerClient::new(server, project)
         .await?
         .delete_workflow(name)
         .await?;
@@ -75,8 +86,13 @@ pub async fn delete(server: &str, name: &str) -> Result<(), CliError> {
 }
 
 /// Re-run one step execution of a run.
-pub async fn retry(server: &str, session_id: &str, step_index: u32) -> Result<(), CliError> {
-    ServerClient::new(server)
+pub async fn retry(
+    server: &str,
+    project: Option<&str>,
+    session_id: &str,
+    step_index: u32,
+) -> Result<(), CliError> {
+    ServerClient::new(server, project)
         .await?
         .retry_workflow_step(session_id, step_index)
         .await?;
@@ -110,12 +126,13 @@ fn to_json<T: serde::Serialize>(v: &T) -> Result<String, CliError> {
 /// on its way when this returns.
 pub async fn run(
     server: &str,
+    project: Option<&str>,
     name: &str,
     input: String,
     environment: EnvironmentSpec,
     session_name: Option<String>,
 ) -> Result<(), CliError> {
-    let client = ServerClient::new(server).await?;
+    let client = ServerClient::new(server, project).await?;
     let res = client
         .run_workflow(
             name,
@@ -135,8 +152,8 @@ pub async fn run(
 /// Two reads: the graph says where the run got to, the session says what state
 /// it is in. A run's status is its session's — one vocabulary for every session
 /// — so there is nothing on the graph to print here.
-pub async fn status(server: &str, session_id: &str) -> Result<(), CliError> {
-    let client = ServerClient::new(server).await?;
+pub async fn status(server: &str, project: Option<&str>, session_id: &str) -> Result<(), CliError> {
+    let client = ServerClient::new(server, project).await?;
     let graph = client.workflow_run(session_id).await?;
     let session = client.get_session(session_id).await?;
     print!("{}", render_run(&graph, session.status));

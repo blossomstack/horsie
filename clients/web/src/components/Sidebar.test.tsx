@@ -26,8 +26,12 @@ vi.mock("../api/client", () => ({
       remove: vi.fn(),
       deleteFork: vi.fn(),
     },
-    globalEventsUrl: () => "/api/events",
+    // The rail's switcher reads both of these. A project is what the rail
+    // below belongs to, so a Sidebar rendered without one is not a Sidebar.
+    projects: { list: vi.fn().mockResolvedValue([]) },
+    globalEventsUrl: () => "/api/p/p1/events",
   },
+  getCurrentProject: () => "p1",
 }));
 
 function renderSidebar(at = "/") {

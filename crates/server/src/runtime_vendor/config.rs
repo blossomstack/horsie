@@ -13,8 +13,8 @@
 //!
 //! [`RuntimeVendorRegistry::register`]: crate::runtime_vendor::RuntimeVendorRegistry::register
 
-use crate::auth::UserId;
 use crate::db::Db;
+use crate::projects::ProjectId;
 use crate::runtime_vendor::fly::{FlyRuntimeVendor, FlySettings};
 use crate::runtime_vendor::fly_api::{FlyHttpApi, FlyMachineSize};
 use crate::runtime_vendor::velos::{VelosRuntimeVendor, VelosSettings};
@@ -382,18 +382,18 @@ fn refusal_message(e: RuntimeVendorError) -> String {
 pub struct RuntimeVendorStore {
     db: Db,
     /// Bound once, here, rather than passed per call.
-    user: UserId,
+    user: ProjectId,
 }
 
 impl RuntimeVendorStore {
     #[must_use]
-    pub fn new(db: Db, user: UserId) -> Self {
+    pub fn new(db: Db, user: ProjectId) -> Self {
         Self { db, user }
     }
 
     pub async fn list(&self) -> Result<Vec<RuntimeVendorRow>, String> {
         let rows = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM runtime_vendors WHERE user_id = ? ORDER BY name"
+            "SELECT {COLS} FROM runtime_vendors WHERE project_id = ? ORDER BY name"
         )))
         .bind(self.user.as_str())
         .fetch_all(self.db.pool())
@@ -404,7 +404,7 @@ impl RuntimeVendorStore {
 
     pub async fn get(&self, name: &str) -> Result<Option<RuntimeVendorRow>, String> {
         let row = sqlx::query(&self.db.q(&format!(
-            "SELECT {COLS} FROM runtime_vendors WHERE user_id = ? AND name = ?"
+            "SELECT {COLS} FROM runtime_vendors WHERE project_id = ? AND name = ?"
         )))
         .bind(self.user.as_str())
         .bind(name)
@@ -422,7 +422,7 @@ impl RuntimeVendorStore {
         sqlx::query(
             &self
                 .db
-                .q("DELETE FROM runtime_vendors WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM runtime_vendors WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -430,7 +430,7 @@ impl RuntimeVendorStore {
         .await
         .map_err(|e| e.to_string())?;
         sqlx::query(&self.db.q(&format!(
-            "INSERT INTO runtime_vendors (user_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO runtime_vendors (project_id, {COLS}) VALUES (?, ?, ?, ?, ?, ?, ?)"
         )))
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -449,7 +449,7 @@ impl RuntimeVendorStore {
         let res = sqlx::query(
             &self
                 .db
-                .q("DELETE FROM runtime_vendors WHERE user_id = ? AND name = ?"),
+                .q("DELETE FROM runtime_vendors WHERE project_id = ? AND name = ?"),
         )
         .bind(self.user.as_str())
         .bind(name)
@@ -863,7 +863,7 @@ mod tests {
 
     fn service(vendors: RuntimeVendorMap, db: Db) -> RuntimeVendorConfigService {
         RuntimeVendorConfigService::new(
-            RuntimeVendorStore::new(db, UserId::new("u1")),
+            RuntimeVendorStore::new(db, ProjectId::new("u1")),
             vendors,
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         )
@@ -1339,7 +1339,7 @@ mod tests {
         let websockets: WebsocketVendorTable =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let service = RuntimeVendorConfigService::new(
-            RuntimeVendorStore::new(db, UserId::new("u1")),
+            RuntimeVendorStore::new(db, ProjectId::new("u1")),
             empty_map(),
             websockets.clone(),
         );

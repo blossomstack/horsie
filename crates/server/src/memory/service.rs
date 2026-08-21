@@ -264,7 +264,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pool = crate::db::testing::db().await;
         (
-            MemoryService::new(MemoryStore::new(pool, crate::auth::UserId::new("1"))),
+            MemoryService::new(MemoryStore::new(pool, crate::projects::ProjectId::new("1"))),
             tmp,
         )
     }

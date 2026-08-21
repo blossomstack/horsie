@@ -1,6 +1,7 @@
 import {
   Boxes,
   Brain,
+  FolderTree,
   Cpu,
   Palette,
   Plug,
@@ -12,6 +13,7 @@ import { SettingsNav, type NavItem } from "../../components/SettingsNav";
 import { SettingsDirtyProvider } from "./dirty";
 
 const ITEMS: NavItem[] = [
+  { to: "projects", label: "Projects", icon: FolderTree },
   { to: "models", label: "Models", icon: SlidersHorizontal },
   { to: "runtimes", label: "Runtimes", icon: Cpu },
   { to: "skills", label: "Skills", icon: Boxes },
