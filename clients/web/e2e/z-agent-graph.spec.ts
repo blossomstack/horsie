@@ -121,9 +121,52 @@ test("Z4: the view is in the URL, so it survives a reload and can be sent", asyn
   await page.reload();
   await expect(page.getByTestId("agent-graph")).toBeVisible();
 
-  // The two structural views are answers to the same question, so one takes
-  // the pane from the other rather than stacking on it.
+  // The three views are answers to the same question, so one takes the pane
+  // from the other rather than stacking on it, and the switch shows which one
+  // holds it.
   await page.getByTestId("timeline-toggle").click();
   await expect(page.getByTestId("session-timeline")).toBeVisible();
   await expect(page.getByTestId("agent-graph")).toHaveCount(0);
+  await expect(page.getByTestId("timeline-toggle")).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("graph-toggle")).toHaveAttribute("aria-checked", "false");
+
+  // The transcript is a setting of the same control, not the absence of one.
+  await page.getByTestId("transcript-toggle").click();
+  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
+  await expect(page.getByTestId("session-timeline")).toHaveCount(0);
+  await expect(page).not.toHaveURL(/view=/);
+  await expect(page.getByTestId("transcript-toggle")).toHaveAttribute("aria-checked", "true");
+});
+
+test("Z5: the view you picked is remembered, and a link still overrides it", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await delegatingSession(page, appBase, mock);
+  const url = page.url();
+
+  await page.getByTestId("graph-toggle").click();
+
+  // Opening the session with a URL that says nothing about the view: the one
+  // picked last is what it opens in, and the URL is corrected to say so — the
+  // address bar must not promise a different page than the one on screen.
+  await page.goto(url);
+  await expect(page.getByTestId("agent-graph")).toBeVisible();
+  await expect(page).toHaveURL(/view=graph/);
+
+  // A link that names a view is someone else's choice, and it wins.
+  await page.goto(`${url}?view=timeline`);
+  await expect(page.getByTestId("session-timeline")).toBeVisible();
+  await expect(page.getByTestId("agent-graph")).toHaveCount(0);
+
+  // A session you just started is not one you opened: it is the answer to a
+  // message you just typed, so it lands in the transcript however you were
+  // working a moment ago. The graph is still what is remembered.
+  await mock.queueText("a fresh thread");
+  await createSession(page, appBase);
+  await sendMessage(page, "start something new");
+  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
+  await expect(page.getByTestId("agent-graph")).toHaveCount(0);
+  await expect(page.getByTestId("transcript-toggle")).toHaveAttribute("aria-checked", "true");
 });

@@ -66,9 +66,10 @@ Beside the composer:
 
 ## See its shape
 
-The key beside the session name swaps the transcript for a **timeline**: the
-same session drawn along one axis instead of down a page. Use it to find where
-the time went, or to see what a session delegated without scrolling for it.
+A three-way switch beside the session name chooses what the pane shows. Its
+middle setting is a **timeline**: the same session drawn along one axis instead
+of down a page. Use it to find where the time went, or to see what a session
+delegated without scrolling for it.
 
 The top lane is the main agent, one bar per entry — what you said, what it
 thought, each tool call, each answer — coloured by kind and as wide as it took.
@@ -98,8 +99,8 @@ The view is in the address bar, so a link to it opens on the timeline.
 
 ## See what it spawned
 
-The next key over swaps the transcript for a **graph**: every agent the session
-holds, drawn as the tree it is. Where the timeline answers *when*, this answers
+The switch's third setting is a **graph**: every agent the session holds, drawn
+as the tree it is. Where the timeline answers *when*, this answers
 *what spawned what* — reach for it when a session has delegated deeply enough
 that the lineage is the thing you are trying to follow.
 
@@ -119,6 +120,11 @@ From there:
 Folding is shared with the timeline: what you put away in one view is put away
 in the other. The view is in the address bar, so a link to it opens on the
 graph.
+
+Whichever view you pick is remembered on this browser, so the next session you
+open lands on it rather than back on the transcript. A link that names a view
+still wins, and a session you have just started always opens on its transcript
+— that is where the answer to the message you just sent appears.
 
 ## Answer a question
 
