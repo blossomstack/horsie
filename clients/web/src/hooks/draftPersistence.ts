@@ -26,6 +26,14 @@ export interface DraftPayload {
   skills: string[];
   mcp: string[];
   memorySpaces: string[];
+  /**
+   * The selected built-in tools, or `null` for the server's default set.
+   *
+   * `null` and `[]` are different stored values on purpose: one defers to the
+   * server, the other says no built-in tools. Collapsing them — the obvious
+   * thing to do with an empty array — would make "none" unsavable.
+   */
+  tools: string[] | null;
   /** Canonical thinking effort; "" = use the model's configured default. */
   thinkingEffort: string;
 }
@@ -38,6 +46,7 @@ export function emptyDraft(): DraftPayload {
     skills: [],
     mcp: [],
     memorySpaces: [],
+    tools: null,
     thinkingEffort: "",
   };
 }
@@ -93,6 +102,9 @@ export function parseDraftPayload(raw: unknown): DraftPayload | undefined {
     skills: p.skills,
     mcp: p.mcp,
     memorySpaces: p.memorySpaces,
+    // Added after v2 shipped. A stored draft without it means the default set,
+    // which is what `null` says — so an older draft needs no migration.
+    tools: isStringArray(p.tools) ? p.tools : null,
     // Added after v1 shipped; older stored drafts simply have no value.
     thinkingEffort: typeof p.thinkingEffort === "string" ? p.thinkingEffort : "",
     // `autoCompact` was a field here and is dropped rather than migrated: a
@@ -177,6 +189,20 @@ export function filterMemorySpaces(
   existing: ReadonlySet<string>,
 ): DraftPayload {
   return filterField(draft, "memorySpaces", existing);
+}
+
+/**
+ * Drop selected tools this server no longer offers. Same ref if unchanged.
+ *
+ * Not `filterField`: `null` is a value here rather than an empty list, and it
+ * must survive untouched — reconciling it into `[]` would turn "the default
+ * set" into "no tools" the first time the catalogue loaded.
+ */
+export function filterTools(draft: DraftPayload, known: ReadonlySet<string>): DraftPayload {
+  if (draft.tools === null) return draft;
+  const filtered = draft.tools.filter((name) => known.has(name));
+  if (filtered.length === draft.tools.length) return draft;
+  return { ...draft, tools: filtered };
 }
 
 /**

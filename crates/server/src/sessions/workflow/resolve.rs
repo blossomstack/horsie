@@ -195,7 +195,6 @@ fn step_settings(
         auto_compact: preset.auto_compact,
         // A workflow step is not a main agent, and only a main agent gets the
         // control-plane tools.
-        control_plane: None,
         // This step's own bundles, never the run's union. Installed into this
         // step's own tree on the shared runtime.
         plugins: preset.plugins.clone(),
@@ -224,7 +223,7 @@ mod tests {
             memory_spaces: Vec::new(),
             thinking_effort: None,
             auto_compact: None,
-            control_plane: None,
+            allowed_tools: None,
             created_at: String::new(),
             updated_at: String::new(),
         }

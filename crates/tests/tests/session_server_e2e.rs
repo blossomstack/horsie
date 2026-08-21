@@ -196,6 +196,35 @@ async fn create_session(
     id
 }
 
+/// Like `create_session`, but with an explicit tool selection.
+async fn create_session_with_tools(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    agent: &FakeRuntimeVendor,
+    tools: &[&str],
+    message: &str,
+) -> String {
+    let body = serde_json::json!({
+        // camelCase: an unknown key is dropped in silence, and `allowed_tools`
+        // here would leave the session on the default set — which advertises
+        // every tool this asserts is gone.
+        "agent": { "model": "mock", "use_plugins": false, "allowedTools": tools },
+        "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
+        "message": message
+    });
+    let res = client
+        .post(format!("http://{addr}/api/sessions"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201);
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+    wait_for_signal(agent, &format!("create:{id}")).await;
+    id
+}
+
 /// Like `create_session`, but selects a named vendor with no `repos` — the
 /// shape a shared-local-vendor session must use (it provisions nothing).
 async fn create_session_for_vendor(
@@ -3555,6 +3584,48 @@ async fn a_compact_only_turn_journals_no_empty_input_message() {
             .is_success()
     );
     wait_for_reply(&client, &server.addr, &id, "an answer after the compaction").await;
+
+    server.shutdown().await;
+}
+
+/// A tool selection reaches every layer, not just the runtime tools.
+///
+/// The regression this guards: the filter used to sit three layers down, above
+/// the runtime toolbox and below everything else, so a session that asked for
+/// `read_file` alone still got `task_list`, the timers, `skill`, and the
+/// subagent and session tools. Narrowing meant one thing for a runtime tool and
+/// nothing at all for the rest.
+///
+/// `task_list` is the probe because it is the furthest layer out — the actor
+/// stacks it last — so a filter that reaches it reaches everything under it.
+#[tokio::test]
+async fn a_narrowed_selection_removes_tools_from_every_layer() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call(
+        "task_list",
+        serde_json::json!({"action": "create", "tasks": ["something"]}),
+    );
+    mock.queue_response("could not keep a list");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let id =
+        create_session_with_tools(&client, &server.addr, &agent, &["read_file"], "make a list")
+            .await;
+    wait_for_reply(&client, &server.addr, &id, "could not keep a list").await;
+
+    let page = messages_page(&client, &server.addr, &id, "main").await;
+    let text = serde_json::to_string(&page).unwrap();
+    assert!(
+        text.contains("not permitted"),
+        "a tool left out of the selection must be refused wherever it lives; \
+         transcript: {text}"
+    );
 
     server.shutdown().await;
 }

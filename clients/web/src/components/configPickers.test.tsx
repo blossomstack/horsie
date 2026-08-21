@@ -4,11 +4,13 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import { ApiRequestError } from "../api/client";
-import type { EnvironmentView, SettingsView } from "../api/types";
+import type { EnvironmentView, SettingsView, ToolCatalog } from "../api/types";
+import { ToolAccess } from "../api/types";
 import { environmentKeys } from "../hooks/useEnvironments";
 import { memorySpacesKey } from "../hooks/useMemory";
 import { pluginsKey } from "../hooks/usePlugins";
 import { settingsKey } from "../hooks/useSettings";
+import { toolsKey } from "../hooks/useTools";
 import type {
   AgentChannel,
   ConfigDraft,
@@ -66,6 +68,8 @@ function draft(overrides: Partial<ConfigDraft> = {}): ConfigDraft {
     setMcp: () => {},
     memorySpaces: new Set(),
     setMemorySpaces: () => {},
+    tools: null,
+    setTools: () => {},
     thinkingEffort: "",
     setThinkingEffort: () => {},
     thinkingEfforts: [],
@@ -112,6 +116,36 @@ function agentDraft(agent: string): ConfigDraft & EnvironmentChannel & AgentChan
   };
 }
 
+// Two groups, one of which is out of the default set — the shape that makes
+// "Default" and "All" different answers, which is the whole point of the
+// tri-state.
+const toolCatalog: ToolCatalog = {
+  groups: [
+    {
+      key: "runtime",
+      label: "Files & shell",
+      description: "Read and change files.",
+      tools: [
+        { name: "bash", description: "Run a command.", access: ToolAccess.Write, inDefaultSet: true },
+        { name: "read_file", description: "Read a file.", access: ToolAccess.Read, inDefaultSet: true },
+      ],
+    },
+    {
+      key: "control",
+      label: "horsie",
+      description: "Manage this server.",
+      tools: [
+        {
+          name: "horsie_agents",
+          description: "Manage agents.",
+          access: ToolAccess.Write,
+          inDefaultSet: false,
+        },
+      ],
+    },
+  ],
+};
+
 function keys(d: ConfigDraft): string[] {
   return pickers(d, seededClient()).map((p) => p.key);
 }
@@ -132,6 +166,7 @@ function seededClient(): QueryClient {
   });
   client.setQueryData(settingsKey, settings);
   client.setQueryData(environmentKeys.all, environments);
+  client.setQueryData(toolsKey, toolCatalog);
   return client;
 }
 
@@ -272,8 +307,86 @@ describe("useConfigPickers", () => {
       "skills",
       "mcp",
       "memory",
+      "tools",
       "model",
     ]);
+  });
+
+  // The tri-state the whole channel turns on. "Default" is not "all ticked":
+  // it defers to the server, which is what keeps a preset following a later
+  // horsie's idea of sensible — and what stops an unset field granting the
+  // control plane.
+  it("shows the default set ticked while nothing has been chosen", () => {
+    const spec = pickers(draft(), seededClient()).find((p) => p.key === "tools");
+    expect(spec?.label).toBe("Default");
+    expect(spec?.marked).toBe(false);
+
+    const view = renderPickerBody(draft(), "tools");
+    const option = (name: string) =>
+      view.getAllByTestId("tool-option").find((el) => el.getAttribute("data-value") === name);
+    expect(option("bash")?.getAttribute("data-selected")).toBe("true");
+    expect(option("horsie_agents")?.getAttribute("data-selected")).toBe("false");
+  });
+
+  it("labels an explicit selection by size, and marks the channel", () => {
+    const spec = pickers(draft({ tools: new Set(["bash"]) }), seededClient()).find(
+      (p) => p.key === "tools",
+    );
+    expect(spec?.label).toBe("1 selected");
+    expect(spec?.marked).toBe(true);
+  });
+
+  // The two answers that are easy to collapse into one, and must not be.
+  it("tells an empty selection apart from an unmade one", () => {
+    const none = pickers(draft({ tools: new Set() }), seededClient()).find(
+      (p) => p.key === "tools",
+    );
+    expect(none?.label).toBe("None");
+    expect(none?.marked).toBe(true);
+  });
+
+  it("groups tools and badges each one read or write", () => {
+    const view = renderPickerBody(draft(), "tools");
+    expect(view.getByTestId("tool-group-runtime")).toBeTruthy();
+    expect(view.getByTestId("tool-group-control")).toBeTruthy();
+    const badges = view.getAllByTestId("tool-access").map((el) => el.getAttribute("data-access"));
+    expect(badges).toEqual(["write", "read", "write"]);
+  });
+
+  it("offers quick selections, including a read-only one", () => {
+    const chosen: (Set<string> | null)[] = [];
+    const d = draft({ setTools: (t) => chosen.push(t) });
+    const view = renderPickerBody(d, "tools");
+
+    view.getByTestId("tool-quick-read").click();
+    expect(chosen.at(-1)).toEqual(new Set(["read_file"]));
+
+    view.getByTestId("tool-quick-all").click();
+    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file", "horsie_agents"]));
+
+    view.getByTestId("tool-quick-none").click();
+    expect(chosen.at(-1)).toEqual(new Set());
+
+    // Back to deferring, which no set of ticks can express.
+    view.getByTestId("tool-quick-default").click();
+    expect(chosen.at(-1)).toBeNull();
+  });
+
+  it("ticks and unticks a whole group at once", () => {
+    const chosen: (Set<string> | null)[] = [];
+    const d = draft({ tools: new Set(), setTools: (t) => chosen.push(t) });
+    const view = renderPickerBody(d, "tools");
+    view.getByTestId("tool-group-all-runtime").click();
+    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file"]));
+  });
+
+  it("says so when the catalogue cannot be read", () => {
+    const view = renderPickerBody(
+      draft(),
+      "tools",
+      failRead(seededClient(), toolsKey),
+    );
+    expect(view.getByTestId("tools-read-error")).toBeTruthy();
   });
 
   it("marks the selected environment and model options", () => {

@@ -34,6 +34,24 @@ See [MCP servers](/using/mcp-servers/).
 
 **Memory** — which memory spaces the agent may read and write.
 
+**Tools** — which of horsie's built-in tools the agent may call, grouped: files
+and shell, workspace, planning, timers, delegation, workflows, session, and
+horsie itself. Each tool is marked **read** or **write**, and the quick actions
+at the top select all of them, the read-only ones, or none.
+
+It starts on **Default** — every group except horsie. That is not the same as
+ticking every box: it defers to the server, so a preset saved today follows a
+later horsie's idea of a sensible default instead of freezing this one's list.
+Touch anything and the selection becomes exactly what you chose.
+
+The **horsie** group is how you let an agent manage this server — its agents,
+workflows, routines, environments, models and runtimes. Selecting one of those
+tools *is* the grant, which is why none of them is in the default set: changes
+take effect immediately and are not confirmed with you first.
+
+Skills, MCP servers and memory spaces are chosen by their own controls and are
+never removed by narrowing this one.
+
 Everything above is fixed for the session's lifetime — an agent whose
 capabilities changed halfway through would make the transcript a record of two
 different agents. The header shows what it was launched with.

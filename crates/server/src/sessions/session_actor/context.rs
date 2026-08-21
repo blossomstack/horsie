@@ -135,6 +135,11 @@ pub(crate) struct StepResultDef {
 /// Wrap `base` with the control-plane tools, and render the command index for
 /// the system prompt.
 ///
+/// The layer is built only when the session's tool selection names a `horsie_*`
+/// tool. The outermost filter would remove them anyway, but the filter cannot
+/// unwrite a system prompt — building unconditionally would tell every model on
+/// the server it can manage horsie and then reject the call.
+///
 /// Main-agent only. A subagent, a workflow step and a fork all inherit the
 /// session's settings, but authority over the server is not a setting they
 /// should carry — the same rule that keeps session-metadata tools off them.
@@ -144,18 +149,25 @@ fn build_control_layer(
     settings: &AgentSettings,
     kind: SessionAgentKind,
 ) -> (Arc<dyn Toolbox>, String) {
-    if !matches!(kind, SessionAgentKind::Main) || settings.control_plane != Some(true) {
+    if !matches!(kind, SessionAgentKind::Main)
+        || !crate::tools::grants_control_plane(settings.allowed_tools.as_deref())
+    {
         return (base, String::new());
     }
     let Some(services) = services else {
         tracing::warn!("session asks for the control plane but no services are wired; ignoring");
         return (base, String::new());
     };
-    let toolbox = crate::control::toolbox::ControlToolbox::new(
-        base,
-        services.clone(),
-        crate::control::operations(),
-    );
+    // Only the resources the selection actually names. The filter above would
+    // drop the rest, but the command index below is written from what this
+    // toolbox holds — so narrowing here is what keeps the prompt honest about
+    // which parts of the server this session can touch.
+    let selected = crate::tools::resolve(settings.allowed_tools.as_deref());
+    let operations = crate::control::operations()
+        .into_iter()
+        .filter(|o| selected.contains(&crate::tools::control_tool_name(o.resource)))
+        .collect();
+    let toolbox = crate::control::toolbox::ControlToolbox::new(base, services.clone(), operations);
     let index = format!(
         "## Managing this horsie server\n\n\
          You can manage this server through the `horsie_*` tools: {}\n\n\
@@ -645,7 +657,10 @@ impl ContextProvider for SessionContextProvider {
 
     async fn provide(&self) -> Result<Contexts, ContextError> {
         let settings = &self.settings;
-        let mut def = session_run_def(settings);
+        let def = session_run_def(settings);
+        // Set only by a typed subagent, whose plugin definition may narrow what
+        // the session grants it. See `Contexts::tool_narrowing`.
+        let mut tool_narrowing: Option<Vec<String>> = None;
         let use_plugins = settings.use_plugins.unwrap_or(true);
         // Preparation progress is main-only: subagents are quiet by design.
         let broadcast = self.kind.broadcasts();
@@ -737,11 +752,15 @@ impl ContextProvider for SessionContextProvider {
                     "agent's tool allowlist names no tool horsie has; it will run with none"
                 );
             }
-            // Intersected with the session's own allowlist, never substituted
+            // Intersected with the session's own selection, never substituted
             // for it. An agent definition is a file inside a plugin: it may say
             // which of the tools this session already grants it wants, and must
             // not be able to grant itself one the session withheld.
-            def.allowed_tools = Some(match &def.allowed_tools {
+            //
+            // Rides to the actor as `Contexts::tool_narrowing` rather than
+            // rewriting `def`: the actor built its params from the def at spawn
+            // and never reads it again, so a mutation here would go nowhere.
+            tool_narrowing = Some(match &def.allowed_tools {
                 None => allowed,
                 Some(session) => allowed
                     .into_iter()
@@ -851,13 +870,8 @@ impl ContextProvider for SessionContextProvider {
                 ),
             }
         }
-        let base: Arc<dyn Toolbox> = DefaultToolboxFactory.for_agent(
-            &def,
-            runtime_client.clone(),
-            ws.names(),
-            use_plugins,
-            mcp,
-        );
+        let base: Arc<dyn Toolbox> =
+            DefaultToolboxFactory.for_agent(runtime_client.clone(), ws.names(), use_plugins, mcp);
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
@@ -1022,6 +1036,7 @@ impl ContextProvider for SessionContextProvider {
         Ok(Contexts {
             provider,
             toolbox,
+            tool_narrowing,
             system_prompt,
             context_window: crate::agent_loop::compaction_window(
                 self.settings.auto_compact,
@@ -1072,7 +1087,6 @@ mod tests {
             max_concurrent_subagents: None,
             instructions: None,
             auto_compact: None,
-            control_plane: None,
             plugins: Vec::new(),
         };
         let (toolbox, index) = build_control_layer(
@@ -1090,7 +1104,7 @@ mod tests {
         );
         assert!(index.is_empty());
 
-        settings.control_plane = Some(true);
+        settings.allowed_tools = Some(vec!["horsie_agents".into()]);
         let (toolbox, index) = build_control_layer(
             base.clone(),
             Some(&services),
@@ -1511,17 +1525,15 @@ mod tests {
             "the plugin's body is the role: {prompt}"
         );
         // `Read, Grep` in Claude's vocabulary is `read_file, grep` in horsie's.
-        let tools: Vec<String> = contexts
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        // Asserted on the narrowing rather than on `toolbox`, because the
+        // toolbox handed back here is deliberately unfiltered: the selection is
+        // applied by the actor, once, after the last layer is stacked on.
+        let tools = contexts.tool_narrowing.expect("a typed agent narrows");
         assert!(tools.contains(&"read_file".to_string()), "{tools:?}");
         assert!(tools.contains(&"grep".to_string()), "{tools:?}");
         assert!(
             !tools.contains(&"bash".to_string()),
-            "the allowlist must exclude what it did not name: {tools:?}"
+            "the narrowing must exclude what it did not name: {tools:?}"
         );
     }
 
@@ -1536,12 +1548,7 @@ mod tests {
         // The session grants `grep` only; the agent asks for `Read, Grep`.
         let provider = typed_provider(&f, &session, id, sub, Some(vec!["grep".to_string()]));
         let contexts = provider.provide().await.expect("contexts");
-        let tools: Vec<String> = contexts
-            .toolbox
-            .specs()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
+        let tools = contexts.tool_narrowing.expect("a typed agent narrows");
         assert!(tools.contains(&"grep".to_string()), "{tools:?}");
         assert!(
             !tools.contains(&"read_file".to_string()),

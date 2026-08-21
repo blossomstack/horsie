@@ -22,9 +22,12 @@ export interface AgentPresetInput {
    */
   autoCompact?: boolean;
   /**
-   * Seeds `AgentSettings.control_plane`; absent → no. Enabling this is the
-   * whole authorisation — a session from this preset can then change or
-   * delete anything this account owns, without confirming first.
+   * Seeds `AgentSettings.allowed_tools`; absent → the default set.
+   *
+   * Naming a `horsie_*` tool here is the whole authorisation for the control
+   * plane — a session from this preset can then change or delete anything
+   * this account owns, without confirming first. That is why the default set
+   * excludes them: authority is granted by asking for it, never by omission.
    */
-  controlPlane?: boolean;
+  allowedTools?: string[];
 }

@@ -150,6 +150,7 @@ function storeDraft(draft: Partial<DraftPayload>) {
     skills: [],
     mcp: [],
     memorySpaces: [],
+    tools: null,
     thinkingEffort: "",
     ...draft,
   };

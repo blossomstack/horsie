@@ -7,7 +7,7 @@ use sqlx::Row;
 use sqlx::any::AnyRow;
 
 const COLS: &str = "name, description, instructions, model, plugins, \
-                    mcp_servers, memory_spaces, thinking_effort, auto_compact, control_plane, created_at, updated_at";
+                    mcp_servers, memory_spaces, thinking_effort, auto_compact, allowed_tools, created_at, updated_at";
 
 /// One row of the `agents` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,7 +24,10 @@ pub struct AgentRow {
     pub thinking_effort: Option<String>,
     /// `None` means yes — see the 0034 migration.
     pub auto_compact: Option<bool>,
-    pub control_plane: Option<bool>,
+    /// The tools sessions from this preset may call. `None` (a NULL column, not
+    /// an empty array) means the default set, and is a different value from
+    /// `Some(vec![])` — which means no built-in tools at all.
+    pub allowed_tools: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -79,7 +82,7 @@ impl AgentStore {
         .bind(to_json(&row.memory_spaces)?)
         .bind(&row.thinking_effort)
         .bind(row.auto_compact.map(i64::from))
-        .bind(row.control_plane.map(i64::from))
+        .bind(opt_json(row.allowed_tools.as_ref())?)
         .bind(&row.created_at)
         .bind(&row.updated_at)
         .execute(self.db.pool())
@@ -93,7 +96,7 @@ impl AgentStore {
         let res = sqlx::query(&self.db.q(
             "UPDATE agents SET description = ?, instructions = ?, model = ?, \
              plugins = ?, mcp_servers = ?, memory_spaces = ?, thinking_effort = ?, \
-             auto_compact = ?, control_plane = ?, updated_at = ? WHERE user_id = ? AND name = ?",
+             auto_compact = ?, allowed_tools = ?, updated_at = ? WHERE user_id = ? AND name = ?",
         ))
         .bind(&row.description)
         .bind(&row.instructions)
@@ -103,7 +106,7 @@ impl AgentStore {
         .bind(to_json(&row.memory_spaces)?)
         .bind(&row.thinking_effort)
         .bind(row.auto_compact.map(i64::from))
-        .bind(row.control_plane.map(i64::from))
+        .bind(opt_json(row.allowed_tools.as_ref())?)
         .bind(&row.updated_at)
         .bind(self.user.as_str())
         .bind(&row.name)
@@ -132,6 +135,14 @@ fn to_json<T: serde::Serialize>(v: &T) -> Result<String, String> {
     serde_json::to_string(v).map_err(|e| e.to_string())
 }
 
+/// A nullable JSON column. `None` stays NULL rather than becoming `"[]"`: for a
+/// tool selection those are different answers — "whatever this horsie thinks is
+/// sensible" versus "no built-in tools".
+fn opt_json<T: serde::Serialize>(v: Option<&T>) -> Result<Option<String>, String> {
+    v.map(|v| serde_json::to_string(v).map_err(|e| e.to_string()))
+        .transpose()
+}
+
 fn from_json<T: serde::de::DeserializeOwned>(col: &str, text: String) -> Result<T, String> {
     serde_json::from_str(&text).map_err(|e| format!("agents.{col}: {e}"))
 }
@@ -157,10 +168,9 @@ fn row_to_agent(row: &AnyRow) -> Result<AgentRow, String> {
             .try_get::<Option<i64>, _>("auto_compact")
             .map_err(|e| e.to_string())?
             .map(|v| v != 0),
-        control_plane: row
-            .try_get::<Option<i64>, _>("control_plane")
-            .map_err(|e| e.to_string())?
-            .map(|v| v != 0),
+        allowed_tools: get_opt("allowed_tools")?
+            .map(|t| from_json("allowed_tools", t))
+            .transpose()?,
         created_at: get("created_at")?,
         updated_at: get("updated_at")?,
     })
@@ -190,7 +200,7 @@ mod tests {
             created_at: "1".into(),
             updated_at: "1".into(),
             auto_compact: None,
-            control_plane: None,
+            allowed_tools: None,
         }
     }
 

@@ -242,6 +242,11 @@ pub mod routines {
     include!(concat!(env!("OUT_DIR"), "/routines/mod.rs"));
 }
 
+#[allow(clippy::doc_markdown, clippy::too_many_arguments)]
+pub mod tools {
+    include!(concat!(env!("OUT_DIR"), "/tools/mod.rs"));
+}
+
 /// The bearer a runtime presents on its dial-back, minted by whoever spawned it
 /// for that runtime's id alone.
 ///
@@ -1166,7 +1171,7 @@ mod agents_tests {
             created_at: "1".into(),
             updated_at: "2".into(),
             auto_compact: None,
-            control_plane: None,
+            allowed_tools: None,
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"mcpServers\""), "{json}");

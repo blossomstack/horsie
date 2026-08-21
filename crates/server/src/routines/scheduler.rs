@@ -198,7 +198,7 @@ mod tests {
                 memory_spaces: None,
                 thinking_effort: None,
                 auto_compact: None,
-                control_plane: None,
+                allowed_tools: None,
             })
             .await
             .unwrap();

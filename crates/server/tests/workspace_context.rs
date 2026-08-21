@@ -84,7 +84,6 @@ async fn scan_composes_prompt_and_exposes_skill_tool() {
     // allowed_tools=["bash"]); skill(name) serves the body from a fresh scan, and with
     // a single workspace the `workspace` arg can be omitted.
     let tb = DefaultToolboxFactory.for_agent(
-        &agent_def(),
         client,
         ws.names(),
         false,
@@ -115,7 +114,6 @@ async fn empty_workspace_yields_plain_prompt_but_tools_present() {
     let prompt = compose_system_prompt(agent_def().system_prompt.as_deref(), &ws, None, None);
     assert_eq!(prompt.as_deref(), Some("You are a coder."));
     let tb = DefaultToolboxFactory.for_agent(
-        &agent_def(),
         client,
         ws.names(),
         false,

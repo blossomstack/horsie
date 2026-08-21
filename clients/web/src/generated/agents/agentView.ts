@@ -44,11 +44,16 @@ export interface AgentView {
    */
   autoCompact?: boolean;
   /**
-   * Whether sessions from this preset may manage this horsie server — its
-   * agents, workflows, routines, environments and runtimes. Granted, never
-   * inherited: absent is off.
+   * The tools sessions from this preset may call, by name. Absent → the
+   * default set (every built-in group except the control plane), which is
+   * what lets a preset saved today follow a later horsie's idea of sensible
+   * rather than freezing this one's list.
+   *
+   * Only built-in tools are governed. Skills, MCP servers and memory spaces
+   * are chosen by their own fields, so a narrowed selection never silently
+   * removes what one of those turned on.
    */
-  controlPlane?: boolean;
+  allowedTools?: string[];
   /**
    * Unix epoch seconds.
    */

@@ -2,11 +2,11 @@
 //! LLM that calls a `horsie_*` tool, asserting the change actually landed.
 //!
 //! The unit tests in `horsie-server` prove the toolbox dispatches to the right
-//! operation. These prove the layer above: that a session built from settings
-//! carrying `control_plane` *advertises* those tools to the model, that a tool
-//! call made mid-turn reaches the same services the HTTP API writes through,
-//! and that a session without the grant never sees them. None of that is
-//! visible from a unit test, because none of it happens until a turn runs.
+//! operation. These prove the layer above: that a session whose tool selection
+//! names a `horsie_*` tool *advertises* it to the model, that a tool call made
+//! mid-turn reaches the same services the HTTP API writes through, and that a
+//! session that never asked for one never sees them. None of that is visible
+//! from a unit test, because none of it happens until a turn runs.
 
 #![allow(
     clippy::unwrap_used,
@@ -97,17 +97,36 @@ impl Harness {
     }
 
     /// Create a session whose main agent may — or may not — manage the server.
+    ///
+    /// Granted by naming the tools, since that *is* the grant. Ungranted means
+    /// sending no selection at all, which is the case worth testing: the
+    /// default set must not reach the control plane, or every session on the
+    /// server would be an admin.
     async fn session(&self, control_plane: bool, message: &str) -> String {
+        let mut agent = serde_json::json!({
+            "model": "mock",
+            "use_plugins": false,
+        });
+        if control_plane {
+            // Every control tool, read from the catalogue rather than listed
+            // here: a resource added to the control plane must not quietly stop
+            // being covered by these tests.
+            //
+            // camelCase, not snake_case: an unknown key is dropped in silence,
+            // so `allowed_tools` here would leave every session ungranted and
+            // make the positive tests below fail for a reason unrelated to the
+            // control plane.
+            let control: Vec<String> = horsie_server::tools::catalog()
+                .groups
+                .into_iter()
+                .flat_map(|g| g.tools)
+                .filter(|t| !t.in_default_set)
+                .map(|t| t.name)
+                .collect();
+            agent["allowedTools"] = serde_json::json!(control);
+        }
         let body = serde_json::json!({
-            "agent": {
-                "model": "mock",
-                "use_plugins": false,
-                // camelCase, not snake_case: an unknown key is dropped in
-                // silence, so `control_plane` here would leave every session
-                // ungranted and make the negative test below pass for the
-                // wrong reason.
-                "controlPlane": control_plane,
-            },
+            "agent": agent,
             "environment": {"type": "Runtime", "value": {"vendor": "mock"}},
             "message": message,
         });

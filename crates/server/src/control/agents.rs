@@ -147,7 +147,7 @@ async fn invoke(
     }
     let wire = WireAgentSettings {
         model: agent.model.clone(),
-        allowed_tools: None,
+        allowed_tools: agent.allowed_tools.clone(),
         use_plugins: None,
         max_iterations: None,
         max_retries: None,
@@ -158,7 +158,6 @@ async fn invoke(
         // What the preset says about *behaviour*, as opposed to what it gates.
         instructions: agent.instructions.clone(),
         auto_compact: agent.auto_compact,
-        control_plane: agent.control_plane,
     };
     let spec = build_session_spec(
         &services.config_store,

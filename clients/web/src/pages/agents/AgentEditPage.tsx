@@ -158,21 +158,11 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                 What every session started from this preset runs with.
               </p>
               <ConfigFields draft={draft} />
-              {/* One more thing this preset runs with, so it lives with the
-                  rest rather than in a section of its own. */}
-              <label className="mt-4 flex items-center gap-2 text-sm text-dim">
-                <input
-                  type="checkbox"
-                  checked={draft.controlPlane}
-                  onChange={(e) => draft.setControlPlane(e.target.checked)}
-                  data-testid="agent-control-plane-toggle"
-                />
-                Let this agent manage this horsie server
-              </label>
-              <p className="mt-1 text-xs text-faint">
-                Creates, changes and deletes agents, routines and environments —
-                immediately, without asking first.
-              </p>
+              {/* "Let this agent manage this horsie server" was a checkbox
+                  here. It is now the Horsie group in the Tools picker above:
+                  the grant was always a question about which tools the agent
+                  gets, and a separate bit beside the list could disagree with
+                  it. Picking the tools is the grant. */}
             </div>
           </section>
 

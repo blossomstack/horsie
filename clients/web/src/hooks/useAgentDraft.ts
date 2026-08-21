@@ -4,12 +4,6 @@ import { useSettings } from "./useSettings";
 import type { ConfigDraft } from "./useSessionDraft";
 
 export interface AgentDraft extends ConfigDraft {
-  /** Whether sessions from this preset may manage the horsie server itself.
-   * Its own field rather than part of `ConfigDraft`: every other setting here
-   * shapes how the agent works, and this one decides what it is allowed to
-   * change. */
-  controlPlane: boolean;
-  setControlPlane: (v: boolean) => void;
   /** Assemble the save payload. `name`/`description` come from the form's
    * text inputs, not the picker state. */
   buildAgentInput: (
@@ -37,6 +31,13 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
   const [memorySpaces, setMemorySpaces] = useState<Set<string>>(
     () => new Set(initial?.memorySpaces ?? []),
   );
+  // `undefined` on the wire is the server's default set, and stays `null` here
+  // rather than being expanded into a concrete list. Expanding it would freeze
+  // today's default into every preset anyone opens — and would make the form's
+  // Save button quietly rewrite presets nobody meant to change.
+  const [tools, setTools] = useState<Set<string> | null>(() =>
+    initial?.allowedTools ? new Set(initial.allowedTools) : null,
+  );
   const [thinkingEffort, setThinkingEffort] = useState(
     initial?.thinkingEffort ?? "",
   );
@@ -45,12 +46,6 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
   // turned back on by anyone who opened the form and pressed Save. So it is
   // carried through untouched rather than dropped.
   const carriedAutoCompact = initial?.autoCompact;
-  // Absent is off. A preset saved before the control plane existed, or by an
-  // API caller who never mentioned it, must not come back granted.
-  const [controlPlane, setControlPlane] = useState(
-    initial?.controlPlane === true,
-  );
-
   // The effort menu belongs to the model, so a preset can name an effort the
   // currently-selected model no longer offers. Treat that as "use the model's
   // default" rather than saving a value the server would reject with a 422.
@@ -77,17 +72,12 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
         memorySpaces: memorySpaces.size ? [...memorySpaces] : undefined,
         thinkingEffort: effectiveThinkingEffort || undefined,
         autoCompact: carriedAutoCompact,
-        controlPlane: controlPlane || undefined,
+        // `null` means nothing was chosen, so nothing is sent and the server
+        // resolves its default set at run time. `[]` is sent as itself — a
+        // preset that may call no built-in tool is a thing someone can mean.
+        allowedTools: tools === null ? undefined : [...tools],
       }),
-    [
-      model,
-      skills,
-      mcp,
-      memorySpaces,
-      effectiveThinkingEffort,
-      carriedAutoCompact,
-      controlPlane,
-    ],
+    [model, skills, mcp, memorySpaces, effectiveThinkingEffort, carriedAutoCompact, tools],
   );
 
   return {
@@ -103,8 +93,8 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
     setThinkingEffort,
     thinkingEfforts,
     modelDefaultThinkingEffort: selectedModel?.thinkingEffort ?? "",
-    controlPlane,
-    setControlPlane,
+    tools: tools === null ? null : new Set(tools),
+    setTools: (t) => setTools(t === null ? null : new Set(t)),
     buildAgentInput,
   };
 }

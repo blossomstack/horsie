@@ -50,6 +50,15 @@ export interface AgentDocument {
    */
   memorySpaces: string[];
   /**
+   * The built-in tools this agent may call, frozen at creation. Absent → the
+   * server's default set, which is what an unnarrowed session has.
+   *
+   * Present so a session that refuses a tool call can say what it was
+   * launched with. Without it the only symptom of a narrowed selection is a
+   * tool that will not run and nothing to check it against.
+   */
+  allowedTools?: string[];
+  /**
    * Whether the runtime's plugin/skill machinery is enabled for this agent.
    */
   usePlugins: boolean;

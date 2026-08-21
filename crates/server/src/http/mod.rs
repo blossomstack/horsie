@@ -161,6 +161,7 @@ pub fn app(state: AppState) -> Router {
     let web_dir = state.web_dir.clone();
     let api = Router::new()
         .route("/api/health", get(handlers::health))
+        .route("/api/tools", get(handlers::tool_catalog))
         .route("/api/sessions", post(handlers::create_session))
         .route(
             "/api/sessions/{id}/annotations",

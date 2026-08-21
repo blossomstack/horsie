@@ -21,6 +21,10 @@ use std::collections::{BTreeMap, HashMap};
 pub const NON_OPERATIONS: &[(&str, &str)] = &[
     // Liveness, before anything is resolved.
     ("/api/health", "no account, no state, nothing to manage"),
+    // A table compiled into this binary. There is nothing here to manage: a
+    // control tool that listed the tools would be answering a question about
+    // the build, not about this account.
+    ("/api/tools", "static catalogue, not a resource"),
     // Credentials. The control plane never issues or spends one.
     ("/api/auth/status", "credential surface"),
     ("/api/auth/login", "credential surface"),
