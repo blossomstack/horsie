@@ -38,6 +38,16 @@ pub(crate) fn wire_annotations(annotations: &BTreeMap<String, String>) -> Vec<An
         .collect()
 }
 
+/// Every built-in tool this server offers, grouped for selection.
+///
+/// Static per build — the catalogue is a table, not a discovery pass — so this
+/// takes no state and touches nothing. MCP tools are deliberately absent: they
+/// are chosen by selecting the server, and their names do not exist until
+/// something has been connected to. See [`crate::tools`].
+pub async fn tool_catalog() -> impl IntoResponse {
+    Json(crate::tools::catalog())
+}
+
 /// Liveness, and — on a clustered node — readiness.
 ///
 /// A node that has stood down reports 503 here so a load balancer drains it,
@@ -309,6 +319,7 @@ pub async fn get_agent(
         model: detail.settings.model,
         mcp_servers: detail.settings.mcp_servers,
         memory_spaces: detail.settings.memory_spaces,
+        allowed_tools: detail.settings.allowed_tools,
         use_plugins: detail.settings.use_plugins.unwrap_or(false),
         thinking_effort: detail.settings.thinking_effort,
         tasks: detail

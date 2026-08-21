@@ -14,6 +14,9 @@ import { cn } from "../lib/cn";
 
 /** Breathing room between a menu and whatever would otherwise clip it. */
 const EDGE = 8;
+/** Never cap a menu below this: a sliver that shows no option is worse than
+ * one that overhangs slightly. */
+const MIN_PANEL_HEIGHT = 160;
 
 /**
  * Marks a button that behaves as one choice in a list of choices.
@@ -92,6 +95,7 @@ export function PopoverMenu({
   warn = false,
   testId,
   width = "w-64",
+  height,
   children,
 }: {
   label: ReactNode;
@@ -109,6 +113,8 @@ export function PopoverMenu({
   warn?: boolean;
   testId?: string;
   width?: string;
+  /** Tailwind max-height for the panel; defaults to `max-h-72`. */
+  height?: string;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -123,17 +129,23 @@ export function PopoverMenu({
   // is mirrored in a ref so `place` can subtract it without depending on the
   // state it sets — otherwise every measurement re-creates the callback and
   // re-runs the effect.
-  const [box, setBox] = useState({ shift: 0, maxWidth: 0 });
+  const [box, setBox] = useState({ shift: 0, maxWidth: 0, maxHeight: 0 });
   const shiftRef = useRef(0);
 
   /**
-   * Anchor the menu to the trigger's left edge, then slide it back inside its
-   * column.
+   * Anchor the menu to the trigger's left edge, slide it back inside its
+   * column, and cap its height at the room it actually has.
    *
    * It used to be right-anchored for every icon key, on the assumption that
    * those keys live at the right end of the row. Once the row grew a left
    * group, a 20rem menu hanging leftward from a key an inch from the pane's
    * edge went straight under the session rail.
+   *
+   * The vertical cap is the same idea one axis over, and it is not optional
+   * for a tall menu: the action row sits at the bottom of the window, so its
+   * menus open *upward*, and a fixed max-height taller than the space above
+   * the trigger runs off the top of the screen — taking its own header and
+   * quick actions with it, which is the half you cannot scroll back to.
    */
   const place = useCallback(() => {
     const anchor = ref.current;
@@ -148,13 +160,23 @@ export function PopoverMenu({
     if (right > bounds.right - EDGE) dx = bounds.right - EDGE - right;
     if (left + dx < bounds.left + EDGE) dx = bounds.left + EDGE - left;
     shiftRef.current = dx;
-    setBox({ shift: dx, maxWidth: Math.max(0, bounds.right - bounds.left - EDGE * 2) });
-  }, []);
+    // Room between the trigger and the edge of the window it opens toward.
+    const a = anchor.getBoundingClientRect();
+    const room =
+      placement === "up" ? a.top - EDGE : window.innerHeight - a.bottom - EDGE;
+    setBox({
+      shift: dx,
+      maxWidth: Math.max(0, bounds.right - bounds.left - EDGE * 2),
+      // A floor, so a trigger that happens to sit near an edge gets a usable
+      // menu that scrolls rather than a sliver that cannot show one option.
+      maxHeight: Math.max(MIN_PANEL_HEIGHT, room),
+    });
+  }, [placement]);
 
   useLayoutEffect(() => {
     if (!open) {
       shiftRef.current = 0;
-      setBox({ shift: 0, maxWidth: 0 });
+      setBox({ shift: 0, maxWidth: 0, maxHeight: 0 });
       return;
     }
     place();
@@ -329,7 +351,12 @@ export function PopoverMenu({
             // the DOM, so a tie went to the panel. Its scrim happens to make
             // the config bar unreachable while it is open, but a menu should
             // not depend on that to be on top.
-            "panel absolute left-0 z-30 max-h-72 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            "panel absolute left-0 z-30 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            // 18rem suits a list of bare names. A picker whose options each
+            // carry a description and a badge says so — see `PickerSpec.height`
+            // — because a two-line option in an 18rem box shows four of them
+            // and hides the rest behind a scrollbar nobody expects.
+            height ?? "max-h-72",
             // The action row sits at the bottom of the screen, so its menus
             // open upward or they open off-screen; a form's open downward.
             placement === "up" ? "bottom-full mb-1.5" : "top-full mt-1.5",
@@ -343,6 +370,9 @@ export function PopoverMenu({
           style={{
             transform: `translateX(${box.shift}px)`,
             maxWidth: box.maxWidth || undefined,
+            // Narrows the class cap, never widens it: `max-h-*` and this both
+            // apply, so the smaller wins and a short menu keeps its own size.
+            maxHeight: box.maxHeight || undefined,
           }}
         >
           {variant === "icon" && legend && (

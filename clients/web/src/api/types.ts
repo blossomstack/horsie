@@ -18,4 +18,5 @@ export * from "../generated/runtime";
 export * from "../generated/session";
 export * from "../generated/session_api";
 export * from "../generated/settings";
+export * from "../generated/tools";
 export * from "../generated/workflow";

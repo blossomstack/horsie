@@ -82,6 +82,7 @@ function DraftControls({ draft }: { draft: ConfigDraft }) {
           marked={p.marked}
           warn={p.warn}
           width={p.width}
+          height={p.height}
         >
           {p.body}
         </PopoverMenu>
@@ -114,6 +115,7 @@ export function ConfigFields({ draft }: { draft: ConfigDraft }) {
             icon={p.icon}
             label={p.label}
             width={p.width}
+            height={p.height}
           >
             {p.body}
           </PopoverMenu>

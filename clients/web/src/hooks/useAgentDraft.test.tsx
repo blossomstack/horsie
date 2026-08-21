@@ -120,28 +120,38 @@ describe("useAgentDraft", () => {
     });
   });
 
-  // Absent is off. A preset saved before the control plane existed, or by an
-  // API caller who never mentioned it, must not come back granted.
-  it("leaves control-plane access off unless the preset carries it", () => {
+  // A preset that never chose stays unanswered, so it follows the server's
+  // default set rather than freezing today's list into the row. That is also
+  // what keeps the control plane out: a grant nobody made is not a grant.
+  it("leaves an unchosen tool selection absent", () => {
     const { result } = render(preset);
-    expect(result.current.controlPlane).toBe(false);
+    expect(result.current.tools).toBeNull();
     expect(
-      result.current.buildAgentInput("reviewer", "", "").controlPlane,
+      result.current.buildAgentInput("reviewer", "", "").allowedTools,
     ).toBeUndefined();
   });
 
-  it("carries an existing grant, and a newly ticked one", () => {
-    const { result } = render({ ...preset, controlPlane: true });
-    expect(result.current.controlPlane).toBe(true);
-    expect(result.current.buildAgentInput("reviewer", "", "").controlPlane).toBe(
-      true,
-    );
+  it("carries an existing selection, and a newly made one", () => {
+    const { result } = render({ ...preset, allowedTools: ["bash", "horsie_agents"] });
+    expect(result.current.tools).toEqual(new Set(["bash", "horsie_agents"]));
+    expect(
+      result.current.buildAgentInput("reviewer", "", "").allowedTools,
+    ).toEqual(["bash", "horsie_agents"]);
 
     const fresh = render(preset);
-    act(() => fresh.result.current.setControlPlane(true));
+    act(() => fresh.result.current.setTools(new Set(["grep"])));
     expect(
-      fresh.result.current.buildAgentInput("reviewer", "", "").controlPlane,
-    ).toBe(true);
+      fresh.result.current.buildAgentInput("reviewer", "", "").allowedTools,
+    ).toEqual(["grep"]);
+  });
+
+  // The two answers a naive `|| undefined` would collapse into one.
+  it("saves an empty selection as itself, not as the default set", () => {
+    const { result } = render(preset);
+    act(() => result.current.setTools(new Set()));
+    expect(
+      result.current.buildAgentInput("reviewer", "", "").allowedTools,
+    ).toEqual([]);
   });
 
   // A preset is saved with `PUT`, which is a full replace: anything the form

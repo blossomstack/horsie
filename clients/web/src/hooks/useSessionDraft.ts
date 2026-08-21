@@ -12,6 +12,7 @@ import {
   filterMcpServers,
   filterMemorySpaces,
   filterSkills,
+  filterTools,
   loadDraftPayload,
   parseDraftPayload,
   reconcileModelEnvironment,
@@ -27,6 +28,7 @@ import { useMcpServers } from "./useMcp";
 import { usePersistentState } from "./usePersistentState";
 import { usePlugins } from "./usePlugins";
 import { useSettings } from "./useSettings";
+import { allTools, useTools } from "./useTools";
 import { useWorkflows } from "./useWorkflows";
 
 export type { EnvironmentDraft };
@@ -52,6 +54,17 @@ export interface ConfigDraft {
   /** Memory spaces the session may read and write. */
   memorySpaces: Set<string>;
   setMemorySpaces: (s: Set<string>) => void;
+  /**
+   * The built-in tools the agent may call. `null` means the server's default
+   * set, and is what an untouched draft carries.
+   *
+   * `null` is not "all": it is deliberately a *deferred* answer, so a preset
+   * saved today follows a later horsie's idea of sensible instead of freezing
+   * this one's list — and so no unset field can hand out the control plane. An
+   * empty set is a real answer meaning no built-in tools at all.
+   */
+  tools: Set<string> | null;
+  setTools: (t: Set<string> | null) => void;
   /** Canonical thinking effort; "" = the model's configured default. */
   thinkingEffort: string;
   setThinkingEffort: (e: string) => void;
@@ -124,6 +137,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const { data: workflows } = useWorkflows();
   const { data: agents } = useAgents();
   const { data: environments } = useEnvironments();
+  const { data: toolCatalog } = useTools();
   const models = settings?.models ?? [];
   const activeVendors = useMemo(() => settings?.vendors ?? [], [settings]);
 
@@ -204,6 +218,17 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     setStaleFiltered(true);
   }, [staleFiltered, bundles, mcpServers, memorySpaces, draft]);
 
+  // The same pass for tools, but on its own: the catalogue is a separate read,
+  // and folding it into the one above would let a failed `/api/tools` stop
+  // skills, MCP servers and memory spaces from ever being reconciled.
+  const [toolsFiltered, setToolsFiltered] = useState(false);
+  useEffect(() => {
+    if (toolsFiltered || !toolCatalog) return;
+    const next = filterTools(draft, new Set(allTools(toolCatalog).map((t) => t.name)));
+    if (next !== draft) setDraft(next);
+    setToolsFiltered(true);
+  }, [toolsFiltered, toolCatalog, draft]);
+
   const environment = draft.environment;
   // Which vendor this selection resolves to — its own, or the predefined
   // environment's. One lookup, so every downstream answer agrees.
@@ -274,6 +299,10 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
       // Memories are served by the server itself, so they work on every
       // vendor, including ones that can't provision.
       memorySpaces: draft.memorySpaces.length ? draft.memorySpaces : undefined,
+      // `null` — nothing was chosen — sends nothing, which the server reads as
+      // its default set. An empty array is sent as itself: "no built-in tools"
+      // is a choice, and `|| undefined` would quietly overturn it.
+      allowedTools: draft.tools ?? undefined,
       thinkingEffort: effectiveThinkingEffort || undefined,
       // `autoCompact` is left absent, which the server reads as on. The UI
       // stopped offering the choice; sending today's default explicitly would
@@ -326,6 +355,8 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
     memorySpaces: new Set(draft.memorySpaces),
     setMemorySpaces: (memorySpaces) =>
       setDraft({ ...draft, memorySpaces: [...memorySpaces] }),
+    tools: draft.tools === null ? null : new Set(draft.tools),
+    setTools: (tools) => setDraft({ ...draft, tools: tools === null ? null : [...tools] }),
     thinkingEffort: effectiveThinkingEffort,
     setThinkingEffort: (thinkingEffort) => setDraft({ ...draft, thinkingEffort }),
     thinkingEfforts,

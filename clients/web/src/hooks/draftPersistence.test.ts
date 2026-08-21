@@ -20,6 +20,7 @@ const sample: DraftPayload = {
   skills: ["bundle-a"],
   mcp: ["mcp-x"],
   memorySpaces: ["horsie"],
+  tools: null,
   thinkingEffort: "high",
 };
 
@@ -240,6 +241,7 @@ describe("emptyDraft", () => {
       skills: [],
       mcp: [],
       memorySpaces: [],
+      tools: null,
       thinkingEffort: "",
     });
   });

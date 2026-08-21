@@ -54,6 +54,13 @@ pub struct AgentParams {
     /// final text is an answer to a person, not a report, and stays a turn
     /// boundary.
     pub park_on_outstanding_work: bool,
+    /// The built-in tools this agent may call, by name. `None` is the default
+    /// set, not "everything" — see [`crate::tools::resolve`].
+    ///
+    /// Carried down to the agent rather than applied by whoever built the
+    /// toolbox, because the toolbox is only whole here: the actor is what stacks
+    /// the timer and `task_list` layers on top of whatever it was handed.
+    pub tools: Option<Vec<String>>,
 }
 
 impl AgentParams {
@@ -66,6 +73,7 @@ impl AgentParams {
             thinking_effort: None,
             interactive: false,
             park_on_outstanding_work: false,
+            tools: def.allowed_tools.clone(),
         }
     }
 }
@@ -1541,6 +1549,7 @@ impl AgentActor {
         // re-running one that ended without the result it owed.
         let tool_choice = self.pending_tool_choice.take();
         let max_iterations = self.params.max_iterations;
+        let run_def_tools = self.params.tools.clone();
         let thinking_effort = self.params.thinking_effort;
         let max_retries = self.params.max_retries;
         let parent = self.ctx.parent.clone();
@@ -1599,20 +1608,39 @@ impl AgentActor {
                     return;
                 }
             };
-            // Every agent gets the timer control tools, like `task_list`: they
-            // are a way of working, not a permission. They execute by `ask`ing
-            // this actor and are never sent to the sandboxed runtime.
+            // The timer and `task_list` layers are stacked unconditionally and
+            // narrowed afterwards by the selection, like every other layer.
+            // Both execute by `ask`ing this actor and are never sent to the
+            // sandboxed runtime.
+            let tool_narrowing = contexts.tool_narrowing;
             let toolbox: Arc<dyn Toolbox> = Arc::new(TimerToolbox {
                 inner: contexts.toolbox,
                 actor: self_ref.clone(),
             });
-            // `task_list` is always available, like `skill`/`inspect_workspace` --
-            // it's a working-memory aid every agent can reach for, not a permission
-            // that needs gating per agent.
             let toolbox: Arc<dyn Toolbox> = Arc::new(TaskListToolbox {
                 inner: toolbox,
                 actor: self_ref.clone(),
             });
+            // The agent's tool selection, applied once and last, so it reaches
+            // every layer above — the runtime tools, the timers, `task_list`,
+            // the session's own. Applied here rather than deeper because here is
+            // the only place the stack is whole; narrowing at any inner layer is
+            // how a selection came to mean "runtime tools, and nothing else you
+            // might reasonably have meant".
+            //
+            // `None` is not a bypass: it resolves to the default set, which
+            // leaves the control plane out. See `crate::tools`.
+            let toolbox =
+                crate::agent_loop::FilteredToolbox::apply(toolbox, run_def_tools.as_deref());
+            // A plugin's agent definition may narrow further. Stacked rather
+            // than merged: two filters can only ever remove, so whichever list
+            // is the narrower wins without anyone having to compute which.
+            let toolbox = match &tool_narrowing {
+                None => toolbox,
+                Some(narrowed) => {
+                    crate::agent_loop::FilteredToolbox::apply(toolbox, Some(narrowed))
+                }
+            };
             let system_prompt = contexts
                 .system_prompt
                 .or(configured_prompt)
@@ -3854,6 +3882,7 @@ mod tests {
                 Ok(crate::agent_loop::Contexts {
                     provider: self.0.clone(),
                     toolbox: Arc::new(EmptyToolbox),
+                    tool_narrowing: None,
                     system_prompt: None,
                     context_window: None,
                 })
@@ -3988,6 +4017,7 @@ mod tests {
                 Ok(crate::agent_loop::Contexts {
                     provider: self.llm.clone(),
                     toolbox: Arc::new(EmptyToolbox),
+                    tool_narrowing: None,
                     system_prompt: None,
                     context_window: None,
                 })
@@ -6273,6 +6303,7 @@ mod queue_tests {
             Ok(Contexts {
                 provider: self.0.clone(),
                 toolbox: Arc::new(horsie_agentcore::ToolboxImpl::new()),
+                tool_narrowing: None,
                 system_prompt: None,
                 context_window: None,
             })

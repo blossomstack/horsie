@@ -6,6 +6,7 @@ import {
   Plug,
   Server,
   Workflow,
+  Wrench,
   Check,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -15,7 +16,19 @@ import { useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
-import type { AgentDocument, SessionDetail } from "../api/types";
+import {
+  allTools,
+  defaultSelection,
+  readOnlySelection,
+  useTools,
+} from "../hooks/useTools";
+import type {
+  AgentDocument,
+  SessionDetail,
+  ToolCatalog,
+  ToolGroupView,
+} from "../api/types";
+import { ToolAccess } from "../api/types";
 import { cn } from "../lib/cn";
 import { basename } from "../lib/format";
 import { ReadError } from "./ReadError";
@@ -48,6 +61,10 @@ export interface PickerSpec {
   /** The control works, but what it configures needs attention. */
   warn?: boolean;
   width: string;
+  /** Tailwind max-height for the popover; omitted leaves `PopoverMenu`'s
+   * default, which suits a list of bare names but not one of described
+   * options. */
+  height?: string;
   testId: string;
   body: (close: () => void) => ReactNode;
 }
@@ -103,6 +120,63 @@ function checkList<T extends string>({
   );
 }
 
+/**
+ * The read/write badge.
+ *
+ * The distinction is about the tool, not the call — `bash` is a write because
+ * it can be one — so the badge answers "could this change something", which is
+ * the question someone narrowing a selection is actually asking.
+ */
+function AccessBadge({ access }: { access: ToolAccess }) {
+  const read = access === ToolAccess.Read;
+  return (
+    <span
+      className={cn(
+        "shrink-0 rounded-[var(--radius-chip)] px-1 py-px text-[0.625rem] tracking-wide uppercase",
+        read ? "bg-raised text-dim" : "bg-raised text-legend",
+      )}
+      data-testid="tool-access"
+      data-access={read ? "read" : "write"}
+    >
+      {read ? "read" : "write"}
+    </span>
+  );
+}
+
+/** One group's heading, with a tick-all that reflects the group's own state. */
+function ToolGroupHeader({
+  group,
+  selected,
+  onSet,
+}: {
+  group: ToolGroupView;
+  selected: Set<string>;
+  onSet: (names: string[], checked: boolean) => void;
+}) {
+  const names = group.tools.map((t) => t.name);
+  const all = names.every((n) => selected.has(n));
+  return (
+    <div className="flex items-baseline gap-2 px-2 pt-2 pb-0.5">
+      <span className="min-w-0 flex-1">
+        <span className="block text-[0.6875rem] tracking-wide text-faint uppercase">
+          {group.label}
+        </span>
+        <span className="block text-[0.6875rem] leading-snug text-faint">
+          {group.description}
+        </span>
+      </span>
+      <button
+        type="button"
+        className="shrink-0 text-[0.6875rem] text-dim hover:text-legend"
+        data-testid={`tool-group-all-${group.key}`}
+        onClick={() => onSet(names, !all)}
+      >
+        {all ? "clear" : "select all"}
+      </button>
+    </div>
+  );
+}
+
 function EmptyLink({ to, children }: { to: string; children: ReactNode }) {
   return (
     <Link to={to} className="block px-2 py-1.5 text-sm text-dim hover:text-legend">
@@ -138,6 +212,142 @@ const INERT_ENVIRONMENT: EnvironmentChannel = {
   provisions: false,
   githubConnected: false,
 };
+
+/**
+ * The Tools picker: which built-in tools the agent may call.
+ *
+ * `draft.tools === null` is *not* the same as every box ticked. It means the
+ * question was left to the server, so the selection follows a later horsie's
+ * idea of a sensible default instead of freezing today's list — and it is what
+ * keeps the control plane out, since a grant that could be inherited from an
+ * unset field would not be a grant. Ticking or unticking anything answers the
+ * question, and from then on the stored list is exactly what was chosen.
+ *
+ * MCP servers, skills and memory spaces are absent on purpose: each has its own
+ * picker on this same row, and their tool names are not fixed at build time. A
+ * selection here never removes what one of those turned on — see
+ * `crate::tools` on the server for the same rule from the other side.
+ */
+function toolsPicker(
+  draft: ConfigDraft,
+  catalog: ToolCatalog | undefined,
+  failed: boolean,
+  error: unknown,
+): PickerSpec {
+  const groups = catalog?.groups ?? [];
+  const every = allTools(catalog);
+  const fallback = defaultSelection(catalog);
+  // What is *ticked*. An unanswered selection shows the default set, so the
+  // boxes always agree with what would actually run.
+  const selected = draft.tools ?? fallback;
+  const answered = draft.tools !== null;
+
+  const set = (names: string[], checked: boolean) => {
+    const next = new Set(selected);
+    for (const n of names) {
+      if (checked) next.add(n);
+      else next.delete(n);
+    }
+    draft.setTools(next);
+  };
+
+  const label = !answered
+    ? "Default"
+    : selected.size === 0
+      ? "None"
+      : selected.size === every.length
+        ? "All"
+        : `${selected.size} selected`;
+
+  const quick: { key: string; label: string; apply: () => void }[] = [
+    { key: "default", label: "Default", apply: () => draft.setTools(null) },
+    {
+      key: "all",
+      label: "All",
+      apply: () => draft.setTools(new Set(every.map((t) => t.name))),
+    },
+    {
+      key: "read",
+      label: "Read-only",
+      apply: () => draft.setTools(readOnlySelection(catalog)),
+    },
+    { key: "none", label: "None", apply: () => draft.setTools(new Set()) },
+  ];
+
+  return {
+    key: "tools",
+    legend: "Tools",
+    icon: <Wrench size={15} />,
+    label,
+    // Only an explicit narrowing is worth marking. "Default" is the resting
+    // state, and a row of permanently-lit chips tells nobody anything.
+    marked: answered,
+    warn: failed,
+    width: "w-96",
+    // Two lines and a badge per option across eight groups: the default 18rem
+    // shows four tools and hides the Horsie group behind a scrollbar nobody
+    // has a reason to look for.
+    height: "max-h-[32rem]",
+    testId: "config-tools",
+    body: () =>
+      failed ? (
+        <ReadError
+          what="the tool catalogue"
+          error={error}
+          testId="tools-read-error"
+          className="mx-1 my-0.5"
+        />
+      ) : (
+        <div className="space-y-0.5" data-testid="tools-body">
+          <div className="flex flex-wrap gap-1 px-2 pt-0.5 pb-1">
+            {quick.map((q) => (
+              <button
+                key={q.key}
+                type="button"
+                className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+                data-testid={`tool-quick-${q.key}`}
+                onClick={q.apply}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+          {groups.map((group) => (
+            <div key={group.key} data-testid={`tool-group-${group.key}`}>
+              <ToolGroupHeader group={group} selected={selected} onSet={set} />
+              {group.tools.map((tool) => {
+                const checked = selected.has(tool.name);
+                return (
+                  <label
+                    key={tool.name}
+                    className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
+                    data-testid="tool-option"
+                    data-value={tool.name}
+                    data-selected={checked}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => set([tool.name], !checked)}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-mono text-sm text-legend">
+                        {tool.name}
+                      </span>
+                      <span className="block text-[0.6875rem] leading-snug text-faint">
+                        {tool.description}
+                      </span>
+                    </span>
+                    <AccessBadge access={tool.access} />
+                  </label>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      ),
+  };
+}
 
 /**
  * The one Environment picker, as its own hook.
@@ -365,6 +575,7 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
     useMcpServers();
   const { data: memorySpaces, isError: memoryFailed, error: memoryError } =
     useMemorySpaces();
+  const { data: toolCatalog, isError: toolsFailed, error: toolsError } = useTools();
   const env = hasEnvironment(draft) ? draft : undefined;
   // Called unconditionally with an inert channel when the draft has none: a
   // hook cannot be conditional, and an agent-preset form has no environment.
@@ -617,6 +828,10 @@ export function useConfigPickers(draft: ConfigDraft): PickerSpec[] {
       }),
   });
 
+  // Between the toolbox channels and the model: it is the widest of them, and
+  // the one whose answer changes what the others are for.
+  pickers.push(toolsPicker(draft, toolCatalog, toolsFailed, toolsError));
+
   pickers.push({
     key: "model",
     legend: "Model",
@@ -867,6 +1082,26 @@ export function useLockedChannels(
     ...optional("skills", "Skills", <Boxes size={15} />, "w-80", detail.plugins),
     ...optional("mcp", "MCP", <Plug size={15} />, "w-72", agent.mcpServers),
     ...optional("memory", "Memory", <Brain size={15} />, "w-72", agent.memorySpaces),
+    // Unlike the others, absent is a real answer here rather than "nothing to
+    // show": a session on the default set has no list to read out, and saying
+    // so is what tells you the tools were *not* the reason a call was refused.
+    {
+      key: "tools",
+      legend: "Tools",
+      icon: <Wrench size={15} />,
+      label: agent.allowedTools ? `${agent.allowedTools.length} selected` : "Default",
+      marked: !!agent.allowedTools,
+      width: "w-80",
+      testId: "config-tools",
+      body: agent.allowedTools
+        ? readout(agent.allowedTools)
+        : () => (
+            <p className="px-1 py-0.5 text-sm text-faint">
+              Every built-in tool except the control plane — this server's
+              default set.
+            </p>
+          ),
+    },
     {
       key: "model",
       legend: "Model",

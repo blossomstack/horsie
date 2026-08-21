@@ -153,7 +153,7 @@ async fn agents_are_isolated() {
         created_at: T.into(),
         updated_at: T.into(),
         auto_compact: None,
-        control_plane: None,
+        allowed_tools: None,
     };
     mine.insert(&agent("mine")).await.unwrap();
 

@@ -20,6 +20,7 @@ test("J1: the New button opens an editable draft at /", async ({ page, appBase }
   await expect(page.getByTestId("config-runtime")).toHaveCount(0);
   await expect(page.getByTestId("config-skills")).toBeVisible();
   await expect(page.getByTestId("config-mcp")).toBeVisible();
+  await expect(page.getByTestId("config-tools")).toBeVisible();
 
   await page.getByTestId("config-environment").click();
   await expect(
@@ -59,6 +60,13 @@ test("J2: a created session keeps the same row, now read-only", async ({
   );
   await page.getByTestId("config-model").click();
   await expect(page.getByTestId("session-config-bar")).toContainText("mock");
+  // A session that never narrowed reads "Default" rather than showing nothing:
+  // "the tools were not the reason" is an answer worth being able to check.
+  await expect(page.getByTestId("config-tools")).toHaveAttribute(
+    "aria-label",
+    /Tools — Default/,
+  );
+
   // Nothing here edits: the draft's option rows do not exist on a locked bar.
   await expect(page.getByTestId("model-option")).toHaveCount(0);
 });
@@ -94,4 +102,40 @@ test("J3: every config menu opens inside the pane, not under the rail", async ({
     ).toBeLessThanOrEqual(pane.x + pane.width + 1);
     await page.keyboard.press("Escape");
   }
+});
+
+// The tool selection is a tri-state, and the middle value is the one that is
+// easy to get wrong: an untouched draft defers to the server rather than
+// freezing a list, and that is what keeps the control plane out of a session
+// nobody granted it to.
+test("J8: the Tools picker opens on the default set, grouped and badged", async ({
+  page,
+  appBase,
+}) => {
+  await page.goto(appBase);
+  await page.getByTestId("new-session-button").click();
+  await page.waitForURL((url) => url.pathname === "/");
+
+  const tools = page.getByTestId("config-tools");
+  await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);
+  await tools.click();
+
+  await expect(page.getByTestId("tool-group-runtime")).toBeVisible();
+  await expect(page.getByTestId("tool-group-control")).toBeVisible();
+
+  const option = (name: string) =>
+    page.locator(`[data-testid="tool-option"][data-value="${name}"]`);
+  await expect(option("bash")).toHaveAttribute("data-selected", "true");
+  // Selecting a `horsie_*` tool is the grant, so it can never start ticked.
+  await expect(option("horsie_agents")).toHaveAttribute("data-selected", "false");
+
+  // Read-only is the one-click safe selection: every write tool goes.
+  await page.getByTestId("tool-quick-read").click();
+  await expect(option("read_file")).toHaveAttribute("data-selected", "true");
+  await expect(option("bash")).toHaveAttribute("data-selected", "false");
+  await expect(tools).toHaveAttribute("aria-label", /Tools — \d+ selected/);
+
+  // And back to deferring, which no set of ticks can express.
+  await page.getByTestId("tool-quick-default").click();
+  await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);
 });

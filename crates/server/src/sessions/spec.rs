@@ -104,12 +104,6 @@ pub struct AgentSettings {
     /// means yes, so every existing session gains the behaviour.
     #[serde(default)]
     pub auto_compact: Option<bool>,
-    /// Whether this session's main agent may manage the horsie server itself.
-    /// `#[serde(default)]` so journal rows written before the control plane
-    /// deserialize; `None` means no, because authority is granted and never
-    /// acquired by age.
-    #[serde(default)]
-    pub control_plane: Option<bool>,
 }
 
 impl AgentSettings {
@@ -231,7 +225,6 @@ impl SessionSpec {
                     thinking_effort: None,
                     max_concurrent_subagents: None,
                     auto_compact: None,
-                    control_plane: None,
                     plugins: Vec::new(),
                 },
             },
@@ -419,7 +412,6 @@ mod tests {
             thinking_effort: None,
             max_concurrent_subagents: None,
             auto_compact: None,
-            control_plane: None,
             plugins: Vec::new(),
         }
     }
@@ -495,6 +487,10 @@ mod tests {
         // Every session journaled before routines existed carries no origin.
         // It must load as a user session — the alternative is a restart that
         // hides every pre-existing session from the session list.
+        //
+        // The row still carries `control_plane`, dropped in 0039. Left in on
+        // purpose: an unknown key must stay ignorable, or every session
+        // journaled before the tool selection would fail to load.
         let row = r#"{"name":null,"kind":{"Agent":{"settings":{"model":"m",
             "allowed_tools":null,"use_plugins":null,"max_iterations":null,
             "max_retries":0,"mcp_servers":[],"memory_spaces":[],

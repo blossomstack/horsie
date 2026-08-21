@@ -1,0 +1,50 @@
+/// The catalogue of built-in tools an agent's tool selection can choose from.
+///
+/// Static per build: every entry here is a tool this horsie compiles in, so the
+/// catalogue is served from a table rather than discovered by connecting to
+/// anything. Tools that arrive from outside the binary — MCP servers, a
+/// plugin's own MCP server — are deliberately absent: their names exist only
+/// once something has been connected to, and they are already chosen by
+/// selecting the server. A selection therefore never governs them.
+package tools;
+
+/// Whether a tool observes or changes something.
+///
+/// A judgement about the tool, not about one call: `bash` is `Write` because it
+/// *can* write, and `horsie_sessions` is `Write` because one of its actions
+/// creates a session. Anything that could go either way is `Write` — the point
+/// of the distinction is to make "read-only" mean it.
+enum ToolAccess {
+    Read,
+    Write,
+}
+
+/// One selectable tool.
+struct ToolView {
+    /// The name the model calls, and the value stored in a selection.
+    name: String,
+    /// One line, written for the person choosing — not the (much longer)
+    /// description the model is given.
+    description: String,
+    access: ToolAccess,
+    /// Whether an unset selection includes this tool. False for the control
+    /// plane alone: selecting a `horsie_*` tool is how server authority is
+    /// granted, so it can never be granted by leaving something unset.
+    in_default_set: bool,
+}
+
+/// A named set of tools that are chosen together as often as not.
+struct ToolGroupView {
+    /// Stable key, for test ids and any client that wants to reason about a
+    /// group rather than render it.
+    key: String,
+    label: String,
+    /// What the group is for, shown under its heading.
+    description: String,
+    tools: Vec<ToolView>,
+}
+
+/// Every built-in tool this server offers, grouped.
+struct ToolCatalog {
+    groups: Vec<ToolGroupView>,
+}

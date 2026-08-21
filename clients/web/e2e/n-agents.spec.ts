@@ -86,7 +86,7 @@ test("N3: the agent form offers skills and MCP, and no runtime", async ({
   await page.request.delete(`${appBase}/api/agents/e2e-channels`);
 });
 
-test("N4: the control-plane toggle is off by default and persists when ticked", async ({
+test("N4: the Horsie tool group is the control-plane grant, and it persists", async ({
   page,
   appBase,
 }) => {
@@ -99,17 +99,30 @@ test("N4: the control-plane toggle is off by default and persists when ticked", 
   expect(res.status()).toBe(201);
 
   await page.goto(`${appBase}/agents/e2e-control/edit`);
-  const toggle = page.getByTestId("agent-control-plane-toggle");
-  await expect(toggle).toBeVisible();
-  // Absent is off: a preset created without mentioning it comes back ungranted.
-  await expect(toggle).not.toBeChecked();
+  // The standalone checkbox is gone: the grant is a tool selection now, so a
+  // second control beside the list could disagree with it.
+  await expect(page.getByTestId("agent-control-plane-toggle")).toHaveCount(0);
+
+  // The form renders each channel as a labelled field, not the session row's
+  // icon-only key, so the value is visible text rather than an accessible name.
+  const tools = page.getByTestId("config-tools");
+  await expect(tools).toContainText("Default");
+  await tools.click();
+
+  const horsieAgents = page.locator(
+    '[data-testid="tool-option"][data-value="horsie_agents"]',
+  );
+  // Absent is ungranted: a preset created without mentioning tools comes back
+  // with the control plane untouched.
+  await expect(horsieAgents).toHaveAttribute("data-selected", "false");
 
   await page.screenshot({
-    path: "test-results/agent-control-plane-toggle.png",
+    path: "test-results/agent-tools-picker.png",
     fullPage: true,
   });
 
-  await toggle.check();
+  await horsieAgents.locator("input[type=checkbox]").check();
+  await page.keyboard.press("Escape");
   await page.getByTestId("save-agent-button").click();
 
   // The grant is only real once the server has it.
@@ -117,7 +130,7 @@ test("N4: the control-plane toggle is off by default and persists when ticked", 
     .poll(async () =>
       (
         await (await page.request.get(`${appBase}/api/agents/e2e-control`)).json()
-      ).controlPlane,
+      ).allowedTools?.includes("horsie_agents"),
     )
     .toBe(true);
 
@@ -127,7 +140,8 @@ test("N4: the control-plane toggle is off by default and persists when ticked", 
   // assertion without the race.
   await page.goto(`${appBase}/agents/e2e-control/edit`);
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
-  await expect(page.getByTestId("agent-control-plane-toggle")).toBeChecked();
+  await page.getByTestId("config-tools").click();
+  await expect(horsieAgents).toHaveAttribute("data-selected", "true");
 
   await page.request.delete(`${appBase}/api/agents/e2e-control`);
 });

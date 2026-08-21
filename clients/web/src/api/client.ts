@@ -47,6 +47,7 @@ import type {
   PasswordChangeRequest,
   CatalogEntryView,
   PluginView,
+  ToolCatalog,
   RoutineInput,
   RoutineRunResponse,
   RoutineView,
@@ -612,6 +613,16 @@ export const api = {
 
     branches: (repo: string): Promise<GitHubBranchList> =>
       request(`/github/repos/branches?repo=${encodeURIComponent(repo)}`),
+  },
+
+  /**
+   * The built-in tools this server offers, grouped for selection.
+   *
+   * Static per build, so a client caches it for the session — see `useTools`.
+   * MCP tools are not here: they are chosen by selecting the server.
+   */
+  tools: {
+    catalog: (): Promise<ToolCatalog> => request("/tools"),
   },
 
   plugins: {

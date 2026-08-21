@@ -4,6 +4,21 @@
  */
 export interface AgentSettings {
   model: string;
+  /**
+   * The built-in tools this session's agents may call, by name. Absent → the
+   * default set: every built-in group except the control plane.
+   *
+   * An allowlist over built-ins only. Skills, MCP servers and memory spaces
+   * are selected by their own fields and are never removed by narrowing this
+   * one — their names are not fixed at build time, so a selection could not
+   * honestly speak for them.
+   *
+   * Naming a `horsie_*` tool is the whole authorisation for the control
+   * plane: authority over this server is asked for, never inherited from a
+   * field left unset. Only the main agent gets those tools — subagents,
+   * forks and workflow steps inherit the selection but not the authority,
+   * the same rule that keeps session-metadata tools off them.
+   */
   allowedTools?: string[];
   usePlugins?: boolean;
   maxIterations?: number;
@@ -46,13 +61,4 @@ export interface AgentSettings {
    * then nothing to be a share of.
    */
   autoCompact?: boolean;
-  /**
-   * Whether this session's main agent may manage the horsie server itself.
-   *
-   * Absent is off, unlike `auto_compact`: authority over the server is
-   * granted explicitly or not at all. Only the main agent gets it —
-   * subagents, forks and workflow steps inherit the setting but not the
-   * tools, the same rule that keeps session-metadata tools off them.
-   */
-  controlPlane?: boolean;
 }

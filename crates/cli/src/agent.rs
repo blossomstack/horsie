@@ -93,6 +93,18 @@ fn render_agent_detail(a: &AgentView) -> String {
     if !a.memory_spaces.is_empty() {
         out.push_str(&format!("memory      {}\n", a.memory_spaces.join(", ")));
     }
+    // Absent and empty are different answers, and the difference matters enough
+    // to print: absent is this horsie's default set, empty is no built-in tools
+    // at all. Only an explicit selection is shown — printing "default" for the
+    // common case would be a line on every preset saying nothing.
+    if let Some(tools) = a.allowed_tools.as_deref() {
+        let listed = if tools.is_empty() {
+            "none".to_string()
+        } else {
+            tools.join(", ")
+        };
+        out.push_str(&format!("tools       {listed}\n"));
+    }
     // Last, and on its own lines: it is prose, and the only field here that is
     // sent to the model rather than describing the preset to a person.
     if let Some(i) = a.instructions.as_deref() {
@@ -124,8 +136,24 @@ mod tests {
             created_at: "1".into(),
             updated_at: "1".into(),
             auto_compact: None,
-            control_plane: None,
+            allowed_tools: None,
         }
+    }
+
+    #[test]
+    fn an_explicit_selection_is_shown_and_an_absent_one_is_not() {
+        let mut a = agent("reviewer");
+        assert!(
+            !render_agent_detail(&a).contains("tools"),
+            "the default set is not worth a line on every preset"
+        );
+        a.allowed_tools = Some(vec!["bash".into(), "read_file".into()]);
+        assert!(render_agent_detail(&a).contains("tools       bash, read_file"));
+        a.allowed_tools = Some(vec![]);
+        assert!(
+            render_agent_detail(&a).contains("tools       none"),
+            "'no built-in tools' must not render as the default set"
+        );
     }
 
     #[test]

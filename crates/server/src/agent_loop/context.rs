@@ -133,8 +133,20 @@ pub trait AgentOutcomeSink: Send + Sync {
 /// itself, not here.
 pub struct Contexts {
     pub provider: Arc<dyn LlmProvider>,
-    /// The agent's permitted tools (runtime + MCP), already composed.
+    /// The agent's tools, already composed but **not** narrowed: the selection
+    /// is applied once, outermost, by the actor that stacks the last layers on.
     pub toolbox: Arc<dyn Toolbox>,
+    /// A further narrowing this run is subject to, on top of the agent's own
+    /// selection. `None` — the usual case — means no extra narrowing.
+    ///
+    /// Exists for one caller: a subagent whose type comes from a plugin's agent
+    /// definition, where the definition's `tools:` list may narrow what the
+    /// session already grants and must never widen it. Carried as a separate
+    /// list rather than folded into the agent's own selection because the two
+    /// are decided by different people — the operator picks the session's, a
+    /// plugin author picks this — and stacking two filters cannot accidentally
+    /// widen, whichever way round they are applied.
+    pub tool_narrowing: Option<Vec<String>>,
     /// The composed system prompt, when the context layer owns it (interactive
     /// sessions compose it from a live workspace scan). `None` means "use the
     /// agent's configured prompt" — workflow agents carry a static prompt in
@@ -310,6 +322,7 @@ impl ContextProvider for FixedContextProvider {
         Ok(Contexts {
             provider: self.provider.clone(),
             toolbox: self.toolbox.clone(),
+            tool_narrowing: None,
             system_prompt: None,
             // A fixed-context agent is a workflow step or a test fixture; it has
             // no model card to read a window from and never auto-compacts.
@@ -361,13 +374,17 @@ pub struct AgentRuntimeContext {
     pub ready: bool,
 }
 
-/// Builds the toolbox an agent runs with: its permitted runtime tools, and
-/// nothing about how its turn ends — a tool that ends a run says so itself, and
-/// the layer adding one is stacked by the caller.
+/// Builds the toolbox an agent runs with: the runtime-backed tools plus any
+/// server-side MCP ones, and nothing about how its turn ends — a tool that ends
+/// a run says so itself, and the layer adding one is stacked by the caller.
+///
+/// Takes no `AgentRunDef`: what an agent may *call* is decided once, outermost,
+/// by [`FilteredToolbox`]. A factory that narrowed here could only ever narrow
+/// its own layer, which is the bug that made a tool selection mean two different
+/// things depending on which tool you asked about.
 pub trait ToolboxFactory: Send + Sync + 'static {
     fn for_agent(
         &self,
-        agent_def: &AgentRunDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
@@ -375,14 +392,13 @@ pub trait ToolboxFactory: Send + Sync + 'static {
     ) -> Arc<dyn Toolbox>;
 }
 
-/// Default factory: exposes the standard runtime-backed tools narrowed to the
-/// agent's allowlist.
+/// Default factory: the standard runtime-backed tools, composed with whatever
+/// server-side MCP toolboxes this agent connected.
 pub struct DefaultToolboxFactory;
 
 impl ToolboxFactory for DefaultToolboxFactory {
     fn for_agent(
         &self,
-        agent_def: &AgentRunDef,
         runtime_client: RuntimeClient,
         workspace_names: Vec<String>,
         use_plugins: bool,
@@ -390,9 +406,9 @@ impl ToolboxFactory for DefaultToolboxFactory {
     ) -> Arc<dyn Toolbox> {
         let client = runtime_client.clone();
         let runtime = add_runtime_tools(ToolboxImpl::new(), runtime_client);
-        // Compose the runtime tools with any server-side MCP toolboxes *before*
-        // the allowlist, so `allowed_tools` gates MCP tools exactly like runtime
-        // tools and the agent sees them as one flat tool set.
+        // The runtime tools and any server-side MCP toolboxes, flattened into
+        // one tool set. MCP names are not governed by a selection — see
+        // `crate::tools` — so nothing narrows them here.
         let composed: Arc<dyn Toolbox> = if mcp.is_empty() {
             Arc::new(runtime)
         } else {
@@ -404,15 +420,11 @@ impl ToolboxFactory for DefaultToolboxFactory {
             boxes.extend(mcp.boxes);
             Arc::new(CompositeToolbox::new(boxes).with_unavailable(mcp.unavailable))
         };
-        let base: Arc<dyn Toolbox> = match &agent_def.allowed_tools {
-            None => composed,
-            Some(list) => Arc::new(FilteredToolbox::new(
-                composed,
-                list.iter().cloned().collect(),
-            )),
-        };
+        // No filtering here any more: the selection is applied once, outermost,
+        // in `AgentActor` — see `FilteredToolbox`. Narrowing at this depth was
+        // what confined a selection to runtime and MCP tools.
         Arc::new(AgentToolbox {
-            base,
+            base: composed,
             runtime_client: client,
             workspace_names,
             use_plugins,
@@ -597,15 +609,54 @@ fn skill_body(skill: &crate::agent_loop::workspace::Skill) -> String {
     }
 }
 
-/// Wraps a toolbox and exposes only an allowlisted subset of its tools.
-struct FilteredToolbox {
+/// Wraps a fully-composed toolbox and removes the tools this agent's selection
+/// left out.
+///
+/// Applied once, outermost, so it reaches every layer — the runtime tools, the
+/// timers, the subagent and workflow tools, the session's own. It used to sit
+/// three layers down, which is why a selection could only ever speak for runtime
+/// and MCP tools.
+///
+/// It filters by *two* sets, not one. `governed` is every name
+/// [`crate::tools::catalog`] knows; a tool outside it is passed through whatever
+/// the selection says. That is deliberate and load-bearing — MCP tools, a
+/// plugin's MCP tools, `memory_*` and `submit_result` all have names that no
+/// saved selection could have known, and are gated by their own channels. See
+/// [`crate::tools`] for why each one.
+pub struct FilteredToolbox {
     inner: Arc<dyn Toolbox>,
     allowed: HashSet<String>,
+    governed: HashSet<String>,
 }
 
 impl FilteredToolbox {
-    fn new(inner: Arc<dyn Toolbox>, allowed: HashSet<String>) -> Self {
-        Self { inner, allowed }
+    #[must_use]
+    pub fn new(
+        inner: Arc<dyn Toolbox>,
+        allowed: HashSet<String>,
+        governed: HashSet<String>,
+    ) -> Self {
+        Self {
+            inner,
+            allowed,
+            governed,
+        }
+    }
+
+    /// Wrap `inner` with the selection this agent runs under. A `None` selection
+    /// is still a filter, not a bypass: it resolves to the default set, which
+    /// excludes the control plane.
+    #[must_use]
+    pub fn apply(inner: Arc<dyn Toolbox>, selection: Option<&[String]>) -> Arc<dyn Toolbox> {
+        Arc::new(Self::new(
+            inner,
+            crate::tools::resolve(selection),
+            crate::tools::governed(),
+        ))
+    }
+
+    fn permits(&self, name: &str) -> bool {
+        !self.governed.contains(name) || self.allowed.contains(name)
     }
 }
 
@@ -615,7 +666,7 @@ impl Toolbox for FilteredToolbox {
         self.inner
             .specs()
             .into_iter()
-            .filter(|s| self.allowed.contains(&s.name))
+            .filter(|s| self.permits(&s.name))
             .collect()
     }
 
@@ -625,7 +676,7 @@ impl Toolbox for FilteredToolbox {
         input: Value,
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
-        if !self.allowed.contains(name) {
+        if !self.permits(name) {
             return Err(ToolCallError::InvalidInput(format!(
                 "tool '{name}' is not permitted for this agent"
             )));
@@ -654,15 +705,6 @@ mod tests {
     }
     use horsie_runtime_host::MockTransport;
 
-    fn def(allowed: Option<Vec<String>>) -> AgentRunDef {
-        AgentRunDef {
-            system_prompt: None,
-            max_iterations: None,
-            max_retries: None,
-            allowed_tools: allowed,
-        }
-    }
-
     fn scan_with_skill(name: &str) -> horsie_models::runtime::WorkspaceScan {
         let content = "---\nname: git-bisect\ndescription: find bad commit\n---\nStep 1...";
         horsie_models::runtime::WorkspaceScan {
@@ -680,10 +722,9 @@ mod tests {
     }
 
     #[test]
-    fn the_toolbox_filters_runtime_tools_to_the_allowlist() {
+    fn the_factory_no_longer_narrows_anything() {
         let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent");
         let tb = DefaultToolboxFactory.for_agent(
-            &def(Some(vec!["bash".into()])),
             client,
             vec!["october".into()],
             false,
@@ -691,14 +732,59 @@ mod tests {
         );
         let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
         assert!(names.contains(&"bash".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
+    }
+
+    #[test]
+    fn a_selection_narrows_the_whole_stack() {
+        let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent");
+        let inner = DefaultToolboxFactory.for_agent(
+            client,
+            vec!["october".into()],
+            false,
+            crate::agent_loop::McpToolboxes::default(),
+        );
+        let tb = FilteredToolbox::apply(inner, Some(&["bash".to_string()]));
+        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
+        assert!(names.contains(&"bash".to_string()));
         assert!(!names.contains(&"read_file".to_string()));
+        // `skill` and `inspect_workspace` are catalogued, so leaving them out of
+        // a selection really does remove them. They used to bypass the filter by
+        // sitting above it, which made "only bash" quietly untrue.
+        assert!(!names.contains(&SKILL_TOOL.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_tool_the_catalogue_does_not_know_is_never_filtered() {
+        // Stands in for an MCP tool, a plugin's MCP tool, `memory_*` and
+        // `submit_result` — every name a saved selection could not have known.
+        let inner: Arc<dyn Toolbox> =
+            horsie_agentcore::testkit::MockToolbox::echo("mcp__notion__search");
+        let tb = FilteredToolbox::apply(inner, Some(&["bash".to_string()]));
+        let names: Vec<String> = tb.specs().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["mcp__notion__search".to_string()]);
+        assert!(
+            tb.execute("mcp__notion__search", json!({}), "tc1")
+                .await
+                .is_ok(),
+            "an ungoverned tool must still be callable"
+        );
+    }
+
+    #[test]
+    fn an_absent_selection_still_filters_the_control_plane() {
+        let inner: Arc<dyn Toolbox> = horsie_agentcore::testkit::MockToolbox::echo("horsie_agents");
+        let tb = FilteredToolbox::apply(inner, None);
+        assert!(
+            tb.specs().is_empty(),
+            "a session that never asked for the control plane must not get it"
+        );
     }
 
     #[tokio::test]
     async fn skill_and_inspect_always_present() {
         let client = RuntimeClient::detached(MockTransport::ok(""), "test-agent"); // empty scan
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -716,7 +802,6 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -766,7 +851,6 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["alpha".into(), "beta".into()],
             false,
@@ -807,7 +891,6 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["october".into()],
             true,
@@ -840,7 +923,6 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["october".into()],
             false,
@@ -864,7 +946,6 @@ mod tests {
             "test-agent",
         );
         let tb = DefaultToolboxFactory.for_agent(
-            &def(None),
             client.clone(),
             vec!["october".into()],
             true,
@@ -881,7 +962,6 @@ mod tests {
 
         // Opted-out agent never sees the shared section.
         let tb_off = DefaultToolboxFactory.for_agent(
-            &def(None),
             client,
             vec!["october".into()],
             false,
