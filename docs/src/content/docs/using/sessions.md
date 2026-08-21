@@ -171,6 +171,14 @@ subagents, and be forked again. It names itself once the direction is clear, and
 appears in the rail nested under the session it belongs to, with its own status
 lamp. Forking a fork nests one level deeper.
 
+The agent can also branch on its own, without waiting to be asked. It has a
+`fork_conversation` tool that does exactly what `/fork` does — same copy or
+summary seed, same rail — so when the work splits into a direction you will want
+to steer separately, it can hand that direction its own conversation and carry
+on with the rest. The new one appears in the rail the moment it exists, and the
+agent hears nothing back from it: a fork talks to you, not to the conversation
+it came from.
+
 Nothing ever removes a fork on its own. Delete one from its menu in the rail
 when you are done with it; deleting the session removes its forks too.
 

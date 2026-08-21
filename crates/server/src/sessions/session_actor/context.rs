@@ -915,6 +915,24 @@ impl ContextProvider for SessionContextProvider {
             ),
             (Some(_), true) | (None, _) => with_spawn,
         };
+        // `/fork`, addressed to the model. Conversations only: a subagent's
+        // history is delegated work and a step's belongs to the run, so neither
+        // has a branch to take — the same rule the composer's `/fork` follows.
+        // An unattended session is excluded for the reason it has no `ask_user`:
+        // a fork is a conversation, and nobody is there to have one.
+        let with_spawn: Arc<dyn Toolbox> = match self.kind {
+            SessionAgentKind::Main | SessionAgentKind::Fork(_) if !self.unattended => {
+                Arc::new(crate::sessions::fork_tool::ForkToolbox::new(
+                    with_spawn,
+                    self.session.clone(),
+                    caller,
+                ))
+            }
+            SessionAgentKind::Main
+            | SessionAgentKind::Fork(_)
+            | SessionAgentKind::Step(_)
+            | SessionAgentKind::Sub(_) => with_spawn,
+        };
         let toolbox: Arc<dyn Toolbox> = match self.kind {
             // An unattended session skips the ask layer entirely rather than
             // offering a tool whose answer would never come.

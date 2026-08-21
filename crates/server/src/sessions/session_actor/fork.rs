@@ -45,6 +45,10 @@ impl ForkedAgents {
                 message,
                 reply,
             } => {
+                if let Err(why) = forkable(actor.id, state, parent, &message) {
+                    let _ = reply.send(Err(why));
+                    return CommandEffect::none();
+                }
                 // The branch point, read before anything is written: where the
                 // source's log stands right now is what this fork carries.
                 let Some(source_seq) = actor.source_log_head(state, ctx, parent).await else {
@@ -581,6 +585,30 @@ impl SessionActor {
     }
 }
 
+/// What every fork must be true of, whoever asked for one.
+///
+/// Here rather than at the two callers — the composer's `/fork` and the
+/// `fork_conversation` tool — because this is the one place a fork is written,
+/// and an invariant checked anywhere else is one a third caller will miss.
+fn forkable(main: Uuid, state: &SessionState, parent: Uuid, message: &str) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Err(
+            "a fork needs a message saying what the new conversation should do".to_string(),
+        );
+    }
+    // A run has no conversation to branch: its steps are chosen by the
+    // definition, and nobody talks to one.
+    if state.forest.root_is_workflow() {
+        return Err("a workflow run cannot be forked".to_string());
+    }
+    // Only a conversation forks. A subagent's is delegated work and a step's
+    // belongs to the run, so neither has a branch to take.
+    if parent != main && state.forest.fork(parent).is_none() {
+        return Err("only a conversation can be forked".to_string());
+    }
+    Ok(())
+}
+
 /// Build a fork's history from its source and hand it over.
 ///
 /// Both modes end with one synthetic `Role::User` message carrying a `fork:`
@@ -667,6 +695,53 @@ mod tests {
             .apply_fork_created(id(1), session, 0, ForkMode::Summary, "go".into(), 1);
         state.forest.apply_fork_status(id(1), status, 5_000);
         state
+    }
+
+    /// The invariants live at the write, so the composer's `/fork` and the
+    /// `fork_conversation` tool cannot disagree about what a fork may be.
+    #[test]
+    fn a_fork_needs_a_message_saying_what_to_do() {
+        let mut state = SessionState::default();
+        state.forest.apply_root_agent(id(9), 0);
+        assert!(forkable(id(9), &state, id(9), "go").is_ok());
+        assert_eq!(
+            forkable(id(9), &state, id(9), "   ").unwrap_err(),
+            "a fork needs a message saying what the new conversation should do"
+        );
+    }
+
+    /// Nobody talks to a run, so there is no conversation in one to branch.
+    #[test]
+    fn a_workflow_run_cannot_be_forked() {
+        let mut state = SessionState::default();
+        state.forest.apply_root_workflow(
+            id(9),
+            "nightly".into(),
+            std::sync::Arc::new(crate::sessions::workflow::WorkflowRunSpec {
+                workflow: "nightly".into(),
+                start: "first".into(),
+                steps: Vec::new(),
+                input: String::new(),
+                max_steps: 1,
+            }),
+            0,
+        );
+        assert_eq!(
+            forkable(id(9), &state, id(9), "go").unwrap_err(),
+            "a workflow run cannot be forked"
+        );
+    }
+
+    /// A subagent's history is delegated work: it has no branch to take, and
+    /// its id is not a conversation the session knows how to seed from.
+    #[test]
+    fn forkable_rejects_a_parent_that_is_not_a_conversation() {
+        let state = state_with_fork(AgentStatus::Idle);
+        assert!(forkable(id(9), &state, id(1), "go").is_ok(), "a fork forks");
+        assert_eq!(
+            forkable(id(9), &state, id(7), "go").unwrap_err(),
+            "only a conversation can be forked"
+        );
     }
 
     /// A summariser call in flight must not be unloaded out from under itself.
@@ -1232,6 +1307,86 @@ mod tests {
             state.forest.owner_of_agent(second_id).unwrap().1.parent,
             Some(first_id),
             "a fork of a fork is rooted on that fork"
+        );
+    }
+
+    /// The model forks itself, mid-turn, with `fork_conversation`.
+    ///
+    /// The path the composer's `/fork` never takes: the branch point falls
+    /// *inside* a turn, so the copy ends on the assistant message carrying the
+    /// very call that asked for the fork, with no result. The same turn-start
+    /// sanitization a parked fork relies on is what keeps that history
+    /// well-formed — see the test below.
+    #[tokio::test]
+    async fn the_model_can_fork_its_own_conversation() {
+        use horsie_agentcore::{
+            StopReason,
+            testkit::{MockProvider, Script},
+        };
+        // The main agent's first call forks. Everything after — including the
+        // fork's own turn — answers with plain text.
+        let provider = MockProvider::scripted(
+            Script::of([Ok(horsie_agentcore::CompletionResponse {
+                parts: vec![horsie_agentcore::ContentPart::ToolCall(
+                    horsie_agentcore::ToolCallPart {
+                        id: "fork-1".into(),
+                        name: crate::sessions::fork_tool::FORK_CONVERSATION_TOOL.into(),
+                        input: serde_json::json!({"message": "try the materialised view"}),
+                    },
+                )],
+                stop_reason: StopReason::ToolUse,
+                usage: horsie_agentcore::Usage::without_cache(1, 1),
+            })])
+            .then_repeating_with(|| {
+                Ok(horsie_agentcore::CompletionResponse {
+                    parts: vec![horsie_agentcore::ContentPart::Text(
+                        horsie_agentcore::TextPart {
+                            text: "answered".to_string(),
+                        },
+                    )],
+                    stop_reason: StopReason::EndTurn,
+                    usage: horsie_agentcore::Usage::without_cache(1, 1),
+                })
+            }),
+        );
+        let (_f, session, id, journal) = spawn_session_with_provider(provider).await;
+
+        send(&session, "start").await;
+        let state = wait_for_state(&journal, id, "the model's fork is seeded", |s| {
+            s.forest.fork_ids().iter().any(|f| {
+                s.forest
+                    .fork(*f)
+                    .is_some_and(|r| r.status != AgentStatus::Provisioning)
+            })
+        })
+        .await;
+        let fork_id = state.forest.fork_ids()[0];
+        let rec = state.forest.fork(fork_id).unwrap();
+        assert_eq!(rec.mode, ForkMode::Copy);
+        assert_eq!(rec.message, "try the materialised view");
+        assert_eq!(
+            state.forest.owner_of_agent(fork_id).unwrap().1.parent,
+            Some(id),
+            "a fork the main agent asked for is rooted on the main agent"
+        );
+
+        // The fork runs on the history it was handed — the proof that a copy
+        // cut mid-turn, ending on an unanswered `fork_conversation` call, is
+        // one a provider accepts.
+        for _ in 0..200 {
+            let t = transcript(&session, Some(fork_id.to_string())).await;
+            if t.contains("answered") {
+                assert!(
+                    t.contains("try the materialised view"),
+                    "the fork was given its instruction: {t}"
+                );
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "the fork never ran: {}",
+            transcript(&session, Some(fork_id.to_string())).await
         );
     }
 

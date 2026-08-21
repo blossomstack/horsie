@@ -30,13 +30,10 @@ use horsie_agentcore::{EmptyOutcome, TurnOutcome};
 /// A recognised fork command: which of the two it was, and what the new
 /// conversation is for.
 ///
-/// A struct rather than three parameters because they are one decision, made
-/// in one place and acted on in another — and because `name` exists only to put
-/// the command the user actually typed into the refusal.
+/// A struct rather than two parameters because they are one decision, made in
+/// one place and acted on in another.
 struct ForkRequest {
     mode: ForkMode,
-    /// The builtin's name, for a refusal that quotes what was typed.
-    name: &'static str,
     message: String,
 }
 use horsie_actor::ActorContext;
@@ -320,7 +317,6 @@ impl SessionActor {
         };
         Some(ForkRequest {
             mode,
-            name: builtin.name,
             message: args.trim().to_string(),
         })
     }
@@ -335,42 +331,19 @@ impl SessionActor {
     /// an `Incoming::Compact` to the agent.
     fn start_fork(
         &mut self,
-        state: &SessionState,
         key: AgentKey,
         req: ForkRequest,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let ForkRequest {
-            mode,
-            name,
-            message,
-        } = req;
-        if message.is_empty() {
-            let _ = reply.send(Err(UserMessageError::Rejected(format!(
-                "/{name} needs a message saying what the new conversation should do"
-            ))));
-            return CommandEffect::none();
-        }
-        // A run has no conversation to branch: its steps are chosen by the
-        // definition, and nobody talks to one.
-        if state.forest.root_is_workflow() {
-            let _ = reply.send(Err(UserMessageError::Rejected(
-                "a workflow run cannot be forked".to_string(),
-            )));
-            return CommandEffect::none();
-        }
-        // Only a conversation forks. A subagent's is delegated work and a
-        // step's belongs to the run, so neither has a branch to take.
+        let ForkRequest { mode, message } = req;
+        // Which agent typed it, as an id `Create` can validate. Everything else
+        // a fork needs to be true — a message, a conversation rather than a run
+        // — is checked there, where a fork is written.
         let parent = match key {
             AgentKey::Main => self.id,
             AgentKey::Fork(id) => id,
-            AgentKey::Sub(_) | AgentKey::Step(_) => {
-                let _ = reply.send(Err(UserMessageError::Rejected(
-                    "only a conversation can be forked".to_string(),
-                )));
-                return CommandEffect::none();
-            }
+            AgentKey::Sub(id) | AgentKey::Step(id) => id,
         };
         // Off the mailbox: `Create` reads the source agent's log head and then
         // waits on its own write, and holding this mailbox across both would
@@ -437,7 +410,7 @@ impl SessionActor {
         // a thing to name a session after: it says what the *new* conversation
         // should do.
         if let Some(req) = Self::fork_request(text.trim()) {
-            return self.start_fork(state, key, req, reply, ctx);
+            return self.start_fork(key, req, reply, ctx);
         }
         // An unnamed session is titled from its first message, once. The rule is
         // `SessionCore`'s — a session's name is its own bookkeeping, not the
