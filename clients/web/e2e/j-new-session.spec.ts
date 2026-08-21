@@ -108,7 +108,7 @@ test("J3: every config menu opens inside the pane, not under the rail", async ({
 // easy to get wrong: an untouched draft defers to the server rather than
 // freezing a list, and that is what keeps the control plane out of a session
 // nobody granted it to.
-test("J8: the Tools picker opens on the default set, grouped and badged", async ({
+test("J8: the Tools picker collapses to groups, and read/write only filters", async ({
   page,
   appBase,
 }) => {
@@ -120,22 +120,32 @@ test("J8: the Tools picker opens on the default set, grouped and badged", async 
   await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);
   await tools.click();
 
-  await expect(page.getByTestId("tool-group-runtime")).toBeVisible();
-  await expect(page.getByTestId("tool-group-control")).toBeVisible();
+  // Groups, collapsed: on the default set every group is all-or-nothing, so
+  // each row says everything about itself and none of them opens.
+  await expect(page.getByTestId("tool-group-runtime")).toHaveAttribute("data-expanded", "false");
+  await expect(page.getByTestId("tool-option")).toHaveCount(0);
+  // Selecting a `horsie_*` tool is the grant, so that group can never start on.
+  await expect(page.getByTestId("tool-group-all-control")).not.toBeChecked();
+  await expect(page.getByTestId("tool-group-all-runtime")).toBeChecked();
 
+  await page.getByTestId("tool-group-expand-runtime").click();
   const option = (name: string) =>
     page.locator(`[data-testid="tool-option"][data-value="${name}"]`);
   await expect(option("bash")).toHaveAttribute("data-selected", "true");
-  // Selecting a `horsie_*` tool is the grant, so it can never start ticked.
-  await expect(option("horsie_agents")).toHaveAttribute("data-selected", "false");
 
-  // Read-only is the one-click safe selection: every write tool goes.
-  await page.getByTestId("tool-quick-read").click();
+  // The filter changes what is listed and nothing else: `bash` goes out of
+  // view under Read and comes back still selected.
+  await page.getByTestId("tool-filter-read").click();
+  await expect(option("bash")).toHaveCount(0);
   await expect(option("read_file")).toHaveAttribute("data-selected", "true");
-  await expect(option("bash")).toHaveAttribute("data-selected", "false");
-  await expect(tools).toHaveAttribute("aria-label", /Tools — \d+ selected/);
+  await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);
 
-  // And back to deferring, which no set of ticks can express.
+  await page.getByTestId("tool-filter-all").click();
+  await expect(option("bash")).toHaveAttribute("data-selected", "true");
+
+  // A group row selects without opening, and that *is* a change.
+  await page.getByTestId("tool-group-all-runtime").uncheck();
+  await expect(tools).toHaveAttribute("aria-label", /Tools — \d+ selected/);
   await page.getByTestId("tool-quick-default").click();
   await expect(tools).toHaveAttribute("aria-label", /Tools — Default/);
 });

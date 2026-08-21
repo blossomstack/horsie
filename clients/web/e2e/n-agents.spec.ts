@@ -109,19 +109,19 @@ test("N4: the Horsie tool group is the control-plane grant, and it persists", as
   await expect(tools).toContainText("Default");
   await tools.click();
 
-  const horsieAgents = page.locator(
-    '[data-testid="tool-option"][data-value="horsie_agents"]',
-  );
   // Absent is ungranted: a preset created without mentioning tools comes back
-  // with the control plane untouched.
-  await expect(horsieAgents).toHaveAttribute("data-selected", "false");
+  // with the control plane untouched. Read off the group row, which is what
+  // the picker shows before anything is opened.
+  const horsieGroup = page.getByTestId("tool-group-all-control");
+  await expect(horsieGroup).not.toBeChecked();
 
   await page.screenshot({
     path: "test-results/agent-tools-picker.png",
     fullPage: true,
   });
 
-  await horsieAgents.locator("input[type=checkbox]").check();
+  // Ticking the group is the grant — no need to open it.
+  await horsieGroup.check();
   await page.keyboard.press("Escape");
   await page.getByTestId("save-agent-button").click();
 
@@ -141,7 +141,7 @@ test("N4: the Horsie tool group is the control-plane grant, and it persists", as
   await page.goto(`${appBase}/agents/e2e-control/edit`);
   await expect(page.getByTestId("agent-edit-page")).toBeVisible();
   await page.getByTestId("config-tools").click();
-  await expect(horsieAgents).toHaveAttribute("data-selected", "true");
+  await expect(page.getByTestId("tool-group-all-control")).toBeChecked();
 
   await page.request.delete(`${appBase}/api/agents/e2e-control`);
 });

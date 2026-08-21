@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, renderHook, within } from "@testing-library/react";
+import { fireEvent, render, renderHook, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
@@ -145,6 +145,14 @@ const toolCatalog: ToolCatalog = {
     },
   ],
 };
+
+/** A group row's own checkbox, as an input so `indeterminate` is readable. */
+function groupBox(
+  view: ReturnType<typeof within>,
+  key: string,
+): HTMLInputElement {
+  return view.getByTestId(`tool-group-all-${key}`) as HTMLInputElement;
+}
 
 function keys(d: ConfigDraft): string[] {
   return pickers(d, seededClient()).map((p) => p.key);
@@ -322,10 +330,44 @@ describe("useConfigPickers", () => {
     expect(spec?.marked).toBe(false);
 
     const view = renderPickerBody(draft(), "tools");
+    // Both groups are all-or-nothing under the default set, so both are
+    // summarised by their row and neither opens.
+    expect(view.getByTestId("tool-group-runtime").getAttribute("data-expanded")).toBe("false");
+    expect(view.queryAllByTestId("tool-option")).toHaveLength(0);
+    expect(groupBox(view, "runtime").checked).toBe(true);
+    expect(groupBox(view, "control").checked).toBe(false);
+
+    fireEvent.click(view.getByTestId("tool-group-expand-runtime"));
     const option = (name: string) =>
       view.getAllByTestId("tool-option").find((el) => el.getAttribute("data-value") === name);
     expect(option("bash")?.getAttribute("data-selected")).toBe("true");
-    expect(option("horsie_agents")?.getAttribute("data-selected")).toBe("false");
+  });
+
+  // The row is the control most selections are made with, so it must not need
+  // opening — and opening must not select.
+  it("selects a whole group from its row, without opening it", () => {
+    const chosen: (Set<string> | null)[] = [];
+    const d = draft({ tools: new Set(), setTools: (t) => chosen.push(t) });
+    const view = renderPickerBody(d, "tools");
+
+    fireEvent.click(groupBox(view, "runtime"));
+    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file"]));
+    expect(view.getByTestId("tool-group-runtime").getAttribute("data-expanded")).toBe("false");
+
+    fireEvent.click(view.getByTestId("tool-group-expand-runtime"));
+    expect(view.getByTestId("tool-group-runtime").getAttribute("data-expanded")).toBe("true");
+    expect(chosen).toHaveLength(1);
+  });
+
+  // A partly-chosen group is the one case the row cannot answer, so it is the
+  // one case that opens by itself — and its box is neither ticked nor empty.
+  it("opens a partly-chosen group and marks it indeterminate", () => {
+    const view = renderPickerBody(draft({ tools: new Set(["bash"]) }), "tools");
+    expect(view.getByTestId("tool-group-runtime").getAttribute("data-expanded")).toBe("true");
+    expect(view.getByTestId("tool-group-control").getAttribute("data-expanded")).toBe("false");
+    const box = groupBox(view, "runtime");
+    expect(box.checked).toBe(false);
+    expect(box.indeterminate).toBe(true);
   });
 
   it("labels an explicit selection by size, and marks the channel", () => {
@@ -349,36 +391,78 @@ describe("useConfigPickers", () => {
     const view = renderPickerBody(draft(), "tools");
     expect(view.getByTestId("tool-group-runtime")).toBeTruthy();
     expect(view.getByTestId("tool-group-control")).toBeTruthy();
+    fireEvent.click(view.getByTestId("tool-group-expand-runtime"));
+    fireEvent.click(view.getByTestId("tool-group-expand-control"));
     const badges = view.getAllByTestId("tool-access").map((el) => el.getAttribute("data-access"));
     expect(badges).toEqual(["write", "read", "write"]);
   });
 
-  it("offers quick selections, including a read-only one", () => {
-    const chosen: (Set<string> | null)[] = [];
-    const d = draft({ setTools: (t) => chosen.push(t) });
-    const view = renderPickerBody(d, "tools");
-
-    view.getByTestId("tool-quick-read").click();
-    expect(chosen.at(-1)).toEqual(new Set(["read_file"]));
-
-    view.getByTestId("tool-quick-all").click();
-    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file", "horsie_agents"]));
-
-    view.getByTestId("tool-quick-none").click();
-    expect(chosen.at(-1)).toEqual(new Set());
-
-    // Back to deferring, which no set of ticks can express.
-    view.getByTestId("tool-quick-default").click();
-    expect(chosen.at(-1)).toBeNull();
-  });
-
-  it("ticks and unticks a whole group at once", () => {
+  it("offers selection actions over everything listed", () => {
     const chosen: (Set<string> | null)[] = [];
     const d = draft({ tools: new Set(), setTools: (t) => chosen.push(t) });
     const view = renderPickerBody(d, "tools");
-    view.getByTestId("tool-group-all-runtime").click();
-    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file"]));
+
+    fireEvent.click(view.getByTestId("tool-quick-all"));
+    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file", "horsie_agents"]));
+
+    fireEvent.click(view.getByTestId("tool-quick-none"));
+    expect(chosen.at(-1)).toEqual(new Set());
+
+    // Back to deferring, which no set of ticks can express.
+    fireEvent.click(view.getByTestId("tool-quick-default"));
+    expect(chosen.at(-1)).toBeNull();
   });
+
+  // The whole point of the read/write control: it changes what you are looking
+  // at and nothing else. A version of this that reassigned the selection would
+  // silently discard every write tool the moment you glanced at the read ones.
+  it("filters the list by access without touching the selection", () => {
+    const chosen: (Set<string> | null)[] = [];
+    const d = draft({ tools: new Set(["bash", "read_file"]), setTools: (t) => chosen.push(t) });
+    const view = renderPickerBody(d, "tools");
+    fireEvent.click(view.getByTestId("tool-group-expand-runtime"));
+
+    const listed = () =>
+      view.getAllByTestId("tool-option").map((el) => el.getAttribute("data-value"));
+    expect(listed()).toEqual(["bash", "read_file"]);
+
+    fireEvent.click(view.getByTestId("tool-filter-read"));
+    expect(listed()).toEqual(["read_file"]);
+    expect(chosen).toHaveLength(0);
+
+    // The hidden write tool is still chosen, and says so when it comes back.
+    fireEvent.click(view.getByTestId("tool-filter-all"));
+    expect(listed()).toEqual(["bash", "read_file"]);
+    expect(
+      view.getAllByTestId("tool-option").find((el) => el.getAttribute("data-value") === "bash")
+        ?.getAttribute("data-selected"),
+    ).toBe("true");
+    expect(chosen).toHaveLength(0);
+  });
+
+  // A group the filter has nothing to say about is not an empty group.
+  it("hides a group with no tools of the filtered access", () => {
+    const view = renderPickerBody(draft(), "tools");
+    expect(view.queryByTestId("tool-group-control")).toBeTruthy();
+    fireEvent.click(view.getByTestId("tool-filter-read"));
+    expect(view.queryByTestId("tool-group-control")).toBeNull();
+  });
+
+  // Selecting acts on what is listed, so it can never reach behind the filter.
+  it("scopes select-all and clear to the filtered list", () => {
+    const chosen: (Set<string> | null)[] = [];
+    const d = draft({ tools: new Set(["bash"]), setTools: (t) => chosen.push(t) });
+    const view = renderPickerBody(d, "tools");
+
+    fireEvent.click(view.getByTestId("tool-filter-read"));
+    fireEvent.click(view.getByTestId("tool-quick-all"));
+    expect(chosen.at(-1)).toEqual(new Set(["bash", "read_file"]));
+
+    fireEvent.click(view.getByTestId("tool-quick-none"));
+    expect(chosen.at(-1)).toEqual(new Set(["bash"]));
+  });
+
+
 
   it("says so when the catalogue cannot be read", () => {
     const view = renderPickerBody(
