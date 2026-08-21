@@ -36,8 +36,15 @@ See [MCP servers](/using/mcp-servers/).
 
 **Tools** — which of horsie's built-in tools the agent may call, grouped: files
 and shell, workspace, planning, timers, delegation, workflows, session, and
-horsie itself. Each tool is marked **read** or **write**, and the quick actions
-at the top select all of them, the read-only ones, or none.
+horsie itself. Groups start collapsed, each showing how many of its tools are
+chosen; the checkbox on a group row selects or clears the whole group without
+opening it. Open one to pick individual tools.
+
+Each tool is marked **read** or **write**, and the **All / Read / Write**
+control filters what is *listed* — it never changes what is selected. Switching
+to Read hides the write tools; anything chosen among them stays chosen and comes
+back when you switch back. **Select all** and **Clear** act on whatever is
+listed, so to reach a read-only agent, filter to Write and press Clear.
 
 It starts on **Default** — every group except horsie. That is not the same as
 ticking every box: it defers to the server, so a preset saved today follows a

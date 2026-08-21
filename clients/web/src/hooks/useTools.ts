@@ -1,7 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { ToolCatalog, ToolGroupView, ToolView } from "../api/types";
-import { ToolAccess } from "../api/types";
 
 export const toolsKey = ["tools"] as const;
 
@@ -34,15 +33,6 @@ export function defaultSelection(catalog: ToolCatalog | undefined): Set<string> 
   return new Set(
     allTools(catalog)
       .filter((t) => t.inDefaultSet)
-      .map((t) => t.name),
-  );
-}
-
-/** Every read-only tool. The one-click "safe selection". */
-export function readOnlySelection(catalog: ToolCatalog | undefined): Set<string> {
-  return new Set(
-    allTools(catalog)
-      .filter((t) => t.access === ToolAccess.Read)
       .map((t) => t.name),
   );
 }

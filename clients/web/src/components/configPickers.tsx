@@ -1,6 +1,7 @@
 import {
   Boxes,
   Brain,
+  ChevronDown,
   Cpu,
   Lightbulb,
   Plug,
@@ -9,19 +10,14 @@ import {
   Wrench,
   Check,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useGithubRepos } from "../hooks/useGithub";
 import { useMcpServers } from "../hooks/useMcp";
 import { useMemorySpaces } from "../hooks/useMemory";
 import { usePlugins } from "../hooks/usePlugins";
 import { useSettings } from "../hooks/useSettings";
-import {
-  allTools,
-  defaultSelection,
-  readOnlySelection,
-  useTools,
-} from "../hooks/useTools";
+import { allTools, defaultSelection, useTools } from "../hooks/useTools";
 import type {
   AgentDocument,
   SessionDetail,
@@ -143,36 +139,83 @@ function AccessBadge({ access }: { access: ToolAccess }) {
   );
 }
 
-/** One group's heading, with a tick-all that reflects the group's own state. */
-function ToolGroupHeader({
+/**
+ * One group, as a collapsed row that expands.
+ *
+ * The row is the control: its checkbox selects or clears the whole group
+ * without opening anything, which is how most selections are actually made —
+ * "no shell access", "no server admin" are group-shaped thoughts, not
+ * tool-shaped ones. Opening it is for the rarer case of wanting three of the
+ * ten.
+ *
+ * Two controls, deliberately not nested: a checkbox that selects, and a
+ * separate button that expands. One control doing both means every attempt to
+ * look inside a group also changes what is selected.
+ */
+function ToolGroup({
   group,
+  names,
   selected,
+  expanded,
+  onToggleExpanded,
   onSet,
+  children,
 }: {
   group: ToolGroupView;
+  /** The group's tools *as currently filtered* — what the row summarises and
+   * what its checkbox acts on, so the two can never disagree with the list. */
+  names: string[];
   selected: Set<string>;
+  expanded: boolean;
+  onToggleExpanded: () => void;
   onSet: (names: string[], checked: boolean) => void;
+  children: ReactNode;
 }) {
-  const names = group.tools.map((t) => t.name);
-  const all = names.every((n) => selected.has(n));
+  const chosen = names.filter((n) => selected.has(n)).length;
+  const all = chosen === names.length;
   return (
-    <div className="flex items-baseline gap-2 px-2 pt-2 pb-0.5">
-      <span className="min-w-0 flex-1">
-        <span className="block text-[0.6875rem] tracking-wide text-faint uppercase">
-          {group.label}
-        </span>
-        <span className="block text-[0.6875rem] leading-snug text-faint">
-          {group.description}
-        </span>
-      </span>
-      <button
-        type="button"
-        className="shrink-0 text-[0.6875rem] text-dim hover:text-legend"
-        data-testid={`tool-group-all-${group.key}`}
-        onClick={() => onSet(names, !all)}
-      >
-        {all ? "clear" : "select all"}
-      </button>
+    <div data-testid={`tool-group-${group.key}`} data-expanded={expanded}>
+      <div className="flex items-center gap-2 px-2 py-1 hover:bg-raised">
+        <input
+          type="checkbox"
+          className="shrink-0"
+          checked={all}
+          // A group with some of its tools chosen is neither ticked nor empty,
+          // and `indeterminate` is a DOM property with no HTML attribute — it
+          // can only be set through the element.
+          ref={(el) => {
+            if (el) el.indeterminate = chosen > 0 && !all;
+          }}
+          aria-label={`Select all ${group.label} tools`}
+          data-testid={`tool-group-all-${group.key}`}
+          onChange={() => onSet(names, !all)}
+        />
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-expanded={expanded}
+          data-testid={`tool-group-expand-${group.key}`}
+          onClick={onToggleExpanded}
+        >
+          <span className="min-w-0 flex-1">
+            <span className="block text-[0.6875rem] leading-tight tracking-wide text-faint uppercase">
+              {group.label}
+            </span>
+            <span className="block truncate text-[0.6875rem] leading-tight text-faint">
+              {group.description}
+            </span>
+          </span>
+          <span className="shrink-0 font-mono text-[0.6875rem] text-faint">
+            {chosen}/{names.length}
+          </span>
+          <ChevronDown
+            size={12}
+            className={cn("shrink-0 text-faint transition-transform", expanded && "rotate-180")}
+            aria-hidden
+          />
+        </button>
+      </div>
+      {expanded && <div className="pb-1">{children}</div>}
     </div>
   );
 }
@@ -242,15 +285,6 @@ function toolsPicker(
   const selected = draft.tools ?? fallback;
   const answered = draft.tools !== null;
 
-  const set = (names: string[], checked: boolean) => {
-    const next = new Set(selected);
-    for (const n of names) {
-      if (checked) next.add(n);
-      else next.delete(n);
-    }
-    draft.setTools(next);
-  };
-
   const label = !answered
     ? "Default"
     : selected.size === 0
@@ -259,20 +293,18 @@ function toolsPicker(
         ? "All"
         : `${selected.size} selected`;
 
-  const quick: { key: string; label: string; apply: () => void }[] = [
-    { key: "default", label: "Default", apply: () => draft.setTools(null) },
-    {
-      key: "all",
-      label: "All",
-      apply: () => draft.setTools(new Set(every.map((t) => t.name))),
-    },
-    {
-      key: "read",
-      label: "Read-only",
-      apply: () => draft.setTools(readOnlySelection(catalog)),
-    },
-    { key: "none", label: "None", apply: () => draft.setTools(new Set()) },
-  ];
+  // Selection actions only. The read/write control beside them is a *filter*
+  // and never appears here: narrowing what you are looking at must not change
+  // what you have chosen, or a glance at the read tools would silently throw
+  // away every write tool you had picked.
+  const select = (names: string[], checked: boolean) => {
+    const next = new Set(selected);
+    for (const n of names) {
+      if (checked) next.add(n);
+      else next.delete(n);
+    }
+    draft.setTools(next);
+  };
 
   return {
     key: "tools",
@@ -298,55 +330,187 @@ function toolsPicker(
           className="mx-1 my-0.5"
         />
       ) : (
-        <div className="space-y-0.5" data-testid="tools-body">
-          <div className="flex flex-wrap gap-1 px-2 pt-0.5 pb-1">
-            {quick.map((q) => (
-              <button
-                key={q.key}
-                type="button"
-                className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
-                data-testid={`tool-quick-${q.key}`}
-                onClick={q.apply}
-              >
-                {q.label}
-              </button>
-            ))}
-          </div>
-          {groups.map((group) => (
-            <div key={group.key} data-testid={`tool-group-${group.key}`}>
-              <ToolGroupHeader group={group} selected={selected} onSet={set} />
-              {group.tools.map((tool) => {
-                const checked = selected.has(tool.name);
-                return (
-                  <label
-                    key={tool.name}
-                    className="flex cursor-pointer items-center gap-2 px-2 py-1 text-sm hover:bg-raised"
-                    data-testid="tool-option"
-                    data-value={tool.name}
-                    data-selected={checked}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => set([tool.name], !checked)}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-mono text-sm text-legend">
-                        {tool.name}
-                      </span>
-                      <span className="block text-[0.6875rem] leading-snug text-faint">
-                        {tool.description}
-                      </span>
-                    </span>
-                    <AccessBadge access={tool.access} />
-                  </label>
-                );
-              })}
-            </div>
-          ))}
-        </div>
+        <ToolsBody
+          groups={groups}
+          selected={selected}
+          onSet={select}
+          onDefault={() => draft.setTools(null)}
+        />
       ),
   };
+}
+
+/**
+ * The Tools popover's contents.
+ *
+ * A component rather than inline JSX because which groups are open is state,
+ * and `PickerSpec.body` is a plain render function called from a hook — there
+ * is nowhere in `toolsPicker` for a `useState` to live.
+ *
+ * Deliberately *not* lifted into the draft: which groups you have open is not
+ * part of the session you are configuring. It should not persist, travel to the
+ * server, or make a preset look edited.
+ */
+/** What the read/write control is showing. Not a selection — see `ToolsBody`. */
+type AccessFilter = "all" | "read" | "write";
+
+/**
+ * The Tools popover's contents.
+ *
+ * A component rather than inline JSX because which groups are open, and which
+ * access the list is filtered to, are both state — and `PickerSpec.body` is a
+ * plain render function called from a hook, so there is nowhere in
+ * `toolsPicker` for a `useState` to live.
+ *
+ * Deliberately *not* lifted into the draft: neither belongs to the session you
+ * are configuring. They should not persist, travel to the server, or make a
+ * preset look edited.
+ *
+ * **The read/write control filters, it does not select.** Switching to Read
+ * hides the write tools; anything already chosen among them stays chosen and
+ * comes back into view under All or Write. The controls that *do* select — the
+ * group boxes and Select all / Clear — act on what is currently listed, so
+ * they never reach behind the filter to change something you cannot see.
+ */
+function ToolsBody({
+  groups,
+  selected,
+  onSet,
+  onDefault,
+}: {
+  groups: ToolGroupView[];
+  selected: Set<string>;
+  onSet: (names: string[], checked: boolean) => void;
+  onDefault: () => void;
+}) {
+  const [filter, setFilter] = useState<AccessFilter>("all");
+  const shown = (g: ToolGroupView) =>
+    g.tools.filter(
+      (t) =>
+        filter === "all" ||
+        (filter === "read") === (t.access === ToolAccess.Read),
+    );
+  // A group with nothing matching is not an empty group, it is a group this
+  // filter has nothing to say about — so it goes rather than reading "0/0".
+  const visibleGroups = groups.filter((g) => shown(g).length > 0);
+  const visibleNames = visibleGroups.flatMap((g) => shown(g).map((t) => t.name));
+
+  // Open only what the row cannot summarise. A group entirely on or entirely
+  // off is fully described by its checkbox and its count; a partly chosen one
+  // is the only case where the answer is inside — so a narrowed preset shows
+  // what it narrowed to without a click.
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () =>
+      new Set(
+        groups
+          .filter((g) => {
+            const chosen = g.tools.filter((t) => selected.has(t.name)).length;
+            return chosen > 0 && chosen < g.tools.length;
+          })
+          .map((g) => g.key),
+      ),
+  );
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+
+  const filters: { key: AccessFilter; label: string }[] = [
+    { key: "all", label: "All" },
+    { key: "read", label: "Read" },
+    { key: "write", label: "Write" },
+  ];
+
+  return (
+    <div className="space-y-0.5" data-testid="tools-body" data-filter={filter}>
+      <div className="flex flex-wrap items-center gap-1 px-2 pt-0.5 pb-1">
+        <span className="flex overflow-hidden rounded-[var(--radius-chip)] bg-raised">
+          {filters.map((f) => (
+            <button
+              key={f.key}
+              type="button"
+              className={cn(
+                "px-1.5 py-0.5 text-[0.6875rem]",
+                filter === f.key ? "bg-legend/10 text-legend" : "text-dim hover:text-legend",
+              )}
+              aria-pressed={filter === f.key}
+              data-testid={`tool-filter-${f.key}`}
+              onClick={() => setFilter(f.key)}
+            >
+              {f.label}
+            </button>
+          ))}
+        </span>
+        <span className="ml-auto flex gap-1">
+          <button
+            type="button"
+            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+            data-testid="tool-quick-default"
+            onClick={onDefault}
+          >
+            Default
+          </button>
+          <button
+            type="button"
+            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+            data-testid="tool-quick-all"
+            onClick={() => onSet(visibleNames, true)}
+          >
+            Select all
+          </button>
+          <button
+            type="button"
+            className="rounded-[var(--radius-chip)] bg-raised px-1.5 py-0.5 text-[0.6875rem] text-dim hover:text-legend"
+            data-testid="tool-quick-none"
+            onClick={() => onSet(visibleNames, false)}
+          >
+            Clear
+          </button>
+        </span>
+      </div>
+      {visibleGroups.map((group) => (
+        <ToolGroup
+          key={group.key}
+          group={group}
+          names={shown(group).map((t) => t.name)}
+          selected={selected}
+          expanded={expanded.has(group.key)}
+          onToggleExpanded={() => toggle(group.key)}
+          onSet={onSet}
+        >
+          {shown(group).map((tool) => {
+            const checked = selected.has(tool.name);
+            return (
+              <label
+                key={tool.name}
+                className="flex cursor-pointer items-center gap-2 py-1 pr-2 pl-8 text-sm hover:bg-raised"
+                data-testid="tool-option"
+                data-value={tool.name}
+                data-selected={checked}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onSet([tool.name], !checked)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-mono text-sm text-legend">
+                    {tool.name}
+                  </span>
+                  <span className="block text-[0.6875rem] leading-snug text-faint">
+                    {tool.description}
+                  </span>
+                </span>
+                <AccessBadge access={tool.access} />
+              </label>
+            );
+          })}
+        </ToolGroup>
+      ))}
+    </div>
+  );
 }
 
 /**
