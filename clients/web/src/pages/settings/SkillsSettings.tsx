@@ -6,9 +6,11 @@ import {
   useMarketplaces,
   usePlugins,
 } from "../../hooks/usePlugins";
+import { useAuthoredPlugins } from "../../hooks/useAuthored";
 import { ReadError } from "../../components/ReadError";
 import { TextField, SettingsPane } from "./fields";
 import { SettingsHeader } from "./SettingsHeader";
+import { AuthoredSection } from "./skills/AuthoredSection";
 import { BundleRow } from "./skills/BundleRow";
 import { MarketplaceRow } from "./skills/MarketplaceRow";
 
@@ -21,6 +23,7 @@ export function SkillsSettings() {
   } = useMarketplaces();
   const install = useInstallPlugin();
 
+  const { data: authored } = useAuthoredPlugins();
   const [sourceUrl, setSourceUrl] = useState("");
   const [sourceRef, setSourceRef] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -147,6 +150,8 @@ export function SkillsSettings() {
             </div>
           </section>
         )}
+
+        <AuthoredSection plugins={authored ?? []} />
 
         <section className="panel p-4">
           <div className="mb-3 flex items-start gap-2">

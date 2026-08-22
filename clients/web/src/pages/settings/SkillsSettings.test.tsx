@@ -32,6 +32,18 @@ beforeEach(() => {
   marketplacesFailed.current = null;
 });
 
+// The authored section is its own feature with its own tests; this file is
+// about the install box and the marketplace list, so the hook is stubbed to an
+// empty library rather than dragged in with a QueryClientProvider.
+vi.mock("../../hooks/useAuthored", () => ({
+  useAuthoredPlugins: () => ({ data: [], isLoading: false, isError: false }),
+  useCreateAuthoredPlugin: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useRemoveAuthoredPlugin: () => ({ mutate: vi.fn(), isPending: false }),
+  useRemoveSkill: () => ({ mutate: vi.fn(), isPending: false }),
+  useRestoreSkill: () => ({ mutate: vi.fn(), isPending: false }),
+  useSkillRevisions: () => ({ data: [], isLoading: false, isError: false }),
+}));
+
 vi.mock("../../hooks/usePlugins", () => ({
   usePlugins: () => ({ data: [], isLoading: false, isError: false }),
   useMarketplaces: () => ({

@@ -260,12 +260,45 @@ pub mod tools {
 /// owner-only. It is a credential, so it travels the private channel.
 pub const ENV_CONNECT_TOKEN: &str = "HORSIE_CONNECT_TOKEN";
 
-/// JSON array of `{name, hash}` plugin-bundle refs the runtime fetches at
-/// startup (written by the server's plugin provisioner into the runtime env).
+/// JSON array of [`runtime::BundleRef`]s the runtime fetches at startup
+/// (written by the server's plugin provisioner into the runtime env).
 ///
-/// No URLs: an artifact is named by its hash, and the address it is fetched
+/// No URLs: a bundle is named by its version, and the address it is fetched
 /// from arrives separately as [`ENV_SERVER_URL`].
 pub const ENV_PLUGIN_MANIFEST: &str = "HORSIE_PLUGIN_MANIFEST";
+
+/// How a bundle version is spelled in a URL path and as a directory name.
+///
+/// One function rather than a format string on each side: the server builds
+/// the route from it and the runtime builds the request and its store key from
+/// it, and a mismatch between those two is a 404 nobody can read.
+///
+/// Prefixed by kind, so a generation can never be mistaken for a hash — and so
+/// a store entry keeps saying which sort of thing it is.
+#[must_use]
+pub fn bundle_version_slug(version: &runtime::BundleVersion) -> String {
+    match version {
+        runtime::BundleVersion::Hash(h) => format!("sha256-{}", h.hash),
+        runtime::BundleVersion::Generation(g) => format!("gen-{}", g.generation),
+    }
+}
+
+/// [`bundle_version_slug`] read backwards. `None` for anything else, which the
+/// route answers as "no such bundle" rather than guessing.
+#[must_use]
+pub fn parse_bundle_version_slug(slug: &str) -> Option<runtime::BundleVersion> {
+    if let Some(hash) = slug.strip_prefix("sha256-") {
+        return (!hash.is_empty() && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| {
+            runtime::BundleVersion::Hash(runtime::BundleHash {
+                hash: hash.to_string(),
+            })
+        });
+    }
+    let generation = slug.strip_prefix("gen-")?.parse().ok()?;
+    Some(runtime::BundleVersion::Generation(
+        runtime::BundleGeneration { generation },
+    ))
+}
 
 /// The base URL this runtime reaches its server at.
 ///

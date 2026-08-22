@@ -144,6 +144,7 @@ pub struct ProjectServices {
     pub github: Arc<crate::github::GithubService>,
     pub mcp: Arc<crate::mcp::McpService>,
     pub plugins: Arc<crate::plugins::PluginService>,
+    pub authored: Arc<crate::plugins::authored::AuthoredService>,
     pub memory: Arc<crate::memory::MemoryService>,
     pub agents: Arc<crate::agents::AgentService>,
     pub routines: Arc<crate::routines::RoutineService>,
@@ -222,6 +223,11 @@ async fn build_project(
         crate::plugins::PluginStore::new(shared.db.clone(), project.clone()),
         crate::plugins::MarketplaceStore::new(shared.db.clone(), project.clone()),
         shared.artifacts.clone(),
+        crate::plugins::authored::AuthoredStore::new(shared.db.clone(), project.clone()),
+    ));
+    let authored = Arc::new(crate::plugins::authored::AuthoredService::new(
+        crate::plugins::authored::AuthoredStore::new(shared.db.clone(), project.clone()),
+        plugins.clone(),
     ));
     let memory = Arc::new(crate::memory::MemoryService::new(
         crate::memory::MemoryStore::new(shared.db.clone(), project.clone()),
@@ -333,6 +339,7 @@ async fn build_project(
     // the one bus this deployment shares.
     let account = project.as_str().to_string();
     Ok(Arc::new(ProjectServices {
+        authored,
         project,
         owner,
         supervisor,

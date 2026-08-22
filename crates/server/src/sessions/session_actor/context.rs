@@ -179,6 +179,38 @@ fn build_control_layer(
     (Arc::new(toolbox), index)
 }
 
+/// Wrap `base` with the authoring tools.
+///
+/// Built only when the session's tool selection names one, and main-agent only
+/// — for the same reason the control plane is. A skill authored here is offered
+/// to every session this account starts afterwards, which is authority over the
+/// server rather than a setting a subagent should inherit.
+fn build_authoring_layer(
+    base: Arc<dyn Toolbox>,
+    services: Option<&Arc<crate::projects::ProjectServices>>,
+    settings: &AgentSettings,
+    kind: SessionAgentKind,
+) -> Arc<dyn Toolbox> {
+    if !matches!(kind, SessionAgentKind::Main) {
+        return base;
+    }
+    let selected = crate::tools::resolve(settings.allowed_tools.as_deref());
+    if !crate::plugins::authored::toolbox::TOOLS
+        .iter()
+        .any(|(name, _)| selected.contains(*name))
+    {
+        return base;
+    }
+    let Some(services) = services else {
+        tracing::warn!("session asks to author skills but no services are wired; ignoring");
+        return base;
+    };
+    Arc::new(crate::plugins::authored::AuthoringToolbox::new(
+        base,
+        services.authored.clone(),
+    ))
+}
+
 /// Which of a session's agents a [`SessionContextProvider`] serves. The kind
 /// decides the toolbox layers (session-metadata tools are main-only) and
 /// whether preparation progress is broadcast (main-only — subagents are
@@ -409,13 +441,7 @@ impl SessionContextProvider {
             Some(library) if !names.is_empty() => library
                 .resolve(&names)
                 .await
-                .map_err(ContextError::retryable)?
-                .iter()
-                .map(|r| horsie_models::runtime::BundleRef {
-                    name: r.name.clone(),
-                    hash: r.hash.clone(),
-                })
-                .collect(),
+                .map_err(ContextError::retryable)?,
             _ => Vec::new(),
         };
         client
@@ -876,6 +902,8 @@ impl ContextProvider for SessionContextProvider {
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
             build_control_layer(with_memory, self.services.as_ref(), settings, self.kind);
+        let with_memory =
+            build_authoring_layer(with_memory, self.services.as_ref(), settings, self.kind);
         // Spawns and invocations attribute to the actual agent making them —
         // the main agent's id is the session's.
         let caller = match self.kind {

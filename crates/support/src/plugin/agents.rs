@@ -170,7 +170,7 @@ mod tests {
         write(dir.path(), "agents/ignored.md");
         let manifest = PluginManifest {
             agents: vec!["./custom/one.md".into(), "elsewhere".into()],
-            ..Default::default()
+            ..PluginManifest::empty(crate::plugin::ManifestDialect::Claude)
         };
         assert_eq!(
             names(&agent_files(dir.path(), Some(&manifest)), dir.path()),
@@ -225,7 +225,7 @@ mod tests {
         assert!(agent_files(dir.path(), None).is_empty());
         let manifest = PluginManifest {
             agents: vec!["nowhere".into()],
-            ..Default::default()
+            ..PluginManifest::empty(crate::plugin::ManifestDialect::Claude)
         };
         assert!(agent_files(dir.path(), Some(&manifest)).is_empty());
     }

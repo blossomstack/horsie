@@ -375,7 +375,7 @@ async fn plugin_bundles_are_isolated() {
         .await
         .unwrap();
     assert_eq!(
-        mine.get("impeccable").await.unwrap().unwrap().artifact_hash,
+        mine.get("impeccable").await.unwrap().unwrap().digest,
         "hash-a"
     );
 
@@ -473,19 +473,20 @@ async fn journal_logs_are_separated_by_their_id_alone() {
 fn plugin(name: &str, hash: &str) -> horsie_server::plugins::PluginRow {
     horsie_server::plugins::PluginRow {
         name: name.into(),
-        source_kind: "git".into(),
-        source_url: "https://example.com/x.git".into(),
-        source_ref: None,
-        source_subpath: None,
+        kind: horsie_models::plugins::PluginKind::Claude(horsie_models::plugins::ExternalOrigin {
+            url: "https://example.com/x.git".into(),
+            git_ref: None,
+            subpath: None,
+            marketplace: None,
+            marketplace_entry: None,
+        }),
         version: None,
         description: None,
         catalog: Vec::new(),
         has_hooks: false,
-        artifact_hash: hash.into(),
+        digest: hash.into(),
         artifact_size: 1,
         enabled_default: false,
-        marketplace: None,
-        marketplace_entry: None,
         created_at: T.into(),
         updated_at: T.into(),
     }

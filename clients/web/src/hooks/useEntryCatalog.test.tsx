@@ -24,13 +24,20 @@ function bundle(
     name,
     description: undefined,
     version: undefined,
-    sourceUrl: "u",
-    sourceRef: undefined,
+    kind: {
+      kind: "Claude",
+      value: {
+        url: "u",
+        gitRef: undefined,
+        subpath: undefined,
+        marketplace: undefined,
+        marketplaceEntry: undefined,
+      },
+    },
     catalog,
     hasHooks: false,
     enabledDefault,
     artifactSize: 1,
-    marketplace: undefined,
   };
 }
 

@@ -3,25 +3,24 @@
 //! plain metadata store (mirrors `github::store` without the `Secret` wrapping).
 
 use crate::db::Db;
+use crate::plugins::kind;
 use crate::projects::ProjectId;
+use horsie_models::plugins::PluginKind;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::collections::HashSet;
 
-const COLS: &str = "name, source_kind, source_url, source_ref, source_subpath, version, \
-     description, catalog, has_hooks, artifact_hash, artifact_size, enabled_default, \
+const COLS: &str = "name, source_kind, source_url, source_ref, source_subpath, generation, \
+     version, description, catalog, has_hooks, digest, artifact_size, enabled_default, \
      marketplace, marketplace_entry, created_at, updated_at";
 
 /// One row of the `plugins` table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRow {
     pub name: String,
-    pub source_kind: String,
-    pub source_url: String,
-    pub source_ref: Option<String>,
-    /// Where inside the checkout the plugin root sat. `None` means the repo
-    /// root, which is what a plain bundle repo means.
-    pub source_subpath: Option<String>,
+    /// What this bundle is: cloned in one of two layouts, or authored here.
+    /// Stored as a discriminant plus the column group its arm uses.
+    pub kind: PluginKind,
     pub version: Option<String>,
     pub description: Option<String>,
     /// Everything this bundle offers, derived at ingest. Empty when the column
@@ -30,13 +29,12 @@ pub struct PluginRow {
     /// rather than fail a list nobody could then repair.
     pub catalog: Vec<horsie_support::plugin::catalog::CatalogEntry>,
     pub has_hooks: bool,
-    pub artifact_hash: String,
+    /// sha256 of the packed bytes. For an external bundle this is also its
+    /// identity — it is what the artifact on disk is named by. For an authored
+    /// one it is only an integrity check on a package the server re-renders.
+    pub digest: String,
     pub artifact_size: u64,
     pub enabled_default: bool,
-    /// The marketplace this bundle came through, and that marketplace's name
-    /// for it. Both or neither.
-    pub marketplace: Option<String>,
-    pub marketplace_entry: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -79,34 +77,36 @@ impl PluginStore {
     pub async fn upsert(&self, row: &PluginRow) -> Result<(), String> {
         let sql = self.db.q(
             "INSERT INTO plugins (project_id, name, source_kind, source_url, source_ref, source_subpath, \
-             version, description, catalog, has_hooks, artifact_hash, artifact_size, \
+             generation, version, description, catalog, has_hooks, digest, artifact_size, \
              enabled_default, marketplace, marketplace_entry, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(project_id, name) DO UPDATE SET source_kind = excluded.source_kind, \
              source_url = excluded.source_url, source_ref = excluded.source_ref, \
-             source_subpath = excluded.source_subpath, \
+             source_subpath = excluded.source_subpath, generation = excluded.generation, \
              version = excluded.version, description = excluded.description, \
              catalog = excluded.catalog, has_hooks = excluded.has_hooks, \
-             artifact_hash = excluded.artifact_hash, artifact_size = excluded.artifact_size, \
+             digest = excluded.digest, artifact_size = excluded.artifact_size, \
              enabled_default = excluded.enabled_default, marketplace = excluded.marketplace, \
              marketplace_entry = excluded.marketplace_entry, updated_at = excluded.updated_at",
         );
+        let ext = kind::external(&row.kind);
         sqlx::query(&sql)
             .bind(self.user.as_str())
             .bind(&row.name)
-            .bind(&row.source_kind)
-            .bind(&row.source_url)
-            .bind(&row.source_ref)
-            .bind(&row.source_subpath)
+            .bind(kind::tag(&row.kind))
+            .bind(ext.map(|e| e.url.clone()))
+            .bind(ext.and_then(|e| e.git_ref.clone()))
+            .bind(ext.and_then(|e| e.subpath.clone()))
+            .bind(kind::generation(&row.kind).map(|g| i64::try_from(g).unwrap_or(i64::MAX)))
             .bind(&row.version)
             .bind(&row.description)
             .bind(serde_json::to_string(&row.catalog).unwrap_or_else(|_| "[]".to_string()))
             .bind(i64::from(row.has_hooks))
-            .bind(&row.artifact_hash)
+            .bind(&row.digest)
             .bind(i64::try_from(row.artifact_size).unwrap_or(i64::MAX))
             .bind(i64::from(row.enabled_default))
-            .bind(&row.marketplace)
-            .bind(&row.marketplace_entry)
+            .bind(ext.and_then(|e| e.marketplace.clone()))
+            .bind(ext.and_then(|e| e.marketplace_entry.clone()))
             .bind(&row.created_at)
             .bind(&row.updated_at)
             .execute(self.db.pool())
@@ -163,23 +163,26 @@ impl PluginStore {
             .collect())
     }
 
-    /// Every artifact hash any account still references.
+    /// Every artifact digest any account still references.
     ///
     /// Deliberately NOT scoped, and it must stay that way. Artifacts are
     /// content-addressed and therefore shared between accounts, so a scoped
     /// keep-set would make GC delete bundle bytes another account is still
     /// using. On the scope audit's allowlist for exactly this reason.
+    ///
+    /// Authored bundles are excluded: they have no artifact on disk at all, so
+    /// naming their digests here would be claiming a file that does not exist.
     pub async fn referenced_hashes(&self) -> Result<HashSet<String>, String> {
-        let sql = self.db.q("SELECT artifact_hash FROM plugins");
+        let sql = self
+            .db
+            .q("SELECT digest FROM plugins WHERE source_kind != ?");
         let rows = sqlx::query(&sql)
+            .bind(kind::AUTHORED)
             .fetch_all(self.db.pool())
             .await
             .map_err(|e| e.to_string())?;
         rows.iter()
-            .map(|r| {
-                r.try_get::<String, _>("artifact_hash")
-                    .map_err(|e| e.to_string())
-            })
+            .map(|r| r.try_get::<String, _>("digest").map_err(|e| e.to_string()))
             .collect()
     }
 }
@@ -191,23 +194,27 @@ fn row_to_plugin(row: &AnyRow) -> Result<PluginRow, String> {
             .map_err(|e| e.to_string())
     };
     let get_i = |c: &str| row.try_get::<i64, _>(c).map_err(|e| e.to_string());
+    let get_oi = |c: &str| row.try_get::<Option<i64>, _>(c).map_err(|e| e.to_string());
     Ok(PluginRow {
         name: get_s("name")?,
-        source_kind: get_s("source_kind")?,
-        source_url: get_s("source_url")?,
-        source_ref: get_os("source_ref")?,
-        source_subpath: get_os("source_subpath")?,
+        kind: kind::from_columns(
+            &get_s("source_kind")?,
+            get_os("source_url")?,
+            get_os("source_ref")?,
+            get_os("source_subpath")?,
+            get_os("marketplace")?,
+            get_os("marketplace_entry")?,
+            get_oi("generation")?.map(|g| u64::try_from(g).unwrap_or_default()),
+        )?,
         version: get_os("version")?,
         description: get_os("description")?,
         catalog: get_os("catalog")?
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
         has_hooks: get_i("has_hooks")? != 0,
-        artifact_hash: get_s("artifact_hash")?,
+        digest: get_s("digest")?,
         artifact_size: u64::try_from(get_i("artifact_size")?).unwrap_or(0),
         enabled_default: get_i("enabled_default")? != 0,
-        marketplace: get_os("marketplace")?,
-        marketplace_entry: get_os("marketplace_entry")?,
         created_at: get_s("created_at")?,
         updated_at: get_s("updated_at")?,
     })
@@ -233,10 +240,15 @@ mod tests {
     fn row(name: &str, hash: &str) -> PluginRow {
         PluginRow {
             name: name.into(),
-            source_kind: "git".into(),
-            source_url: "https://example.com/x".into(),
-            source_ref: None,
-            source_subpath: None,
+            kind: horsie_models::plugins::PluginKind::Claude(
+                horsie_models::plugins::ExternalOrigin {
+                    url: "https://example.com/x.git".into(),
+                    git_ref: None,
+                    subpath: None,
+                    marketplace: None,
+                    marketplace_entry: None,
+                },
+            ),
             version: Some("1.0.0".into()),
             description: Some("d".into()),
             catalog: vec![
@@ -244,11 +256,9 @@ mod tests {
                 entry(CatalogKind::Skill, "tdd"),
             ],
             has_hooks: true,
-            artifact_hash: hash.into(),
+            digest: hash.into(),
             artifact_size: 123,
             enabled_default: false,
-            marketplace: None,
-            marketplace_entry: None,
             created_at: "1".into(),
             updated_at: "1".into(),
         }
@@ -289,16 +299,23 @@ mod tests {
     async fn provenance_survives_and_lists_installed_entries() {
         let s = PluginStore::new(testing::db().await, ProjectId::new("1"));
         let mut r = row("api-security-testing", "h1");
-        r.marketplace = Some("official".into());
-        // The index's name for an entry is not always the name it installs as.
-        r.marketplace_entry = Some("42crunch-api-security-testing".into());
-        r.source_subpath = Some("./plugins/api".into());
+        r.kind =
+            horsie_models::plugins::PluginKind::Claude(horsie_models::plugins::ExternalOrigin {
+                url: "https://example.com/x.git".into(),
+                git_ref: None,
+                subpath: Some("./plugins/api".into()),
+                marketplace: Some("official".into()),
+                // The index's name for an entry is not always the name it
+                // installs as.
+                marketplace_entry: Some("42crunch-api-security-testing".into()),
+            });
         s.upsert(&r).await.unwrap();
         s.upsert(&row("plain", "h2")).await.unwrap();
 
         let got = s.get("api-security-testing").await.unwrap().unwrap();
-        assert_eq!(got.marketplace.as_deref(), Some("official"));
-        assert_eq!(got.source_subpath.as_deref(), Some("./plugins/api"));
+        let origin = crate::plugins::kind::external(&got.kind).expect("a cloned bundle");
+        assert_eq!(origin.marketplace.as_deref(), Some("official"));
+        assert_eq!(origin.subpath.as_deref(), Some("./plugins/api"));
 
         let entries = s.installed_entries("official").await.unwrap();
         assert!(entries.contains("42crunch-api-security-testing"));

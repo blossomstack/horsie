@@ -16,6 +16,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 pub mod agents;
+mod authored;
 pub mod environments;
 pub mod http;
 pub mod marketplaces;
@@ -53,6 +54,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(mcp::Mcp),
         Box::new(marketplaces::Marketplaces),
         Box::new(plugins::Plugins),
+        Box::new(authored::AuthoredPlugins),
         Box::new(models::Models),
         Box::new(runtime_vendors::RuntimeVendors),
         Box::new(memory_spaces::MemorySpaces),

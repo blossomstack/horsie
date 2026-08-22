@@ -758,8 +758,7 @@ async fn run_loop<S>(
                         // be able to abandon it.
                         let handle = tokio::spawn(async move {
                             let agent_id = req.agent_id.clone();
-                            let bundles: Vec<horsie_runtime::plugin_store::BundleRef> =
-                                req.bundles.iter().map(Into::into).collect();
+                            let bundles = req.bundles.clone();
                             let outcome = match registry.plugins_root() {
                                 Some(root) => {
                                     let store = horsie_runtime::plugin_store::PluginStore::new(

@@ -301,12 +301,35 @@ union ProvisionResult { Ok(ProvisionOk), Err(ProvisionError) }
 
 struct ProvisionWorkspaceResponse { call_id: String, result: ProvisionResult }
 
-/// One plugin bundle, named and content-addressed.
+/// sha256 of a packed bundle. Identity *and* bytes: an external bundle is
+/// content-addressed, so a store entry that exists is finished by construction.
+struct BundleHash { hash: String }
+
+/// An authored bundle's generation, bumped on every save. There is no upstream
+/// whose bytes could differ, and the server can always re-render the package
+/// from its own tables, so a counter is identity enough.
+struct BundleGeneration { generation: u64 }
+
+/// How one revision of a bundle is named.
+#[type_tag = "kind"]
+union BundleVersion {
+    Hash(BundleHash),
+    Generation(BundleGeneration),
+}
+
+/// One plugin bundle: a name to link it under, and the version that is its
+/// identity.
 ///
-/// The hash is the identity: two agents selecting the same bundle name at the
-/// same version resolve to one entry in the runtime's store, so the second costs
-/// a symlink rather than a download.
-struct BundleRef { name: String, hash: String }
+/// Two agents selecting the same bundle at the same version resolve to one
+/// entry in the runtime's store, so the second costs a symlink rather than a
+/// download.
+///
+/// `digest` is the sha256 of the bytes and is an integrity check, never the
+/// identity. For a `Hash` version it repeats what the identity already says.
+/// For a `Generation` it is the thing that catches a server whose renderer has
+/// drifted from what it recorded — a case that would otherwise leave two
+/// runtimes holding different trees under one name.
+struct BundleRef { name: String, version: BundleVersion, digest: String }
 
 /// Install this agent's bundle set and make it the tree its tool calls, hooks,
 /// scans and MCP servers read.

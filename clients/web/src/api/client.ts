@@ -46,6 +46,11 @@ import type {
   PluginInstallInput,
   PasswordChangeRequest,
   CatalogEntryView,
+  AuthoredFileView,
+  AuthoredPluginView,
+  AuthoredPluginWriteInput,
+  AuthoredRevisionView,
+  AuthoredSkillView,
   PluginView,
   ProjectInput,
   ProjectView,
@@ -741,6 +746,75 @@ export const api = {
 
     remove: (name: string): Promise<void> =>
       request(`/plugins/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  },
+
+  /**
+   * Plugins authored on this server, whose source is rows in its database
+   * rather than a git remote.
+   *
+   * Separate from `plugins` because the two answer different questions:
+   * `plugins` is the library a session picks from — authored bundles appear
+   * there too, published — while this is the editable original behind one.
+   */
+  authored: {
+    list: (): Promise<AuthoredPluginView[]> => request("/authored-plugins"),
+
+    get: (name: string): Promise<AuthoredPluginView> =>
+      request(`/authored-plugins/${encodeURIComponent(name)}`),
+
+    create: (body: AuthoredPluginWriteInput): Promise<AuthoredPluginView> =>
+      request("/authored-plugins", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    /** Deletes the plugin, its skills, and the library entry it published. */
+    remove: (name: string): Promise<void> =>
+      request(`/authored-plugins/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      }),
+
+    getSkill: (name: string, skill: string): Promise<AuthoredSkillView> =>
+      request(
+        `/authored-plugins/${encodeURIComponent(name)}/skills/${encodeURIComponent(skill)}`,
+      ),
+
+    /** Omitted fields keep their current value. */
+    writeSkill: (
+      name: string,
+      skill: string,
+      body: {
+        description?: string;
+        body?: string;
+        files?: AuthoredFileView[];
+      },
+    ): Promise<AuthoredSkillView> =>
+      request(
+        `/authored-plugins/${encodeURIComponent(name)}/skills/${encodeURIComponent(skill)}`,
+        { method: "PUT", body: JSON.stringify(body) },
+      ),
+
+    /** Removes the skill; its revisions survive so it can be restored. */
+    removeSkill: (name: string, skill: string): Promise<void> =>
+      request(
+        `/authored-plugins/${encodeURIComponent(name)}/skills/${encodeURIComponent(skill)}`,
+        { method: "DELETE" },
+      ),
+
+    revisions: (name: string, skill: string): Promise<AuthoredRevisionView[]> =>
+      request(
+        `/authored-plugins/${encodeURIComponent(name)}/skills/${encodeURIComponent(skill)}/revisions`,
+      ),
+
+    restoreSkill: (
+      name: string,
+      skill: string,
+      revision: number,
+    ): Promise<AuthoredSkillView> =>
+      request(
+        `/authored-plugins/${encodeURIComponent(name)}/skills/${encodeURIComponent(skill)}/restore`,
+        { method: "POST", body: JSON.stringify({ revision }) },
+      ),
   },
 
   marketplaces: {

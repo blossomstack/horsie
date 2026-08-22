@@ -57,7 +57,7 @@ pub(crate) fn request_base(headers: &axum::http::HeaderMap) -> String {
 ///
 /// Everything scoped lives behind [`Scope`] instead. The split is what keeps
 /// the routes that run *ahead* of the auth layer working: `/api/health`,
-/// `/api/auth/*`, and `/api/plugin-artifacts/*` have no account to resolve.
+/// `/api/auth/*`, and `/api/plugin-bundles/*` have no account to resolve.
 #[derive(Clone)]
 pub struct AppState {
     /// The accounts, the tokens they issue, and the policy the `/api`
@@ -402,7 +402,10 @@ pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(handlers::health))
         .route("/api/tools", get(handlers::tool_catalog))
-        .route("/api/plugin-artifacts/{file}", get(plugins::get_artifact))
+        .route(
+            "/api/plugin-bundles/{name}/{version}",
+            get(plugins::get_bundle),
+        )
         // An account's own routes, outside any project: what projects it has,
         // and how to gain or lose one.
         .route(
@@ -1662,26 +1665,26 @@ mod tests {
         // Artifact fetch: 403 without a bearer, 200 with this account's own
         // runtime's dial token.
         let refs = plugins.resolve(&["demo".into()]).await.unwrap();
-        let hash = refs[0].hash.clone();
+        let slug = horsie_models::bundle_version_slug(&refs[0].version);
         let res = app
             .clone()
-            .oneshot(get(&format!("/api/plugin-artifacts/{hash}.zip")))
+            .oneshot(get(&format!("/api/plugin-bundles/demo/{slug}")))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
         let token = dial_token_for(&t, "rt-1").await;
         let req = Request::builder()
-            .uri(format!("/api/plugin-artifacts/{hash}.zip"))
+            .uri(format!("/api/plugin-bundles/demo/{slug}"))
             .header("authorization", format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
         let res = app.clone().oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        // A hash this account never installed is refused even with a valid
+        // A bundle this account never installed is refused even with a valid
         // token — the boundary the old deployment-global secret did not have.
         let req = Request::builder()
-            .uri("/api/plugin-artifacts/deadbeef.zip")
+            .uri("/api/plugin-bundles/nope/sha256-deadbeef")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
@@ -1699,7 +1702,7 @@ mod tests {
             },
         );
         let req = Request::builder()
-            .uri(format!("/api/plugin-artifacts/{hash}.zip"))
+            .uri(format!("/api/plugin-bundles/demo/{slug}"))
             .header("authorization", format!("Bearer {forged}"))
             .body(Body::empty())
             .unwrap();
@@ -1840,7 +1843,14 @@ mod tests {
         let res = app.oneshot(get(&t.url("/plugins"))).await.unwrap();
         let bundles: Vec<PluginView> = read_json(res).await;
         assert_eq!(bundles.len(), 1, "dropping a source keeps its software");
-        assert_eq!(bundles[0].marketplace.as_deref(), Some("catalogue"));
+        assert!(
+            matches!(
+                &bundles[0].kind,
+                horsie_models::plugins::PluginKind::Claude(e)
+                    if e.marketplace.as_deref() == Some("catalogue")
+            ),
+            "a bundle picked from a catalogue records which one"
+        );
     }
 
     #[tokio::test]

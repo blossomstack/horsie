@@ -27,7 +27,6 @@
 //! crashed fetch leave nothing behind. A half-unpacked directory already named
 //! after its hash would be treated as a cache hit for the life of the runtime.
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -36,19 +35,22 @@ use std::path::{Path, PathBuf};
 /// entries — never mistakes it for a bundle.
 const MARKER: &str = ".manifest.json";
 
-/// One bundle to install: a name to link it under, and the hash that is its
-/// identity.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BundleRef {
-    pub name: String,
-    pub hash: String,
-}
+/// One bundle to install. The wire type itself: the marker file records
+/// exactly what the server asked for, so "is this tree already the one I was
+/// told to build" is a comparison rather than a translation.
+pub use horsie_models::runtime::BundleRef;
 
-impl From<&horsie_models::runtime::BundleRef> for BundleRef {
-    fn from(w: &horsie_models::runtime::BundleRef) -> Self {
-        Self {
-            name: w.name.clone(),
-            hash: w.hash.clone(),
+/// Where a bundle's bytes live in the store.
+///
+/// A hash names its own contents, so every agent selecting that bundle shares
+/// one entry and the second costs a symlink. A generation only names its
+/// contents *within one plugin*, so the name goes in the key — two authored
+/// plugins both at generation 3 are not the same bytes.
+fn store_key(bundle: &BundleRef) -> String {
+    match &bundle.version {
+        horsie_models::runtime::BundleVersion::Hash(h) => h.hash.clone(),
+        horsie_models::runtime::BundleVersion::Generation(g) => {
+            format!("a_{}_g{}", bundle.name, g.generation)
         }
     }
 }
@@ -58,7 +60,7 @@ impl From<&horsie_models::runtime::BundleRef> for BundleRef {
 /// least worth exercising over a socket in a unit test.
 #[async_trait::async_trait]
 pub trait BundleSource: Send + Sync {
-    /// The zip for `hash`, or why it could not be had.
+    /// The zip for `bundle`, or why it could not be had.
     async fn fetch(&self, bundle: &BundleRef) -> Result<Vec<u8>, String>;
 }
 
@@ -89,12 +91,16 @@ impl HttpBundles {
 #[async_trait::async_trait]
 impl BundleSource for HttpBundles {
     async fn fetch(&self, bundle: &BundleRef) -> Result<Vec<u8>, String> {
-        let url = format!(
-            "{}/api/plugin-artifacts/{}.zip",
-            self.base.trim_end_matches('/'),
-            bundle.hash
-        );
-        let mut req = self.client.get(&url);
+        // Built through `Url` rather than `format!`: a bundle name is a path
+        // segment now, and a manifest is free to call itself something with a
+        // slash or a space in it.
+        let mut url = reqwest::Url::parse(self.base.trim_end_matches('/'))
+            .map_err(|e| format!("bad server URL: {e}"))?;
+        url.path_segments_mut()
+            .map_err(|()| "server URL cannot have path segments".to_string())?
+            .extend(["api", "plugin-bundles", &bundle.name])
+            .push(&horsie_models::bundle_version_slug(&bundle.version));
+        let mut req = self.client.get(url);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
         }
@@ -209,14 +215,21 @@ impl PluginStore {
     /// Put `bundle` in the store if it is not already there.
     ///
     /// Fetch → verify → rename. The rename is what makes the store safe to read
-    /// without locking: an entry under its hash is complete by construction,
+    /// without locking: an entry under its key is complete by construction,
     /// because nothing is ever named that until its bytes have been checked.
+    ///
+    /// The check is against `digest`, not against the key. For an external
+    /// bundle the two are the same value and always were. For an authored one
+    /// they are not — the key names a revision of the server's rows, and the
+    /// digest names the bytes that revision rendered to — which is exactly why
+    /// the server sends both.
     async fn ensure_stored(
         &self,
         bundle: &BundleRef,
         source: &dyn BundleSource,
     ) -> Result<(), String> {
-        let final_dir = self.store_dir().join(sanitize(&bundle.hash));
+        let key = store_key(bundle);
+        let final_dir = self.store_dir().join(sanitize(&key));
         if final_dir.is_dir() {
             return Ok(());
         }
@@ -228,25 +241,26 @@ impl PluginStore {
             .await
             .map_err(|e| format!("bundle '{}': {e}", bundle.name))?;
         let got = sha256_hex(&bytes);
-        if got != bundle.hash {
+        if got != bundle.digest {
             return Err(format!(
-                "bundle '{}': hash mismatch (want {}, got {got})",
-                bundle.name, bundle.hash
+                "bundle '{}': digest mismatch (want {}, got {got})",
+                bundle.name, bundle.digest
             ));
         }
 
         // Beside the final location, so the rename is within one filesystem.
         let staging = self
             .store_dir()
-            .join(format!(".staging-{}", sanitize(&bundle.hash)));
+            .join(format!(".staging-{}", sanitize(&key)));
         let _ = std::fs::remove_dir_all(&staging);
         unpack_zip(&bytes, &staging).map_err(|e| format!("bundle '{}': {e}", bundle.name))?;
 
         match std::fs::rename(&staging, &final_dir) {
             Ok(()) => Ok(()),
-            // Another provision for the same hash won the race and put an
-            // identical tree there. Identical by construction — the hash is the
-            // contents — so this is a success, not a conflict.
+            // Another provision for the same key won the race and put an
+            // identical tree there. Identical by construction — the bytes were
+            // checked against the same digest — so this is a success, not a
+            // conflict.
             Err(_) if final_dir.is_dir() => {
                 let _ = std::fs::remove_dir_all(&staging);
                 Ok(())
@@ -298,7 +312,7 @@ impl PluginStore {
         // Relative, so the tree survives the whole plugins directory being
         // mounted at a different path — which it is, between a container and the
         // laptop that built the image.
-        let target = Path::new("../../store").join(sanitize(&bundle.hash));
+        let target = Path::new("../../store").join(sanitize(&store_key(bundle)));
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&target, &link)
@@ -416,16 +430,41 @@ mod tests {
     #[async_trait::async_trait]
     impl BundleSource for FakeSource {
         async fn fetch(&self, bundle: &BundleRef) -> Result<Vec<u8>, String> {
-            self.fetched.lock().unwrap().push(bundle.hash.clone());
+            self.fetched.lock().unwrap().push(bundle.digest.clone());
             if let Some(e) = &self.fail {
                 return Err(e.clone());
             }
             self.zips
                 .lock()
                 .unwrap()
-                .get(&bundle.hash)
+                .get(&bundle.digest)
                 .cloned()
                 .ok_or_else(|| "no such bundle".to_string())
+        }
+    }
+
+    /// An external bundle: content-addressed, so identity and digest coincide.
+    fn external(name: &str, hash: &str) -> BundleRef {
+        BundleRef {
+            name: name.to_string(),
+            version: horsie_models::runtime::BundleVersion::Hash(
+                horsie_models::runtime::BundleHash {
+                    hash: hash.to_string(),
+                },
+            ),
+            digest: hash.to_string(),
+        }
+    }
+
+    /// An authored bundle: named by generation, checked by digest. The two are
+    /// deliberately different values here, because that is the whole point.
+    fn authored(name: &str, generation: u64, digest: &str) -> BundleRef {
+        BundleRef {
+            name: name.to_string(),
+            version: horsie_models::runtime::BundleVersion::Generation(
+                horsie_models::runtime::BundleGeneration { generation },
+            ),
+            digest: digest.to_string(),
         }
     }
 
@@ -450,14 +489,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let dir = store
-            .provision_agent(
-                "agent-1",
-                &[BundleRef {
-                    name: "pack".into(),
-                    hash: hash.clone(),
-                }],
-                &source,
-            )
+            .provision_agent("agent-1", &[external("pack", &hash.clone())], &source)
             .await
             .unwrap();
 
@@ -472,16 +504,61 @@ mod tests {
     /// The reason for content-addressing. Two agents on one bundle must cost one
     /// download, or a session with five subagents pays five times for the same
     /// zip.
+    /// An authored bundle is keyed by its own generation, not by a hash — two
+    /// plugins both at generation 1 are not the same bytes — and it is still
+    /// verified against the digest the server sent.
+    #[tokio::test]
+    async fn an_authored_bundle_is_keyed_by_plugin_and_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let (source, digest) = FakeSource::with(&[("skills/a/SKILL.md", "body-a")]);
+        let store = PluginStore::new(root.path().to_path_buf());
+
+        let dir = store
+            .provision_agent("agent-1", &[authored("notes", 4, &digest)], &source)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("notes/skills/a/SKILL.md")).unwrap(),
+            "body-a"
+        );
+        assert!(
+            root.path().join("store/a_notes_g4").is_dir(),
+            "the key carries the plugin, or two plugins at one generation collide"
+        );
+        assert!(
+            !root.path().join("store").join(&digest).is_dir(),
+            "an authored bundle is not stored under its digest — that is the check, not the name"
+        );
+    }
+
+    /// The digest is what the bytes are checked against for either kind. An
+    /// authored bundle whose server rendered something else must fail loudly
+    /// rather than populate the store with it.
+    #[tokio::test]
+    async fn an_authored_bundle_with_the_wrong_digest_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let (source, _) = FakeSource::with(&[("skills/a/SKILL.md", "body-a")]);
+        let store = PluginStore::new(root.path().to_path_buf());
+
+        let err = store
+            .provision_agent(
+                "agent-1",
+                &[authored("notes", 1, "not-the-digest")],
+                &source,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("notes"), "{err}");
+    }
+
     #[tokio::test]
     async fn two_agents_on_one_bundle_fetch_it_once() {
         let root = tempfile::tempdir().unwrap();
         let (source, hash) = FakeSource::with(&[("skills/a/SKILL.md", "body-a")]);
         let fetched = source.fetched.clone();
         let store = PluginStore::new(root.path().to_path_buf());
-        let refs = [BundleRef {
-            name: "pack".into(),
-            hash,
-        }];
+        let refs = [external("pack", &hash)];
 
         for agent in ["agent-1", "agent-2"] {
             store.provision_agent(agent, &refs, &source).await.unwrap();
@@ -507,10 +584,7 @@ mod tests {
         let (source, hash) = FakeSource::with(&[("skills/a/SKILL.md", "body-a")]);
         let fetched = source.fetched.clone();
         let store = PluginStore::new(root.path().to_path_buf());
-        let refs = [BundleRef {
-            name: "pack".into(),
-            hash,
-        }];
+        let refs = [external("pack", &hash)];
 
         store.provision_agent("a1", &refs, &source).await.unwrap();
         store.provision_agent("a1", &refs, &source).await.unwrap();
@@ -537,25 +611,11 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         store
-            .provision_agent(
-                "a1",
-                &[BundleRef {
-                    name: "one".into(),
-                    hash: h1,
-                }],
-                &source,
-            )
+            .provision_agent("a1", &[external("one", &h1)], &source)
             .await
             .unwrap();
         let dir = store
-            .provision_agent(
-                "a1",
-                &[BundleRef {
-                    name: "two".into(),
-                    hash: h2,
-                }],
-                &source,
-            )
+            .provision_agent("a1", &[external("two", &h2)], &source)
             .await
             .unwrap();
 
@@ -573,14 +633,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent(
-                "a1",
-                &[BundleRef {
-                    name: "pack".into(),
-                    hash,
-                }],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", &hash)], &source)
             .await
             .unwrap_err();
 
@@ -605,18 +658,11 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent(
-                "a1",
-                &[BundleRef {
-                    name: "pack".into(),
-                    hash: "not-the-real-hash".into(),
-                }],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", "not-the-real-hash")], &source)
             .await
             .unwrap_err();
 
-        assert!(err.contains("hash mismatch"), "{err}");
+        assert!(err.contains("digest mismatch"), "{err}");
         assert!(
             !root.path().join("store/not-the-real-hash").exists(),
             "unverified bytes must never be named after the hash they claimed"
@@ -657,14 +703,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let dir = store
-            .provision_agent(
-                "a1",
-                &[BundleRef {
-                    name: "pack".into(),
-                    hash,
-                }],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", &hash)], &source)
             .await
             .unwrap();
 

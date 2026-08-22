@@ -60,7 +60,16 @@ const settings: SettingsView = {
 const bundles: PluginView[] = [
   {
     name: "bundle-a",
-    sourceUrl: "",
+    kind: {
+      kind: "Claude",
+      value: {
+        url: "",
+        gitRef: undefined,
+        subpath: undefined,
+        marketplace: undefined,
+        marketplaceEntry: undefined,
+      },
+    },
     catalog: [],
     hasHooks: false,
     enabledDefault: true,
@@ -68,7 +77,16 @@ const bundles: PluginView[] = [
   },
   {
     name: "bundle-b",
-    sourceUrl: "",
+    kind: {
+      kind: "Claude",
+      value: {
+        url: "",
+        gitRef: undefined,
+        subpath: undefined,
+        marketplace: undefined,
+        marketplaceEntry: undefined,
+      },
+    },
     catalog: [],
     hasHooks: false,
     enabledDefault: false,

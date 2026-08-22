@@ -18,13 +18,20 @@ function bundle(over: Partial<PluginView> = {}): PluginView {
     name: "feature-dev",
     description: "d",
     version: "1.0.0",
-    sourceUrl: "https://example.com/x.git",
-    sourceRef: undefined,
+    kind: {
+      kind: "Claude",
+      value: {
+        url: "https://example.com/x.git",
+        gitRef: undefined,
+        subpath: undefined,
+        marketplace: undefined,
+        marketplaceEntry: undefined,
+      },
+    },
     catalog: [],
     hasHooks: false,
     enabledDefault: false,
     artifactSize: 1,
-    marketplace: undefined,
     ...over,
   };
 }
@@ -79,5 +86,20 @@ describe("BundleRow", () => {
     const toggle = screen.getByRole("button", { expanded: false });
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("nothing horsie runs")).toBeTruthy();
+  });
+
+  /// An authored bundle has no upstream, and the server refuses to update one.
+  /// A button that can only ever produce an error is worse than no button.
+  it("offers Update for a clone but not for an authored bundle", () => {
+    const { unmount } = render(<BundleRow bundle={bundle()} />);
+    expect(screen.queryByText("Update")).not.toBeNull();
+    unmount();
+
+    render(
+      <BundleRow
+        bundle={bundle({ kind: { kind: "Authored", value: { generation: 3 } } })}
+      />,
+    );
+    expect(screen.queryByText("Update")).toBeNull();
   });
 });

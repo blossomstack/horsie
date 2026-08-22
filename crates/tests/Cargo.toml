@@ -17,6 +17,8 @@ horsie-llm-providers = { path = "../llm-providers" }
 horsie-server = { path = "../server", features = ["test-util"] }
 horsie-actor = { workspace = true }
 horsie-models = { path = "../models" }
+horsie-runtime = { path = "../runtime" }
+horsie-support = { path = "../support" }
 tokio       = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-util  = { workspace = true }
 async-trait = { workspace = true }

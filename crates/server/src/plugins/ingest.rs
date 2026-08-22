@@ -54,12 +54,13 @@ impl IngestTarget {
     }
 }
 
-/// A packed bundle — everything needed to persist a `plugins` row.
+/// A packed bundle: everything a `plugins` row needs that can be derived from
+/// the bytes themselves.
 ///
-/// `url`/`git_ref`/`subpath` are what was *actually* cloned and descended into,
-/// which is not always what the caller asked for: a marketplace entry may name
-/// another repo. Storing the resolved triple is what makes `update` re-clone
-/// the same tree.
+/// Deliberately says nothing about where the tree came from. A bundle rendered
+/// from this server's own tables is described here exactly as a cloned one is,
+/// which is what stops the library reporting two different things about two
+/// bundles holding the same skill.
 pub struct PluginBundle {
     pub name: String,
     pub version: Option<String>,
@@ -75,9 +76,10 @@ pub struct PluginBundle {
     pub unsupported_hooks: Vec<String>,
     pub zip_bytes: Vec<u8>,
     pub hash: String,
-    pub url: String,
-    pub git_ref: Option<String>,
-    pub subpath: Option<String>,
+    /// Which packaging convention the checked-out tree follows. Recorded so a
+    /// re-clone is classified the same way, and so the library can say which
+    /// bundles are already portable to other clients.
+    pub dialect: horsie_support::plugin::ManifestDialect,
 }
 
 /// A catalogue as read from a checkout — everything a `marketplaces` row stores.
@@ -98,7 +100,11 @@ pub struct ParsedMarketplace {
 
 /// What a cloned repo turned out to be.
 pub enum Ingested {
-    Plugin(PluginBundle),
+    /// The packed tree, and the clone it was descended from — which is not
+    /// always what the caller asked for, since a marketplace entry may name
+    /// another repo. The resolved triple is what makes `update` re-clone the
+    /// same tree.
+    Plugin(PluginBundle, horsie_models::plugins::ExternalOrigin),
     /// Only reachable from [`IngestTarget::Url`].
     Marketplace(ParsedMarketplace),
 }
@@ -165,7 +171,7 @@ pub fn ingest_git(target: &IngestTarget) -> Result<Ingested, String> {
         Some(s) => join_declared(&dest, s),
         None => dest.clone(),
     };
-    let bundle = pack(
+    let (bundle, origin) = pack(
         &dest,
         &plugin_root,
         url,
@@ -173,7 +179,7 @@ pub fn ingest_git(target: &IngestTarget) -> Result<Ingested, String> {
         subpath,
         &fallback,
     )?;
-    Ok(Ingested::Plugin(bundle))
+    Ok(Ingested::Plugin(bundle, origin))
 }
 
 /// Clone `url` and parse its marketplace index. Used by refresh, which must not
@@ -203,27 +209,26 @@ pub fn read_marketplace(url: &str, git_ref: Option<&str>) -> Result<ParsedMarket
     })
 }
 
-/// Inspect a plugin root and pack it. `checkout` is the clone's root — the sha
-/// fallback for a version comes from there, not from the plugin subtree.
-fn pack(
-    checkout: &Path,
+/// Inspect a plugin tree already on disk and pack it.
+///
+/// Shared by ingest and by the authored renderer, so the two cannot drift in
+/// what they report about a bundle. `version_fallback` is used when the tree's
+/// own manifest declares none — the cloned commit sha for a checkout, the
+/// generation for an authored plugin.
+pub fn bundle_from_dir(
     plugin_root: &Path,
-    url: &str,
-    git_ref: Option<&str>,
-    subpath: Option<String>,
     fallback_name: &str,
+    version_fallback: Option<String>,
 ) -> Result<PluginBundle, String> {
     let root = PluginRoot::inspect(plugin_root)?;
     if !root.is_installable() {
         return Err(format!("not a plugin bundle: {}", root.rejection()));
     }
     let name = root.name(fallback_name);
-    let version = root
-        .version()
-        .map(str::to_string)
-        .or_else(|| horsie_support::git::head_sha(checkout));
+    let version = root.version().map(str::to_string).or(version_fallback);
     let description = root.description().map(str::to_string);
     let catalog = horsie_support::plugin::catalog::build(&root);
+    let dialect = root.dialect();
     let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
     let unsupported_hooks = horsie_support::plugin::hooks::read(plugin_root)
         .map(|h| {
@@ -244,10 +249,36 @@ fn pack(
         unsupported_hooks,
         zip_bytes,
         hash,
+        dialect,
+    })
+}
+
+/// Inspect a plugin root inside a clone and pack it. `checkout` is the clone's
+/// root — the sha fallback for a version comes from there, not from the plugin
+/// subtree.
+fn pack(
+    checkout: &Path,
+    plugin_root: &Path,
+    url: &str,
+    git_ref: Option<&str>,
+    subpath: Option<String>,
+    fallback_name: &str,
+) -> Result<(PluginBundle, horsie_models::plugins::ExternalOrigin), String> {
+    let bundle = bundle_from_dir(
+        plugin_root,
+        fallback_name,
+        horsie_support::git::head_sha(checkout),
+    )?;
+    let origin = horsie_models::plugins::ExternalOrigin {
         url: url.to_string(),
         git_ref: git_ref.map(str::to_string),
         subpath,
-    })
+        // Filled in by `persist` from the provenance: ingest knows what it
+        // cloned, not why it was asked to.
+        marketplace: None,
+        marketplace_entry: None,
+    };
+    Ok((bundle, origin))
 }
 
 /// Unpack an artifact back into a directory tree — [`zip_dir`] read backwards.
@@ -419,8 +450,16 @@ mod tests {
     /// `Ingested` holds zip bytes and deliberately isn't `Debug`, so unwrap by
     /// matching rather than with `unwrap`/`unwrap_err`.
     fn expect_plugin(ing: Ingested) -> PluginBundle {
+        expect_plugin_with_origin(ing).0
+    }
+
+    /// The bundle and the clone it was resolved from — what `update` will
+    /// re-clone, which several tests are specifically about.
+    fn expect_plugin_with_origin(
+        ing: Ingested,
+    ) -> (PluginBundle, horsie_models::plugins::ExternalOrigin) {
         match ing {
-            Ingested::Plugin(p) => p,
+            Ingested::Plugin(p, o) => (p, o),
             Ingested::Marketplace(m) => panic!("expected a plugin, got marketplace {}", m.name),
         }
     }
@@ -428,7 +467,7 @@ mod tests {
     fn expect_marketplace(ing: Ingested) -> ParsedMarketplace {
         match ing {
             Ingested::Marketplace(m) => m,
-            Ingested::Plugin(p) => panic!("expected a marketplace, got plugin {}", p.name),
+            Ingested::Plugin(p, _) => panic!("expected a marketplace, got plugin {}", p.name),
         }
     }
 
@@ -651,7 +690,7 @@ mod tests {
         std::fs::write(repo.join("README.md"), "not part of the bundle").unwrap();
         let url = commit_repo(&repo);
 
-        let b = expect_plugin(ingest_git(&url_target(&url)).unwrap());
+        let (b, o) = expect_plugin_with_origin(ingest_git(&url_target(&url)).unwrap());
         assert_eq!(b.name, "impeccable");
         assert_eq!(
             b.catalog
@@ -660,9 +699,9 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(b.subpath.as_deref(), Some("./plugin"));
+        assert_eq!(o.subpath.as_deref(), Some("./plugin"));
         assert_eq!(
-            b.url, url,
+            o.url, url,
             "a path entry stays in the marketplace's own repo"
         );
         let names = zip_entry_names(&b.zip_bytes);
@@ -737,7 +776,7 @@ mod tests {
         write_skill(&repo.join("plugins/beta"), "b");
         let url = commit_repo(&repo);
 
-        let b = expect_plugin(
+        let (b, o) = expect_plugin_with_origin(
             ingest_git(&IngestTarget::Resolved {
                 url: url.clone(),
                 git_ref: None,
@@ -753,7 +792,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(b.subpath.as_deref(), Some("./plugins/beta"));
+        assert_eq!(o.subpath.as_deref(), Some("./plugins/beta"));
     }
 
     /// A one-entry index whose entry points at ANOTHER repo: the second repo is
@@ -776,10 +815,10 @@ mod tests {
         );
         let url = commit_repo(&repo);
 
-        let b = expect_plugin(ingest_git(&url_target(&url)).unwrap());
+        let (b, o) = expect_plugin_with_origin(ingest_git(&url_target(&url)).unwrap());
         assert_eq!(b.name, "x");
-        assert_eq!(b.url, other_url);
-        assert!(b.subpath.is_none());
+        assert_eq!(o.url, other_url);
+        assert!(o.subpath.is_none());
     }
 
     /// `read_marketplace` is refresh's entry point: it must refuse a repo that

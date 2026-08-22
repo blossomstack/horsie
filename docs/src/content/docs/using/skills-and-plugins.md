@@ -8,7 +8,8 @@ sidebar:
 
 A **bundle** packages skills, agents, slash commands, hooks and MCP servers
 that an agent can use during a session. You install bundles from git
-repositories once, then select which ones a session loads.
+repositories once, then select which ones a session loads. An agent can also
+write a bundle of its own — see [Skills an agent writes](#skills-an-agent-writes).
 
 Every runtime loads them the same way, whichever vendor it runs on: it fetches
 the bundles its session selected over its own outbound connection at startup.
@@ -143,13 +144,49 @@ agent that ran it and shows the reason: a tool hook's halt fails the turn,
 fails a subagent for its parent, or fails a workflow step. On `Stop` and
 `SubagentStop` the turn is already ending, so a halt there simply lets it end.
 
+## Skills an agent writes
+
+A session whose tool selection includes the **Authoring** group can write
+skills of its own, so what an agent works out in one session is available to
+the next. The skills live in the server's database rather than in a git repo,
+and the server renders them into a bundle whenever a runtime asks for one.
+
+Give a session the authoring tools and the agent gets `plugin_write`,
+`skill_write`, `skill_delete`, `skill_list`, `skill_history` and
+`skill_restore`. It creates a plugin to group its skills, then writes skills
+into it. Everything it writes is kept as an append-only history, so an edit
+never loses what was there before and any past revision can be restored.
+
+**Settings → Skills → Authored here** lists what has been written, opens each
+plugin's skills, shows a skill's history and rolls one back. The bundle it
+publishes appears under **Installed bundles** like any other, which is where
+you switch it on for new sessions.
+
+Two things worth knowing:
+
+- Selecting the authoring tools is the whole grant. A skill written this way is
+  offered to every session this project starts afterwards, so treat it as
+  authority rather than convenience.
+- A skill takes effect for the *next* session. A runtime is given its bundles
+  when an agent loads, so one already running keeps the tree it started with.
+
+Agents cannot author hooks or MCP servers — only skills and the files that sit
+beside them. A skill does nothing until an agent chooses to load it; a hook
+fires on its own and an MCP server is launched at startup, which is a
+different kind of trust.
+
 ## Where the files go
 
-The server stores each installed plugin as a content-addressed zip. When a
-runtime starts, the server hands it the `{name, hash}` refs its session
-selected plus a short-lived token; the runtime fetches each zip over its own
-outbound connection, checks the hash, and unpacks it into a directory of its
-own.
+The server stores each installed plugin as a content-addressed zip. An authored
+plugin has no zip on disk at all: the database is the original, and the package
+is rendered when it is asked for.
+
+When a runtime starts, the server hands it a ref per bundle its session
+selected — a name, a version, and a digest — plus a short-lived token. The
+runtime fetches each zip over its own outbound connection, checks it against
+the digest, and unpacks it into a directory of its own. An installed bundle's
+version is the hash of its bytes; an authored one's is a generation that
+advances every time someone edits it.
 
 That directory belongs to one runtime. A session sees exactly the bundles it
 selected and never another session's, and the whole thing is deleted when the
@@ -173,6 +210,7 @@ So you can tell before installing rather than after:
 | MCP | yes | stdio and http, in the runtime. No OAuth. |
 | `${CLAUDE_PLUGIN_ROOT}` | partly | Resolved in skill and agent bodies, hook commands and URLs, and MCP declarations — not in a command body, which the server catalogues without knowing where the runtime mounted the plugin. |
 | Marketplaces | yes | Add a source, browse it, install by name. |
+| [Agent Plugins 1.0](https://agent-plugins.org/specification) | yes | A root `plugin.json` with a `$schema`, skills fixed at `skills/`, servers in `mcp.json`. A repo shipping both this and `.claude-plugin/plugin.json` is read as the latter, which can express more of what horsie runs. |
 
 Two deliberate omissions. `` !`cmd` `` inside a command template is left as
 written rather than executed — ask the agent to run it, since it has a shell.

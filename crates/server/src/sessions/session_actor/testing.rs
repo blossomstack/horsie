@@ -1235,7 +1235,7 @@ impl crate::plugins::PluginProvisioner for FakeLibrary {
     async fn resolve(
         &self,
         _names: &[String],
-    ) -> Result<Vec<crate::plugins::PluginArtifactRef>, String> {
+    ) -> Result<Vec<horsie_models::runtime::BundleRef>, String> {
         Ok(Vec::new())
     }
 

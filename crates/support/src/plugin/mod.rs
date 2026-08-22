@@ -21,7 +21,7 @@ pub mod skills;
 #[cfg(feature = "git")]
 pub use checkout::{Checkout, ensure_checkout, source_location};
 pub use layout::PluginRoot;
-pub use manifest::PluginManifest;
+pub use manifest::{ManifestDialect, PluginManifest};
 pub use marketplace::{Marketplace, MarketplaceEntry, PluginSource};
 
 use sha2::{Digest, Sha256};

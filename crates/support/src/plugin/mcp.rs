@@ -35,20 +35,30 @@ pub struct PluginMcpServer {
     pub transport: McpTransportSpec,
 }
 
-/// Read `<plugin_root>/.mcp.json`.
+/// Read `<plugin_root>/.mcp.json`, else `<plugin_root>/mcp.json`.
+///
+/// The dotted name is Claude Code's; the bare one is Agent Plugins', which
+/// fixes it at the root beside `plugin.json`. The two files hold the same
+/// shape, so one parser serves both and the only question is which name a
+/// plugin chose. `.mcp.json` is tried first for the reason the Claude manifest
+/// wins in [`super::PluginManifest::read`]: a repo carrying both is carrying
+/// one for this shape of reader.
 ///
 /// An absent file is an empty set. A present but malformed one is an error, for
 /// the reason a malformed `hooks.json` is: silently reading it as "no servers"
 /// is the failure this whole feature exists to remove.
 pub fn read(plugin_root: &Path) -> Result<Vec<PluginMcpServer>, String> {
-    let path = plugin_root.join(".mcp.json");
-    if !path.is_file() {
+    let Some((path, name)) = [".mcp.json", "mcp.json"]
+        .into_iter()
+        .map(|n| (plugin_root.join(n), n))
+        .find(|(p, _)| p.is_file())
+    else {
         return Ok(Vec::new());
-    }
+    };
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let json: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!(".mcp.json: {e}"))?;
+        serde_json::from_str(&text).map_err(|e| format!("{name}: {e}"))?;
     Ok(parse(&json))
 }
 
@@ -236,5 +246,48 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Agent Plugins fixes the file at the root under its bare name.
+    #[test]
+    fn reads_the_bare_mcp_json_agent_plugins_fixes() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+                "mcpServers":{"docs":{"type":"stdio","command":"./bin/server"}}}"#,
+        )
+        .unwrap();
+        let servers = read(dir.path()).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "docs");
+    }
+
+    /// A repo carrying both is carrying one for this shape of reader, the same
+    /// rule the manifest follows.
+    #[test]
+    fn the_dotted_name_wins_when_both_are_present() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"dotted":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("mcp.json"),
+            r#"{"mcpServers":{"bare":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let servers = read(dir.path()).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "dotted");
+    }
+
+    #[test]
+    fn a_malformed_bare_file_names_itself() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("mcp.json"), "{nope").unwrap();
+        let err = read(dir.path()).unwrap_err();
+        assert!(err.starts_with("mcp.json:"), "{err}");
     }
 }

@@ -1,6 +1,6 @@
 //! Deciding whether a directory is an installable plugin, and describing it.
 
-use super::{PluginManifest, agents, commands, skills};
+use super::{ManifestDialect, PluginManifest, agents, commands, skills};
 use std::path::{Path, PathBuf};
 
 /// An inspected plugin directory.
@@ -28,6 +28,18 @@ impl PluginRoot {
             agent_files,
             command_files,
         })
+    }
+
+    /// Which packaging convention this directory follows.
+    ///
+    /// A directory with no manifest at all reads as
+    /// [`ManifestDialect::Claude`]: it is being interpreted by horsie's own
+    /// conventions, which are Claude's, and the portable dialect cannot be
+    /// claimed by a plugin that never declared a `$schema`.
+    pub fn dialect(&self) -> ManifestDialect {
+        self.manifest
+            .as_ref()
+            .map_or(ManifestDialect::Claude, |m| m.dialect)
     }
 
     /// Manifest `name`, else `fallback` (normally the repo basename).
@@ -212,5 +224,36 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write(&dir.path().join(".claude-plugin/plugin.json"), "{oops");
         assert!(PluginRoot::inspect(dir.path()).is_err());
+    }
+
+    /// The whole portable core in one tree: a root manifest, a fixed `skills/`.
+    /// Nothing about it is horsie-shaped, and it still installs.
+    #[test]
+    fn an_agent_plugins_tree_is_installable_and_names_its_dialect() {
+        let dir = TempDir::new().unwrap();
+        write(
+            &dir.path().join("plugin.json"),
+            r#"{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name":"acme.tools","description":"d","version":"1.0.0"}"#,
+        );
+        write(
+            &dir.path().join("skills/summarize/SKILL.md"),
+            "---\nname: summarize\ndescription: d\n---\nbody",
+        );
+        let root = PluginRoot::inspect(dir.path()).unwrap();
+        assert_eq!(root.dialect(), ManifestDialect::AgentPlugin);
+        assert!(root.is_installable());
+        assert_eq!(root.name("fallback"), "acme.tools");
+        assert_eq!(root.skill_dirs.len(), 1);
+    }
+
+    /// A directory nobody labelled is being read by horsie's own conventions,
+    /// which are Claude's.
+    #[test]
+    fn a_manifestless_tree_reads_as_the_claude_dialect() {
+        let dir = TempDir::new().unwrap();
+        write(&dir.path().join("skills/x/SKILL.md"), "---\nname: x\n---\n");
+        let root = PluginRoot::inspect(dir.path()).unwrap();
+        assert_eq!(root.dialect(), ManifestDialect::Claude);
     }
 }

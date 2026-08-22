@@ -93,7 +93,7 @@ mod tests {
         write_skill(dir.path(), "skills/ignored");
         let m = PluginManifest {
             skills: vec!["custom/skills".into()],
-            ..Default::default()
+            ..PluginManifest::empty(crate::plugin::ManifestDialect::Claude)
         };
         let dirs = skill_dirs(dir.path(), Some(&m));
         assert_eq!(dirs, vec![dir.path().join("custom/skills/x")]);
@@ -106,7 +106,7 @@ mod tests {
         write_skill(dir.path(), ".claude/skills/impeccable");
         let m = PluginManifest {
             skills: vec!["./.claude/skills/".into()],
-            ..Default::default()
+            ..PluginManifest::empty(crate::plugin::ManifestDialect::Claude)
         };
         let dirs = skill_dirs(dir.path(), Some(&m));
         assert_eq!(dirs.len(), 1);
@@ -127,7 +127,7 @@ mod tests {
         write_skill(dir.path(), "a/skills/one");
         let m = PluginManifest {
             skills: vec!["a/skills".into(), "b/skills".into()],
-            ..Default::default()
+            ..PluginManifest::empty(crate::plugin::ManifestDialect::Claude)
         };
         let dirs = skill_dirs(dir.path(), Some(&m));
         assert_eq!(
