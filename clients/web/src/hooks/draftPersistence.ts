@@ -15,7 +15,9 @@ export const DRAFT_STORAGE_KEY = "horsie-session-draft";
  */
 export type EnvironmentDraft =
   | { kind: "runtime"; vendor: string; repos: Record<string, string> }
-  | { kind: "named"; name: string };
+  | { kind: "named"; name: string }
+  /** No sandbox at all: the model, its MCP servers and its memory, nothing else. */
+  | { kind: "none" };
 
 /** The stored draft, v2. Plain JSON types only — never Map/Set. */
 export interface DraftPayload {
@@ -154,6 +156,7 @@ export function reconcileModelEnvironment(
       environment = { kind: "runtime", vendor: defaultRuntimeVendor, repos: {} };
     }
   } else if (
+    environment.kind === "runtime" &&
     !activeVendorNames.includes(environment.vendor) &&
     environment.vendor !== defaultRuntimeVendor
   ) {
@@ -219,6 +222,9 @@ export function toEnvironmentSpec(
   if (environment.kind === "named") {
     return { type: "Named", value: { name: environment.name } };
   }
+  if (environment.kind === "none") {
+    return { type: "None", value: {} };
+  }
   const repos: RepoConfig[] = provisions
     ? Object.entries(environment.repos).map(([fullName, ref]) => ({
         url: `https://github.com/${fullName}`,
@@ -241,12 +247,21 @@ function fullName(url: string): string {
 
 /** The inverse, for a form seeded from something already saved. */
 export function fromEnvironmentSpec(spec: EnvironmentSpec): EnvironmentDraft {
-  if (spec.type === "Named") return { kind: "named", name: spec.value.name };
-  return {
-    kind: "runtime",
-    vendor: spec.value.vendor,
-    repos: Object.fromEntries(
-      (spec.value.repos ?? []).map((r) => [fullName(r.url), r.gitRef ?? ""]),
-    ),
-  };
+  // Switched on the tag rather than tested for one variant and assumed the
+  // other: the union has three members now, and "not Named" no longer means
+  // "Runtime".
+  switch (spec.type) {
+    case "Named":
+      return { kind: "named", name: spec.value.name };
+    case "None":
+      return { kind: "none" };
+    case "Runtime":
+      return {
+        kind: "runtime",
+        vendor: spec.value.vendor,
+        repos: Object.fromEntries(
+          (spec.value.repos ?? []).map((r) => [fullName(r.url), r.gitRef ?? ""]),
+        ),
+      };
+  }
 }

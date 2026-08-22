@@ -540,6 +540,8 @@ mod tests {
                         parent: id,
                         seed: crate::sessions::run_forest::SeedMode::Fresh,
                         message: "try the other migration".into(),
+                        // Nothing named, so it works where its parent works.
+                        env: crate::sessions::session_actor::RequestedRuntime::Inherit,
                         reply,
                     },
                 )
@@ -648,7 +650,12 @@ mod tests {
         };
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &spec.runtime_env())
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &spec.runtime_env().expect("the fixture has a runtime"),
+            )
             .await
             .expect("create");
         // The plan step concludes and routes to code; code stays in flight on
@@ -819,7 +826,9 @@ mod tests {
                 &id.to_string(),
                 "i1",
                 "mock",
-                &actor_spec_fixture().runtime_env(),
+                &actor_spec_fixture()
+                    .runtime_env()
+                    .expect("the fixture has a runtime"),
             )
             .await
             .expect("create");

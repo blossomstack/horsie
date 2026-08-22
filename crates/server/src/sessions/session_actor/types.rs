@@ -19,15 +19,16 @@ use crate::agent_loop::{AgentOutcome, AgentUsageSnapshot, UsageTotal};
 pub use crate::agent_loop::{AnswerError, AskAnswer};
 use crate::sessions::{
     UserMessageError,
+    run_forest::RuntimeChoice,
     run_forest::{RunForest, RunId, RunState, SeedMode, TurnPhase},
-    spec::{AgentSettings, SessionSpec, SessionStatus},
+    spec::{AgentSettings, RuntimeId, SessionSpec, SessionStatus},
     workflow::{WorkflowRunSpec, WorkflowRunStatus},
 };
 use horsie_actor::ReplyTo;
 use horsie_models::hooks::HookRecord;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -59,22 +60,30 @@ pub enum SessionCommand {
 /// Getting and releasing this session's sandbox.
 #[derive(Serialize, Deserialize)]
 pub enum LifecycleCommand {
-    /// Build this session's runtime.
+    /// Build a runtime for `owner`, from `env`.
     ///
-    /// Sent once, by the supervisor, as part of creating the session — and
-    /// again by the session itself when it loads to find a create that the
-    /// process died inside. It is idempotent against a runtime that already
-    /// exists: a session that is past provisioning ignores it, which is what
-    /// keeps "provisioned exactly once" true without any bookkeeping beyond the
-    /// status the journal already carries.
-    Provision,
+    /// Sent by the supervisor as part of creating the session, by the session
+    /// itself when it loads to find a create the process died inside, and by a
+    /// sub session that asked for an environment of its own. Idempotent against
+    /// a runtime already built for that owner: the record's own state is what
+    /// keeps "provisioned exactly once" true, with no bookkeeping beyond the
+    /// journal.
+    ///
+    /// `env` is `None` for the re-attempt paths, which re-use the environment
+    /// the record already carries — a retry must build the same sandbox, not
+    /// re-resolve one that may since have been edited.
+    Provision {
+        owner: Uuid,
+        env: Option<Box<crate::sessions::spec::RuntimeEnv>>,
+    },
     /// Internal: the detached create has word of the runtime it asked for —
     /// "the machine is booting" — before it has an outcome. The vendor's own
     /// sentence, carried unedited, because it is what the user is shown.
-    NarrateProvisioning { detail: String },
+    NarrateProvisioning { runtime: RuntimeId, detail: String },
     /// Internal: the detached create finished. Carries the vendor's own error
     /// rather than a summary, because that string is what the user is shown.
     FinishProvisioning {
+        runtime: RuntimeId,
         error: Option<String>,
         terminal: bool,
     },
@@ -249,6 +258,8 @@ pub enum SubSessionCommand {
         parent: Uuid,
         seed: SeedMode,
         message: String,
+        /// Where the sub session should run, already resolved.
+        env: RequestedRuntime,
         reply: ReplyTo<Result<Uuid, String>>,
     },
     /// Internal: the `ForkCreated` write came back — only now does the sub
@@ -256,6 +267,10 @@ pub enum SubSessionCommand {
     /// does). A failed write spawns nothing and the caller gets the error.
     FinishCreate {
         id: Uuid,
+        /// Carried through from `Create` rather than parked in a map: the
+        /// environment belongs to this one create, and a map keyed by id would
+        /// be a second thing to keep in step with the journal.
+        env: RequestedRuntime,
         reply: ReplyTo<Result<Uuid, String>>,
         persisted: Result<(), horsie_actor::JournalError>,
     },
@@ -467,6 +482,26 @@ pub enum SessionDomainEvent {
     /// is safe to re-attempt precisely because no turn can have run under it.
     ProvisioningStarted {
         at_ms: u64,
+        /// Which runtime is being built. A session may own several — its own,
+        /// and one per sub session that asked for an environment of its own —
+        /// so every provisioning fact has to name the one it is about.
+        runtime: RuntimeId,
+    },
+    /// A session or sub session asked for a runtime of its own.
+    ///
+    /// Separate from [`Self::ProvisioningStarted`] because a create may be
+    /// re-attempted and the environment may not: this carries the snapshot
+    /// once, and the retries that follow carry only the attempt. It is also
+    /// what points the asking conversation at the runtime, which is how every
+    /// agent below it resolves one.
+    RuntimeRequested {
+        at_ms: u64,
+        runtime: RuntimeId,
+        /// The session or sub session that asked. Its entry gets the runtime,
+        /// and deleting it is what shuts the runtime down.
+        owner: Uuid,
+        /// What to build it from, resolved at the moment it was asked for.
+        env: crate::sessions::spec::RuntimeEnv,
     },
     /// What the vendor said about a create still in flight, in its own words.
     ///
@@ -477,18 +512,21 @@ pub enum SessionDomainEvent {
     /// substrate that is out of capacity.
     ProvisioningProgress {
         at_ms: u64,
+        runtime: RuntimeId,
         detail: String,
     },
     /// The vendor confirmed the runtime. The session becomes ordinary here,
     /// and whatever queued behind the create starts.
     ProvisioningSucceeded {
         at_ms: u64,
+        runtime: RuntimeId,
     },
     /// The create failed. `terminal` carries the one distinction that matters:
     /// a live vendor refusing to produce the runtime ends the session, while an
     /// offline vendor or a failed token mint leaves it retryable.
     ProvisioningFailed {
         at_ms: u64,
+        runtime: RuntimeId,
         error: String,
         terminal: bool,
     },
@@ -663,15 +701,18 @@ pub enum SessionDomainEvent {
         /// session abandoned mid-seed can be re-seeded with it, rather than
         /// coming back idle with nothing to answer.
         message: String,
-        /// The runtime it was given, if it asked for one of its own. `None`
-        /// means it runs on whatever its parent runs on — resolved by walking
-        /// the forest, never copied, so it follows a re-provision.
+        /// Where it runs, as it was asked for.
+        ///
+        /// The three answers the tool accepts, one variant each: `Inherit` for
+        /// an omitted `environment`, `Without` for `"none"`, and `Pending` for
+        /// a named one — whose record lands moments later, and until then
+        /// nothing may run in it.
         ///
         /// `#[serde(default)]` so sub sessions journaled before a session could
         /// own more than one runtime replay as inheriting, which is what they
         /// did.
-        #[serde(default)]
-        runtime: Option<crate::sessions::spec::RuntimeId>,
+        #[serde(default = "crate::sessions::run_forest::inherit")]
+        runtime: RuntimeChoice,
     },
     /// The sub session's initial state is durable, so it may run and the
     /// message seeded alongside it is drained.
@@ -810,6 +851,40 @@ pub(super) enum NotAnEnd {
     },
 }
 
+/// What a caller asked for when it branched a sub session.
+///
+/// The three answers `spawn_subsession`'s `environment` parameter accepts, as
+/// three variants. It used to be an `Option<Option<_>>`, where the outer
+/// `None` meant "omitted" and the inner one meant `"none"` — two absences a
+/// reader had to hold in their head, on the decision where getting it backwards
+/// silently takes a sub session's filesystem away.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RequestedRuntime {
+    /// The parameter was omitted: run wherever the parent runs, including
+    /// nowhere.
+    Inherit,
+    /// `"none"`: run with no sandbox.
+    Without,
+    /// A named environment, already resolved.
+    Own(Box<crate::sessions::spec::RuntimeEnv>),
+}
+
+/// Where one agent runs, as this state can answer it.
+///
+/// Three answers, never two. "No runtime" used to mean both "it asked for none"
+/// and "nothing here can say yet", and the two demand opposite behaviour: the
+/// first is ready to run, the second must wait. Collapsed into one `None`, a
+/// session ran its whole first turn believing it had no sandbox.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AgentRuntime<'a> {
+    /// It runs on this one.
+    On(RuntimeId, &'a RuntimeRecord),
+    /// It asked for no sandbox, and is ready to run without one.
+    Without,
+    /// It should have one and this state cannot yet say which. Never run here.
+    Pending,
+}
+
 /// One runtime this session owns, and where its build got to.
 ///
 /// The session holds a map of these rather than one `ProvisioningState`,
@@ -890,8 +965,16 @@ pub struct SessionState {
     /// Everything else about "how is it going" lives on the entry it is true
     /// of, in the forest.
     pub fatal: Option<String>,
-    /// The sandbox lifecycle, its sole owner.
-    pub provisioning: ProvisioningState,
+    /// Every runtime this session owns, keyed by its own id.
+    ///
+    /// A map rather than one `ProvisioningState`, because a sub session may run
+    /// on a sandbox of its own: a root idling while one of its branches boots a
+    /// machine is an ordinary shape now, and a single session-wide field could
+    /// not say it. Which agent runs on which is *not* here — that lives on the
+    /// run entries, resolved by [`RunForest::runtime_of_agent`], so there is
+    /// one owner of "who runs where" and one of "how is it doing".
+    #[serde(default)]
+    pub runtimes: BTreeMap<RuntimeId, RuntimeRecord>,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
     /// Every unit of work this session hosts — the main session, its
@@ -901,6 +984,70 @@ pub struct SessionState {
 }
 
 impl SessionState {
+    /// How the runtime `agent` runs on is doing.
+    ///
+    /// `None` means there is nothing to wait for: either the agent's session
+    /// chose no runtime, or it named one this state has never heard of. Both
+    /// read as "no sandbox", which is what every caller does about it.
+    #[must_use]
+    pub fn provisioning_for(&self, agent: Uuid) -> Option<&ProvisioningState> {
+        match self.runtime_for(agent) {
+            AgentRuntime::On(_, rec) => Some(&rec.provisioning),
+            AgentRuntime::Without | AgentRuntime::Pending => None,
+        }
+    }
+
+    /// The record for the runtime `agent` runs on, with its id.
+    #[must_use]
+    pub fn runtime_for(&self, agent: Uuid) -> AgentRuntime<'_> {
+        self.runtime_of_choice(self.forest.runtime_of_agent(agent))
+    }
+
+    /// The record behind a choice the forest already resolved.
+    ///
+    /// Split out because a step's runtime is resolved by walking from its
+    /// *run* rather than from itself, and both walks land on the same lookup.
+    pub fn runtime_of_choice(&self, choice: RuntimeChoice) -> AgentRuntime<'_> {
+        match choice {
+            RuntimeChoice::On(id) => match self.runtimes.get(&id) {
+                Some(rec) => AgentRuntime::On(id, rec),
+                // Pointed at a runtime this state has never heard of. A broken
+                // journal, not a configuration — so it waits rather than
+                // running without.
+                None => AgentRuntime::Pending,
+            },
+            RuntimeChoice::Without => AgentRuntime::Without,
+            // Nothing here can say yet. `Inherit` lands here only when the
+            // walk ran off the top of the forest, which is the same amount of
+            // knowledge as no walk at all.
+            //
+            // Deliberately not "then look for a runtime this agent owns": that
+            // guess is how an agent ends up on a sandbox nobody pointed it at.
+            // An unresolved binding is re-resolved when the create lands.
+            RuntimeChoice::Pending | RuntimeChoice::Inherit => AgentRuntime::Pending,
+        }
+    }
+
+    /// The runtimes `owner` is responsible for — the ones it asked for, which
+    /// are the ones that go away when it does. A sub session that inherited its
+    /// parent's owns nothing and takes nothing down with it.
+    pub fn runtimes_owned_by(
+        &self,
+        owner: Uuid,
+    ) -> impl Iterator<Item = (RuntimeId, &RuntimeRecord)> {
+        self.runtimes
+            .iter()
+            .filter(move |(_, r)| r.owner == owner)
+            .map(|(id, r)| (*id, r))
+    }
+
+    /// The record for the session's own runtime — the one its main agent runs
+    /// on. `None` for a runtime-less session, and for a workflow run's root.
+    #[must_use]
+    pub fn root_runtime(&self) -> Option<&RuntimeRecord> {
+        self.runtimes.get(&self.forest.root_runtime_id()?)
+    }
+
     /// Tokens banked across every agent this session hosts. Banked, so a turn
     /// in flight is not in it and nothing has to be asked of an agent.
     pub fn session_usage_total(&self) -> UsageTotal {
@@ -920,14 +1067,18 @@ impl SessionState {
                 reason: reason.clone(),
             };
         }
-        match &self.provisioning {
-            ProvisioningState::InFlight { .. } => return SessionStatus::Provisioning,
-            ProvisioningState::Failed { reason, .. } => {
+        // The *session's own* runtime, not any of them: a sub session booting a
+        // machine of its own is that sub session's news, and reporting it here
+        // would paint the whole session as provisioning while its main agent
+        // works. A session with no runtime skips this entirely.
+        match self.root_runtime().map(|r| &r.provisioning) {
+            Some(ProvisioningState::InFlight { .. }) => return SessionStatus::Provisioning,
+            Some(ProvisioningState::Failed { reason, .. }) => {
                 return SessionStatus::ProvisioningFailed {
                     reason: reason.clone(),
                 };
             }
-            ProvisioningState::Never | ProvisioningState::Ready { .. } => {}
+            Some(ProvisioningState::Never | ProvisioningState::Ready { .. }) | None => {}
         }
         match self.forest.root().map(|entry| &entry.state) {
             Some(RunState::Main(main)) => match &main.turn {
@@ -1179,7 +1330,11 @@ mod tests {
     #[test]
     fn fatal_projects_unrecoverable_over_any_root_phase() {
         let mut state = SessionState::default();
-        state.forest.apply_root_agent(Uuid::new_v4(), 0);
+        state.forest.apply_root_agent(
+            Uuid::new_v4(),
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         state.fatal = Some("runtime gone".into());
         assert_eq!(
             state.status(),
@@ -1194,21 +1349,75 @@ mod tests {
     /// runnable while the runtime is still being built.
     #[test]
     fn provisioning_projects_over_an_idle_root() {
+        let session = Uuid::new_v4();
+        let runtime = RuntimeId::generate();
         let mut state = SessionState::default();
-        state.forest.apply_root_agent(Uuid::new_v4(), 0);
-        state.provisioning = ProvisioningState::InFlight { at_ms: 5 };
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
+        state.forest.point_at_runtime(
+            session,
+            crate::sessions::run_forest::RuntimeChoice::On(runtime),
+        );
+        fn set(state: &mut SessionState, runtime: RuntimeId, session: Uuid, p: ProvisioningState) {
+            state.runtimes.insert(
+                runtime,
+                RuntimeRecord {
+                    env: SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                    owner: session,
+                    provisioning: p,
+                },
+            );
+        }
+        set(
+            &mut state,
+            runtime,
+            session,
+            ProvisioningState::InFlight { at_ms: 5 },
+        );
         assert_eq!(state.status(), SessionStatus::Provisioning);
-        state.provisioning = ProvisioningState::Failed {
-            at_ms: 5,
-            reason: "vendor offline".into(),
-        };
+        set(
+            &mut state,
+            runtime,
+            session,
+            ProvisioningState::Failed {
+                at_ms: 5,
+                reason: "vendor offline".into(),
+            },
+        );
         assert_eq!(
             state.status(),
             SessionStatus::ProvisioningFailed {
                 reason: "vendor offline".into()
             }
         );
-        state.provisioning = ProvisioningState::Ready { at_ms: 5 };
+        set(
+            &mut state,
+            runtime,
+            session,
+            ProvisioningState::Ready { at_ms: 5 },
+        );
+        assert_eq!(state.status(), SessionStatus::Idle);
+    }
+
+    /// A session that asked for no runtime is never "provisioning": there is
+    /// nothing being built, so its status is simply its root's phase. Without
+    /// this, a runtime-less session would have to fake a `Ready` record to look
+    /// idle.
+    #[test]
+    fn a_session_with_no_runtime_reads_as_its_root_phase() {
+        let session = Uuid::new_v4();
+        let mut state = SessionState::default();
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
+        assert!(state.runtimes.is_empty());
         assert_eq!(state.status(), SessionStatus::Idle);
     }
 }

@@ -743,15 +743,17 @@ mod tests {
                     plugins: Vec::new(),
                 }),
             },
-            workspaces: vec![WorkspaceDef {
-                name: "main".into(),
-            }],
-            provision: vec![],
-            vendor: vendor.into(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.into(),
+                workspaces: vec![WorkspaceDef {
+                    name: "main".into(),
+                }],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
@@ -803,7 +805,13 @@ mod tests {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let spec = manager
-            .runtime_spec("rt-1", "i1", &session_spec("v").runtime_env())
+            .runtime_spec(
+                "rt-1",
+                "i1",
+                &session_spec("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            )
             .await
             .unwrap();
         let token = spec
@@ -823,11 +831,23 @@ mod tests {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let one = manager
-            .runtime_spec("rt-1", "i1", &session_spec("v").runtime_env())
+            .runtime_spec(
+                "rt-1",
+                "i1",
+                &session_spec("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            )
             .await
             .unwrap();
         let two = manager
-            .runtime_spec("rt-2", "i1", &session_spec("v").runtime_env())
+            .runtime_spec(
+                "rt-2",
+                "i1",
+                &session_spec("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            )
             .await
             .unwrap();
         let token_of = |s: &RuntimeSpec| {
@@ -863,7 +883,9 @@ mod tests {
                 "s1",
                 "i1",
                 "nope",
-                &SessionSpec::for_vendor("v").runtime_env(),
+                &SessionSpec::for_vendor("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
                 false,
                 None,
             )
@@ -893,7 +915,9 @@ mod tests {
                     "s1",
                     "i1",
                     "v",
-                    &SessionSpec::for_vendor("v").runtime_env(),
+                    &SessionSpec::for_vendor("v")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
                     false,
                     None,
                 )
@@ -921,7 +945,9 @@ mod tests {
                 "s1",
                 "i1",
                 "v",
-                &SessionSpec::for_vendor("v").runtime_env(),
+                &SessionSpec::for_vendor("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
                 false,
                 None,
             )
@@ -942,14 +968,23 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
-            .await
-            .expect("create");
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &session_spec("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
         m.get(
             "s1",
             "i1",
             "v",
-            &SessionSpec::for_vendor("v").runtime_env(),
+            &SessionSpec::for_vendor("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
             false,
             None,
         )
@@ -968,9 +1003,16 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
-            .await
-            .expect("create");
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &session_spec("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(sent.workspaces, vec!["main".to_string()]);
     }
@@ -983,13 +1025,22 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let mut spec = session_spec("v");
-        spec.env_vars.push(crate::sessions::spec::EnvVarSpec {
-            name: "RUST_LOG".into(),
-            value: "debug".into(),
-        });
-        m.create("s1", "i1", "v", &spec.runtime_env())
-            .await
-            .expect("create");
+        spec.runtime
+            .as_mut()
+            .expect("a vendor spec has a runtime")
+            .env_vars
+            .push(crate::sessions::spec::EnvVarSpec {
+                name: "RUST_LOG".into(),
+                value: "debug".into(),
+            });
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &spec.runtime_env().expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(
             sent.env
@@ -1062,9 +1113,14 @@ mod tests {
         }));
         let mut spec = session_spec("v");
         spec.plugins = vec!["superpowers".to_string()];
-        m.create("s1", "i1", "v", &spec.runtime_env())
-            .await
-            .expect("create");
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &spec.runtime_env().expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
 
         let sent = agent.last_create_request().expect("create request");
         let env = |name: &str| {
@@ -1133,16 +1189,24 @@ mod tests {
             bus: std::sync::Arc::new(crate::bus::MemoryBus::new()),
         }));
         let mut spec = session_spec("v");
-        spec.provision
+        spec.runtime
+            .as_mut()
+            .expect("a vendor spec has a runtime")
+            .provision
             .push(crate::sessions::spec::ProvisionStepSpec {
                 name: "checkout".into(),
                 uses: "git_checkout".into(),
                 with: vec![("url".into(), "https://github.com/o/repo.git".into())],
             });
 
-        m.create("s1", "i1", "v", &spec.runtime_env())
-            .await
-            .expect("create");
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &spec.runtime_env().expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
         let env = agent.last_create_request().expect("create request").env;
         assert!(
             !env.iter().any(|e| e.name == "GITHUB_TOKEN"),
@@ -1300,7 +1364,9 @@ mod tests {
             "s1",
             "i1",
             "v",
-            &SessionSpec::for_vendor("v").runtime_env(),
+            &SessionSpec::for_vendor("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
             false,
             None,
         )
@@ -1322,7 +1388,9 @@ mod tests {
                 "s1",
                 "i1",
                 "v",
-                &SessionSpec::for_vendor("v").runtime_env(),
+                &SessionSpec::for_vendor("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
                 false,
                 None,
             )
@@ -1355,7 +1423,9 @@ mod tests {
                     "s1",
                     "i1",
                     "v",
-                    &SessionSpec::for_vendor("v").runtime_env(),
+                    &SessionSpec::for_vendor("v")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
                     false,
                     None,
                 )
@@ -1399,7 +1469,9 @@ mod tests {
                         "s1",
                         "i1",
                         "v",
-                        &SessionSpec::for_vendor("v").runtime_env(),
+                        &SessionSpec::for_vendor("v")
+                            .runtime_env()
+                            .expect("a vendor spec has a runtime"),
                         false,
                         None,
                     )
@@ -1434,7 +1506,7 @@ mod tests {
         let spec = spec_with_checkout();
 
         for _ in 0..2 {
-            m.get("s1", "i1", "v", &spec.runtime_env(), false, None)
+            m.get("s1", "i1", "v", &spec, false, None)
                 .await
                 .expect("acquiring a runtime that is already up");
         }
@@ -1461,7 +1533,9 @@ mod tests {
             "s1",
             "i1",
             "v",
-            &SessionSpec::for_vendor("v").runtime_env(),
+            &SessionSpec::for_vendor("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
             false,
             None,
         )
@@ -1483,14 +1557,7 @@ mod tests {
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
 
         let Err(err) = m
-            .get(
-                "s1",
-                "i1",
-                "v",
-                &spec_with_checkout().runtime_env(),
-                false,
-                None,
-            )
+            .get("s1", "i1", "v", &spec_with_checkout(), false, None)
             .await
         else {
             panic!("a failed provision must not yield a client")
@@ -1501,15 +1568,16 @@ mod tests {
         );
     }
 
-    fn spec_with_checkout() -> SessionSpec {
-        SessionSpec {
-            provision: vec![crate::sessions::spec::ProvisionStepSpec {
-                name: "checkout repo".to_string(),
-                uses: "git_checkout".to_string(),
-                with: vec![("url".to_string(), "file:///fixture".to_string())],
-            }],
-            ..SessionSpec::for_vendor("v")
-        }
+    fn spec_with_checkout() -> RuntimeEnv {
+        let mut env = SessionSpec::for_vendor("v")
+            .runtime_env()
+            .expect("a vendor spec has a runtime");
+        env.provision = vec![crate::sessions::spec::ProvisionStepSpec {
+            name: "checkout repo".to_string(),
+            uses: "git_checkout".to_string(),
+            with: vec![("url".to_string(), "file:///fixture".to_string())],
+        }];
+        env
     }
 
     /// A vendor whose runtime is already up, and stays up.
@@ -1652,7 +1720,14 @@ mod tests {
     async fn a_create_hands_back_what_the_vendor_said_about_the_runtime() {
         let m = manager(published_vendor(BootingVendor::ready()));
         let said = m
-            .create("s1", "i1", "v", &session_spec("v").runtime_env())
+            .create(
+                "s1",
+                "i1",
+                "v",
+                &session_spec("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            )
             .await
             .expect("create");
         assert_eq!(
@@ -1673,7 +1748,14 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let said = m
-            .create("s1", "i1", "v", &session_spec("v").runtime_env())
+            .create(
+                "s1",
+                "i1",
+                "v",
+                &session_spec("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            )
             .await
             .expect("create");
         assert_eq!(said, None);
@@ -1698,7 +1780,9 @@ mod tests {
             "s1",
             "i1",
             "v",
-            &SessionSpec::for_vendor("v").runtime_env(),
+            &SessionSpec::for_vendor("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
             false,
             Some(tx),
         )
@@ -1736,7 +1820,9 @@ mod tests {
                 "s1",
                 "i1",
                 "v",
-                &SessionSpec::for_vendor("v").runtime_env(),
+                &SessionSpec::for_vendor("v")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
                 false,
                 Some(tx),
             )
@@ -1759,15 +1845,24 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
-            .await
-            .expect("create");
+        m.create(
+            "s1",
+            "i1",
+            "v",
+            &session_spec("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
+        )
+        .await
+        .expect("create");
         let provider = m.provider(
             "s1".to_string(),
             "i1".to_string(),
             false,
             "v".to_string(),
-            SessionSpec::for_vendor("v").runtime_env(),
+            SessionSpec::for_vendor("v")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
         );
         provider.get(None).await.expect("provider get");
         assert_eq!(

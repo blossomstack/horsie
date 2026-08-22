@@ -14,12 +14,14 @@
 
 #![allow(dead_code)]
 
+use super::context::AgentRuntimeBinding;
 use super::{ReadCommand, SubAgentCommand, TurnCommand};
 use super::{
     context::{SessionAgentKind, SessionContextProvider},
     *,
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
+use crate::sessions::spec::RuntimeId;
 use crate::sessions::spec::SessionSpec;
 use crate::sessions::spec::{AgentSettings, AgentSource};
 use crate::sessions::supervisor::SupervisorConfig;
@@ -65,15 +67,25 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
         kind: SessionKind::Agent {
             settings: Box::new(agent_settings_fixture()),
         },
-        workspaces: vec![WorkspaceDef {
-            name: "main".into(),
-        }],
-        provision: vec![],
-        vendor: "mock".into(),
+        runtime: Some(crate::sessions::spec::RuntimeEnv {
+            vendor: "mock".into(),
+            workspaces: vec![WorkspaceDef {
+                name: "main".into(),
+            }],
+            provision: vec![],
+            env_vars: vec![],
+            environment: None,
+        }),
         plugins: vec![],
         origin: crate::sessions::spec::SessionOrigin::User,
-        environment: None,
-        env_vars: vec![],
+    }
+}
+
+/// The same session, but asking for no runtime at all.
+pub(super) fn runtime_less_spec_fixture() -> SessionSpec {
+    SessionSpec {
+        runtime: None,
+        ..actor_spec_fixture()
     }
 }
 
@@ -368,7 +380,9 @@ pub(super) async fn spawn_session_with_provider(
             &id.to_string(),
             "i1",
             "mock",
-            &actor_spec_fixture().runtime_env(),
+            &actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
         )
         .await
         .expect("create");
@@ -379,7 +393,10 @@ pub(super) async fn spawn_session_with_provider(
     let journal = f.journal();
     let session = f.start(id, actor_spec_fixture()).await;
     wait_for_state(&journal, id, "the session's create lands", |s| {
-        matches!(s.provisioning, ProvisioningState::Ready { .. })
+        matches!(
+            s.root_runtime().map(|r| &r.provisioning),
+            Some(ProvisioningState::Ready { .. })
+        )
     })
     .await;
     (f, session, id, journal)
@@ -528,7 +545,12 @@ pub(super) async fn spawn_run_with_provider(
     };
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &spec.runtime_env())
+        .create(
+            &id.to_string(),
+            "i1",
+            "mock",
+            &spec.runtime_env().expect("the fixture has a runtime"),
+        )
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -1155,13 +1177,19 @@ pub(super) async fn stop_harness_full(
         .expect("fake agent");
     let f = fixture_over(agent, None).await;
     let id = Uuid::new_v4();
+    // `"0"` rather than a name of its own: the seeded log below says this
+    // runtime was provisioned at 0, and the incarnation an agent addresses
+    // comes from that log. Any other name here builds a sandbox nothing can
+    // reach.
     f.deps
         .runtimes
         .create(
             &id.to_string(),
-            "i1",
+            "0",
             "mock",
-            &actor_spec_fixture().runtime_env(),
+            &actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
         )
         .await
         .expect("create");
@@ -1376,7 +1404,9 @@ pub(super) async fn catalog_harness_with(
             &id.to_string(),
             "i1",
             "mock",
-            &actor_spec_fixture().runtime_env(),
+            &actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
         )
         .await
         .expect("create");
@@ -1396,13 +1426,17 @@ pub(super) fn catalog_provider(
     id: Uuid,
 ) -> SessionContextProvider {
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(
-            id.to_string(),
-            "i1".to_string(),
-            false,
-            "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-        ),
+        runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+            f.deps.runtimes.provider(
+                id.to_string(),
+                "i1".to_string(),
+                false,
+                "mock".to_string(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            ),
+        ))),
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,
@@ -1460,7 +1494,9 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
             &id.to_string(),
             "i1",
             "mock",
-            &actor_spec_fixture().runtime_env(),
+            &actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
         )
         .await
         .expect("create");
@@ -1475,9 +1511,40 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
     // `Create` would provision a second one that nothing here ever runs on.
     // Seeding puts the spec in the log first, which is what makes the create
     // the no-op a reload is.
-    let session = seed_session(&f, id, actor_spec_fixture(), &[]).await;
+    //
+    // The runtime built above has to be *named* in the log too. Without the
+    // ask and its outcome the session points at no runtime, and every agent
+    // under it resolves to "unanswered" — which correctly refuses to run, so
+    // the harness would sit there taking no turns.
+    let session = seed_session(
+        &f,
+        id,
+        actor_spec_fixture(),
+        &harness_runtime_events(id, RuntimeId(id)),
+    )
+    .await;
     drop(prompts);
     (f, session, id)
+}
+
+/// The log a session leaves behind when it asked for `runtime` and got it.
+///
+/// For harnesses that build the sandbox themselves and then seed a history to
+/// match: the incarnation is `0` because that is what the create above used,
+/// and a mismatch there addresses a sandbox that does not exist.
+pub(super) fn harness_runtime_events(owner: Uuid, runtime: RuntimeId) -> Vec<SessionDomainEvent> {
+    vec![
+        SessionDomainEvent::RuntimeRequested {
+            at_ms: 0,
+            runtime,
+            owner,
+            env: actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
+        },
+        SessionDomainEvent::ProvisioningStarted { at_ms: 0, runtime },
+        SessionDomainEvent::ProvisioningSucceeded { at_ms: 0, runtime },
+    ]
 }
 
 pub(super) async fn spawn_typed(
@@ -1510,13 +1577,17 @@ pub(super) fn typed_provider(
     let mut settings = agent_settings_fixture();
     settings.allowed_tools = allowed_tools;
     SessionContextProvider {
-        runtimes: f.deps.runtimes.provider(
-            id.to_string(),
-            "i1".to_string(),
-            false,
-            "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-        ),
+        runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+            f.deps.runtimes.provider(
+                id.to_string(),
+                "i1".to_string(),
+                false,
+                "mock".to_string(),
+                crate::sessions::spec::SessionSpec::for_vendor("mock")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            ),
+        ))),
         registry: f.deps.provider_registry.clone(),
         mcp: None,
         memory: None,

@@ -278,12 +278,20 @@ pub struct RuntimeEnv {
 pub struct SessionSpec {
     pub name: Option<String>,
     pub kind: SessionKind,
-    pub workspaces: Vec<WorkspaceDef>,
-    /// Setup steps run by the runtime at every create/attach (idempotent).
+    /// What this session's *own* runtime is built from — the one its main agent
+    /// runs on.
+    ///
+    /// `None` means it runs without a sandbox at all: no runtime tools, no
+    /// plugin skills, no hooks. An `Option` rather than an empty vendor,
+    /// because a session with nowhere to run tools is a legitimate thing to ask
+    /// for and a sentinel would leave every reader deciding for itself what
+    /// counts as absent.
+    ///
+    /// Only the session's own. A sub session that asked for an environment of
+    /// its own gets a runtime record instead; this is the seed for the first
+    /// record, not a registry of them.
     #[serde(default)]
-    pub provision: Vec<ProvisionStepSpec>,
-    /// Runtime vendor name (key into [`ServerDeps::vendors`]).
-    pub vendor: String,
+    pub runtime: Option<RuntimeEnv>,
     /// Selected plugin-bundle names to provision for this session. Resolved to
     /// current artifact hashes at each create/attach (latest-at-start); the
     /// runtime fetches them into its plugins dir before scanning.
@@ -293,15 +301,6 @@ pub struct SessionSpec {
     /// journal row loads as [`SessionOrigin::User`].
     #[serde(default)]
     pub origin: SessionOrigin,
-    /// The predefined environment this session was created from. Provenance
-    /// only — everything it contributed is resolved into the fields above, so
-    /// nothing re-reads it. `None` for an ad-hoc environment.
-    #[serde(default)]
-    pub environment: Option<String>,
-    /// Environment variables injected into the runtime child, from the
-    /// environment. Snapshotted with the rest.
-    #[serde(default)]
-    pub env_vars: Vec<EnvVarSpec>,
 }
 
 impl SessionSpec {
@@ -329,32 +328,45 @@ impl SessionSpec {
                     plugins: Vec::new(),
                 }),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.to_string(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.to_string(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
-    /// This session's own runtime environment: the half of the spec a vendor
-    /// needs, in the shape a runtime record holds.
-    ///
-    /// A view rather than storage, for now. When a session owns a *map* of
-    /// runtimes the fields move onto the records and this goes away — every
-    /// caller already asks for the environment rather than the spec, which is
-    /// what makes that move a deletion rather than a rewrite.
+    /// A minimal spec with no runtime at all, for tests about the sessions that
+    /// run without one.
+    #[cfg(test)]
     #[must_use]
-    pub fn runtime_env(&self) -> RuntimeEnv {
-        RuntimeEnv {
-            vendor: self.vendor.clone(),
-            workspaces: self.workspaces.clone(),
-            provision: self.provision.clone(),
-            env_vars: self.env_vars.clone(),
-            environment: self.environment.clone(),
-        }
+    pub(crate) fn runtime_less() -> Self {
+        let mut spec = Self::for_vendor("unused");
+        spec.runtime = None;
+        spec
+    }
+
+    /// What this session's own runtime is built from, if it has one.
+    #[must_use]
+    pub fn runtime_env(&self) -> Option<RuntimeEnv> {
+        self.runtime.clone()
+    }
+
+    /// The vendor this session's own runtime is built by, if it has one.
+    #[must_use]
+    pub fn vendor(&self) -> Option<&str> {
+        self.runtime.as_ref().map(|r| r.vendor.as_str())
+    }
+
+    /// The predefined environment this session was created from, if any.
+    /// Provenance only — everything it contributed is already resolved.
+    #[must_use]
+    pub fn environment(&self) -> Option<&str> {
+        self.runtime.as_ref().and_then(|r| r.environment.as_deref())
     }
 
     /// The routine this session is a run of, if any.
@@ -543,13 +555,15 @@ mod tests {
             kind: SessionKind::Agent {
                 settings: Box::new(agent_settings()),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.into(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.into(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
@@ -565,13 +579,15 @@ mod tests {
                     max_steps: 10,
                 }),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.into(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.into(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
     }
 

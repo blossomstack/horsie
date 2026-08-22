@@ -176,12 +176,16 @@ pub(crate) fn detail(
         created_at: rec.created_at,
         last_error: status_reason(&status),
         annotations: wire_annotations(&rec.annotations),
-        environment: rec.spec.environment.clone(),
-        vendor: rec.spec.vendor.clone(),
+        environment: rec.spec.environment().map(str::to_string),
+        // A session that runs without a sandbox names no vendor. The wire field
+        // stays required and reads empty, which is what every client already
+        // renders as "nothing to show".
+        vendor: rec.spec.vendor().unwrap_or_default().to_string(),
         repos: rec
             .spec
-            .provision
+            .runtime
             .iter()
+            .flat_map(|r| r.provision.iter())
             .filter(|s| s.uses == "git_checkout")
             .filter_map(|s| {
                 s.with

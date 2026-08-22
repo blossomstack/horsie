@@ -139,10 +139,13 @@ impl RoutineRunner {
         // deleted since it was saved, or a vendor now offline, fails here and
         // is recorded in `last_error` rather than failing inside a session
         // nobody is watching.
-        if !self.vendors.connected_names().contains(&spec.vendor) {
+        // A routine whose environment asks for no runtime names no vendor, so
+        // there is nothing to re-resolve.
+        if let Some(vendor) = spec.vendor()
+            && !self.vendors.connected_names().iter().any(|v| v == vendor)
+        {
             return Err(RoutineError::Invalid(format!(
-                "runtime vendor '{}' is not connected",
-                spec.vendor
+                "runtime vendor '{vendor}' is not connected"
             )));
         }
 

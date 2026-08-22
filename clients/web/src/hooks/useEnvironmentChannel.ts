@@ -41,7 +41,9 @@ export function useEnvironmentChannel(
   const resolvedVendor =
     environment.kind === "named"
       ? (environments ?? []).find((e) => e.name === environment.name)?.vendor
-      : environment.vendor;
+      : environment.kind === "none"
+        ? undefined
+        : environment.vendor;
   const provisions = !!(settings?.vendors ?? []).find(
     (v) => v.name === resolvedVendor,
   )?.capabilities?.supportsProvisioning;
@@ -53,9 +55,11 @@ export function useEnvironmentChannel(
     provisions,
     githubConnected: !!ghStatus?.connected,
     spec: toEnvironmentSpec(environment, provisions),
+    // A runtime-less session has chosen: "nowhere" is an answer, not a
+    // blank.
     chosen:
       environment.kind === "named"
         ? !!environment.name
-        : !!environment.vendor.trim(),
+        : environment.kind === "none" || !!environment.vendor.trim(),
   };
 }

@@ -123,20 +123,57 @@ pub enum TurnPhase {
     },
 }
 
+/// Where a session or sub session runs. The one place that answer is recorded.
+///
+/// Four variants rather than an `Option<RuntimeId>`, because "no runtime" was
+/// two different facts wearing one value: a session that *asked* for no sandbox
+/// and one whose sandbox is not known yet. A reader cannot act on both the same
+/// way — the first is ready to run and the second must wait — and collapsing
+/// them meant a session ran its whole first turn believing it had no sandbox,
+/// which is the quietest possible way to be wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuntimeChoice {
+    /// A runtime was asked for and the record naming it has not been journaled
+    /// yet. Transient, and the reason this is not `Without`: nothing may run
+    /// here — it must wait, exactly as it waits for a create to finish.
+    ///
+    /// Found at load it means the process died between creating the session and
+    /// requesting its runtime, which the reload re-requests.
+    Pending,
+    /// On this one.
+    On(RuntimeId),
+    /// Deliberately nowhere: no shell, no files, no skills. A choice, so an
+    /// agent here is ready to run rather than waiting for something.
+    Without,
+    /// Whatever the parent runs on, resolved by walking up.
+    ///
+    /// Only a sub session can say this. A session's own entry has no parent to
+    /// inherit from, so it never carries it — and [`RunForest::runtime_of_agent`]
+    /// treats it as `Pending` if one ever did, since a walk that runs off the
+    /// top has not answered the question.
+    Inherit,
+}
+
+pub(crate) fn pending() -> RuntimeChoice {
+    RuntimeChoice::Pending
+}
+
+pub(crate) fn inherit() -> RuntimeChoice {
+    RuntimeChoice::Inherit
+}
+
 /// The main session.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MainRun {
     pub turn: TurnPhase,
-    /// The runtime this session's agent runs on. `None` while the session has
-    /// not provisioned one — and, once a session may be created without a
-    /// sandbox at all, for as long as it never does.
+    /// Where this session's agent runs.
     ///
     /// On the entry rather than on the session, because a sub session may name
     /// a different one: this and [`SubSessionRun::runtime`] are the only two
     /// places a runtime is *chosen*, and everything delegated below them
     /// inherits by walking up to the nearest of the two.
-    #[serde(default)]
-    pub runtime: Option<RuntimeId>,
+    #[serde(default = "pending")]
+    pub runtime: RuntimeChoice,
 }
 
 /// Lifecycle of one subagent. `Completed`/`Failed` are turn-terminal, not
@@ -188,6 +225,13 @@ pub struct WorkflowRun {
     /// Whether the invoking agent was sent this run's terminal result. Inert
     /// for the root run, which has no parent to owe.
     pub notified: bool,
+    /// The runtime this run's steps execute on.
+    ///
+    /// `Inherit` for a run invoked mid-session — it works where its invoker
+    /// works. A *root* run is the session itself, so it is the one that
+    /// chooses, exactly as a main agent does.
+    #[serde(default = "inherit")]
+    pub runtime: RuntimeChoice,
 }
 
 /// One branched session. Owes nobody a result — there is deliberately no
@@ -210,14 +254,15 @@ pub struct SubSessionRun {
     /// When this sub session last did anything — the moment of its most recent
     /// status change.
     pub last_activity_ms: u64,
-    /// The runtime this sub session runs on.
+    /// Where this sub session runs.
     ///
-    /// Inherited from whoever branched it unless it asked for an environment of
-    /// its own, in which case this names a runtime the session provisioned for
-    /// it. `#[serde(default)]` so sub sessions journaled before a session could
-    /// own more than one runtime load as inheriting.
-    #[serde(default)]
-    pub runtime: Option<RuntimeId>,
+    /// `Inherit` unless it asked for an environment of its own, in which case
+    /// this names the runtime the session provisioned for it — or `Without` if
+    /// it asked to run with no sandbox. `#[serde(default)]` so sub sessions
+    /// journaled before a session could own more than one runtime load as
+    /// inheriting, which is what they did.
+    #[serde(default = "inherit")]
+    pub runtime: RuntimeChoice,
 }
 
 /// How a sub session's history was seeded.
@@ -272,14 +317,21 @@ impl RunForest {
     // ---------------------------------------------------------------- roots
 
     /// The session is a session: one main agent, keyed by the session id.
-    pub fn apply_root_agent(&mut self, session: Uuid, at_ms: u64) {
+    /// `runtime` is what the session's spec asked for: `Pending` when it wants
+    /// one (the record naming it lands moments later) and `Without` when it
+    /// asked for none. Passed in rather than defaulted, so a caller cannot
+    /// forget to say which and get "no sandbox" by omission.
+    pub fn apply_root_agent(&mut self, session: Uuid, at_ms: u64, runtime: RuntimeChoice) {
         let id = RunId(session);
         self.entries.insert(
             id,
             RunEntry {
                 parent: None,
                 created_at_ms: at_ms,
-                state: RunState::Main(MainRun::default()),
+                state: RunState::Main(MainRun {
+                    turn: TurnPhase::default(),
+                    runtime,
+                }),
             },
         );
         self.agents.insert(session, id);
@@ -294,6 +346,7 @@ impl RunForest {
         workflow: String,
         graph: Arc<WorkflowRunSpec>,
         at_ms: u64,
+        runtime: RuntimeChoice,
     ) {
         let id = RunId(session);
         self.entries.insert(
@@ -306,6 +359,13 @@ impl RunForest {
                     graph,
                     run: WorkflowRunState::default(),
                     notified: false,
+                    // What the spec asked for, exactly as a main agent's root
+                    // records it: `Pending` until the `RuntimeRequested` that
+                    // names it, or `Without` if this session asked for none.
+                    //
+                    // Hardcoding `Pending` here left a runtime-less run waiting
+                    // for a create that, correctly, was never going to happen.
+                    runtime,
                 }),
             },
         );
@@ -399,34 +459,83 @@ impl RunForest {
     /// to: the agent is unknown, or the session it belongs to has no runtime.
     /// Both answer "there is nothing to run tools on".
     #[must_use]
-    pub fn runtime_of_agent(&self, agent: Uuid) -> Option<RuntimeId> {
+    pub fn runtime_of_agent(&self, agent: Uuid) -> RuntimeChoice {
+        let Some((_, entry)) = self.owner_of_agent(agent) else {
+            // An agent the forest does not know. Not `Without` — that would
+            // claim it deliberately has no sandbox, when the truth is that
+            // nothing here can say.
+            return RuntimeChoice::Pending;
+        };
+        self.runtime_from(entry)
+    }
+
+    /// The same walk, started at a run rather than at an agent.
+    ///
+    /// A run's step agent needs this: the event that puts a step in the forest
+    /// persists *after* the agent exists, so at spawn there is nothing to look
+    /// the agent up by — but the run it belongs to is already there, and a
+    /// step never chooses a runtime of its own anyway.
+    #[must_use]
+    pub fn runtime_of_run(&self, run: RunId) -> RuntimeChoice {
+        match self.entries.get(&run) {
+            Some(entry) => self.runtime_from(entry),
+            None => RuntimeChoice::Pending,
+        }
+    }
+
+    fn runtime_from(&self, start: &RunEntry) -> RuntimeChoice {
         // Bounded exactly as `depth_of_entry` is, and for the same reason: this
         // walks recovered data, where a chain that does not terminate is a
         // corrupt journal rather than an impossibility.
-        let (_, mut entry) = self.owner_of_agent(agent)?;
+        let mut entry = start;
         let mut hops = 0usize;
         loop {
             match &entry.state {
-                RunState::Main(main) => return main.runtime,
-                RunState::SubSession(sub) => {
-                    // A sub session that named its own runtime stops the walk;
-                    // one that inherited carries on up.
-                    if let Some(runtime) = sub.runtime {
-                        return Some(runtime);
-                    }
+                RunState::Main(main) => {
+                    // The root has no parent, so `Inherit` here would be a walk
+                    // that ran off the top: unanswered, not "no sandbox".
+                    return match main.runtime {
+                        RuntimeChoice::Inherit => RuntimeChoice::Pending,
+                        decided @ (RuntimeChoice::Pending
+                        | RuntimeChoice::On(_)
+                        | RuntimeChoice::Without) => decided,
+                    };
                 }
-                // Neither chooses. Keep walking.
-                RunState::Sub(_) | RunState::Workflow(_) => {}
+                RunState::SubSession(sub) => match sub.runtime {
+                    // A sub session that decided stops the walk; one that
+                    // inherits carries on up.
+                    RuntimeChoice::Inherit => {}
+                    decided @ (RuntimeChoice::Pending
+                    | RuntimeChoice::On(_)
+                    | RuntimeChoice::Without) => return decided,
+                },
+                // A root run decides, an invoked one inherits — and which it
+                // is, is recorded rather than inferred from having no parent.
+                RunState::Workflow(w) => match w.runtime {
+                    RuntimeChoice::Inherit => {}
+                    decided @ (RuntimeChoice::Pending
+                    | RuntimeChoice::On(_)
+                    | RuntimeChoice::Without) => return decided,
+                },
+                // A subagent never chooses. Keep walking.
+                RunState::Sub(_) => {}
             }
             hops += 1;
             if hops > self.entries.len() {
                 tracing::warn!(
-                    "a run entry's parent chain does not terminate; reporting no runtime"
+                    "a run entry's parent chain does not terminate; reporting no answer"
                 );
-                return None;
+                return RuntimeChoice::Pending;
             }
-            let parent = entry.parent?;
-            entry = self.owner_of_agent(parent)?.1;
+            let Some(parent) = entry.parent else {
+                return RuntimeChoice::Pending;
+            };
+            let Some((_, next)) = self.owner_of_agent(parent) else {
+                // A deleted ancestor. The chain is broken, so the honest answer
+                // is that nothing here knows — never "it has no sandbox".
+                return RuntimeChoice::Pending;
+            };
+            entry = next;
         }
     }
 
@@ -660,11 +769,42 @@ impl RunForest {
         }
     }
 
-    /// The session provisioned its runtime. Records which one on the root
-    /// entry, where every agent that inherits it will resolve it from.
-    pub fn apply_session_runtime(&mut self, session: Uuid, runtime: RuntimeId) {
-        if let Some(main) = self.main_mut(session) {
-            main.runtime = Some(runtime);
+    /// The runtime the root entry runs on, if it is a session and has one.
+    #[must_use]
+    pub fn root_runtime_id(&self) -> Option<RuntimeId> {
+        // Both root shapes, because both *are* the session: an agent session's
+        // main run, and a workflow session's run. Answering only for the first
+        // left a run's status blind to the runtime it was waiting on.
+        match self.root().map(|e| &e.state) {
+            Some(
+                RunState::Main(MainRun {
+                    runtime: RuntimeChoice::On(id),
+                    ..
+                })
+                | RunState::Workflow(WorkflowRun {
+                    runtime: RuntimeChoice::On(id),
+                    ..
+                }),
+            ) => Some(*id),
+            // It has not been named yet, or the session asked for none.
+            _ => None,
+        }
+    }
+
+    /// `owner` asked for a runtime and got this one. Records it on that
+    /// entry, where every agent below will resolve it from.
+    ///
+    /// Only a session or a sub session may own one, so anything else is
+    /// ignored: a subagent cannot acquire a sandbox of its own, and silently
+    /// doing nothing is the honest answer to being asked.
+    pub fn point_at_runtime(&mut self, owner: Uuid, runtime: RuntimeChoice) {
+        match self.entries.get_mut(&RunId(owner)).map(|e| &mut e.state) {
+            Some(RunState::Main(main)) => main.runtime = runtime,
+            Some(RunState::SubSession(sub)) => sub.runtime = runtime,
+            // A workflow session: the run *is* the session, so it is what the
+            // runtime is recorded against.
+            Some(RunState::Workflow(w)) => w.runtime = runtime,
+            Some(RunState::Sub(_)) | None => {}
         }
     }
 
@@ -696,6 +836,8 @@ impl RunForest {
                     graph,
                     run: WorkflowRunState::default(),
                     notified: false,
+                    // Invoked mid-session: it runs where its invoker runs.
+                    runtime: RuntimeChoice::Inherit,
                 }),
             },
         );
@@ -873,7 +1015,7 @@ impl RunForest {
         seed: SeedMode,
         message: String,
         at_ms: u64,
-        runtime: Option<RuntimeId>,
+        runtime: RuntimeChoice,
     ) {
         self.entries.insert(
             RunId(id),
@@ -891,9 +1033,9 @@ impl RunForest {
                     // is precisely the state in which no turn has run.
                     status: AgentStatus::Provisioning,
                     last_activity_ms: at_ms,
-                    // `None` means "whatever my parent runs on", resolved by
-                    // walking up rather than copied down: a copy would go stale
-                    // the moment the parent re-provisioned.
+                    // `Inherit` is resolved by walking up rather than copied
+                    // down: a copy would go stale the moment the parent
+                    // re-provisioned.
                     runtime,
                 }),
             },
@@ -1167,7 +1309,11 @@ mod tests {
     fn session_forest() -> (RunForest, Uuid) {
         let mut f = RunForest::default();
         let session = uid(1);
-        f.apply_root_agent(session, 100);
+        f.apply_root_agent(
+            session,
+            100,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         (f, session)
     }
 
@@ -1178,17 +1324,21 @@ mod tests {
     fn delegated_work_inherits_the_runtime_of_the_session_it_runs_under() {
         let (mut f, session) = session_forest();
         let rt = RuntimeId(uid(7));
-        f.apply_session_runtime(session, rt);
+        f.point_at_runtime(session, RuntimeChoice::On(rt));
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "l".into(), "t".into(), None, 200);
         let nested = uid(3);
         f.apply_sub_spawned(nested, sub, "l".into(), "t".into(), None, 300);
 
-        assert_eq!(f.runtime_of_agent(session), Some(rt));
-        assert_eq!(f.runtime_of_agent(sub), Some(rt), "a subagent chooses none");
+        assert_eq!(f.runtime_of_agent(session), RuntimeChoice::On(rt));
+        assert_eq!(
+            f.runtime_of_agent(sub),
+            RuntimeChoice::On(rt),
+            "a subagent chooses none"
+        );
         assert_eq!(
             f.runtime_of_agent(nested),
-            Some(rt),
+            RuntimeChoice::On(rt),
             "and neither does a subagent of a subagent"
         );
     }
@@ -1197,7 +1347,7 @@ mod tests {
     fn a_sub_session_inherits_unless_it_named_a_runtime_of_its_own() {
         let (mut f, session) = session_forest();
         let parent_rt = RuntimeId(uid(7));
-        f.apply_session_runtime(session, parent_rt);
+        f.point_at_runtime(session, RuntimeChoice::On(parent_rt));
 
         let inherited = uid(2);
         f.apply_sub_session_created(
@@ -1207,7 +1357,7 @@ mod tests {
             SeedMode::Fresh,
             "go".into(),
             200,
-            None,
+            RuntimeChoice::Inherit,
         );
         let own_rt = RuntimeId(uid(8));
         let owns = uid(3);
@@ -1218,31 +1368,38 @@ mod tests {
             SeedMode::Fresh,
             "go".into(),
             300,
-            Some(own_rt),
+            RuntimeChoice::On(own_rt),
         );
 
-        assert_eq!(f.runtime_of_agent(inherited), Some(parent_rt));
-        assert_eq!(f.runtime_of_agent(owns), Some(own_rt));
+        assert_eq!(f.runtime_of_agent(inherited), RuntimeChoice::On(parent_rt));
+        assert_eq!(f.runtime_of_agent(owns), RuntimeChoice::On(own_rt));
 
         // A subagent under the sub session that owns a runtime gets *that*
         // one, not the root's — which is the whole point of the walk stopping
         // at the nearest chooser rather than running to the root.
         let under = uid(4);
         f.apply_sub_spawned(under, owns, "l".into(), "t".into(), None, 400);
-        assert_eq!(f.runtime_of_agent(under), Some(own_rt));
+        assert_eq!(f.runtime_of_agent(under), RuntimeChoice::On(own_rt));
     }
 
     /// A session that has never provisioned answers "nothing to run tools on",
     /// and so does everything under it — which is what a runtime-less session
     /// will rely on.
     #[test]
-    fn no_runtime_anywhere_resolves_to_none() {
+    fn no_runtime_anywhere_reads_as_unanswered_not_as_without() {
         let (mut f, session) = session_forest();
         let sub = uid(2);
         f.apply_sub_spawned(sub, session, "l".into(), "t".into(), None, 200);
-        assert_eq!(f.runtime_of_agent(session), None);
-        assert_eq!(f.runtime_of_agent(sub), None);
-        assert_eq!(f.runtime_of_agent(uid(9)), None, "an unknown agent");
+        assert_eq!(f.runtime_of_agent(session), RuntimeChoice::Pending);
+        assert_eq!(f.runtime_of_agent(sub), RuntimeChoice::Pending);
+        // An agent the forest does not know reads as unanswered, never as
+        // "deliberately without": the difference is between waiting and
+        // running with no sandbox.
+        assert_eq!(
+            f.runtime_of_agent(uid(9)),
+            RuntimeChoice::Pending,
+            "an unknown agent"
+        );
     }
 
     #[test]
@@ -1412,7 +1569,13 @@ mod tests {
     fn a_workflow_session_roots_a_run_keyed_by_the_session() {
         let mut f = RunForest::default();
         let session = uid(1);
-        f.apply_root_workflow(session, "review".into(), graph("review"), 100);
+        f.apply_root_workflow(
+            session,
+            "review".into(),
+            graph("review"),
+            100,
+            RuntimeChoice::Pending,
+        );
         assert_eq!(f.root_id(), Some(RunId(session)));
         let (id, w) = f.workflows().next().unwrap();
         assert_eq!(id, RunId(session));
@@ -1424,7 +1587,13 @@ mod tests {
     fn a_step_agent_is_hosted_by_its_run() {
         let mut f = RunForest::default();
         let session = uid(1);
-        f.apply_root_workflow(session, "review".into(), graph("review"), 100);
+        f.apply_root_workflow(
+            session,
+            "review".into(),
+            graph("review"),
+            100,
+            RuntimeChoice::Pending,
+        );
         let step_agent = uid(5);
         f.apply_step_started(
             RunId(session),
@@ -1486,7 +1655,13 @@ mod tests {
     fn the_root_run_is_never_owed_to_anybody() {
         let mut f = RunForest::default();
         let session = uid(1);
-        f.apply_root_workflow(session, "review".into(), graph("review"), 100);
+        f.apply_root_workflow(
+            session,
+            "review".into(),
+            graph("review"),
+            100,
+            RuntimeChoice::Pending,
+        );
         f.apply_run_finished(RunId(session), serde_json::json!({"ok": true}));
         assert!(f.owed().is_empty(), "no parent, nothing owed");
         assert_eq!(f.live_run_count(), 0);
@@ -1530,7 +1705,7 @@ mod tests {
             SeedMode::Copy,
             "go".into(),
             1_000,
-            None,
+            RuntimeChoice::Inherit,
         );
         let rec = f.sub_session(sub_session).unwrap();
         assert_eq!(rec.source_seq, 42);
@@ -1563,7 +1738,7 @@ mod tests {
             SeedMode::Copy,
             "go".into(),
             1_000,
-            None,
+            RuntimeChoice::Inherit,
         );
         f.apply_sub_session_status(sub_session, AgentStatus::Running, 1_100);
         f.apply_sub_session_seeded(sub_session);
@@ -1584,7 +1759,7 @@ mod tests {
             SeedMode::Copy,
             "go".into(),
             1_000,
-            None,
+            RuntimeChoice::Inherit,
         );
         f.apply_sub_session_deleted(sub_session);
         f.apply_sub_session_seeded(sub_session);
@@ -1604,7 +1779,7 @@ mod tests {
             SeedMode::Copy,
             "go".into(),
             1_000,
-            None,
+            RuntimeChoice::Inherit,
         );
         f.apply_sub_session_status(sub_session, AgentStatus::Idle, 2_000);
         assert!(f.owed().is_empty());
@@ -1615,8 +1790,24 @@ mod tests {
         let (mut f, session) = session_forest();
         let parent = uid(3);
         let child = uid(4);
-        f.apply_sub_session_created(parent, session, 0, SeedMode::Copy, "go".into(), 1_000, None);
-        f.apply_sub_session_created(child, parent, 0, SeedMode::Copy, "go".into(), 2_000, None);
+        f.apply_sub_session_created(
+            parent,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            1_000,
+            RuntimeChoice::Inherit,
+        );
+        f.apply_sub_session_created(
+            child,
+            parent,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            2_000,
+            RuntimeChoice::Inherit,
+        );
         f.apply_sub_session_deleted(parent);
         assert!(
             f.sub_session(child).is_some(),
@@ -1641,7 +1832,7 @@ mod tests {
             SeedMode::Summary,
             "go".into(),
             600,
-            None,
+            RuntimeChoice::Inherit,
         );
         let json = serde_json::to_value(&f).unwrap();
         let back: RunForest = serde_json::from_value(json).unwrap();

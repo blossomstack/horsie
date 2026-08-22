@@ -16,11 +16,13 @@
 use super::CoreCommand;
 use super::{AgentKey, SessionCommand, hooks::SessionHookSink};
 use crate::agent_loop::{
-    AgentRunDef, ContextError, ContextProvider, Contexts, DefaultToolboxFactory, SharedContext,
-    StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
+    AgentRunDef, CompositeToolbox, ContextError, ContextProvider, Contexts, DefaultToolboxFactory,
+    SharedContext, SharedScan, StartTurn, ToolboxFactory, TurnPreparation, WorkspaceContext,
+    compose_system_prompt, scan_workspace,
 };
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::run_forest::SeedMode;
+use crate::sessions::sub_session_tool::EnvironmentResolver;
 use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
@@ -29,7 +31,7 @@ use crate::{
     },
 };
 use async_trait::async_trait;
-use horsie_agentcore::{LlmProvider, Toolbox};
+use horsie_agentcore::{EmptyToolbox, LlmProvider, Toolbox};
 use horsie_models::{
     hooks::HookRecord,
     runtime::{
@@ -242,6 +244,18 @@ pub(super) enum SessionAgentKind {
 }
 
 impl SessionAgentKind {
+    /// The id this agent is known by in the run forest — the session's own for
+    /// the main agent, since main's entry is keyed by it.
+    ///
+    /// What a runtime lookup takes: resolving which sandbox an agent runs on
+    /// starts from its entry, and main is the one kind whose id is not its own.
+    pub(super) fn agent_id(&self, session: Uuid) -> Uuid {
+        match self {
+            Self::Main => session,
+            Self::Sub(id) | Self::Step(id) | Self::SubSession(id) => *id,
+        }
+    }
+
     /// The key this agent is registered under on the session. One vocabulary:
     /// what the provider knows itself as is what the session looks it up by.
     pub(super) fn agent_key(&self) -> AgentKey {
@@ -264,9 +278,35 @@ impl SessionAgentKind {
 /// The runtime client an agent runs with. Subagents share the session's
 /// sandbox but never its cwd/env bucket: the runtime keys that state by
 /// agent id, so each subagent acts under its own identity.
-pub(super) fn scoped_client(kind: &SessionAgentKind, client: RuntimeClient) -> RuntimeClient {
+/// The tool set an agent with no sandbox runs with: its server-side MCP
+/// servers, and nothing else.
+///
+/// Deliberately not `DefaultToolboxFactory` with a stub client. Every tool that
+/// factory adds — the runtime-backed set, `skill`, `inspect_workspace` — reaches
+/// into a sandbox, so offering them against nothing would hand the model tools
+/// that fail at the moment of use rather than being honestly absent. What
+/// remains is composed the same way, so a call for a missing MCP server still
+/// gets the composite's explanation rather than "no tool named …".
+fn runtime_less_toolbox(mcp: crate::agent_loop::McpToolboxes) -> Arc<dyn Toolbox> {
+    if mcp.is_empty() {
+        return Arc::new(EmptyToolbox);
+    }
+    Arc::new(CompositeToolbox::new(mcp.boxes).with_unavailable(mcp.unavailable))
+}
+
+pub(super) fn scoped_client(
+    kind: &SessionAgentKind,
+    client: RuntimeClient,
+    session: Uuid,
+) -> RuntimeClient {
     match kind {
-        SessionAgentKind::Main => client,
+        // Explicitly scoped, not left on the runtime's default bucket. That
+        // default is the runtime's own id, which used to *be* the session's —
+        // so main got its own bucket by coincidence. Once a runtime has an id
+        // of its own, and once two sessions can share one sandbox, relying on
+        // that coincidence would have main and a sub session sharing one cwd,
+        // one env and one plugin tree.
+        SessionAgentKind::Main => client.with_agent_id(session.to_string()),
         // Steps share the run's sandbox — that is the point — but never its
         // cwd/env bucket: the runtime keys that state by agent id, so each acts
         // under its own identity, exactly as a subagent does.
@@ -359,13 +399,39 @@ it. Work from the instructions you were given — where they leave a choice open
 reasonable one, say which you made and why, and carry on. Your final message is the \
 report; make it self-contained.";
 
+/// What an agent runs its tools on, as its session last resolved it.
+///
+/// The three-way shape is the point. `Pending` is not `Without`: an agent
+/// whose session is still building a runtime has one coming, and reading that
+/// as "no sandbox" is exactly what let a whole first turn run tool-less, with
+/// no hooks and no complaint. Waiting is recoverable; running without is not.
+pub(super) enum AgentRuntimeBinding {
+    /// Resolved, and this is how to reach it. Boxed because the other two
+    /// answers are unit-sized and this one carries a whole client provider.
+    On(Box<RuntimeClientProvider>),
+    /// Resolved: this agent asked for no sandbox and has none. Its tools are
+    /// the runtime-less set, and that is a working session, not a broken one.
+    Without,
+    /// Not yet resolved. Nothing may run on this.
+    Pending,
+}
+
 /// Per-run context for a session's agent, resolved on the run's own task.
 ///
 /// It asks the [`RuntimeClientProvider`] for a client each run rather than
 /// holding one: that is what lets the agent be resident across a hibernate and
 /// resume without knowing either happened.
 pub(super) struct SessionContextProvider {
-    pub(super) runtimes: RuntimeClientProvider,
+    /// How this agent reaches its sandbox — the field that decides whether
+    /// this is an ordinary agent or a runtime-less one.
+    ///
+    /// Behind a lock because an agent outlives the answer. The main agent is
+    /// spawned at load, which is *before* its session has finished asking for
+    /// a runtime, so what is resolvable at that moment is `Pending` and the
+    /// real answer arrives later. The session re-points this the moment the
+    /// runtime lands; without that, an agent built during the gap would hold
+    /// "no sandbox" for the rest of its life.
+    pub(super) runtimes: Mutex<AgentRuntimeBinding>,
     pub(super) registry: crate::sessions::spec::SharedProviderRegistry,
     pub(super) mcp: Option<Arc<crate::mcp::McpService>>,
     pub(super) memory: Option<Arc<crate::memory::MemoryService>>,
@@ -502,12 +568,49 @@ impl SessionContextProvider {
             .map_err(|e| ContextError::retryable(e.to_string()))
     }
 
+    /// The saved environments a sub session could be given, for the tool's own
+    /// prose. Empty when this server has none, or when the read fails — a
+    /// listing is advisory, and a session must not fail to build a toolbox
+    /// because a database was briefly slow.
+    async fn environment_catalogue(&self) -> Vec<(String, String)> {
+        let Some(services) = &self.services else {
+            return Vec::new();
+        };
+        services
+            .environments
+            .list()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.name, e.description))
+            .collect()
+    }
+
     /// Acquire this agent's runtime handle, scoped to it. Sink-less: `provide`
     /// attaches one for the tool hooks that report themselves mid-call, while
     /// `start_hooks` returns its records to the agent, which journals them
     /// itself. A sink there would both duplicate them and race the turn they
     /// must precede.
-    async fn runtime_client(&self) -> Result<RuntimeClient, ContextError> {
+    ///
+    /// `None` when this agent has no sandbox: not a failure, and deliberately
+    /// not an error the caller has to recognise — a runtime-less agent simply
+    /// has nothing to acquire.
+    async fn runtime_client(&self) -> Result<Option<RuntimeClient>, ContextError> {
+        // Cloned out from under the lock: the acquisition below awaits for as
+        // long as a machine takes to boot, and the session re-points this
+        // binding meanwhile.
+        let runtimes = match &*self.runtimes.lock().unwrap_or_else(PoisonError::into_inner) {
+            AgentRuntimeBinding::On(runtimes) => (**runtimes).clone(),
+            AgentRuntimeBinding::Without => return Ok(None),
+            // The session has not said yet. Retryable rather than `None`,
+            // because `None` here would mean "this agent has no sandbox" and
+            // the truth is that it has one nobody has named yet.
+            AgentRuntimeBinding::Pending => {
+                return Err(ContextError::retryable(
+                    "the session has not resolved this agent's runtime yet",
+                ));
+            }
+        };
         // The wait this call *is*. A machine that has to resume takes minutes,
         // and the vendor says why the whole time — first in what it returns,
         // then on its sink — so those words are carried into this agent's log
@@ -517,7 +620,7 @@ impl SessionContextProvider {
             .broadcasts()
             .then(|| narration_pump(&self.session, self.kind.agent_key()))
             .unzip();
-        let acquired = self.runtimes.get(narrate).await;
+        let acquired = runtimes.get(narrate).await;
         // Joined rather than detached. The acquisition dropped the sender on
         // its way out, so this ends immediately — and waiting for it is what
         // keeps every line of narration ordered before whatever stage the
@@ -534,7 +637,7 @@ impl SessionContextProvider {
                 ContextError::retryable(other.to_string())
             }
         })?;
-        Ok(scoped_client(&self.kind, client))
+        Ok(Some(scoped_client(&self.kind, client, self.session_id)))
     }
 
     /// Expand `/name` or `@name`, if this prompt is one.
@@ -660,7 +763,7 @@ impl ContextProvider for SessionContextProvider {
         // first turn of a load has nothing cached — and that is the turn whose
         // hooks could not have run any earlier anyway.
         let client = match self.cached_client() {
-            Some(cached) => cached.without_hook_sink(),
+            Some(cached) => Some(cached.without_hook_sink()),
             None => self.runtime_client().await?,
         };
         // KNOWN GAP: this seam runs *before* `provide` (see the
@@ -685,6 +788,15 @@ impl ContextProvider for SessionContextProvider {
         // `provide` provisions too. Both is correct rather than wasteful: this
         // method is skipped entirely when `has_start_hooks` is false, and the
         // runtime absorbs a repeat for a set it has already built.
+        // Hooks run runtime-side, so an agent with no sandbox has none to run
+        // and nothing to provision them into. It still returns the prompt: a
+        // runtime-less turn is an ordinary turn with an empty hook set.
+        let Some(client) = client else {
+            return Ok(TurnPreparation {
+                records: Vec::new(),
+                message: turn.prompt,
+            });
+        };
         self.provision_agent(&client).await?;
         let mut records = Vec::new();
         if let Some(source) = turn.start_source {
@@ -754,14 +866,21 @@ impl ContextProvider for SessionContextProvider {
             )
             .await;
         }
+        // `None` all the way down from here: an agent with no sandbox skips
+        // the acquisition, the agent provisioning, the workspace scan and every
+        // runtime-backed tool. What is left is the model, its MCP servers, its
+        // memory and the tools that delegate — which is a coherent agent, just
+        // one that cannot touch a file.
         let runtime_client = self.runtime_client().await?;
         // Hooks run runtime-side and report what they did on the tool response.
         // Routing those records here is what makes a plugin's interventions
         // visible to the user rather than silent.
-        let runtime_client = runtime_client.with_hook_sink(Arc::new(SessionHookSink::new(
-            self.session.clone(),
-            self.kind.agent_key(),
-        )));
+        let runtime_client = runtime_client.map(|c| {
+            c.with_hook_sink(Arc::new(SessionHookSink::new(
+                self.session.clone(),
+                self.kind.agent_key(),
+            )))
+        });
         // Cached *after* the sink is attached, not before: `Stop` runs its
         // hooks through this handle once the turn is over, and a sink-less
         // clone would run them and drop every record on the floor.
@@ -770,13 +889,15 @@ impl ContextProvider for SessionContextProvider {
         *self
             .last_client
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(runtime_client.clone());
+            .unwrap_or_else(PoisonError::into_inner) = runtime_client.clone();
 
         // Before anything reads this agent's plugins — the hooks its bundles
         // declare, the skills the scan finds, the MCP servers discovery starts.
         // Sent on every load rather than once: the runtime is the only party
         // that knows what is already on its disk, and it absorbs the repeat.
-        self.provision_agent(&runtime_client).await?;
+        if let Some(client) = &runtime_client {
+            self.provision_agent(client).await?;
+        }
 
         if broadcast {
             emit_progress(
@@ -787,7 +908,16 @@ impl ContextProvider for SessionContextProvider {
             )
             .await;
         }
-        let (ws, shared_scan) = scan_workspace(&runtime_client, None).await;
+        // Nothing to scan without a sandbox: no workspaces, and no plugin
+        // skills, since those live on the runtime's disk.
+        let (ws, shared_scan) = match &runtime_client {
+            Some(client) => scan_workspace(client, None).await,
+            // Nothing to scan without a sandbox — no workspaces, and no plugin
+            // skills, since those live on the runtime's disk. The empty shape
+            // is what every reader below already handles for a scan that found
+            // nothing.
+            None => (WorkspaceContext::default(), SharedScan::default()),
+        };
         // No `SessionStart` here any more. It used to fire on this line, once
         // per *run* — `provide` is per-run — so every turn re-ran every start
         // hook, always reporting `source: "startup"`. It now fires once per
@@ -901,8 +1031,10 @@ impl ContextProvider for SessionContextProvider {
         // first box advertising a name, and a plugin declaring a server the
         // user already configured must not capture those calls, arguments and
         // all.
-        if use_plugins {
-            match runtime_client.mcp_discover().await {
+        // A runtime-less agent hosts no plugin MCP servers: the runtime is what
+        // runs them, so there is nothing to discover.
+        if use_plugins && let Some(client) = &runtime_client {
+            match client.mcp_discover().await {
                 Ok(discovery) => {
                     for failure in &discovery.failures {
                         match failure {
@@ -937,7 +1069,7 @@ impl ContextProvider for SessionContextProvider {
                     if !discovery.tools.is_empty() {
                         mcp.boxes
                             .push(Arc::new(crate::agent_loop::PluginMcpToolbox::new(
-                                runtime_client.clone(),
+                                client.clone(),
                                 discovery.tools,
                             )));
                     }
@@ -951,8 +1083,15 @@ impl ContextProvider for SessionContextProvider {
                 ),
             }
         }
-        let base: Arc<dyn Toolbox> =
-            DefaultToolboxFactory.for_agent(runtime_client.clone(), ws.names(), use_plugins, mcp);
+        // With no runtime there are no runtime-backed tools and no `skill` or
+        // `inspect_workspace` — all three reach into a sandbox. What is left is
+        // the server-side MCP set, which the layers below add to.
+        let base: Arc<dyn Toolbox> = match &runtime_client {
+            Some(client) => {
+                DefaultToolboxFactory.for_agent(client.clone(), ws.names(), use_plugins, mcp)
+            }
+            None => runtime_less_toolbox(mcp),
+        };
         let (with_memory, memory_index) =
             build_memory_layer(base, self.memory.clone(), settings).await?;
         let (with_memory, control_index) =
@@ -1023,6 +1162,11 @@ impl ContextProvider for SessionContextProvider {
                     with_spawn,
                     self.session.clone(),
                     caller,
+                    // A snapshot for the description; the call re-resolves.
+                    self.environment_catalogue().await,
+                    self.services
+                        .as_ref()
+                        .map(|s| Arc::clone(&s.environments) as Arc<dyn EnvironmentResolver>),
                 ))
             }
             SessionAgentKind::Main
@@ -1226,13 +1370,17 @@ mod tests {
 
         let build = |kind: SessionAgentKind| SessionContextProvider {
             agent_type: None,
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-            ),
+            runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+                f.deps.runtimes.provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".into(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                ),
+            ))),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -1291,13 +1439,17 @@ mod tests {
         let mut settings = agent_settings_fixture();
         settings.max_concurrent_subagents = Some(0);
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-            ),
+            runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+                f.deps.runtimes.provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".into(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                ),
+            ))),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -1337,13 +1489,17 @@ mod tests {
         // too -- the base prompt tells the model the tool exists.
         let (f, session, id, _journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let build = |unattended: bool| SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-            ),
+            runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+                f.deps.runtimes.provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".into(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                ),
+            ))),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -1383,18 +1539,40 @@ mod tests {
         assert!(!attended.system_prompt.unwrap().contains("# Unattended run"));
     }
 
+    /// Every agent acts under its own identity inside the sandbox — including
+    /// the main one, which used to ride the runtime's *default* bucket.
+    ///
+    /// That default is the runtime's own id. It used to equal the session's, so
+    /// main got its own cwd, env and plugin tree by coincidence. A runtime now
+    /// has an id of its own and two sessions can share one sandbox, so relying
+    /// on that coincidence would have main and a sub session sharing all three.
     #[test]
-    fn a_subagent_gets_its_own_runtime_identity() {
+    fn every_agent_including_main_acts_under_its_own_identity() {
+        let session = Uuid::new_v4();
         let client = horsie_runtime_host::RuntimeClient::detached(
             horsie_runtime_host::MockTransport::ok(""),
-            "session-id",
+            // Deliberately not the session's id: the runtime is named
+            // separately now, and main must not inherit whatever this is.
+            "runtime-id",
         );
-        let main = scoped_client(&SessionAgentKind::Main, client.clone());
-        assert_eq!(main.agent_id(), "session-id");
+        let main = scoped_client(&SessionAgentKind::Main, client.clone(), session);
+        assert_eq!(
+            main.agent_id(),
+            session.to_string(),
+            "main acts as the session, not as the runtime"
+        );
 
         let sub_id = Uuid::new_v4();
-        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client);
+        let sub = scoped_client(&SessionAgentKind::Sub(sub_id), client.clone(), session);
         assert_eq!(sub.agent_id(), sub_id.to_string());
+
+        let branch = Uuid::new_v4();
+        let branched = scoped_client(&SessionAgentKind::SubSession(branch), client, session);
+        assert_ne!(
+            branched.agent_id(),
+            main.agent_id(),
+            "a sub session sharing the sandbox must not share main's bucket"
+        );
     }
 
     #[tokio::test]
@@ -1701,13 +1879,17 @@ mod tests {
     async fn a_subagent_whose_agent_type_is_gone_fails_rather_than_running_generic() {
         let (f, session, id) = agent_harness().await;
         let provider = SessionContextProvider {
-            runtimes: f.deps.runtimes.provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".to_string(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-            ),
+            runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+                f.deps.runtimes.provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".to_string(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                ),
+            ))),
             registry: f.deps.provider_registry.clone(),
             mcp: None,
             memory: None,
@@ -1905,13 +2087,17 @@ mod tests {
         );
         SessionContextProvider {
             agent_type: None,
-            runtimes: crate::runtime_manager::test_runtime_manager(&vendors).provider(
-                id.to_string(),
-                "i1".to_string(),
-                false,
-                "mock".into(),
-                crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
-            ),
+            runtimes: Mutex::new(AgentRuntimeBinding::On(Box::new(
+                crate::runtime_manager::test_runtime_manager(&vendors).provider(
+                    id.to_string(),
+                    "i1".to_string(),
+                    false,
+                    "mock".into(),
+                    crate::sessions::spec::SessionSpec::for_vendor("mock")
+                        .runtime_env()
+                        .expect("a vendor spec has a runtime"),
+                ),
+            ))),
             registry: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             mcp: None,
             memory: None,

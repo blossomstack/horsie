@@ -19,8 +19,8 @@ use super::component::Component;
 use super::{AgentAction, LifecycleCommand, TurnEnd};
 use super::{
     AgentKey, AgentStatus, AnswerError, AskAnswer, CommandEffect, MessageAccepted,
-    ProvisioningState, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
-    SubSessionCommand, TurnCommand,
+    ProvisioningState, RequestedRuntime, SessionActor, SessionCommand, SessionDomainEvent,
+    SessionState, SubSessionCommand, TurnCommand,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
@@ -364,6 +364,11 @@ impl SessionActor {
                         parent,
                         seed,
                         message,
+                        // `/fork` and `/summary-n-fork` always inherit: a
+                        // person branching a session means the same checkout
+                        // and the same edits, which is the whole reason to
+                        // branch rather than start something new.
+                        env: RequestedRuntime::Inherit,
                         reply: r,
                     })
                 })
@@ -483,10 +488,18 @@ impl SessionActor {
         // than start a turn that would ask for it. The message waits in the
         // agent's queue and the create's own completion releases it, exactly as
         // at session creation.
-        if matches!(state.provisioning, ProvisioningState::Failed { .. }) {
+        if matches!(
+            state.provisioning_for(self.id),
+            Some(ProvisioningState::Failed { .. })
+        ) {
             let _ = self
                 .me(ctx)
-                .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+                .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                    owner: self.id,
+                    // The record keeps the environment; a retry rebuilds the
+                    // same sandbox rather than re-resolving one.
+                    env: None,
+                }))
                 .await;
         }
         // A person acting is the boundary that flushes results owed to subagent

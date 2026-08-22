@@ -76,7 +76,9 @@ mod tests {
                 assert_eq!(r.vendor, "fly");
                 assert_eq!(r.repos.unwrap()[0].url, "https://github.com/o/api");
             }
-            EnvironmentSpec::Named(_) => panic!("expected the runtime variant"),
+            EnvironmentSpec::Named(_) | EnvironmentSpec::None(_) => {
+                panic!("expected the runtime variant")
+            }
         }
     }
 
@@ -85,7 +87,9 @@ mod tests {
         let spec = environment_from_flags(None, Some("local".into()), vec![]).unwrap();
         match spec {
             EnvironmentSpec::Runtime(r) => assert!(r.repos.is_none()),
-            EnvironmentSpec::Named(_) => panic!("expected the runtime variant"),
+            EnvironmentSpec::Named(_) | EnvironmentSpec::None(_) => {
+                panic!("expected the runtime variant")
+            }
         }
     }
 
