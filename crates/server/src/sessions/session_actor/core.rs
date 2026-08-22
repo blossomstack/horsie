@@ -90,7 +90,15 @@ impl SessionCore {
                 let me = actor.me(ctx);
                 if creating {
                     let _ = me
-                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                            // The session's own runtime, owned by its main
+                            // agent — whose id is the session's. No `env`: the
+                            // spec is being journaled by this very command, so
+                            // reading it here would read it before it is set.
+                            // The handler reads it, by which time it is.
+                            owner: actor.id,
+                            env: None,
+                        }))
                         .await;
                 }
                 // Answered either way: a create that carried a message owes
@@ -284,7 +292,17 @@ impl Component for SessionCore {
                 // session id, so replay needs nothing but this event.
                 match &spec.kind {
                     crate::sessions::spec::SessionKind::Agent { .. } => {
-                        state.forest.apply_root_agent(session, at_ms);
+                        // What the spec asked for. `Pending` rather than
+                        // `Without` when it wants one: the record naming it
+                        // lands moments later, and until then nothing may run.
+                        state.forest.apply_root_agent(
+                            session,
+                            at_ms,
+                            match spec.runtime {
+                                Some(_) => crate::sessions::run_forest::RuntimeChoice::Pending,
+                                None => crate::sessions::run_forest::RuntimeChoice::Without,
+                            },
+                        );
                     }
                     crate::sessions::spec::SessionKind::Workflow { run } => {
                         state.forest.apply_root_workflow(
@@ -292,6 +310,10 @@ impl Component for SessionCore {
                             run.workflow.clone(),
                             run.clone(),
                             at_ms,
+                            match spec.runtime {
+                                Some(_) => crate::sessions::run_forest::RuntimeChoice::Pending,
+                                None => crate::sessions::run_forest::RuntimeChoice::Without,
+                            },
                         );
                     }
                 }
@@ -379,7 +401,7 @@ mod tests {
         let spec = journaled_spec(&journal, id)
             .await
             .expect("the spec is recorded");
-        assert_eq!(spec.vendor, actor_spec_fixture().vendor);
+        assert_eq!(spec.vendor(), actor_spec_fixture().vendor());
         assert_eq!(
             spec.name.as_deref(),
             Some("named"),

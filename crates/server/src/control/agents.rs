@@ -230,14 +230,17 @@ async fn invoke(
     .await?;
     // Checked on the *resolved* vendor, which only exists once the environment
     // has been read: a named environment carries its own.
-    if !services
-        .connected_vendors
-        .connected_names()
-        .contains(&spec.vendor)
+    // A session that asked for no runtime names no vendor, so there is nothing
+    // to check: `None` here is a choice, not an unresolved lookup.
+    if let Some(vendor) = spec.vendor()
+        && !services
+            .connected_vendors
+            .connected_names()
+            .iter()
+            .any(|v| v == vendor)
     {
         return Err(ControlError::Invalid(format!(
-            "runtime vendor '{}' is not connected",
-            spec.vendor
+            "runtime vendor '{vendor}' is not connected"
         )));
     }
     let created_at = now_ms();

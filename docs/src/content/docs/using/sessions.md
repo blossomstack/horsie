@@ -218,13 +218,32 @@ same way it writes one for a subagent. When the work splits into a direction you
 will want to steer separately, it can give that direction its own sub session
 and carry on with the rest.
 
-The sub session appears on the graph the moment it exists, shares the workspace
-like any other, and starts on the brief and nothing else — so it is yours to
-talk to from the first message. The agent hears nothing back from it.
+The sub session appears on the graph the moment it exists, starts on the brief
+and nothing else — so it is yours to talk to from the first message — and shares
+the workspace, unless it was given one of its own.
+
+### Where a sub session works
+
+By default a sub session works where the session it branched from works: same
+machine, same checkout, same files. Branching from the composer is always this,
+and so is a `spawn_subsession` that names no environment.
+
+The agent may instead name one of your [environments](/using/environments/), and
+then the sub session gets a machine of its own — a different vendor, a different
+checkout, whatever that environment describes. Its first message waits while
+that machine is built, exactly as a new session's does. A machine asked for this
+way belongs to the sub session that asked: deleting that sub session tears it
+down, and deleting one that simply shares its parent's tears down nothing.
+
+A sub session can also be given no machine at all. It still has the model, its
+MCP servers and its memory, and it can still delegate — but it has no shell and
+no files, so none of the runtime tools are offered to it. That is a working
+session, not a broken one; it is useful for thinking a problem through without
+touching anything.
 
 Nothing ever removes a sub session on its own. Delete one with the bin key on
 its own page when you are done with it; deleting a session removes its sub
-sessions too.
+sessions too — and every machine any of them owned.
 
 ## Stop, or delete
 

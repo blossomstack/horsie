@@ -251,6 +251,7 @@ impl SessionActor {
                 step_result: Default::default(),
                 agent_type,
                 origin: None,
+                runtime_via: None,
             },
         )
         .map(|resident| resident.actor)
@@ -1052,7 +1053,11 @@ mod tests {
         let mut state = SessionState::default();
         let session = Uuid::new_v4();
         let id = Uuid::new_v4();
-        state.forest.apply_root_agent(session, 0);
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         state
             .forest
             .apply_sub_spawned(id, session, "x".into(), "t".into(), None, 100);

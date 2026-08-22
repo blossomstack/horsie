@@ -1612,7 +1612,10 @@ mod tests {
         let session = {
             let services = services(&state).await;
             let mut spec = crate::sessions::spec::SessionSpec::for_vendor("mock");
-            spec.provision
+            spec.runtime
+                .as_mut()
+                .expect("a vendor spec has a runtime")
+                .provision
                 .push(crate::sessions::spec::ProvisionStepSpec {
                     name: "checkout".into(),
                     uses: "git_checkout".into(),

@@ -16,8 +16,8 @@
 use super::component::Component;
 use super::context::SessionAgentKind;
 use super::{
-    AgentKey, AgentPlan, AgentStatus, CommandEffect, SessionActor, SessionCommand,
-    SessionDomainEvent, SessionState, SubSessionCommand, TurnEnd,
+    AgentKey, AgentPlan, AgentStatus, CommandEffect, LifecycleCommand, RequestedRuntime,
+    SessionActor, SessionCommand, SessionDomainEvent, SessionState, SubSessionCommand, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
 use crate::agent_loop::{
@@ -25,7 +25,7 @@ use crate::agent_loop::{
     SeedCommand as AgentSeedCommand,
 };
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::run_forest::SeedMode;
+use crate::sessions::run_forest::{RuntimeChoice, SeedMode};
 use horsie_actor::{ActorContext, ActorRef, ReplyTo};
 use horsie_agentcore::{
     ContentPart, EmptyOutcome, FailedOutcome, Message, Role, TextPart, TurnOutcome,
@@ -48,6 +48,7 @@ impl SubSessions {
                 parent,
                 seed,
                 message,
+                env,
                 reply,
             } => {
                 if let Err(why) = branchable(actor.id, state, parent, &message) {
@@ -69,6 +70,17 @@ impl SubSessions {
                     source_seq,
                     seed,
                     message: message.clone(),
+                    // Which of the three the caller asked for. Never an id:
+                    // that is minted by `RuntimeRequested`, which is also what
+                    // moves this entry to `On`. Two writers would be two ids.
+                    //
+                    // `Pending` is what makes a sub session with a machine of
+                    // its own wait for it rather than start without one.
+                    runtime: match &env {
+                        RequestedRuntime::Own(_) => RuntimeChoice::Pending,
+                        RequestedRuntime::Without => RuntimeChoice::Without,
+                        RequestedRuntime::Inherit => RuntimeChoice::Inherit,
+                    },
                 };
                 // Persist first, spawn second — see the module doc.
                 let (tx, rx) = oneshot::channel();
@@ -83,6 +95,7 @@ impl SubSessions {
                         .tell(SessionCommand::SubSession(
                             SubSessionCommand::FinishCreate {
                                 id,
+                                env,
                                 reply,
                                 persisted,
                             },
@@ -93,6 +106,7 @@ impl SubSessions {
             }
             SubSessionCommand::FinishCreate {
                 id,
+                env,
                 reply,
                 persisted,
             } => {
@@ -103,6 +117,24 @@ impl SubSessions {
                 if actor.spawn_sub_session_actor(ctx, state, id).is_none() {
                     let _ = reply.send(Err("could not start the sub session".to_string()));
                     return CommandEffect::none();
+                }
+                // A sub session that asked for an environment of its own gets a
+                // runtime built for it, owned by it. Sent now rather than at
+                // `Create`, so the entry the create points at already exists —
+                // and off this mailbox, so the minutes a machine takes to boot
+                // do not stop the session answering.
+                //
+                // Its first turn waits on the result, exactly as a new
+                // session's does: the `ready` flag its agent is built with is
+                // false until the record says otherwise.
+                if let RequestedRuntime::Own(env) = env {
+                    let _ = actor
+                        .me(ctx)
+                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                            owner: id,
+                            env: Some(env),
+                        }))
+                        .await;
                 }
                 // The message is *not* enqueued here. It rides into the same
                 // write as the seed, because a sub session with a message and
@@ -266,9 +298,10 @@ impl Component for SubSessions {
                 seed,
                 message,
                 at_ms,
+                runtime,
             } => state
                 .forest
-                .apply_sub_session_created(id, parent, source_seq, seed, message, at_ms),
+                .apply_sub_session_created(id, parent, source_seq, seed, message, at_ms, runtime),
             SessionDomainEvent::SubSessionSeeded { id, .. } => {
                 state.forest.apply_sub_session_seeded(id)
             }
@@ -418,6 +451,7 @@ impl SessionActor {
                 step_result: Default::default(),
                 agent_type: None,
                 origin: self.sub_session_origin(state, id),
+                runtime_via: None,
             },
         )
         .map(|resident| resident.actor)
@@ -743,7 +777,7 @@ fn summary_message(seed: &Seed) -> Option<Message> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::run_forest::SeedMode;
+    use crate::sessions::run_forest::{RuntimeChoice, SeedMode};
 
     fn id(n: u8) -> Uuid {
         Uuid::from_bytes([n; 16])
@@ -752,7 +786,11 @@ mod tests {
     fn state_with_sub_session(status: AgentStatus) -> SessionState {
         let mut state = SessionState::default();
         let session = id(9);
-        state.forest.apply_root_agent(session, 0);
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         state.forest.apply_sub_session_created(
             id(1),
             session,
@@ -760,6 +798,7 @@ mod tests {
             SeedMode::Summary,
             "go".into(),
             1,
+            RuntimeChoice::Inherit,
         );
         state.forest.apply_sub_session_status(id(1), status, 5_000);
         state
@@ -770,7 +809,11 @@ mod tests {
     #[test]
     fn a_sub_session_needs_a_message_saying_what_to_do() {
         let mut state = SessionState::default();
-        state.forest.apply_root_agent(id(9), 0);
+        state.forest.apply_root_agent(
+            id(9),
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         assert!(branchable(id(9), &state, id(9), "go").is_ok());
         assert_eq!(
             branchable(id(9), &state, id(9), "   ").unwrap_err(),
@@ -793,6 +836,7 @@ mod tests {
                 max_steps: 1,
             }),
             0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
         );
         assert_eq!(
             branchable(id(9), &state, id(9), "go").unwrap_err(),
@@ -846,7 +890,11 @@ mod tests {
     #[test]
     fn the_fold_tracks_a_sub_session_through_its_life() {
         let mut state = SessionState::default();
-        state.forest.apply_root_agent(id(9), 0);
+        state.forest.apply_root_agent(
+            id(9),
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         SubSessions::apply(
             &mut state,
             &SessionDomainEvent::SubSessionCreated {
@@ -856,6 +904,7 @@ mod tests {
                 source_seq: 12,
                 seed: SeedMode::Copy,
                 message: "go".into(),
+                runtime: crate::sessions::run_forest::RuntimeChoice::Inherit,
             },
         );
         assert_eq!(

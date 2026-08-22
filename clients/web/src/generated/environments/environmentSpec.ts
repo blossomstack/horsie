@@ -1,5 +1,6 @@
 
 import { NamedEnvironment } from './namedEnvironment';
+import { NoRuntime } from './noRuntime';
 import { RuntimeEnvironment } from './runtimeEnvironment';
 /**
  * Where a session runs and what it runs against. Required by every path that
@@ -8,4 +9,5 @@ import { RuntimeEnvironment } from './runtimeEnvironment';
  */
 export type EnvironmentSpec =
   | { type: "Runtime"; value: RuntimeEnvironment }
-  | { type: "Named"; value: NamedEnvironment };
+  | { type: "Named"; value: NamedEnvironment }
+  | { type: "None"; value: NoRuntime };

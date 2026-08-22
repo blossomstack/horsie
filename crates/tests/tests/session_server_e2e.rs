@@ -223,7 +223,7 @@ async fn create_session(
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
     let id = v["session"]["id"].as_str().unwrap().to_string();
-    wait_for_signal(agent, &format!("create:{id}")).await;
+    wait_for_create(agent).await;
     id
 }
 
@@ -252,19 +252,25 @@ async fn create_session_with_tools(
     assert_eq!(res.status().as_u16(), 201);
     let v: serde_json::Value = res.json().await.unwrap();
     let id = v["session"]["id"].as_str().unwrap().to_string();
-    wait_for_signal(agent, &format!("create:{id}")).await;
+    wait_for_create(agent).await;
     id
 }
 
 /// Like `create_session`, but selects a named vendor with no `repos` — the
 /// shape a shared-local-vendor session must use (it provisions nothing).
-async fn create_session_for_vendor(
+/// Create a session on `vendor` and answer with both its id and the id of the
+/// runtime it had built — which are two different names for two different
+/// things, and a test that wants to talk about the sandbox needs the second.
+async fn create_session_on_runtime(
     client: &reqwest::Client,
     api: &Api,
     vendor: &str,
     agent: &FakeRuntimeVendor,
     message: &str,
-) -> String {
+) -> (String, String) {
+    // Counted before the request, so a second session on the same vendor waits
+    // for its *own* create rather than returning on the first one's.
+    let before = creates(agent).len();
     let body = serde_json::json!({
         "agent": { "model": "mock", "use_plugins": false },
         "environment": {"type": "Runtime", "value": {"vendor": vendor}},
@@ -280,8 +286,21 @@ async fn create_session_for_vendor(
     let v: serde_json::Value = res.json().await.unwrap();
     let id = v["session"]["id"].as_str().unwrap().to_string();
     // As `create_session`: a session is not up until its runtime exists.
-    wait_for_signal(agent, &format!("create:{id}")).await;
-    id
+    let runtime = wait_for_create_after(agent, before).await;
+    (id, runtime)
+}
+
+/// The same, for the callers that only need the session.
+async fn create_session_for_vendor(
+    client: &reqwest::Client,
+    api: &Api,
+    vendor: &str,
+    agent: &FakeRuntimeVendor,
+    message: &str,
+) -> String {
+    create_session_on_runtime(client, api, vendor, agent, message)
+        .await
+        .0
 }
 
 /// Start a server with no vendor pre-published, for the tests where an agent
@@ -542,6 +561,72 @@ async fn wait_status(client: &reqwest::Client, api: &Api, id: &str, want: &str) 
 /// mailbox and stays `Provisioning` until it has an answer. A test that takes
 /// the vendor away, or restarts the server, has to wait for `create:<id>` first
 /// or it is racing the create it meant to happen before.
+/// Wait until this vendor has been asked to create *a* runtime.
+///
+/// Not `create:<session id>`: a runtime has an id of its own now, so the name
+/// the vendor is given is not the session's and a test cannot predict it. Every
+/// caller here creates exactly one session against a fresh vendor, so "a
+/// create happened" is the same fact it used to assert, said honestly.
+/// The runtime this vendor was asked to build, read off its own signals.
+///
+/// A test that wants to say "the same runtime was reused" has to name it, and
+/// it cannot guess the name: a runtime is identified independently of the
+/// session that asked for it. So the create says what it is, and everything
+/// after is asserted against that.
+fn created_runtime(agent: &FakeRuntimeVendor) -> String {
+    creates(agent)
+        .first()
+        .cloned()
+        .expect("the vendor was asked to create a runtime")
+}
+
+/// Every runtime this vendor has been asked to build, in the order it was
+/// asked.
+fn creates(agent: &FakeRuntimeVendor) -> Vec<String> {
+    agent
+        .signals()
+        .iter()
+        .filter_map(|s| s.strip_prefix("create:").map(str::to_string))
+        .collect()
+}
+
+/// Wait for a create beyond the `seen` this caller already knew about, and
+/// answer with the runtime it named.
+async fn wait_for_create_after(agent: &FakeRuntimeVendor, seen: usize) -> String {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        let built = creates(agent);
+        if built.len() > seen {
+            return built[seen].clone();
+        }
+        assert!(
+            start.elapsed() <= deadline,
+            "timed out waiting for create #{}; saw {:?}",
+            seen + 1,
+            agent.signals()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn wait_for_create(agent: &FakeRuntimeVendor) {
+    let deadline = Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        if agent.signals().iter().any(|s| s.starts_with("create:")) {
+            return;
+        }
+        assert!(
+            start.elapsed() <= deadline,
+            "timed out waiting for a create; saw {:?}",
+            agent.signals()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[allow(dead_code)]
 async fn wait_for_signal(agent: &FakeRuntimeVendor, signal: &str) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -844,13 +929,21 @@ async fn create_message_sse_roundtrip() {
     );
 
     wait_turns(&client, &server.api, &id, 2).await;
+    let signals = agent.signals();
+    // Named by the runtime rather than the session — see the note on the other
+    // signal-sequence assertion.
+    let runtime = signals
+        .first()
+        .and_then(|s| s.strip_prefix("create:"))
+        .expect("the first signal is the create")
+        .to_string();
     assert_eq!(
-        agent.signals(),
+        signals,
         vec![
-            format!("create:{id}"),
-            format!("get:{id}"),
-            format!("get:{id}"),
-            format!("get:{id}")
+            format!("create:{runtime}"),
+            format!("get:{runtime}"),
+            format!("get:{runtime}"),
+            format!("get:{runtime}")
         ],
         "one create at session creation, then two gets for the first turn: the \
          pre-run hook seam needs a runtime before the turn snapshots its \
@@ -1351,7 +1444,7 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     assert_eq!(res.status().as_u16(), 200);
     wait_turns(&client, &server.api, &id, 1).await;
     assert!(
-        !agent.signals().contains(&format!("hibernate:{id}")),
+        !agent.signals().iter().any(|s| s.starts_with("hibernate:")),
         "stop must not hibernate: {:?}",
         agent.signals()
     );
@@ -1364,7 +1457,11 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
         202
     );
     wait_turns(&client, &server.api, &id, 2).await;
-    assert!(agent.signals().contains(&format!("get:{id}")));
+    assert!(
+        agent
+            .signals()
+            .contains(&format!("get:{}", created_runtime(&agent)))
+    );
 
     server.shutdown().await;
 }
@@ -1497,7 +1594,8 @@ async fn restart_reconciles_the_interrupted_turn_and_never_resumes() {
         202
     );
     wait_turns(&client, &server2.api, &id, 2).await;
-    assert!(agent.signals().iter().any(|s| s == &format!("get:{id}")));
+    let rt = created_runtime(&agent);
+    assert!(agent.signals().iter().any(|s| s == &format!("get:{rt}")));
 
     server2.shutdown().await;
 }
@@ -2091,12 +2189,20 @@ async fn reads_after_a_concluded_turn_acquire_no_runtime() {
     wait_turns(&client, &server.api, &id, 1).await;
 
     let after_turn = agent.signals();
+    // Keyed by the *runtime's* id, which a test cannot predict now that a
+    // runtime is named apart from its session. The shape is what matters, and
+    // that every signal names the one runtime the create produced.
+    let runtime = after_turn
+        .first()
+        .and_then(|s| s.strip_prefix("create:"))
+        .expect("the first signal is the create")
+        .to_string();
     assert_eq!(
         after_turn,
         vec![
-            format!("create:{id}"),
-            format!("get:{id}"),
-            format!("get:{id}")
+            format!("create:{runtime}"),
+            format!("get:{runtime}"),
+            format!("get:{runtime}")
         ],
         "one create at session creation, two gets for the first turn — the hook \
          seam resolves one before the snapshot, `provide` one for the run"
@@ -2339,7 +2445,9 @@ async fn an_unreachable_vendor_fails_one_turn_and_recovers_on_the_next() {
     wait_turns(&client, &server.api, &id, 3).await;
     let signals = agent2.signals();
     assert!(
-        signals.iter().any(|s| s == &format!("get:{id}")),
+        signals
+            .iter()
+            .any(|s| s == &format!("get:{}", created_runtime(&agent2))),
         "the recovered turn resumes the same runtime: {signals:?}"
     );
     assert_eq!(
@@ -2379,7 +2487,7 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
     let _ = server.supervisor.tell(SessionSupervisorCommand::Tick).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
-        !agent.signals().contains(&format!("hibernate:{id}")),
+        !agent.signals().iter().any(|s| s.starts_with("hibernate:")),
         "a session inside its idle window must stay loaded: {:?}",
         agent.signals()
     );
@@ -2391,7 +2499,8 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         async || {
             agent
                 .signals()
-                .contains(&format!("hibernate:{id}"))
+                .iter()
+                .any(|s| s.starts_with("hibernate:"))
                 .then_some(())
         },
     )
@@ -2421,7 +2530,7 @@ async fn an_idle_session_hibernates_and_the_next_message_resumes_it() {
         agent
             .signals()
             .iter()
-            .filter(|s| *s == &format!("get:{id}"))
+            .filter(|s| *s == &format!("get:{}", created_runtime(&agent)))
             .count()
             >= 2,
         "the resumed turn asked for the same runtime: {:?}",
@@ -2451,8 +2560,8 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
         .expect("agent connects");
     server.await_vendor("agent-2", true).await;
 
-    let a = create_session_for_vendor(&client, &server.api, "agent-2", &agent, "hi").await;
-    let b = create_session_for_vendor(&client, &server.api, "agent-2", &agent, "hi").await;
+    let (a, _rt_a) = create_session_on_runtime(&client, &server.api, "agent-2", &agent, "hi").await;
+    let (b, rt_b) = create_session_on_runtime(&client, &server.api, "agent-2", &agent, "hi").await;
     wait_turns(&client, &server.api, &a, 1).await;
     wait_turns(&client, &server.api, &b, 1).await;
     assert_eq!(agent.live_runtimes().len(), 2, "one runtime per session");
@@ -2469,7 +2578,7 @@ async fn stopping_one_session_leaves_another_on_the_same_agent_alive() {
     // still there. What matters is that stopping one session did not disturb
     // the other's runtime — which the message below proves.
     assert!(
-        agent.live_runtimes().contains(&b),
+        agent.live_runtimes().contains(&rt_b),
         "the untouched session must keep its runtime"
     );
     assert_eq!(
@@ -3121,7 +3230,8 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     wait_until("the finished run to be unloaded", async || {
         agent
             .signals()
-            .contains(&format!("hibernate:{id}"))
+            .iter()
+            .any(|s| s.starts_with("hibernate:"))
             .then_some(())
     })
     .await;
@@ -3134,11 +3244,12 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     //
     // Filtering to `id` is also the property this test is named for: a cold
     // *run* must survive being listed without its vendor hearing anything.
+    let run_runtime = created_runtime(&agent);
     let signals_for_run = |agent: &FakeRuntimeVendor| -> Vec<String> {
         agent
             .signals()
             .into_iter()
-            .filter(|s| s.ends_with(&format!(":{id}")))
+            .filter(|s| s.ends_with(&format!(":{run_runtime}")))
             .collect()
     };
     let before = signals_for_run(&agent);
@@ -3619,4 +3730,118 @@ async fn a_narrowed_selection_removes_tools_from_every_layer() {
     );
 
     server.shutdown().await;
+}
+
+/// A session created with no runtime at all answers, over the real HTTP path.
+///
+/// The one that catches the failure this feature is most likely to have: a
+/// session that parks forever acquiring a sandbox nobody will ever build. No
+/// unit test can see it — the forest happily reports `None` while the turn
+/// waits on a vendor.
+#[tokio::test]
+async fn a_session_with_no_runtime_still_takes_a_turn() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_response("answered with nothing to run on");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "agent": { "model": "mock", "use_plugins": false },
+        "environment": {"type": "None", "value": {}},
+        "message": "think about it"
+    });
+    let res = client
+        .post(format!("{}/sessions", server.api))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 201, "{:?}", res.text().await);
+    let v: serde_json::Value = res.json().await.unwrap();
+    let id = v["session"]["id"].as_str().unwrap().to_string();
+
+    // No `wait_for_signal`: the vendor is never asked for anything, which is
+    // the point. If a create were sent, this session would be waiting on a
+    // runtime it never asked for.
+    wait_turns(&client, &server.api, &id, 1).await;
+
+    let detail: serde_json::Value = client
+        .get(format!("{}/sessions/{id}", server.api))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        detail["session"]["status"], "Idle",
+        "a session with no runtime is idle, never provisioning: {detail}"
+    );
+    assert_eq!(
+        detail["session"]["vendor"], "",
+        "and it names no vendor: {detail}"
+    );
+}
+
+/// And it is not offered the tools it could not run.
+///
+/// Asserted by having the model *call* one: a tool that is advertised but fails
+/// at the moment of use is the failure mode worth guarding, and it is
+/// indistinguishable from a correct tool list until something tries.
+#[tokio::test]
+async fn a_runtime_less_session_is_not_offered_runtime_tools() {
+    let mock = MockLlmServer::builder().build().await;
+    mock.queue_tool_call("bash", serde_json::json!({"command": "echo hi"}));
+    mock.queue_response("I cannot run commands here");
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = FakeRuntimeVendor::builder("mock")
+        .serve_in_process()
+        .await
+        .expect("fake agent");
+    let server = start_server(tmp.path(), agent.link(), &mock.url()).await;
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "agent": { "model": "mock", "use_plugins": false },
+        "environment": {"type": "None", "value": {}},
+        "message": "run something"
+    });
+    let id = client
+        .post(format!("{}/sessions", server.api))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["session"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    wait_turns(&client, &server.api, &id, 1).await;
+
+    let messages: serde_json::Value = client
+        .get(format!("{}/sessions/{id}/messages?max=100", server.api))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let transcript = messages.to_string();
+    assert!(
+        transcript.contains("bash"),
+        "the model's attempt should be in the transcript: {transcript}"
+    );
+    // The runtime never saw it: there is no runtime.
+    assert!(
+        !agent.signals().iter().any(|s| s.starts_with("create:")),
+        "no sandbox may be built for a session that asked for none: {:?}",
+        agent.signals()
+    );
 }
