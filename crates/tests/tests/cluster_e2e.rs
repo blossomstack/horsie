@@ -200,8 +200,10 @@ impl Node {
         let res = self
             .get_when_serving(&format!("/sessions/{id}/messages?max=200"))
             .await;
-        assert_eq!(res.status(), 200, "a transcript should be readable");
-        res.json().await.unwrap()
+        let status = res.status();
+        let body = res.text().await.unwrap();
+        assert_eq!(status, 200, "a transcript should be readable: {body}");
+        serde_json::from_str(&body).unwrap()
     }
 
     /// Wait until this agent has finished `want` turns.

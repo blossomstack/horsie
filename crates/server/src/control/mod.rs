@@ -75,28 +75,17 @@ pub fn operations() -> Vec<Operation> {
         .collect()
 }
 
-/// Ask the session supervisor a question, mapping a closed mailbox to an
-/// internal error.
+/// Ask the session supervisor a question.
 ///
-/// Lives here rather than in `http::handlers` because both surfaces need it and
-/// `ControlError` is the base vocabulary; `handlers::ask` is now a rendering of
-/// this into `Api`.
+/// A thin wrapper now that the mapping is [`From<TellError>`], and kept because
+/// it is the shape most call sites want; anything that reaches the reference
+/// directly gets the same rendering from `?`.
 pub(crate) async fn ask<T, F>(services: &ProjectServices, make: F) -> Result<T, ControlError>
 where
     F: FnOnce(horsie_actor::ReplyTo<T>) -> crate::sessions::supervisor::SessionSupervisorCommand,
     T: Send + 'static,
 {
-    services.supervisor.ask(make).await.map_err(|e| match e {
-        // Not a fault: this node has lost touch with a quorum and cannot know
-        // whether these actors are still its own, so it refuses rather than
-        // answer from state that may already be history. Another node can.
-        horsie_actor::TellError::Undeliverable => ControlError::Unavailable(
-            "this node is not currently serving; retry against another".to_string(),
-        ),
-        horsie_actor::TellError::MailboxClosed | horsie_actor::TellError::NoAnswer => {
-            ControlError::Internal("session supervisor unavailable".to_string())
-        }
-    })
+    Ok(services.supervisor.ask(make).await?)
 }
 
 /// A create's failure in the control envelope.
@@ -302,6 +291,30 @@ pub enum ControlError {
     /// a minority stands down deliberately, and the caller should retry rather
     /// than report a fault.
     Unavailable(String),
+}
+
+/// Why an actor could not be reached, in the shared vocabulary.
+///
+/// One map, reachable by `?` from every surface — which is the point. Each
+/// place that hand-rolled this had to decide the not-serving case again, and
+/// the read side of the session API had already decided it wrong: a node
+/// standing down answered 500, so a client following the retry the status code
+/// asks for never retried at all.
+impl From<horsie_actor::TellError> for ControlError {
+    fn from(e: horsie_actor::TellError) -> Self {
+        match e {
+            // Not a fault: this node has lost touch with a quorum and cannot
+            // know whether these actors are still its own, so it refuses rather
+            // than answer from state that may already be history. Another node
+            // can.
+            horsie_actor::TellError::Undeliverable => Self::Unavailable(
+                "this node is not currently serving; retry against another".to_string(),
+            ),
+            horsie_actor::TellError::MailboxClosed | horsie_actor::TellError::NoAnswer => {
+                Self::Internal("session supervisor unavailable".to_string())
+            }
+        }
+    }
 }
 
 impl From<ControlError> for Api {

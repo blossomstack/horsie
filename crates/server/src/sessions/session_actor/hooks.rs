@@ -570,6 +570,11 @@ mod tests {
         ])
         .await;
         send(&session, "do the thing").await;
+        // One turn: a stop hook that blocks re-prompts inside the turn it is
+        // ending, so its continuations are inputs rather than turns of their
+        // own. The boundary first, then the settle, which is what shows nothing
+        // continued past it.
+        await_turns(&session, 1).await;
         let inputs = settled_inputs(&session).await;
         assert_eq!(inputs.len(), 2, "the turn continued once: {inputs:?}");
         assert!(inputs[0].contains("do the thing"), "{inputs:?}");
@@ -583,6 +588,7 @@ mod tests {
     async fn an_unconditionally_blocking_stop_hook_is_stopped_by_the_cap() {
         let (_f, session) = stop_harness(vec![stop_blocked("again")]).await;
         send(&session, "go").await;
+        await_turns(&session, 1).await;
         let inputs = settled_inputs(&session).await;
         assert_eq!(
             inputs.len(),
@@ -597,7 +603,10 @@ mod tests {
     async fn the_capped_continuation_is_recorded_as_cap_reached() {
         let (_f, session) = stop_harness(vec![stop_blocked("again")]).await;
         send(&session, "go").await;
-        settled_inputs(&session).await;
+        // One turn, not one per continuation: a stop hook that blocks re-prompts
+        // inside the turn it is ending, so the cap is reached and recorded
+        // before the single `TurnEnded` that closes the whole sequence.
+        await_turns(&session, 1).await;
         let outcomes = stop_outcomes(&session).await;
         assert!(
             matches!(outcomes.last(), Some(StopOutcome::CapReached(_))),
@@ -617,6 +626,7 @@ mod tests {
         ))]])
         .await;
         send(&session, "go").await;
+        await_turns(&session, 1).await;
         let inputs = settled_inputs(&session).await;
         assert_eq!(inputs.len(), 1, "informed, not forced: {inputs:?}");
     }
@@ -632,6 +642,7 @@ mod tests {
         });
         let (_f, session, id, journal) = stop_harness_with_journal(vec![blocking]).await;
         send(&session, "go").await;
+        await_turns(&session, 1).await;
         let inputs = settled_inputs(&session).await;
         assert_eq!(
             inputs.len(),
@@ -703,6 +714,7 @@ mod tests {
         ))]])
         .await;
         send(&session, "go").await;
+        await_turns(&session, 1).await;
         assert_eq!(settled_inputs(&session).await.len(), 1);
     }
 
@@ -717,7 +729,7 @@ mod tests {
         ))]])
         .await;
         send(&session, "go").await;
-        settled_inputs(&session).await;
+        await_turns(&session, 1).await;
         assert_eq!(stop_outcomes(&session).await.len(), 1);
     }
 
@@ -737,13 +749,13 @@ mod tests {
         )]])
         .await;
         send(&session, "first").await;
-        settled_inputs(&session).await;
+        await_turns(&session, 1).await;
         assert_eq!(stop_outcomes(&session).await.len(), 1);
 
         // The hook ran when the first turn ended, so the second turn is the
         // first prompt that can carry it.
         send(&session, "second").await;
-        settled_inputs(&session).await;
+        await_turns(&session, 2).await;
 
         let seen = prompts.lock().unwrap().clone();
         assert!(

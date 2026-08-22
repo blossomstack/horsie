@@ -46,6 +46,23 @@ fn may_send(serving: &Serving) -> bool {
     serving.as_ref().is_none_or(|rx| *rx.borrow())
 }
 
+/// How a failed send reads once this node has stood down.
+///
+/// A node standing down fails every caller still waiting for an answer, so an
+/// ask in flight across that moment comes back `MailboxClosed` — which at the
+/// call site is indistinguishable from an actor that really is gone. It is not
+/// the same thing: nothing is broken, this node simply stopped being allowed to
+/// answer, and the caller should retry elsewhere rather than report a fault.
+/// Asking again after the failure is what tells the two apart, because the ask
+/// before it passed.
+fn refusal(serving: &Serving, e: TellError) -> TellError {
+    if may_send(serving) {
+        e
+    } else {
+        TellError::Undeliverable
+    }
+}
+
 /// Between an account and what it owns, in a rendered id.
 ///
 /// Only ever written. Nothing reads one of these back apart, because every node
@@ -162,7 +179,10 @@ impl SupervisorRef {
         if !may_send(&self.serving) {
             return Err(TellError::Undeliverable);
         }
-        self.shard.tell(self.addressed(cmd)).await
+        self.shard
+            .tell(self.addressed(cmd))
+            .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     /// # Errors
@@ -175,7 +195,10 @@ impl SupervisorRef {
         if !may_send(&self.serving) {
             return Err(TellError::Undeliverable);
         }
-        self.shard.ask(|reply| self.addressed(make(reply))).await
+        self.shard
+            .ask(|reply| self.addressed(make(reply)))
+            .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     /// [`ask`](Self::ask), giving up after `within`.
@@ -198,6 +221,7 @@ impl SupervisorRef {
         self.shard
             .ask_within(within, |reply| self.addressed(make(reply)))
             .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     fn addressed(&self, cmd: SessionSupervisorCommand) -> SupervisorInbox {
@@ -248,7 +272,10 @@ impl SessionRef {
         if !may_send(&self.serving) {
             return Err(TellError::Undeliverable);
         }
-        self.shard.tell(self.addressed(cmd)).await
+        self.shard
+            .tell(self.addressed(cmd))
+            .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     /// # Errors
@@ -261,7 +288,10 @@ impl SessionRef {
         if !may_send(&self.serving) {
             return Err(TellError::Undeliverable);
         }
-        self.shard.ask(|reply| self.addressed(make(reply))).await
+        self.shard
+            .ask(|reply| self.addressed(make(reply)))
+            .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     /// [`ask`](Self::ask), giving up after `within`.
@@ -284,6 +314,7 @@ impl SessionRef {
         self.shard
             .ask_within(within, |reply| self.addressed(make(reply)))
             .await
+            .map_err(|e| refusal(&self.serving, e))
     }
 
     fn addressed(&self, cmd: SessionCommand) -> SessionInbox {
@@ -319,6 +350,41 @@ mod tests {
     #[test]
     fn an_unclustered_node_is_never_gated() {
         assert!(may_send(&None));
+    }
+
+    /// Standing down mid-ask is not a fault, and must not be reported as one.
+    ///
+    /// The stand-down itself is what fails the caller — every waiter is dropped
+    /// — so the error that arrives says "mailbox closed", which everywhere else
+    /// means the actor is gone and something is wrong. Here it means this node
+    /// stopped being allowed to answer, and the caller should ask another one.
+    #[test]
+    fn a_failure_while_standing_down_reads_as_undeliverable() {
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let down = Some(rx);
+        assert!(matches!(
+            refusal(&down, TellError::MailboxClosed),
+            TellError::Undeliverable
+        ));
+        assert!(matches!(
+            refusal(&down, TellError::NoAnswer),
+            TellError::Undeliverable
+        ));
+    }
+
+    /// And the converse, which is the half that keeps 500 meaning something: a
+    /// serving node whose actor really has gone reports exactly that.
+    #[test]
+    fn a_failure_while_serving_keeps_its_reason() {
+        let (_tx, rx) = tokio::sync::watch::channel(true);
+        assert!(matches!(
+            refusal(&Some(rx), TellError::MailboxClosed),
+            TellError::MailboxClosed
+        ));
+        assert!(matches!(
+            refusal(&None, TellError::MailboxClosed),
+            TellError::MailboxClosed
+        ));
     }
 
     /// Read per send rather than captured once: a node that stands down

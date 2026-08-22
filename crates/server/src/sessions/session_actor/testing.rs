@@ -1209,23 +1209,57 @@ pub(super) async fn stop_outcomes(session: &SessionRef) -> Vec<StopOutcome> {
 
 /// Wait until the transcript stops growing, so a test asserting "no further
 /// turn ran" observes a real stop rather than a race it won.
+///
+/// The whole transcript, not the user messages it returns. Watching only the
+/// inputs made this settle the moment the *first* entry of a turn had landed —
+/// a turn writes exactly one of them, at the start — so it reported quiet with
+/// the turn still running, and every assertion made after it about what the
+/// turn produced was reading a transcript that had not finished being written.
+/// On a fast machine the turn beat the window anyway; CI is where that stopped
+/// being true.
+///
+/// Still a settle rather than a turn boundary, because its callers assert that
+/// nothing *further* happened, and there is no event for a turn that never
+/// began. [`await_turns`] is the exact wait, for a test that knows how many it
+/// is expecting.
 pub(super) async fn settled_inputs(session: &SessionRef) -> Vec<String> {
-    let mut last = turn_inputs(session).await;
+    let mut last = 0;
     let mut stable = 0;
     for _ in 0..200 {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let now = turn_inputs(session).await;
+        let now = agent_history(session, None).await.entries.len();
         if now == last {
             stable += 1;
             if stable == 5 {
-                return now;
+                break;
             }
         } else {
             stable = 0;
             last = now;
         }
     }
-    last
+    turn_inputs(session).await
+}
+
+/// Wait until `want` turns have ended on the main agent's log.
+///
+/// The boundary itself, for the tests that assert on what a turn produced: a
+/// `TurnEnded` carries how it ended, so a halted or failed turn counts here
+/// exactly as a completed one does. Nothing a turn writes can land after it.
+pub(super) async fn await_turns(session: &SessionRef, want: usize) {
+    for _ in 0..400 {
+        let page = agent_history(session, None).await;
+        if turn_outcomes(&page).len() >= want {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let page = agent_history(session, None).await;
+    panic!(
+        "only {} of {want} turns ended: {:?}",
+        turn_outcomes(&page).len(),
+        page.entries
+    );
 }
 
 pub(super) async fn send(session: &SessionRef, text: &str) {
@@ -1477,6 +1511,27 @@ pub(super) fn typed_provider(
         plugin_library: None,
         last_client: Mutex::new(None),
     }
+}
+
+/// The parent's subagent reports, polled until `needle` is among them.
+///
+/// Polled, not read once. `SubAgentNotified` is journaled as soon as the
+/// parent's *mailbox* accepts the report — it is a `tell` — so the flag means
+/// "handed over", not "recorded". The parent appends to its own history a
+/// scheduling hop later, and reading immediately races that.
+///
+/// Returns whatever it last saw, so the caller's assertion is what names the
+/// failure rather than this.
+pub(super) async fn await_subagent_text(session: &SessionRef, needle: &str) -> Vec<String> {
+    let mut texts = Vec::new();
+    for _ in 0..300 {
+        texts = subagent_texts(&main_history(session).await);
+        if texts.iter().any(|t| t.contains(needle)) {
+            return texts;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    texts
 }
 
 pub(super) async fn main_history(session: &SessionRef) -> crate::agent_loop::LogPage {

@@ -41,6 +41,11 @@ pub struct TestState {
     /// The password `bootstrap` generated, for a suite that logs in with it.
     /// `None` if the database already held an account.
     pub initial_password: Option<String>,
+    /// The other end of this deployment's serving watch, present only when
+    /// [`TestStateBuilder::stood_down`] built one. Held so the channel stays
+    /// open for as long as the deployment does, and so a test that wants the
+    /// node back can send `true`.
+    pub serving: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 impl TestState {
@@ -151,6 +156,9 @@ pub struct TestStateBuilder {
     db: Option<Db>,
     mode: AuthMode,
     supervisor: SupervisorConfig,
+    /// What this deployment reports for [`crate::sessions::addressing::Serving`].
+    /// `None` is the single-node default: never stands down, never gated.
+    serving: Option<tokio::sync::watch::Sender<bool>>,
 }
 
 /// A Fly API root nothing is listening on, so a save's substrate check fails
@@ -173,6 +181,7 @@ pub fn state(state_dir: impl Into<PathBuf>) -> TestStateBuilder {
         db: None,
         mode: AuthMode::Off,
         supervisor: SupervisorConfig::default(),
+        serving: None,
     }
 }
 
@@ -196,6 +205,18 @@ impl TestStateBuilder {
     /// the test asks for one and never by surprise.
     pub fn supervisor(mut self, supervisor: SupervisorConfig) -> Self {
         self.supervisor = supervisor;
+        self
+    }
+
+    /// A clustered node that has lost touch with a quorum.
+    ///
+    /// The one thing a single-node suite cannot otherwise produce, and the
+    /// state every route has to answer for: a stood-down node holds actors it
+    /// may no longer speak for, so its references refuse to send. What is being
+    /// asserted through this is never behaviour of the cluster — it is what a
+    /// handler does when its ask comes back undeliverable.
+    pub fn stood_down(mut self) -> Self {
+        self.serving = Some(tokio::sync::watch::channel(false).0);
         self
     }
 
@@ -233,7 +254,10 @@ impl TestStateBuilder {
         let shared = Arc::new(Shared {
             bus: Arc::new(crate::bus::MemoryBus::new()),
             system: crate::projects::node_system(&db, None),
-            serving: None,
+            serving: self
+                .serving
+                .as_ref()
+                .map(tokio::sync::watch::Sender::subscribe),
             db,
             project_service,
             artifacts: Arc::new(ArtifactStore::new(self.state_dir.join("plugins"))),
@@ -257,6 +281,7 @@ impl TestStateBuilder {
             state,
             user,
             account,
+            serving: self.serving,
             initial_password,
         }
     }
