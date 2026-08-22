@@ -37,7 +37,7 @@ function Shell() {
           still plays in full before the rail goes away. */}
       <div
         className={cn(
-          "z-40 h-full shrink-0 transition-[transform,visibility] duration-200 ease-out max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:shadow-[var(--panel-lift)]",
+          "z-40 h-full shrink-0 transition-[transform,visibility] duration-200 ease-out max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:shadow-[var(--float)]",
           open ? "max-md:translate-x-0" : "max-md:invisible max-md:-translate-x-full",
         )}
       >
@@ -48,7 +48,7 @@ function Shell() {
           keyboard where it was. No ring on it — a 2px outline round the whole
           column is a lot of chrome for a stop you leave on the next Tab, and
           that Tab lands on a real control that draws its own. */}
-      <main id="main" tabIndex={-1} className="min-w-0 flex-1 outline-none">
+      <main id="main" tabIndex={-1} className="min-w-0 flex-1 bg-panel outline-none">
         <Outlet />
       </main>
     </div>

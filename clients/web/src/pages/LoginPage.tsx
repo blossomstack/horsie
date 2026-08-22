@@ -42,7 +42,7 @@ export function LoginPage() {
         <div className="flex items-center gap-2.5">
           <span
             aria-hidden
-            className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-orange font-mono text-sm font-bold text-orange-ink shadow-[var(--cap-lift)]"
+            className="flex h-7 w-7 items-center justify-center rounded-[4px] bg-accent font-mono text-sm font-bold text-accent-ink shadow-[var(--cap-lift)]"
           >
             h
           </span>

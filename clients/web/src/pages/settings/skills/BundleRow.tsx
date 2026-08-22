@@ -59,7 +59,7 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
 
   return (
     <div
-      className="rounded-[var(--radius-control)] border p-3"
+      className="rounded-[var(--radius-control)] p-3"
       style={{ background: "var(--panel-raised)" }}
       data-testid="bundle-row"
     >
@@ -200,7 +200,7 @@ function Toggle({
       onClick={() => onChange(!checked)}
       className={cn(
         "relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50",
-        checked ? "bg-orange" : "bg-raised",
+        checked ? "bg-accent" : "bg-raised",
       )}
     >
       <span

@@ -28,11 +28,11 @@ const PAD = 20;
 const TOGGLE_R = 8;
 
 /** A node is a panel key lit by the same lamps the rest of the console uses:
- * amber for work in motion, ok for an agent that landed, red for a fault. */
+ * live for work in motion, ok for an agent that landed, red for a fault. */
 const STATUS_CLASS: Record<string, string> = {
-  running: "fill-amber-quiet stroke-amber",
-  provisioning: "fill-amber-quiet stroke-amber",
-  awaiting_input: "fill-orange-quiet stroke-orange",
+  running: "fill-live-quiet stroke-live",
+  provisioning: "fill-live-quiet stroke-live",
+  awaiting_input: "fill-accent-quiet stroke-accent",
   completed: "fill-raised stroke-lamp-ok",
   failed: "fill-red-quiet stroke-red",
   cancelled: "fill-raised stroke-rule-strong",
@@ -145,7 +145,7 @@ export function AgentGraph({
             fill="none"
             className={cn(
               "stroke-[1.5]",
-              w.live ? "stroke-amber" : "stroke-rule-strong opacity-70",
+              w.live ? "stroke-live" : "stroke-rule-strong opacity-70",
             )}
           />
         ))}
@@ -186,7 +186,7 @@ export function AgentGraph({
                   className={cn(
                     STATUS_CLASS[n.status] ?? "fill-raised stroke-rule",
                     "stroke-[1.5]",
-                    selected === n.id && "stroke-amber stroke-[2.5]",
+                    selected === n.id && "stroke-live stroke-[2.5]",
                   )}
                 />
                 <text x={12} y={20} className="fill-legend text-[12px] font-medium">

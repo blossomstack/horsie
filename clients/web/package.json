@@ -16,10 +16,10 @@
     "generate-types": "fluorite clean -o src/generated && fluorite ts -i ../../crates/models/fluorite/agent.fl ../../crates/models/fluorite/hooks.fl ../../crates/models/fluorite/runtime.fl ../../crates/models/fluorite/capabilities.fl ../../crates/models/fluorite/session.fl ../../crates/models/fluorite/session_api.fl ../../crates/models/fluorite/settings.fl ../../crates/models/fluorite/github.fl ../../crates/models/fluorite/mcp.fl ../../crates/models/fluorite/plugins.fl ../../crates/models/fluorite/projects.fl ../../crates/models/fluorite/model_cards.fl ../../crates/models/fluorite/memory.fl ../../crates/models/fluorite/auth.fl ../../crates/models/fluorite/agents.fl ../../crates/models/fluorite/routines.fl ../../crates/models/fluorite/executor.fl ../../crates/models/fluorite/environments.fl ../../crates/models/fluorite/runtime_vendor.fl ../../crates/models/fluorite/workflow.fl ../../crates/models/fluorite/tools.fl -o src/generated"
   },
   "dependencies": {
-    "@fontsource-variable/archivo": "^5.3.0",
-    "@fontsource-variable/libre-franklin": "^5.3.0",
-    "@fontsource-variable/manrope": "^5.3.0",
-    "@fontsource-variable/martian-mono": "^5.3.0",
+    "@fontsource-variable/geist": "^5.3.0",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "@radix-ui/react-dialog": "^1.1.19",
     "@tanstack/react-query": "^5.101.2",
     "clsx": "^2.1.1",

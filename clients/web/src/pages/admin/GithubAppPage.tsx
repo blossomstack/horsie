@@ -199,7 +199,7 @@ export function GithubAppPage() {
                 App configured.{" "}
                 <Link
                   to="/settings/integrations"
-                  className="text-amber-ink underline underline-offset-2"
+                  className="text-live-ink underline underline-offset-2"
                 >
                   Connect an account
                 </Link>

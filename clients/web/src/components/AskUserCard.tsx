@@ -76,16 +76,16 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
     <div
       data-testid="ask-user-card"
       data-pending={pending}
-      className="rounded-[var(--radius-control)] border border-amber bg-amber-quiet px-3 py-2 text-sm text-legend"
+      className="rounded-[var(--radius-control)] bg-live-quiet px-3 py-2 text-sm text-legend"
     >
       <div className="flex items-start gap-2">
-        <HelpCircle size={16} className="mt-0.5 shrink-0 text-amber-ink" />
+        <HelpCircle size={16} className="mt-0.5 shrink-0 text-live-ink" />
         {/* `break-words` is load-bearing, not defensive: a question or an
             answer routinely carries a path, a URL or an identifier with no
             break opportunity, and without it that single token widens the
             card past the transcript column. */}
         <div className="min-w-0 flex-1 break-words">
-          <span className="font-medium text-amber-ink">Asked: </span>
+          <span className="font-medium text-live-ink">Asked: </span>
           {input.question ?? ""}
 
           {choices.length > 0 && (
@@ -104,9 +104,9 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                     // long choice label straight out of the card — the model
                     // writes these, so their length is unbounded.
                     "chip chip-wrap",
-                    pending && "cursor-pointer hover:border-amber",
+                    pending && "cursor-pointer hover:bg-raised",
                     (pending ? selected.includes(c) : picked?.has(c)) &&
-                      "border-amber bg-amber/15 font-medium",
+                      "bg-live-quiet font-medium text-legend",
                   )}
                 >
                   {c}
@@ -145,7 +145,7 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                 // nothing clipping it and no ring of its own, and it is the
                 // field that unblocks a parked agent — the one place to lose
                 // the focus ring is not this one.
-                className="min-w-0 flex-1 rounded-[var(--radius-control)] border bg-transparent px-2 py-1 text-sm placeholder:text-faint focus:border-amber disabled:opacity-60"
+                className="min-w-0 flex-1 rounded-[var(--radius-control)] bg-transparent px-2 py-1 text-sm placeholder:text-faint focus:border-live disabled:opacity-60"
               />
               <button
                 type="button"

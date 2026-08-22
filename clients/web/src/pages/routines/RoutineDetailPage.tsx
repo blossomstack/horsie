@@ -44,7 +44,7 @@ export function RoutineDetailPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="routine-detail-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <Link
           to="/routines"
@@ -56,7 +56,7 @@ export function RoutineDetailPage() {
         </Link>
         <h1 className="page-title min-w-0 flex-1 truncate">{routine.name}</h1>
         {!routine.enabled && (
-          <span className="rounded-full border px-2 py-0.5 text-[0.6875rem] text-faint">
+          <span className="rounded-full px-2 py-0.5 text-[0.6875rem] text-faint">
             paused
           </span>
         )}
@@ -133,7 +133,7 @@ export function RoutineDetailPage() {
 
           <div>
             <div className="mb-1 text-xs font-medium text-dim">Prompt</div>
-            <pre className="whitespace-pre-wrap rounded-[var(--radius-control)] border bg-raised px-3 py-2 font-mono text-xs text-legend">
+            <pre className="whitespace-pre-wrap rounded-[var(--radius-control)] bg-raised px-3 py-2 font-mono text-xs text-legend">
               {routine.prompt}
             </pre>
           </div>
@@ -165,12 +165,12 @@ export function RoutineDetailPage() {
                 question.
               </p>
             )}
-            <div className="space-y-2">
+            <div className="space-y-px">
               {(runs ?? []).map((s) => (
                 <Link
                   key={s.id}
                   to={`/sessions/${s.id}`}
-                  className="flex items-center gap-2.5 rounded-[var(--radius-control)] border px-4 py-3 hover:bg-raised"
+                  className="flex items-center gap-2.5 row px-2.5 py-2"
                   data-testid="routine-run-row"
                   data-session-id={s.id}
                 >

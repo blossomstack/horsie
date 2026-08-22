@@ -25,7 +25,7 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
           onClick={() => setOpen((v) => !v)}
           data-testid="compaction-toggle"
           aria-expanded={open}
-          className="flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[0.6875rem] uppercase tracking-wide text-dim transition-colors hover:border-amber hover:text-legend"
+          className="flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--rule)] px-2.5 py-1 text-[0.6875rem] uppercase tracking-wide text-dim transition-colors hover:border-live hover:text-legend"
           title={
             open
               ? "Hide what was carried across"

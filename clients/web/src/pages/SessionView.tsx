@@ -185,7 +185,7 @@ function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
   const gone = error instanceof ApiRequestError && error.status === 404;
   return (
     <div className="flex h-full flex-col" data-testid="session-unavailable">
-      <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
           {gone ? "No such session" : "Could not load this session"}
@@ -193,7 +193,7 @@ function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
       </header>
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
         <div className="mx-auto max-w-3xl">
-          <section className="panel p-4">
+          <section className="section">
             <h2 className="legend">Session id</h2>
             <pre className="screen mt-3 overflow-x-auto px-3 py-2.5 font-mono text-[0.6875rem] leading-relaxed text-legend select-all">
               {id}
@@ -620,7 +620,7 @@ export function SessionView() {
               so the three columns read as one instrument face. Only live state
               earns a place here: what this is, what it is doing, and how full
               its context is. Settled facts sit behind the info key. */}
-          <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+          <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
             <RailToggle />
             <SessionTitle id={id} name={detail?.name} editable={!agentId} />
             {/* Beside the title rather than in the key cluster on the right:
@@ -669,7 +669,7 @@ export function SessionView() {
                 that quietly stops moving while the lamp still says Running. */}
             {!stream.connected && (
               <span
-                className="flex shrink-0 items-center gap-2 text-amber-ink"
+                className="flex shrink-0 items-center gap-2 text-live-ink"
                 data-testid="session-reconnecting"
                 title="Lost the live feed. The run continues on the server; this reconnects and replays anything missed."
               >
@@ -791,7 +791,7 @@ export function SessionView() {
             <TranscriptSpine boundaries={boundaries} onSeek={seek} />
             {isLoading && stream.items.length === 0 ? (
               <div className="flex h-full items-center justify-center gap-2">
-                <span className="lamp lamp-live text-amber-ink" aria-hidden />
+                <span className="lamp lamp-live text-live-ink" aria-hidden />
                 <span className="legend">Loading transcript</span>
               </div>
             ) : stream.items.length === 0 &&
@@ -822,7 +822,7 @@ export function SessionView() {
                     {stream.loadingMore ? (
                       <>
                         <span
-                          className="lamp lamp-live text-amber-ink"
+                          className="lamp lamp-live text-live-ink"
                           aria-hidden
                         />
                         <span className="legend">Loading earlier messages</span>
@@ -867,7 +867,7 @@ export function SessionView() {
                 data-stage={stream.progression.stage}
                 className="flex items-center gap-2 py-1.5"
               >
-                <span className="lamp lamp-live text-amber-ink" aria-hidden />
+                <span className="lamp lamp-live text-live-ink" aria-hidden />
                 <span className="legend">
                   {progressionLabel(stream.progression.stage)}
                   {stream.progression.detail ? ` — ${stream.progression.detail}` : ""}
@@ -909,7 +909,7 @@ export function SessionView() {
           {/* A workflow step takes no messages — the definition drives it — so
               it gets the stop control without the send one. */}
           {agentId && detail?.workflow ? (
-            <div className="flex items-center gap-3 border-t px-4 py-2">
+            <div className="flex items-center gap-3 px-4 py-2">
               <span className="text-xs text-faint">
                 This is a workflow step. It works from its definition, not from
                 messages.

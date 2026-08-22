@@ -140,7 +140,7 @@ export function RuntimesSettings() {
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 p-6">
-        <span className="lamp lamp-live text-amber-ink" aria-hidden />
+        <span className="lamp lamp-live text-live-ink" aria-hidden />
         <span className="legend">Loading runtimes</span>
       </div>
     );

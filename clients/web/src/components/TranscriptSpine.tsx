@@ -51,7 +51,7 @@ export function TranscriptSpine({
               // measured, and a tick that jumps around as images and code
               // blocks settle is worse than one that never moves.
               style={{ top: `${((i + 1) / (boundaries.length + 1)) * 100}%` }}
-              className="absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[var(--rule-strong)] bg-[var(--surface)] transition-colors hover:border-amber hover:bg-amber"
+              className="absolute left-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[var(--rule-strong)] bg-[var(--surface)] transition-colors hover:border-live hover:bg-live"
               title={
                 b.covered === null
                   ? `Session ${i + 1} ended here`
@@ -91,7 +91,7 @@ function Cap({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex h-5 w-5 items-center justify-center rounded-full text-faint transition-colors hover:text-amber-ink"
+      className="flex h-5 w-5 items-center justify-center rounded-full text-faint transition-colors hover:text-live-ink"
     >
       {children}
     </button>

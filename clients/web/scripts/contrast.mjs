@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * The AA gate for every skin × mode this app ships.
+ * The AA gate for every world × exposure this app ships.
  *
  * Reads the palettes out of `src/index.css` and `src/skins.css` rather than
- * restating them here. The previous version hard-coded two ramps, which meant
- * it verified whatever it had been told last rather than what shipped; with
- * four skins that drift is a certainty, not a risk.
+ * restating them here, and DISCOVERS the worlds by scanning for `data-skin`
+ * blocks rather than carrying a list. A hardcoded list is blind to exactly the
+ * case this gate exists for — a world added later and never measured.
  *
  * Exits non-zero on any failure so it can gate a build.
  *
@@ -100,16 +100,24 @@ const pick = (...selectors) => {
   return null;
 };
 
-/** Console's light block patches its dark base, so it is resolved by merge;
- * every skin block is complete on its own. */
-const consoleDark = pick(':root, [data-theme="dark"]');
-const consoleLight = { ...consoleDark, ...pick('[data-theme="light"]') };
+/** Graphite's light block patches its dark base, so it is resolved by merge;
+ * every alternate world's block is complete on its own. */
+const dark = pick(':root, [data-theme="dark"]');
+const light = { ...dark, ...pick('[data-theme="light"]') };
 
 const PALETTES = [
-  ["console", "dark", consoleDark],
-  ["console", "light", consoleLight],
+  ["graphite", "dark", dark],
+  ["graphite", "light", light],
 ];
-for (const skin of ["paper", "soft", "slate"]) {
+
+const SKIN_IDS = [
+  ...new Set([...skinsCss.matchAll(/\[data-skin="([a-z-]+)"\]/g)].map((m) => m[1])),
+].sort();
+if (!SKIN_IDS.length) {
+  console.error("no [data-skin=...] blocks found in skins.css");
+  process.exitCode = 1;
+}
+for (const skin of SKIN_IDS) {
   for (const mode of ["dark", "light"]) {
     const p = pick(`[data-skin="${skin}"][data-theme="${mode}"]`);
     if (!p) {
@@ -124,7 +132,7 @@ for (const skin of ["paper", "soft", "slate"]) {
 /* ---------- checks ---------- */
 
 const FIELDS = ["chassis", "panel", "panel-raised", "screen"];
-const INKS = ["legend", "legend-dim", "legend-faint", "amber-ink", "red-ink", "lamp-ok"];
+const INKS = ["legend", "legend-dim", "legend-faint", "live-ink", "red-ink", "lamp-ok"];
 const CODE = ["code-keyword", "code-string", "code-number", "code-type"];
 const AA = 4.5;
 /** WCAG 1.4.11: a non-text indicator needs 3:1 against what surrounds it. */
@@ -147,8 +155,8 @@ for (const [skin, mode, T] of PALETTES) {
     "keycap",
     "keycap-ink",
     "focus-ring",
-    "orange",
-    "orange-ink",
+    "accent",
+    "accent-ink",
   ].filter((k) => !T[k]);
   if (missing.length) {
     fail(`palette is missing: ${missing.join(", ")}`);
@@ -184,26 +192,31 @@ for (const [skin, mode, T] of PALETTES) {
   // cap — so the pair that has to separate is ink against the key's own face,
   // not against the panel the key sits on.
   {
-    const v = contrast(T["orange-ink"], T.orange);
-    if (v < NON_TEXT) fail(`key-go focus ring ${v.toFixed(2)} on the orange face`);
+    const v = contrast(T["accent-ink"], T.accent);
+    if (v < NON_TEXT) fail(`key-go focus ring ${v.toFixed(2)} on the accent face`);
     else console.log(`  ok    ${"key-go focus".padEnd(13)} ${v.toFixed(2)}`);
   }
 
-  // A keycap is a different material from its panel in every mode — this is
-  // the invariant a light theme breaks by lightening instead of re-roling.
+  // A secondary key is a filled rectangle with no border, so the fill is the
+  // only thing separating it from the surface it sits on.
   const capSep = contrast(T.keycap, T.panel);
   if (capSep < 1.25) fail(`keycap:panel separation only ${capSep.toFixed(2)}`);
   const capInk = contrast(T["keycap-ink"], T.keycap);
   if (capInk < AA) fail(`keycap ink ${capInk.toFixed(2)} on the cap`);
 
-  // Material roles hold by order, not by brightness: screen is always the most
-  // recessed surface and raised always the most lifted.
-  const lum = (k) => luminance(T[k]);
-  const darkMode = lum("chassis") < 0.5;
-  const ordered = darkMode
-    ? lum("screen") < lum("chassis") && lum("chassis") < lum("panel") && lum("panel") < lum("panel-raised")
-    : lum("screen") < lum("chassis") && lum("chassis") < lum("panel") && lum("panel") < lum("panel-raised");
-  if (!ordered) fail("material roles out of order (screen < chassis < panel < raised)");
+  // `panel-raised` is the INTERACTION FILL — hover, selection, a menu above
+  // the surface. What it has to do is separate from the ground it lands on,
+  // which is lighter in the dark and darker in the light. The old gate held
+  // the ordering by brightness in both exposures, which is precisely why the
+  // light theme's hover states were invisible: a white fill on a white panel.
+  const sep = contrast(T["panel-raised"], T.panel);
+  if (sep < 1.1) fail(`interaction fill only ${sep.toFixed(2)} against the panel`);
+  else console.log(`  ok    ${"fill:panel".padEnd(13)} ${sep.toFixed(2)}`);
+
+  // Machine output is a tint on the surface, and a tint you cannot see is not
+  // marking anything.
+  const tint = contrast(T.screen, T.panel);
+  if (tint < 1.05) fail(`screen tint only ${tint.toFixed(2)} against the panel`);
 }
 
 console.log(

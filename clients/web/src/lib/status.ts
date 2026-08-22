@@ -163,10 +163,10 @@ export function showsProgression(stage: string | undefined): boolean {
 }
 
 export const TONE_TEXT: Record<StatusTone, string> = {
-  live: "text-amber-ink",
+  live: "text-live-ink",
   ready: "text-lamp-ok",
   idle: "text-dim",
-  attention: "text-orange",
+  attention: "text-accent",
   fault: "text-red-ink",
   off: "text-faint",
 };

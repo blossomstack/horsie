@@ -48,7 +48,7 @@ function MachineTokens() {
 
   return (
     <section
-      className="panel space-y-3 p-4"
+      className="section space-y-3"
       data-testid="machine-tokens"
     >
       <div>
@@ -96,7 +96,7 @@ function MachineTokens() {
           <p className="text-xs text-lamp-ok">
             Copy this now — it will not be shown again.
           </p>
-          <code className="block break-all rounded-[var(--radius-control)] border p-2 font-mono text-xs">
+          <code className="block break-all rounded-[var(--radius-control)] p-2 font-mono text-xs">
             {fresh}
           </code>
         </div>
@@ -120,7 +120,7 @@ function MachineTokens() {
         {tokens.data?.map((t) => (
           <div
             key={t.id}
-            className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] border px-3 py-2"
+            className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] px-3 py-2"
             data-testid={`token-row-${t.label}`}
           >
             <div className="min-w-0">
@@ -185,7 +185,7 @@ export function AccountSettings() {
         <SettingsPane>
           <p
             data-testid="account-disabled"
-            className="panel p-4 text-sm text-dim"
+            className="section  text-sm text-dim"
           >
             Authentication is disabled on this deployment, so there is no
             account to manage. Anyone who can reach this server has full access.
@@ -205,7 +205,7 @@ export function AccountSettings() {
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"
-            className="panel p-4 text-sm text-legend"
+            className="section  text-sm text-legend"
           >
             This server is still using the password it generated on first boot.
             Change it below — that also deletes the{" "}
@@ -215,7 +215,7 @@ export function AccountSettings() {
         {status.external ? (
           <p
             data-testid="account-external"
-            className="panel p-4 text-sm text-dim"
+            className="section  text-sm text-dim"
           >
             Sign-in for this server is managed elsewhere, so there is no
             password to change here.
@@ -223,7 +223,7 @@ export function AccountSettings() {
         ) : (
           <form
             data-testid="password-form"
-            className="panel max-w-sm space-y-3 p-4"
+            className="section max-w-sm space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
               change.mutate();

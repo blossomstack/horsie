@@ -127,7 +127,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="environment-edit-page">
-      <header className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:px-6">
+      <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New environment"}
@@ -151,7 +151,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto" data-popover-boundary>
         <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
-          <section className="panel space-y-4 p-4">
+          <section className="section space-y-4">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="block">
                 <RowLabel>Name</RowLabel>
@@ -213,7 +213,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
           <RepoPicker repos={repos} setRepos={setRepos} />
 
-          <section className="panel space-y-3 p-4">
+          <section className="section space-y-3">
             <h2 className="section-title">Env vars</h2>
             <p className="text-xs text-faint">
               Plain text only — no secrets here.
@@ -266,7 +266,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
             </button>
           </section>
 
-          <section className="panel space-y-3 p-4">
+          <section className="section space-y-3">
             <h2 className="section-title">Provision steps</h2>
             <p className="text-xs text-faint">
               A JSON array of {"{name, uses, with}"} steps. Nothing runs them
@@ -361,7 +361,7 @@ function RepoPicker({
     );
 
   return (
-    <section className="panel space-y-3 p-4">
+    <section className="section space-y-3">
       <div className="flex items-baseline justify-between gap-4">
         <h2 className="section-title">Repos</h2>
         <span className="legend" data-testid="repo-selected-count">

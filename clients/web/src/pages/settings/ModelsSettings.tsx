@@ -416,7 +416,7 @@ export function ModelsSettings() {
                           className={
                             p.hasCredential
                               ? "flex items-center gap-1.5 text-lamp-ok"
-                              : "flex items-center gap-1.5 text-amber-ink"
+                              : "flex items-center gap-1.5 text-live-ink"
                           }
                           title={credentialHint(p.kind, p.hasCredential)}
                         >
@@ -809,7 +809,7 @@ function ModelIdField({
       />
       {show && (
         <ul
-          className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-[var(--radius-control)] border shadow-lg"
+          className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded-[var(--radius-control)] shadow-lg"
           style={{ background: "var(--panel)" }}
           data-testid="model-card-suggestions"
         >
@@ -902,7 +902,7 @@ function ModelEditor({
           onChange={(v) => set({ contextWindow: v })}
           placeholder="200000"
         />
-        <div className="col-span-1 border-t pt-3 sm:col-span-2">
+        <div className="col-span-1 pt-3 sm:col-span-2">
           <RowLabel>Thinking efforts this model offers</RowLabel>
           <div className="flex flex-wrap gap-3">
             {EFFORTS.map((e) => (

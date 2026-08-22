@@ -68,7 +68,7 @@ function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
 
   return (
     <li
-      className="rounded-[var(--radius-control)] border px-2.5 py-2"
+      className="rounded-[var(--radius-control)] px-2.5 py-2"
       data-testid="authored-skill"
     >
       <div className="flex items-center gap-2">
@@ -117,7 +117,7 @@ function PluginRow({ plugin }: { plugin: AuthoredPluginView }) {
 
   return (
     <div
-      className="rounded-[var(--radius-control)] border p-3"
+      className="rounded-[var(--radius-control)] p-3"
       style={{ background: "var(--panel-raised)" }}
       data-testid="authored-plugin-row"
     >
@@ -195,7 +195,7 @@ export function AuthoredSection({
   const create = useCreateAuthoredPlugin();
 
   return (
-    <section className="panel p-4" data-testid="authored-section">
+    <section className="section" data-testid="authored-section">
       <div className="mb-3 flex items-start gap-2">
         <PenLine size={15} className="mt-0.5 text-faint" />
         <div>
@@ -246,7 +246,7 @@ export function AuthoredSection({
 
       <div className="space-y-2.5">
         {plugins.length === 0 && (
-          <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+          <p className="screen px-3 py-4 text-center text-sm text-faint">
             Nothing authored yet. A session with the authoring tools selected
             can write skills here.
           </p>

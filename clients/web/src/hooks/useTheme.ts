@@ -4,42 +4,44 @@ import { useCallback, useSyncExternalStore } from "react";
 export type ThemeChoice = "light" | "dark" | "system";
 /** What is actually painted — `system` is resolved away before this. */
 export type Mode = "light" | "dark";
-export type Skin = "console" | "paper" | "soft" | "slate";
-/** How big the instrument is drawn. Scales every rem in the build, so the
+/** Which of the four worlds. Graphite is the default and carries NO
+ * attribute, so `index.css` keeps the specificity it was written against. */
+export type Skin = "graphite" | "ink" | "aurora" | "glass";
+/** How big the interface is drawn. Scales every rem in the build, so the
  * spacing grows with the type instead of the type outgrowing its slots. */
 export type TextSize = "compact" | "default" | "large";
-
-export const SKINS: { id: Skin; name: string; blurb: string }[] = [
-  {
-    id: "console",
-    name: "Console",
-    blurb:
-      "Machined gunmetal, engraved mono legends, one safety-orange key. The instrument horsie was built as.",
-  },
-  {
-    id: "paper",
-    name: "Paper",
-    blurb:
-      "Editorial calm. No panel borders, whitespace doing the separating, one humanist sans, ink blue for the control that commits.",
-  },
-  {
-    id: "soft",
-    name: "Soft",
-    blurb:
-      "A modern product surface. Elevation instead of borders, generous radii, warm neutral greys, muted violet accent.",
-  },
-  {
-    id: "slate",
-    name: "Slate",
-    blurb:
-      "Reductive monochrome. No borders, no shadows — surfaces separate by a step in value, and one accent carries every action.",
-  },
-];
 
 export const TEXT_SIZES: { id: TextSize; name: string; blurb: string }[] = [
   { id: "compact", name: "Compact", blurb: "The densest fit — most transcript on screen." },
   { id: "default", name: "Default", blurb: "The shipped density." },
   { id: "large", name: "Large", blurb: "Roomier type and spacing, less on screen at once." },
+];
+
+export const SKINS: { id: Skin; name: string; blurb: string }[] = [
+  {
+    id: "graphite",
+    name: "Graphite",
+    blurb:
+      "Cool graphite under an electric indigo accent. The default: enough colour to have an identity, quiet enough to watch for an hour.",
+  },
+  {
+    id: "ink",
+    name: "Ink",
+    blurb:
+      "Bright minimal, true neutral. The accent is ink itself, so the control that commits is the highest-contrast thing on screen rather than the most colourful.",
+  },
+  {
+    id: "aurora",
+    name: "Aurora",
+    blurb:
+      "Tinted and vivid. Every ground carries the accent's own hue at low chroma and mint is the action. Rounder, in a rounder letter.",
+  },
+  {
+    id: "glass",
+    name: "Glass",
+    blurb:
+      "Soft depth. A tinted ground with two coloured lights on it, and the interface as a frosted sheet laid over the top.",
+  },
 ];
 
 const THEME_KEY = "horsie-theme";
@@ -48,8 +50,6 @@ const TEXT_SIZE_KEY = "horsie-text-size";
 
 const isChoice = (v: unknown): v is ThemeChoice =>
   v === "light" || v === "dark" || v === "system";
-const isSkin = (v: unknown): v is Skin =>
-  v === "console" || v === "paper" || v === "soft" || v === "slate";
 const isTextSize = (v: unknown): v is TextSize =>
   v === "compact" || v === "default" || v === "large";
 
@@ -67,9 +67,9 @@ function readChoice(): ThemeChoice {
 function readSkin(): Skin {
   try {
     const raw = localStorage.getItem(SKIN_KEY);
-    return isSkin(raw) ? raw : "console";
+    return SKINS.some((s) => s.id === raw) ? (raw as Skin) : "graphite";
   } catch {
-    return "console";
+    return "graphite";
   }
 }
 
@@ -114,26 +114,15 @@ const emit = () => {
 function apply() {
   const root = document.documentElement;
   root.dataset.theme = resolveMode(choice);
-  // Console is the default and carries no attribute, so every selector in
-  // index.css keeps the specificity it was written against.
-  if (skin === "console") delete root.dataset.skin;
+  // Graphite is the default and deliberately carries no attribute, so every
+  // selector in index.css keeps the specificity it was written against.
+  if (skin === "graphite") delete root.dataset.skin;
   else root.dataset.skin = skin;
   // Same convention: the shipped density carries no attribute, so `--text-root`
   // falls through to its default rather than being restated in two places.
   if (textSize === "default") delete root.dataset.textSize;
   else root.dataset.textSize = textSize;
 }
-
-/**
- * The two faces the alternate skins need are fetched only when a skin that
- * uses one is chosen, so Console — the default, and what most installs run —
- * pays nothing for worlds nobody opened. Slate deliberately reuses Archivo
- * and costs no fetch at all.
- */
-const loadFace = (s: Skin) => {
-  if (s === "paper") void import("@fontsource-variable/libre-franklin");
-  if (s === "soft") void import("@fontsource-variable/manrope");
-};
 
 // A `system` choice keeps tracking the OS after first paint rather than
 // sampling it once at load.
@@ -158,6 +147,16 @@ function setChoice(next: ThemeChoice) {
   apply();
   emit();
 }
+
+/**
+ * The two extra faces are fetched only when a world that uses one is chosen,
+ * so Graphite — the default, and what most installs run — pays nothing for
+ * worlds nobody opened. Glass deliberately reuses Inter and costs no fetch.
+ */
+const loadFace = (s: Skin) => {
+  if (s === "ink") void import("@fontsource-variable/geist");
+  if (s === "aurora") void import("@fontsource-variable/plus-jakarta-sans");
+};
 
 function setSkin(next: Skin) {
   skin = next;
@@ -190,7 +189,7 @@ const subscribe = (l: () => void) => {
 };
 const getSnapshot = () => snapshot;
 
-// The inline script in index.html already set both attributes before first
+// The inline script in index.html already set the attributes before first
 // paint; this re-asserts them for the SPA's lifetime and fetches the face.
 if (typeof document !== "undefined") {
   apply();

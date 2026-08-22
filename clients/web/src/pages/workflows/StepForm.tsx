@@ -55,7 +55,7 @@ export function StepForm({
     step.agent !== "" && !agents.some((a) => a.name === step.agent);
   return (
     <div className="space-y-4" data-testid="step-form" data-step-name={step.name}>
-      <section className="panel space-y-3 p-4">
+      <section className="section space-y-3">
         <label className="block">
           <span className="section-title">Name</span>
           <input
@@ -111,7 +111,7 @@ export function StepForm({
         </label>
       </section>
 
-      <section className="panel p-4">
+      <section className="section">
         <h2 className="legend">Outcomes</h2>
         <p className="mt-1 text-xs text-faint">
           How this step can end. The step picks one, and it is the only thing a
@@ -169,7 +169,7 @@ export function StepForm({
         </div>
       </section>
 
-      <section className="panel p-4">
+      <section className="section">
         <h2 className="legend">Result fields</h2>
         <p className="mt-1 text-xs text-faint">
           Extra values this step returns, beyond its outcome and the markdown
@@ -259,7 +259,7 @@ export function StepForm({
         </div>
       </section>
 
-      <section className="panel p-4">
+      <section className="section">
         <label className="flex items-start gap-2">
           <input
             type="checkbox"
@@ -278,7 +278,7 @@ export function StepForm({
         </label>
       </section>
 
-      <section className="panel p-4">
+      <section className="section">
         <h2 className="legend">Goes to</h2>
         <p className="mt-1 text-xs text-faint">
           Tried in order; the first match wins. A row that names no outcome is
@@ -378,7 +378,7 @@ export function StepForm({
           leaves alone, and they were previously carried through the editor
           without being shown at all — so a budget set through the API was
           invisible here while quietly surviving a save. */}
-      <section className="panel space-y-3 p-4">
+      <section className="section space-y-3">
         <h3 className="legend">Limits</h3>
         <div className="grid grid-cols-2 gap-3">
           <label className="block">

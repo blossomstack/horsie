@@ -658,7 +658,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
           provision has nowhere to check anything out.
         */}
         {named && (
-          <div className="border-t pt-1.5" data-testid="environment-summary">
+          <div className="pt-1.5" data-testid="environment-summary">
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
               Repos
             </p>
@@ -680,7 +680,7 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
           </div>
         )}
         {adhoc && d.provisions && (
-          <div className="border-t pt-1.5" data-testid="environment-repos">
+          <div className="pt-1.5" data-testid="environment-repos">
             <p className="px-2 pb-0.5 text-[0.6875rem] tracking-wide text-faint uppercase">
               Repos
             </p>

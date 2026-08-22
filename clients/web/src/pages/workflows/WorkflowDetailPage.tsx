@@ -41,7 +41,7 @@ export function WorkflowDetailPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <Link
           to="/workflows"
@@ -75,7 +75,7 @@ export function WorkflowDetailPage() {
           <p className="max-w-prose text-sm text-dim">{workflow.description}</p>
         )}
 
-        <section className="panel p-4">
+        <section className="section">
           <h2 className="legend">Graph</h2>
           <p className="mt-1 text-xs text-faint">
             Every step shares one runtime and one workspace.{" "}
@@ -87,7 +87,7 @@ export function WorkflowDetailPage() {
           </div>
         </section>
 
-        <section className="panel p-4">
+        <section className="section">
           <h2 className="legend">Runs</h2>
           {runsFailed ? (
             <ReadError
@@ -104,7 +104,7 @@ export function WorkflowDetailPage() {
                 <Link
                   key={s.id}
                   to={`/sessions/${s.id}`}
-                  className="flex items-center gap-3 rounded-[var(--radius-control)] border px-3 py-2"
+                  className="flex items-center gap-3 row px-2.5 py-2"
                   data-testid="workflow-run-row"
                 >
                   <span className="min-w-0 flex-1 truncate text-sm text-legend">

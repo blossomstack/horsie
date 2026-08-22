@@ -63,7 +63,7 @@ export function SkillsSettings() {
       />
 
       <SettingsPane>
-        <section className="panel p-4">
+        <section className="section">
           <div className="mb-3 flex items-start gap-2">
             <Download size={15} className="mt-0.5 text-faint" />
             <div>
@@ -117,7 +117,7 @@ export function SkillsSettings() {
             *failed* read is not "none", and silently removing the section is
             how a catalogue someone added appears to have been deleted. */}
         {(marketplacesFailed || (marketplaces && marketplaces.length > 0)) && (
-          <section className="panel p-4">
+          <section className="section">
             <div className="mb-3 flex items-start gap-2">
               <Store size={15} className="mt-0.5 text-faint" />
               <div>
@@ -153,7 +153,7 @@ export function SkillsSettings() {
 
         <AuthoredSection plugins={authored ?? []} />
 
-        <section className="panel p-4">
+        <section className="section">
           <div className="mb-3 flex items-start gap-2">
             <Boxes size={15} className="mt-0.5 text-faint" />
             <div>
@@ -176,7 +176,7 @@ export function SkillsSettings() {
               />
             )}
             {bundles && bundles.length === 0 && (
-              <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+              <p className="screen px-3 py-4 text-center text-sm text-faint">
                 No skill bundles installed yet.
               </p>
             )}

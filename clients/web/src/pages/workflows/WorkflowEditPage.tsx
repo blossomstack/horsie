@@ -157,7 +157,7 @@ function WorkflowEditor() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-edit-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${name}` : "New workflow"}
@@ -184,7 +184,7 @@ function WorkflowEditor() {
             it on a phone — the same move the settings nav makes, because a
             15rem column takes two thirds of a 390px viewport. */}
         <nav
-          className="flex shrink-0 border-b md:h-full md:w-60 md:flex-col md:border-b-0 md:border-r"
+          className="flex shrink-0 md:h-full md:w-60 md:flex-col md:"
           aria-label="Workflow contents"
           data-testid="workflow-sidebar"
         >
@@ -285,7 +285,7 @@ function WorkflowEditor() {
             </button>
           </div>
 
-          <div className="flex shrink-0 items-center border-l p-2 md:border-l-0 md:border-t">
+          <div className="flex shrink-0 items-center p-2 md:">
             <button
               // A toggle, not a command: a blank key that lights the same way
               // a config key holding a value does. Amber would be wrong — it
@@ -312,7 +312,7 @@ function WorkflowEditor() {
           )}
 
           {visualizing ? (
-            <section className="panel p-4" data-testid="workflow-visual">
+            <section className="section" data-testid="workflow-visual">
               <h2 className="legend">Graph</h2>
               <p className="mt-1 text-xs text-faint">Choose a step to edit it.</p>
               <div className="mt-3 overflow-auto">
@@ -341,7 +341,7 @@ function WorkflowEditor() {
             </div>
           ) : (
             <section
-              className="panel max-w-3xl space-y-3 p-4"
+              className="section max-w-3xl space-y-3"
               data-testid="definition-form"
             >
               <h2 className="legend">Definition</h2>

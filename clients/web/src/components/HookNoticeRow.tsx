@@ -21,7 +21,7 @@ export function HookNoticeRow({ record }: { record: HookRecord }) {
     >
       <span className="flex w-3.5 shrink-0 justify-center pt-0.5">
         {intervened ? (
-          <ShieldAlert size={12} className="text-amber-ink" aria-hidden />
+          <ShieldAlert size={12} className="text-live-ink" aria-hidden />
         ) : (
           <ShieldCheck size={12} className="text-faint" aria-hidden />
         )}
@@ -47,7 +47,7 @@ export function HookNoticeRow({ record }: { record: HookRecord }) {
         {note && (
           <p
             data-testid="hook-notice-system-message"
-            className="mt-0.5 text-[0.6875rem] leading-relaxed text-amber-ink"
+            className="mt-0.5 text-[0.6875rem] leading-relaxed text-live-ink"
           >
             {note}
           </p>

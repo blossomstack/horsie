@@ -22,7 +22,7 @@ export function RoutinesPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button
@@ -40,7 +40,7 @@ export function RoutinesPage() {
           <p className="text-sm text-red-ink">Can’t reach the server.</p>
         )}
         {routines && routines.length === 0 && (
-          <section className="panel p-4" data-testid="routines-empty">
+          <section className="section" data-testid="routines-empty">
             <h2 className="legend">Routine roster</h2>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
               A routine runs an agent against a fixed prompt — on a timer, from
@@ -50,11 +50,11 @@ export function RoutinesPage() {
             </p>
           </section>
         )}
-        <div className="space-y-2">
+        <div className="space-y-px">
           {(routines ?? []).map((r) => (
             <div
               key={r.name}
-              className="flex items-center gap-3 rounded-[var(--radius-control)] border px-4 py-3"
+              className="flex items-center gap-3 row px-2.5 py-2"
               data-testid="routine-row"
               data-routine-name={r.name}
             >

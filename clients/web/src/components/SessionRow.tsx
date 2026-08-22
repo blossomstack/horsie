@@ -75,7 +75,7 @@ export function SessionRow({
             // now that the menu is always there.
             "flex items-start gap-2.5 rounded-[var(--radius-control)] py-2 pl-2.5 pr-9 transition-colors",
             // The raised fill is the whole cue. The ring that used to sit on
-            // top of it drew a border that competed with the sub session rails
+            // top of it drew a that competed with the sub session rails
             // beneath for the same job.
             isActive
               ? "bg-raised text-legend"
@@ -144,7 +144,7 @@ export function SessionRow({
               }}
             />
           </div>
-          <div className="my-1 border-t" role="separator" />
+          <div className="my-1 " role="separator" />
           <MenuItem
             danger
             testId={`delete-session-${s.id}`}
