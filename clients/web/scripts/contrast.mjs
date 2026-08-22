@@ -137,6 +137,21 @@ const CODE = ["code-keyword", "code-string", "code-number", "code-type"];
 const AA = 4.5;
 /** WCAG 1.4.11: a non-text indicator needs 3:1 against what surrounds it. */
 const NON_TEXT = 3;
+/**
+ * Secondary ink, WHILE THE USER IS SELECTING IT.
+ *
+ * The one floor in this file below AA, and it is a measured trade rather than
+ * a rounding-down. A selection wash visible enough to read necessarily moves
+ * the ground toward the ink on it: hold every ink at 4.5 and the wash falls to
+ * ~1.25 visibility, which is a selection you have to hunt for. The reference
+ * implementations sit in the same place — GitHub's dark theme (`#3392FF44`)
+ * measures ~1.42 visibility and drops its own muted text to ~4.44.
+ *
+ * So: primary prose ink holds full AA and lands at 7.3-9.2, well clear.
+ * Secondary ink — descriptions, blockquotes — is floored at 4.3 and only
+ * while it is actively selected. It is 5.9-6.9 at rest.
+ */
+const SELECTED_DIM = 4.3;
 
 let failures = 0;
 const fail = (msg) => {
@@ -157,6 +172,7 @@ for (const [skin, mode, T] of PALETTES) {
     "focus-ring",
     "edge",
     "selection",
+    "code-fill",
     "accent",
     "accent-ink",
   ].filter((k) => !T[k]);
@@ -221,14 +237,40 @@ for (const [skin, mode, T] of PALETTES) {
   if (sel < 1.1) fail(`selected fill only ${sel.toFixed(2)} against the hover fill`);
   else console.log(`  ok    ${"select:hover".padEnd(13)} ${sel.toFixed(2)}`);
 
-  // Text selection has to be seen on the surfaces it can land on — including
-  // a user bubble, which is itself the interaction fill.
-  for (const under of ["panel", "panel-raised", "screen"]) {
-    const v = contrast(T.selection, T[under]);
-    if (v < 1.2) fail(`::selection only ${v.toFixed(2)} on ${under}`);
+  // ::selection is a semi-transparent WASH, so the declared colour is never
+  // what lands on screen. Every check below is against the composite.
+  //
+  // Two things have to hold at once and they pull against each other: the
+  // wash must be visible against the surface it covers, and the ink on top —
+  // which is deliberately NOT overridden, so that code chips and syntax
+  // survive being selected — must still clear AA over it.
+  for (const under of ["panel", "panel-raised", "screen", "code-fill"]) {
+    const painted = over(T.selection, T[under]);
+    const seen = contrast(painted, T[under]);
+    if (seen < 1.3) fail(`::selection only ${seen.toFixed(2)} on ${under}`);
+    const v = contrast(T.legend, painted);
+    if (v < AA) fail(`legend on ::selection over ${under} is ${v.toFixed(2)}`);
+    // Secondary ink never lands on the inline-code fill — code inherits the
+    // prose ink, which is `legend`.
+    if (under !== "code-fill") {
+      const d = contrast(T["legend-dim"], painted);
+      if (d < SELECTED_DIM) {
+        fail(`legend-dim on ::selection over ${under} is ${d.toFixed(2)}`);
+      }
+    }
   }
-  const selInk = contrast(T.legend, T.selection);
-  if (selInk < AA) fail(`legend on ::selection ${selInk.toFixed(2)}`);
+  console.log(
+    `  ok    ${"::selection".padEnd(13)} ${contrast(over(T.selection, T.panel), T.panel).toFixed(2)} seen`,
+  );
+
+  // A code span has to be seen with nothing pointing at it, so it is held to
+  // a real step off the ground it sits on rather than the interaction fill's
+  // whisper — and its ink has to clear AA on it.
+  const codeSep = contrast(T["code-fill"], T.panel);
+  if (codeSep < 1.35) fail(`inline code fill only ${codeSep.toFixed(2)} against the panel`);
+  else console.log(`  ok    ${"code:panel".padEnd(13)} ${codeSep.toFixed(2)}`);
+  const codeInk = contrast(T.legend, T["code-fill"]);
+  if (codeInk < AA) fail(`legend on the inline code fill ${codeInk.toFixed(2)}`);
 
   // The chrome frame. A hairline that cannot be seen against the surfaces it
   // divides is a frame nobody drew — which is how the columns came to float.

@@ -98,6 +98,9 @@
   --panel-raised: oklch(0.272 0.006 268);
   /* Machine output: tool results, code, logs. A tint, not a recess. */
   --screen: oklch(0.148 0.005 268);
+  /* A token inside running text: inline code, a kbd hint. Louder than the
+   * interaction fill on purpose — nothing points at it. */
+  --code-fill: oklch(0.335 0.012 268);
 
   /* The structural frame: column edges, header underside, footer top, and
    * the separator between rows of one list. Nothing else. */
@@ -122,7 +125,7 @@
   --accent-hover: oklch(0.655 0.2 275);
   --accent-ink: oklch(0.985 0.008 275);
   --accent-quiet: oklch(0.365 0.105 275);
-  --selection: oklch(0.45 0.14 275);
+  --selection: oklch(0.605 0.212 275 / 0.22);
 
   --live: oklch(0.82 0.14 82);
   --live-ink: oklch(0.82 0.14 82);
@@ -156,6 +159,7 @@
   /* Darker than the panel — see the note on the dark block. */
   --panel-raised: oklch(0.912 0.007 268);
   --screen: oklch(0.958 0.004 268);
+  --code-fill: oklch(0.882 0.012 268);
 
   --edge: oklch(0.898 0.006 268);
 
@@ -174,7 +178,7 @@
   --accent-hover: oklch(0.442 0.215 275);
   --accent-ink: oklch(0.995 0.004 275);
   --accent-quiet: oklch(0.862 0.085 275);
-  --selection: oklch(0.815 0.115 275);
+  --selection: oklch(0.492 0.222 275 / 0.36);
 
   --live: oklch(0.72 0.15 82);
   --live-ink: oklch(0.482 0.115 72);
@@ -202,6 +206,7 @@
   --color-panel: var(--panel);
   --color-raised: var(--panel-raised);
   --color-screen: var(--screen);
+  --color-code-fill: var(--code-fill);
   --color-edge: var(--edge);
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
@@ -276,9 +281,18 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* A WASH UNDER the text, not a block over it — so the ink keeps its own
+   * colour and a selected paragraph keeps its inline code chips and its
+   * syntax highlighting. This is what every editor does and what GitHub's own
+   * theme does (`#3392FF44`, ~27% alpha); the solid fill plus a forced
+   * `color` that shipped before flattened all of it into slabs.
+   *
+   * Deliberately NOT setting `color`. MDN's guidance is that the selected
+   * text must still clear 4.5:1 — with the ink untouched and the ground only
+   * washed, it does, and contrast.mjs measures it composited rather than
+   * trusting that. */
   ::selection {
     background: var(--selection);
-    color: var(--legend);
   }
 
   /* Every focusable thing gets the same accent ring — the one line in the
@@ -685,7 +699,7 @@
     display: inline-flex;
     align-items: center;
     border-radius: 4px;
-    background: var(--panel-raised);
+    background: var(--code-fill);
     padding: 0.0625rem 0.3125rem;
     font-family: var(--font-mono);
     font-size: 0.625rem;
@@ -939,7 +953,7 @@
   font-size: 0.875em;
   padding: 0.08em 0.3em;
   border-radius: 4px;
-  background: var(--panel-raised);
+  background: var(--code-fill);
   overflow-wrap: anywhere;
 }
 .prose pre {

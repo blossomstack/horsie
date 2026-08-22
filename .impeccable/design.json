@@ -497,10 +497,17 @@
       },
       "selection": {
         "role": "accent",
-        "displayName": "Text selection",
-        "canonical": "oklch(0.45 0.14 275)",
-        "light": "oklch(0.815 0.115 275)",
-        "purpose": "The ::selection tint. Its own token because it must be seen on the interaction fill too \u2014 it rode accent-quiet, a wash by design, so selecting text inside a user bubble highlighted nothing."
+        "displayName": "Selection wash",
+        "canonical": "oklch(0.605 0.212 275 / 0.22)",
+        "light": "oklch(0.492 0.222 275 / 0.36)",
+        "purpose": "::selection, SEMI-TRANSPARENT and with no color override, so selected text keeps its own ink - syntax highlighting and inline-code chips survive being selected. Gated on the composite, never the declared colour. GitHub's dark theme does the same at #3392FF44."
+      },
+      "code-fill": {
+        "role": "neutral",
+        "displayName": "Inline code fill",
+        "canonical": "oklch(0.335 0.012 268)",
+        "light": "oklch(0.882 0.012 268)",
+        "purpose": "A token inside running text: inline code, a kbd hint. Louder than the interaction fill on purpose - a hover fill has the pointer to help it read, a code span has nothing."
       }
     },
     "typographyMeta": {
@@ -647,9 +654,10 @@
       "worstDark": "4.90 - legend-faint on panel-raised (glass)",
       "worstLight": "4.65 - legend-faint on panel-raised (aurora)",
       "worstFocusRing": "3.30 - graphite dark, measured composited",
-      "interactionFill": "panel-raised separates from panel by >=1.20 in all eight palettes; accent-quiet separates from panel-raised by >=1.10; edge separates from both chassis and panel by >=1.15; ::selection by >=1.20 from every surface it can land on. All floored by the gate.",
+      "interactionFill": "panel-raised separates from panel by >=1.20 in all eight palettes; accent-quiet separates from panel-raised by >=1.10; edge separates from both chassis and panel by >=1.15; ::selection by >=1.20 from every surface it can land on. All floored by the gate. Inline code separates from the panel by >=1.35, since nothing points at it. Inline code separates from the panel by >=1.35, since nothing points at it.",
       "script": "clients/web/scripts/contrast.mjs",
-      "note": "The gate DISCOVERS the worlds by scanning skins.css for data-skin blocks rather than carrying a list, and it parses the shipped CSS rather than restating values."
+      "note": "The gate DISCOVERS the worlds by scanning skins.css for data-skin blocks rather than carrying a list, and it parses the shipped CSS rather than restating values.",
+      "selection": "Wash visibility floored at 1.30 (measures 1.41-1.77); primary ink holds full AA over it (7.3-9.7); secondary ink floored at 4.3 WHILE SELECTED (5.9-6.9 at rest) - a measured trade, since holding every ink at 4.5 drops the wash to ~1.25. GitHub's dark theme measures ~1.42 visibility and ~4.44 muted text."
     },
     "skins": {
       "attribute": "data-skin",
@@ -810,7 +818,10 @@
       "One shadow, spent only on things that genuinely float. Modelling depth on a surface that has none is what produced the boxes.",
       "Anything a world must vary needs a new seam variable, never a call-site override.",
       "Every column header reads --header-h, so the app lines up across its seams without any of them agreeing on a number separately.",
-      "AA is measured by contrast.mjs against the shipped CSS, and the gate discovers the worlds rather than listing them."
+      "AA is measured by contrast.mjs against the shipped CSS, and the gate discovers the worlds rather than listing them.",
+      "Inline code gets its own fill, not the interaction fill: a hover fill is sized to be a whisper because the pointer helps it read, and a code span has no pointer.",
+      "::selection is a transparent wash with no color override, so syntax highlighting and code chips survive selection. Gate the composite, not the declared colour.",
+      "Inline code gets its own fill, not the interaction fill: a hover fill is sized to be a whisper because the pointer helps it read, and a code span has no pointer."
     ],
     "dos": [
       "Draw the frame with the *-edge-* utilities: column-edge-r/l, bar-edge-b/t, list-divided.",
@@ -832,7 +843,8 @@
       "Do not reach for font-mono unless the string is genuinely a machine string.",
       "Do not add a second shadow or an elevation scale.",
       "Do not signal state with colour alone, in any world.",
-      "Do not lower a contrast threshold to make the gate pass."
+      "Do not lower a contrast threshold to make the gate pass.",
+      "Do not give ::selection a solid background or a color override."
     ]
   },
   "components_note": "Each entry points at the class it names. The CSS of record is clients/web/src/index.css - restating it here gives it a second copy free to drift."
