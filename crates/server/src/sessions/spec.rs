@@ -276,7 +276,6 @@ pub struct RuntimeEnv {
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
-    pub name: Option<String>,
     pub kind: SessionKind,
     /// What this session's *own* runtime is built from — the one its main agent
     /// runs on.
@@ -310,7 +309,6 @@ impl SessionSpec {
     #[must_use]
     pub(crate) fn for_vendor(vendor: &str) -> Self {
         Self {
-            name: None,
             kind: SessionKind::Agent {
                 settings: Box::new(AgentSettings {
                     source: AgentSource::AdHoc,
@@ -551,7 +549,6 @@ mod tests {
 
     pub(super) fn agent_spec(vendor: &str, origin: SessionOrigin) -> SessionSpec {
         SessionSpec {
-            name: None,
             kind: SessionKind::Agent {
                 settings: Box::new(agent_settings()),
             },
@@ -569,7 +566,6 @@ mod tests {
 
     pub(super) fn workflow_spec(vendor: &str, workflow: &str) -> SessionSpec {
         SessionSpec {
-            name: None,
             kind: SessionKind::Workflow {
                 run: Arc::new(crate::sessions::workflow::WorkflowRunSpec {
                     workflow: workflow.into(),

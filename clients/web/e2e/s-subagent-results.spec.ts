@@ -27,7 +27,7 @@ test("S1: a finished subagent renders as a collapsed row, not a user bubble", as
   mock,
 }) => {
   await mock.queueToolCall("spawn_agent", {
-    label: "audit",
+    title: "audit",
     task: "audit the dependencies",
   });
   // Consumed in either order by the main agent's continuation and the
@@ -57,7 +57,7 @@ test("S2: the result turn adds no second user bubble", async ({
   mock,
 }) => {
   await mock.queueToolCall("spawn_agent", {
-    label: "audit",
+    title: "audit",
     task: "audit the dependencies",
   });
   await mock.queueText(RACING);

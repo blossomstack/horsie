@@ -4,7 +4,7 @@ import { Usage } from '../agent';
 import { UsageView } from '../session';
 /**
  * One agent's current values: what it is, what became of it, what it runs
- * under, and its live numbers. The subagent-only fields (`parent`, `label`,
+ * under, and its live numbers. The subagent-only fields (`parent`, `title`,
  * `task`, `output`, `error`) are absent for a session's main agent.
  *
  * The configuration fields — `model`, `mcp_servers`, `memory_spaces`,
@@ -20,9 +20,11 @@ export interface AgentDocument {
    */
   parent?: string;
   /**
-   * A subagent's label, or the step a workflow agent ran.
+   * What this agent is called: the main agent's title (which is the
+   * session's name), a subagent's or sub session's, or the step a workflow
+   * agent ran.
    */
-  label?: string;
+  title?: string;
   /**
    * The task a subagent was spawned to do.
    */

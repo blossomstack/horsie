@@ -117,9 +117,6 @@ impl RoutineRunner {
         let spec = build_session_spec(
             &self.config,
             &self.environments,
-            // Named for the routine so a run is recognisable before the agent
-            // titles it; the agent may retitle it from what it actually did.
-            Some(routine.name.clone()),
             // A routine *is* a scheduled invoke of a preset, so its runs are
             // findable under that preset alongside the interactive ones — which
             // is exactly the history a tuning routine reads.
@@ -156,6 +153,10 @@ impl RoutineRunner {
             .supervisor
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: spec.clone(),
+                // Named for the routine so a run is recognisable before the
+                // agent titles it; the agent may retitle it from what it
+                // actually did.
+                name: Some(routine.name.clone()),
                 created_at: now_ms,
                 message: Some(routine.prompt.clone()),
                 reply,
@@ -178,7 +179,7 @@ impl RoutineRunner {
         let status = SessionStatus::Idle;
         Ok(SessionSummary {
             id,
-            name: spec.name.clone(),
+            name: Some(routine.name.clone()),
             status: status_kind(&status),
             created_at: now_ms,
             last_error: status_reason(&status),

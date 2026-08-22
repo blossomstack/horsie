@@ -465,12 +465,12 @@ mod tests {
         );
     }
 
-    fn report(id: &str, label: &str, text: &str) -> Incoming {
+    fn report(id: &str, title: &str, text: &str) -> Incoming {
         Incoming::SubAgent {
             id: id.to_string(),
             part: Box::new(SubAgentResultPart {
                 subagent_id: id.to_string(),
-                label: label.to_string(),
+                title: title.to_string(),
                 status: "completed".to_string(),
                 text: text.to_string(),
                 spawned_at_ms: 0,

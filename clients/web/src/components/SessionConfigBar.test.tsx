@@ -189,7 +189,7 @@ describe("SessionConfigBar locked mode", () => {
     });
     const code = agent({
       id: "code-step",
-      label: "code",
+      title: "code",
       model: "deepseek-v4-flash",
       thinkingEffort: "high",
       mcpServers: ["mcp-code"],

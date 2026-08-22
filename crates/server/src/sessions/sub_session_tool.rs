@@ -48,8 +48,15 @@ fn spawn_subsession_spec(environments: &[(String, String)]) -> ToolSpec {
             .to_string(),
         input_schema: json!({
             "type": "object",
-            "required": ["task"],
+            "required": ["title", "task"],
             "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "A short, specific title for the sub session — a few \
+                        words naming what it is for. A sub session cannot name itself, so \
+                        this is what the user sees in their session list and in this \
+                        session's agent graph."
+                },
                 "environment": {
                     "type": "string",
                     "description": environment_help(environments)
@@ -160,6 +167,10 @@ impl Toolbox for SubSessionToolbox {
         if name != SPAWN_SUBSESSION_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
+        let title = input
+            .get("title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
         let task = input
             .get("task")
             .and_then(Value::as_str)
@@ -195,6 +206,7 @@ impl Toolbox for SubSessionToolbox {
                     parent: self.caller,
                     seed: SeedMode::Fresh,
                     message: task.to_string(),
+                    title: title.to_string(),
                     env: env.clone(),
                     reply,
                 })
@@ -241,8 +253,9 @@ mod tests {
     struct Empty;
 
     /// What the stub records of each `Create` it answered: who asked, how the
-    /// sub session is seeded, the message, and where it was told to run.
-    type Created = Arc<Mutex<Vec<(Uuid, SeedMode, String, String)>>>;
+    /// sub session is seeded, the message, the title it was given, and where
+    /// it was told to run.
+    type Created = Arc<Mutex<Vec<(Uuid, SeedMode, String, String, String)>>>;
 
     /// Answers `Create` the way the session will, and records what it was
     /// asked for — the tool's whole job is to turn a call into that command.
@@ -276,6 +289,7 @@ mod tests {
                 parent,
                 seed,
                 message,
+                title,
                 env,
                 reply,
             }) = cmd.cmd
@@ -284,6 +298,7 @@ mod tests {
                     parent,
                     seed,
                     message,
+                    title,
                     // The variant itself, not a flattened vendor: telling
                     // `Inherit` from `Without` is the whole point of the
                     // type, so a test that collapsed them could not catch
@@ -304,7 +319,7 @@ mod tests {
         toolbox: SubSessionToolbox,
         caller: Uuid,
         /// What the session was asked for: who branched, how it is seeded, the
-        /// brief, and which of the three runtime answers it carried.
+        /// brief, the title, and which of the three runtime answers it carried.
         seen: Created,
     }
 
@@ -396,7 +411,7 @@ mod tests {
             .toolbox
             .execute(
                 SPAWN_SUBSESSION_TOOL,
-                json!({"task": "try the other migration"}),
+                json!({"title": "the other migration", "task": "try the other migration"}),
                 "tc1",
             )
             .await
@@ -407,6 +422,7 @@ mod tests {
                 h.caller,
                 SeedMode::Fresh,
                 "try the other migration".to_string(),
+                "the other migration".to_string(),
                 // Omitted, so it inherits.
                 "inherit".to_string()
             )]
@@ -419,6 +435,20 @@ mod tests {
         }
     }
 
+    /// The title is as required as the task: a sub session cannot name itself,
+    /// so a call that does not name it would leave one nameless for good.
+    #[tokio::test]
+    async fn a_missing_title_is_rejected() {
+        let h = harness(Ok(Uuid::new_v4()));
+        let err = h
+            .toolbox
+            .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(h.seen.lock().unwrap().is_empty());
+    }
+
     /// The three answers the `environment` parameter can give, and the fact
     /// that they are three rather than two.
     ///
@@ -429,13 +459,17 @@ mod tests {
     async fn omitting_the_environment_inherits_and_naming_none_does_not() {
         let h = harness(Ok(Uuid::new_v4()));
         h.toolbox
-            .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "go"}),
+                "tc1",
+            )
             .await
             .unwrap();
         h.toolbox
             .execute(
                 SPAWN_SUBSESSION_TOOL,
-                json!({"task": "think", "environment": "none"}),
+                json!({"title": "a branch", "task": "think", "environment": "none"}),
                 "tc2",
             )
             .await
@@ -443,7 +477,7 @@ mod tests {
         h.toolbox
             .execute(
                 SPAWN_SUBSESSION_TOOL,
-                json!({"task": "build", "environment": "staging"}),
+                json!({"title": "a branch", "task": "build", "environment": "staging"}),
                 "tc3",
             )
             .await
@@ -457,10 +491,10 @@ mod tests {
         // asking for "none" must not arrive as the same thing: the first shares
         // the parent's sandbox, the second has none, and a model that omitted
         // it did not ask to lose its filesystem.
-        assert_eq!(seen[0].3, "inherit", "omitted inherits");
-        assert_eq!(seen[1].3, "without", "\"none\" asks for no sandbox");
+        assert_eq!(seen[0].4, "inherit", "omitted inherits");
+        assert_eq!(seen[1].4, "without", "\"none\" asks for no sandbox");
         assert_eq!(
-            seen[2].3, "own:vendor-for-staging",
+            seen[2].4, "own:vendor-for-staging",
             "a named environment is resolved before the session is asked"
         );
     }
@@ -477,7 +511,11 @@ mod tests {
         };
         let inherited = text(
             h.toolbox
-                .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+                .execute(
+                    SPAWN_SUBSESSION_TOOL,
+                    json!({"title": "a branch", "task": "go"}),
+                    "tc1",
+                )
                 .await
                 .unwrap(),
         );
@@ -490,7 +528,7 @@ mod tests {
             h.toolbox
                 .execute(
                     SPAWN_SUBSESSION_TOOL,
-                    json!({"task": "think", "environment": "none"}),
+                    json!({"title": "a branch", "task": "think", "environment": "none"}),
                     "tc2",
                 )
                 .await
@@ -502,7 +540,7 @@ mod tests {
             h.toolbox
                 .execute(
                     SPAWN_SUBSESSION_TOOL,
-                    json!({"task": "build", "environment": "staging"}),
+                    json!({"title": "a branch", "task": "build", "environment": "staging"}),
                     "tc3",
                 )
                 .await
@@ -521,7 +559,7 @@ mod tests {
             .toolbox
             .execute(
                 SPAWN_SUBSESSION_TOOL,
-                json!({"task": "go", "environment": "missing"}),
+                json!({"title": "a branch", "task": "go", "environment": "missing"}),
                 "tc1",
             )
             .await
@@ -576,7 +614,11 @@ mod tests {
         let h = harness(Err("a workflow run cannot be branched".to_string()));
         let err = h
             .toolbox
-            .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "go"}),
+                "tc1",
+            )
             .await
             .unwrap_err();
         assert!(

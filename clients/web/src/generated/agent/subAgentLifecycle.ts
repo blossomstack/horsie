@@ -5,6 +5,6 @@
  */
 export interface SubAgentLifecycle {
   id: string;
-  label: string;
+  title: string;
   status: string;
 }

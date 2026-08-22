@@ -63,7 +63,6 @@ pub(super) fn agent_settings_fixture() -> AgentSettings {
 pub(super) fn actor_spec_fixture() -> SessionSpec {
     use crate::sessions::spec::{SessionKind, WorkspaceDef};
     SessionSpec {
-        name: Some("test".into()),
         kind: SessionKind::Agent {
             settings: Box::new(agent_settings_fixture()),
         },
@@ -121,6 +120,7 @@ impl ActorFixture {
         let _ = session
             .tell(SessionCommand::Core(CoreCommand::Create {
                 spec: Box::new(spec),
+                name: None,
                 message: None,
             }))
             .await;
@@ -906,7 +906,7 @@ pub(super) async fn spawn_sub(session: &SessionRef, label: &str, task: &str) -> 
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
                 caller,
-                label: label.into(),
+                title: label.into(),
                 task: task.into(),
                 agent_type: None,
                 reply,
@@ -1555,7 +1555,7 @@ pub(super) async fn spawn_typed(
         .ask(|reply| {
             SessionCommand::SubAgent(SubAgentCommand::Spawn {
                 caller: session.session(),
-                label: "review".into(),
+                title: "review".into(),
                 task: "look at the diff".into(),
                 agent_type: agent_type.map(str::to_string),
                 reply,

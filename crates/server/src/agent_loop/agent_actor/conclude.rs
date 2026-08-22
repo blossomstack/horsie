@@ -95,6 +95,7 @@ impl AgentActor {
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
                         usage_total: state.usage_total,
+                        context_tokens: state.context_tokens,
                     })
                     .await;
                 if self.params.requires_result {
@@ -144,6 +145,7 @@ impl AgentActor {
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
                                 usage_total: state.usage_total,
+                                context_tokens: state.context_tokens,
                             })
                             .await;
                         parent
@@ -175,6 +177,7 @@ impl AgentActor {
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
                                 usage_total: state.usage_total,
+                                context_tokens: state.context_tokens,
                             })
                             .await;
                         parent
@@ -207,6 +210,7 @@ impl AgentActor {
                             .deliver(AgentOutcome::UsageRecorded {
                                 agent,
                                 usage_total: state.usage_total,
+                                context_tokens: state.context_tokens,
                             })
                             .await;
                         self.correct_contradiction(calls, state, ctx).await
@@ -222,6 +226,7 @@ impl AgentActor {
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
                         usage_total: state.usage_total,
+                        context_tokens: state.context_tokens,
                     })
                     .await;
                 // A cancelled tool call has no result and never will get one.
@@ -266,6 +271,7 @@ impl AgentActor {
                     .deliver(AgentOutcome::UsageRecorded {
                         agent,
                         usage_total: state.usage_total,
+                        context_tokens: state.context_tokens,
                     })
                     .await;
                 parent

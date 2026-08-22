@@ -3,7 +3,7 @@ import { subSessionReadyToOpen, subSessionTree } from "./subSessionTree";
 import type { SubSessionView } from "../api/types";
 
 function subSession(id: string, parent?: string, createdAtMs = 1): SubSessionView {
-  return { id, parent, title: undefined, status: "idle", createdAtMs, lastActivityMs: createdAtMs };
+  return { id, parent, title: "a branch", status: "idle", createdAtMs, lastActivityMs: createdAtMs };
 }
 
 describe("subSessionTree", () => {
@@ -47,6 +47,7 @@ describe("subSessionTree", () => {
 describe("subSessionReadyToOpen", () => {
   const row = (id: string, status: string): SubSessionView => ({
     id,
+    title: "a branch",
     status,
     createdAtMs: 1,
     lastActivityMs: 1,

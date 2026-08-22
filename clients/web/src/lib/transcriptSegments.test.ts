@@ -202,12 +202,12 @@ describe("questions break out of a work group", () => {
 });
 
 function sub(
-  label: string,
+  title: string,
   over: Partial<RenderedSubAgent> = {},
 ): RenderedSubAgent {
   return {
-    subagentId: `id-${label}`,
-    label,
+    subagentId: `id-${title}`,
+    title,
     status: "completed",
     text: "three stale crates",
     spawnedAtMs: 100,

@@ -1390,7 +1390,7 @@ mod tests {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Spawn {
                         caller: parent,
-                        label: "link".into(),
+                        title: "link".into(),
                         task: "HANG until stopped".into(),
                         agent_type: None,
                         reply,

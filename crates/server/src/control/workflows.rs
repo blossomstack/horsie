@@ -135,9 +135,9 @@ async fn run_workflow(
         })?;
     // No `AgentSettings` is fabricated for the session: a run's agents are its
     // steps, each with its own settings, and nothing session-shaped needs one.
+    let run_name = req.name.or_else(|| Some(name.clone()));
     let spec = build_workflow_spec(
         &services.environments,
-        req.name.or_else(|| Some(name.clone())),
         req.environment,
         resolved.plugins,
         resolved.run,
@@ -165,6 +165,7 @@ async fn run_workflow(
     // step. There is no message to queue.
     let id = ask(services, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
+        name: run_name.clone(),
         created_at,
         message: None,
         reply,
@@ -175,6 +176,7 @@ async fn run_workflow(
     // Just created, so it carries no annotations yet.
     let rec = SessionRecord {
         spec,
+        name: run_name,
         created_at,
         annotations: Default::default(),
         status: SessionStatus::Idle,

@@ -14,7 +14,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use horsie_models::now_ms;
 use horsie_models::session::{
-    AnnotationEntry, AnswerAsksRequest, SessionDetail, SessionSummary, SubAgentView, UsageView,
+    AgentStats, AnnotationEntry, AnswerAsksRequest, SessionDetail, SessionSummary, SubAgentView,
+    SubSessionView, UsageView,
 };
 use horsie_models::session_api::{
     Ack, AgentDocument, CreateSessionRequest, CreateSessionResponse, GetAgentResponse,
@@ -80,7 +81,7 @@ where
 pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: id.to_string(),
-        name: rec.spec.name.clone(),
+        name: rec.name.clone(),
         status: status_kind(&rec.status),
         created_at: rec.created_at,
         last_error: status_reason(&rec.status),
@@ -110,10 +111,10 @@ pub async fn create_session(
     if req.message.trim().is_empty() {
         return Err(Api::unprocessable("message must not be empty"));
     }
+    let name = req.name;
     let spec = build_session_spec(
         &state.config_store,
         &state.environments,
-        req.name,
         // The sessions API takes settings inline; nothing named a preset, so
         // claiming one would be an invention.
         AgentChoice::ad_hoc(req.agent),
@@ -129,6 +130,7 @@ pub async fn create_session(
     // message is durable and the create's completion is what releases it.
     let created = ask(&state, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
+        name: name.clone(),
         created_at,
         message: Some(req.message),
         reply,
@@ -138,6 +140,7 @@ pub async fn create_session(
     let id = created.id;
     let rec = SessionRecord {
         spec,
+        name,
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Provisioning,
@@ -163,6 +166,7 @@ pub(crate) fn detail(
     id: &str,
     rec: &SessionRecord,
     snapshot: Option<&crate::sessions::session_actor::SessionSnapshot>,
+    windows: &ContextWindows,
 ) -> SessionDetail {
     // The actor's own status when it answered, the registry's copy otherwise —
     // and the registry always has one, so this document never has to say it
@@ -171,7 +175,7 @@ pub(crate) fn detail(
     let status = snapshot.map_or_else(|| rec.status.clone(), |s| s.status.clone());
     SessionDetail {
         id: id.to_string(),
-        name: rec.spec.name.clone(),
+        name: rec.name.clone(),
         status: status_kind(&status),
         created_at: rec.created_at,
         last_error: status_reason(&status),
@@ -201,18 +205,25 @@ pub(crate) fn detail(
         // knows any of it, and it answers all of it at once.
         usage_total: to_wire_usage(snapshot.as_ref().map(|s| s.usage_total).unwrap_or_default()),
         agents: snapshot
-            .map(|s| s.agents.iter().map(to_wire_agent).collect())
+            .map(|s| s.agents.iter().map(|a| to_wire_agent(a, windows)).collect())
             .unwrap_or_default(),
-        // The same rows a list entry carries, through the same helper. The
-        // supervisor keeps them current whether or not the session actor is
-        // loaded, so this costs no extra read — and reading them from `rec`
-        // rather than the snapshot is what makes them available on a session
-        // that is not resident.
-        sub_sessions: rec
-            .sub_sessions
-            .iter()
-            .map(crate::sessions::supervisor::SubSessionRow::to_view)
-            .collect(),
+        // From the actor when there is one, because only the actor can answer
+        // for a sub session's numbers and its brief. The supervisor's rows are
+        // the fallback: they are kept current whether or not the session is
+        // resident, so a session nobody has loaded still lists what it hosts —
+        // just without the figures nothing has been asked for.
+        sub_sessions: match snapshot {
+            Some(s) => s
+                .sub_sessions
+                .iter()
+                .map(|sub| to_wire_sub_session(sub, windows))
+                .collect(),
+            None => rec
+                .sub_sessions
+                .iter()
+                .map(crate::sessions::supervisor::SubSessionRow::to_view)
+                .collect(),
+        },
         workflow: rec.spec.workflow_name().map(str::to_string),
     }
 }
@@ -263,11 +274,15 @@ pub async fn answer_asks(
 /// thing holding the session's status, its run log and its subagent tree
 /// together, and deriving any of it here meant deriving it differently in each
 /// place that asked.
-fn to_wire_agent(agent: &AgentEntry) -> SubAgentView {
+fn to_wire_agent(agent: &AgentEntry, windows: &ContextWindows) -> SubAgentView {
     SubAgentView {
         id: agent.id.clone(),
         parent: agent.parent.map(|id| id.to_string()),
-        label: agent.label.clone(),
+        title: agent.title.clone(),
+        kind: wire_kind(agent.kind).to_string(),
+        input: agent.input.clone(),
+        output: agent.output.clone(),
+        stats: to_wire_stats(&agent.stats, agent.model.as_deref(), windows),
         depth: agent.depth,
         agent_type: agent.agent_type.clone(),
         preset: agent.preset.clone(),
@@ -275,6 +290,69 @@ fn to_wire_agent(agent: &AgentEntry) -> SubAgentView {
         error: agent.error.clone(),
         spawned_at_ms: agent.started_at_ms,
         ended_at_ms: agent.ended_at_ms,
+    }
+}
+
+/// One sub session, as its session's own document reports it — the registry
+/// row plus what only the session actor holds.
+fn to_wire_sub_session(
+    sub: &crate::sessions::session_actor::SubSessionEntry,
+    windows: &ContextWindows,
+) -> SubSessionView {
+    SubSessionView {
+        id: sub.id.to_string(),
+        parent: sub.parent.map(|p| p.to_string()),
+        title: sub.title.clone(),
+        status: sub.status.as_wire().to_string(),
+        created_at_ms: sub.created_at_ms,
+        last_activity_ms: sub.last_activity_ms,
+        input: Some(sub.input.clone()),
+        stats: Some(to_wire_stats(&sub.stats, sub.model.as_deref(), windows)),
+    }
+}
+
+/// Model alias → the context window that model allows. What the session actor
+/// cannot answer, because which models are configured is not its business.
+pub(crate) type ContextWindows = std::collections::HashMap<String, u32>;
+
+/// Every configured model's context window, by alias.
+///
+/// Read once per document rather than once per agent: a session with thirty
+/// agents would otherwise read the settings thirty times to answer the same
+/// question. A model with no window configured is simply absent, and the
+/// agents running it report no denominator.
+pub(crate) async fn context_windows(
+    config: &std::sync::Arc<dyn crate::config::ConfigStore>,
+) -> Result<ContextWindows, String> {
+    Ok(config
+        .view()
+        .await?
+        .models
+        .into_iter()
+        .filter_map(|m| m.context_window.map(|w| (m.alias, w)))
+        .collect())
+}
+
+fn wire_kind(kind: crate::sessions::session_actor::AgentKind) -> &'static str {
+    use crate::sessions::session_actor::AgentKind as K;
+    match kind {
+        K::Main => "main",
+        K::Sub => "subagent",
+        K::Step => "step",
+        K::SubSession => "sub_session",
+    }
+}
+
+fn to_wire_stats(
+    stats: &crate::sessions::session_actor::AgentStats,
+    model: Option<&str>,
+    windows: &ContextWindows,
+) -> AgentStats {
+    AgentStats {
+        usage: to_wire_usage(stats.usage),
+        subtree_usage: to_wire_usage(stats.subtree_usage),
+        context_tokens: stats.context_tokens,
+        context_window: model.and_then(|m| windows.get(m).copied()),
     }
 }
 
@@ -319,7 +397,7 @@ pub async fn get_agent(
     let agent = AgentDocument {
         id: agent_id,
         parent: detail.entry.parent.map(|id| id.to_string()),
-        label: detail.entry.label.clone(),
+        title: detail.entry.title.clone(),
         task: detail.task,
         depth: detail.entry.depth,
         status: detail.entry.status.as_wire().to_string(),
@@ -379,23 +457,24 @@ pub async fn send_message(
     }
 }
 
-/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one sub session.
+/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one agent a session
+/// hosts, and everything below it.
 ///
-/// Only a sub session. A subagent and a workflow step are part of what their
-/// session did, and deleting one would leave a transcript referring to work
-/// with no record. A sub session is a session somebody started and can be done
-/// with.
-pub async fn delete_sub_session(
+/// A subagent's run or a sub session. Not the main agent, which *is* the
+/// session — deleting that is `DELETE /sessions/:id` — and not a workflow
+/// step, which belongs to its run's log rather than to whoever is reading it.
+/// The session decides which of those an id names; this layer only carries the
+/// answer back.
+pub async fn delete_agent(
     Scope(state): Scope,
     // Two of this route's own, so the project is written out: `Path`
     // deserializes a flat sequence and `Scoped` only drops one segment.
     Path((_project, id, agent_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, Api> {
-    let sub_session =
-        uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such sub_session"))?;
-    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteSubSession {
+    let agent = uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such agent"))?;
+    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteAgent {
         id,
-        sub_session,
+        agent,
         reply,
     })
     .await?;
@@ -422,6 +501,7 @@ mod tests {
     fn record_with_no_sub_sessions() -> SessionRecord {
         SessionRecord {
             spec: crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            name: None,
             created_at: 1_699_000_000_000,
             annotations: BTreeMap::new(),
             status: SessionStatus::Idle,
@@ -436,21 +516,38 @@ mod tests {
     fn an_agent_crosses_the_wire_verbatim() {
         let parent = Uuid::new_v4();
         let id = Uuid::new_v4();
-        let view = to_wire_agent(&AgentEntry {
-            id: id.to_string(),
-            parent: Some(parent),
-            label: Some("research".into()),
-            depth: 2,
-            agent_type: Some("auditor".into()),
-            preset: Some("reviewer".into()),
-            status: AgentStatus::Failed,
-            error: Some("boom".into()),
-            started_at_ms: 100,
-            ended_at_ms: 400,
-        });
+        let view = to_wire_agent(
+            &AgentEntry {
+                id: id.to_string(),
+                parent: Some(parent),
+                title: Some("research".into()),
+                depth: 2,
+                agent_type: Some("auditor".into()),
+                status: AgentStatus::Failed,
+                error: Some("boom".into()),
+                kind: crate::sessions::session_actor::AgentKind::Sub,
+                input: Some("audit the deps".into()),
+                output: None,
+                stats: crate::sessions::session_actor::AgentStats {
+                    context_tokens: 4_000,
+                    ..Default::default()
+                },
+                model: Some("m".into()),
+                preset: Some("reviewer".into()),
+                started_at_ms: 100,
+                ended_at_ms: 400,
+            },
+            &ContextWindows::from([("m".to_string(), 200_000)]),
+        );
         assert_eq!(view.id, id.to_string());
         assert_eq!(view.parent, Some(parent.to_string()));
-        assert_eq!(view.label.as_deref(), Some("research"));
+        assert_eq!(view.title.as_deref(), Some("research"));
+        assert_eq!(view.kind, "subagent");
+        assert_eq!(view.input.as_deref(), Some("audit the deps"));
+        // The window is the HTTP layer's own contribution: the actor names the
+        // model, and only this layer knows what that model allows.
+        assert_eq!(view.stats.context_tokens, 4_000);
+        assert_eq!(view.stats.context_window, Some(200_000));
         assert_eq!(view.agent_type.as_deref(), Some("auditor"));
         // The two are different questions and are carried separately: a typed
         // subagent has an `agent_type` from a plugin and a `preset` it
@@ -475,20 +572,17 @@ mod tests {
         rec.sub_sessions = vec![crate::sessions::supervisor::SubSessionRow {
             id: sub_session,
             parent: None,
-            title: Some("Other migration".into()),
+            title: "Other migration".into(),
             status: AgentStatus::Idle,
             created_at_ms: 1_700_000_000_000,
             last_activity_ms: 1_700_000_000_000,
         }];
 
-        let view = detail("s1", &rec, None);
+        let view = detail("s1", &rec, None, &ContextWindows::new());
 
         assert_eq!(view.sub_sessions.len(), 1);
         assert_eq!(view.sub_sessions[0].id, sub_session.to_string());
-        assert_eq!(
-            view.sub_sessions[0].title.as_deref(),
-            Some("Other migration")
-        );
+        assert_eq!(view.sub_sessions[0].title, "Other migration");
         assert_eq!(view.sub_sessions[0].status, "idle");
         assert_eq!(view.sub_sessions[0].created_at_ms, 1_700_000_000_000);
     }
@@ -506,7 +600,7 @@ mod tests {
             crate::sessions::supervisor::SubSessionRow {
                 id: parent,
                 parent: None,
-                title: None,
+                title: "the first branch".into(),
                 status: AgentStatus::Running,
                 created_at_ms: 10,
                 last_activity_ms: 10,
@@ -514,7 +608,7 @@ mod tests {
             crate::sessions::supervisor::SubSessionRow {
                 id: child,
                 parent: Some(parent),
-                title: Some("deeper".into()),
+                title: "deeper".into(),
                 status: AgentStatus::Idle,
                 created_at_ms: 20,
                 last_activity_ms: 20,
@@ -522,7 +616,7 @@ mod tests {
         ];
 
         assert_eq!(
-            detail("s1", &rec, None).sub_sessions,
+            detail("s1", &rec, None, &ContextWindows::new()).sub_sessions,
             summary("s1", &rec).sub_sessions
         );
     }
@@ -533,7 +627,12 @@ mod tests {
     /// which is the contract a client reads.
     #[test]
     fn the_detail_document_carries_no_session_wide_agent_configuration() {
-        let view = detail("s1", &record_with_no_sub_sessions(), None);
+        let view = detail(
+            "s1",
+            &record_with_no_sub_sessions(),
+            None,
+            &ContextWindows::new(),
+        );
         let json = serde_json::to_value(&view).unwrap();
         for key in [
             "model",

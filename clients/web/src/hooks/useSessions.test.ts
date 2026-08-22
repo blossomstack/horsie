@@ -6,7 +6,7 @@ import { applySessionList, qk } from "./useSessions";
 
 vi.mock("../api/client", () => ({ api: { sessions: {} } }));
 
-function subSession(id: string, title?: string): SubSessionView {
+function subSession(id: string, title = "a branch"): SubSessionView {
   return {
     id,
     title,

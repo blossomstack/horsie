@@ -99,10 +99,11 @@ delegated without scrolling for it.
 The message box belongs to the transcript, so neither picture has one under it
 — press the switch's left setting to go back to the conversation and type.
 
-The top lane is the main agent, one bar per entry — what you said, what it
-thought, each tool call, each answer — coloured by kind and as wide as it took.
-Subagents and sub sessions get their own lanes below, each running from
-the moment it branched off to the last thing it did.
+The top lane is whichever run you are looking at — the session's main agent on
+the session's own page, that subagent on a subagent's page — one bar per entry:
+what you said, what it thought, each tool call, each answer, coloured by kind
+and as wide as it took. Whatever that run spawned gets its own lane below, each
+running from the moment it branched off to the last thing it did.
 
 Names sit in a sidebar down the left, indented under whatever spawned them, and
 they stay put while the lanes scroll. From there:
@@ -110,12 +111,17 @@ they stay put while the lanes scroll. From there:
 - **Hover a lane** — dashed lines drop from its start and end to the lane it
   came from, so you can see which part of the parent's work it covers, and a
   card gives its full name, what became of it and how long it took.
-- **Click the name** — opens that agent's own page.
-- **Click its bar** — draws that agent's own work along the same axis, without
+- **Click the name** — shows what that agent is in a panel on the right: its
+  tokens, how full its context is, what it was asked to do and what it
+  produced. The same panel the graph opens, because it is the same question.
+- **Click the arrow beside the name** — leaves for that agent's own page.
+- **Click its span** — draws that agent's own work along the same axis, without
   leaving the map.
 - **Click the chevron** — folds away everything that agent spawned.
 
-Click any bar on any lane to jump to that entry in the transcript.
+Click any bar on any lane to read that entry in the panel — its text, its
+thinking and the calls it issued — with a key there to go and read it in place
+in the transcript.
 
 One thing about the axis is worth knowing: idle stretches longer than a minute
 collapse to a narrow hatched gutter labelled with what they swallowed, so a
@@ -135,16 +141,22 @@ you are trying to follow. It is also how you reach a sub session: the rail
 lists sessions, and this is where their shape lives.
 
 The main agent sits on the left, and everything below it hangs off to the
-right, generation by generation. Each box gives a name, what it is doing right
-now, and the preset it runs; its colour is its status, the same lamp colours
-the rest of the console uses. A sub session is drawn on a second card behind
-the first, because it is a session you talk to rather than an agent the session
-delegated to. Hover one for its full name, how long it took and when it
-started.
+right, generation by generation. Each box says what kind of thing it is — main
+session, subagent, sub session, workflow step — then its title, then what it is
+doing right now and the preset it runs; its colour is its status, the same lamp
+colours the rest of the console uses. Hover one for its full name, how long it
+took and when it started.
+
+Every box has a title: an agent names the session it is the main agent of, and
+whoever spawns a subagent or branches a sub session titles it at that moment.
 
 From there:
 
-- **Click a box** — opens that agent's own page.
+- **Click a box** — shows that agent in a panel on the right: its tokens, how
+  full its context is, what it was asked to do, what it produced, and a key to
+  delete it if it is a subagent's run or a sub session.
+- **Click the arrow in its top-right corner** — leaves for that agent's own
+  page.
 - **Click the circle on its right edge** — folds away everything below it. The
   box then shows how many agents it is standing in for, so a folded branch
   still says how big it is. Click again to bring them back.
@@ -153,8 +165,10 @@ Folding is shared with the timeline: what you put away in one view is put away
 in the other. The view is in the address bar, so a link to it opens on the
 graph.
 
-Whichever view you pick is remembered on this browser, so the next session you
-open lands on it rather than back on the transcript. A link that names a view
+All three views are offered on every run's page, not just the session's own,
+and each is drawn of the run you are on. Whichever view you pick is remembered
+on this browser, so the next session you open lands on it rather than back on
+the transcript. A link that names a view
 still wins, and a session you have just started always opens on its transcript
 — that is where the answer to the message you just sent appears.
 
@@ -205,16 +219,18 @@ The parent is never changed by either. It gets a marker where the branch
 happened, linking to the sub session that left.
 
 A sub session is a session in every way that matters: it can ask you questions,
-spawn its own subagents, and be branched again. It names itself once the
-direction is clear, and appears on the session's [graph](#see-what-it-spawned)
-hanging off whatever it branched from, with its own status lamp. Branching a
-sub session nests one level deeper. Its own page carries its name after the
-session's, so you always know which conversation you are in.
+spawn its own subagents, and be branched again. The one thing it does not do is
+name itself — it is titled at the moment it is branched, by whoever branched
+it, so it is never a nameless session waiting for a model to get round to it.
+A `/fork` takes its title from the first line of the brief you typed. It
+appears on the session's [graph](#see-what-it-spawned) hanging off whatever it
+branched from, with its own status lamp. Branching a sub session nests one
+level deeper.
 
 The agent can also start one on its own, without waiting to be asked. Its
-`spawn_subsession` tool hands a *task* to a sub session — no copy, no
-summary. The agent already knows the context, so it writes the brief itself, the
-same way it writes one for a subagent. When the work splits into a direction you
+`spawn_subsession` tool hands a *title* and a *task* to a sub session — no
+copy, no summary. The agent already knows the context, so it writes the brief
+itself, the same way it writes one for a subagent. When the work splits into a direction you
 will want to steer separately, it can give that direction its own sub session
 and carry on with the rest.
 
@@ -241,9 +257,14 @@ no files, so none of the runtime tools are offered to it. That is a working
 session, not a broken one; it is useful for thinking a problem through without
 touching anything.
 
-Nothing ever removes a sub session on its own. Delete one with the bin key on
-its own page when you are done with it; deleting a session removes its sub
-sessions too — and every machine any of them owned.
+Nothing ever removes a sub session or a subagent's run on its own. Delete
+either with the bin key on its own page, or from the panel the
+[graph](#see-what-it-spawned) opens; deleting a session removes everything it
+hosts — and every machine any of them owned. Removing a subagent's run takes
+the work it delegated with it: the subagents below it, and any workflow it
+invoked. Removing a sub session leaves any sub session branched from *it*
+standing, because that is a session somebody is having rather than work it was
+doing.
 
 ## Stop, or delete
 

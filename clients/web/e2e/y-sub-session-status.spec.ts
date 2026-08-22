@@ -121,7 +121,11 @@ test("Y3: stopping a sub session stops it, and leaves the session it came from a
  *
  * Both used to live only on the sub session's row in the rail, which lists
  * sessions now: without a home in the header, a sub session's page showed the
- * *session's* name and offered no way to delete the thing on screen. */
+ * *session's* name and offered no way to delete the thing on screen.
+ *
+ * Nothing here titles the sub session, because nothing can: a sub session has
+ * no `set_session_title` of its own. It is named at the branch, and a `/fork`
+ * takes its title from the first line of the brief. */
 test("Y4: a sub session's page names it, and the delete key deletes it", async ({
   page,
   appBase,
@@ -129,7 +133,6 @@ test("Y4: a sub session's page names it, and the delete key deletes it", async (
 }) => {
   await mock.reset();
   await mock.queueText("the original answer");
-  await mock.queueToolCall("set_session_title", { title: "the other way" });
   await mock.queueText("the sub session's answer");
 
   await createSession(page, appBase);
@@ -142,9 +145,12 @@ test("Y4: a sub session's page names it, and the delete key deletes it", async (
     "the sub session's answer",
   );
 
-  // The header says which conversation this is — the sub session's own title,
-  // with the session it branched from in front of it.
-  await expect(page.getByTestId("sub-session-title")).toHaveText("the other way");
+  // The header names this run and nothing above it. It used to put the parent
+  // session's name and a link in front, which spent the widest thing in the
+  // header on context the rail already carries.
+  const title = page.getByTestId("session-title");
+  await expect(title).toHaveText("try the other way");
+  await expect(title).not.toContainText("start the migration");
 
   await page.getByTestId("session-delete").click();
   await page.getByTestId("confirm-accept").click();

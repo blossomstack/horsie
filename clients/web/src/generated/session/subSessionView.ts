@@ -1,4 +1,5 @@
 
+import { AgentStats } from './agentStats';
 /**
  * One sub session under a session.
  *
@@ -10,10 +11,21 @@ export interface SubSessionView {
   id: string;
   parent?: string;
   /**
-   * What the sub session named itself, once it has. Absent until then — a
-   * client shows what it was branched from instead of inventing a name.
+   * What it is called. Always set: a sub session cannot name itself, so
+   * whoever branched it chose a title at the branch — `spawn_subsession`
+   * takes one, and `/fork` derives one from the brief.
    */
-  title?: string;
+  title: string;
+  /**
+   * The brief it was branched with — the first thing it reads. Absent on
+   * the session *list*, which does not read the sessions it lists; present
+   * on a session's own document.
+   */
+  input?: string;
+  /**
+   * Its banked numbers. Absent on the session list, for the same reason.
+   */
+  stats?: AgentStats;
   /**
    * The same vocabulary an agent's document speaks: "provisioning" |
    * "running" | "idle" | "awaiting_input" | "failed" | "cancelled". A sub

@@ -24,7 +24,7 @@ vi.mock("../api/client", () => ({
       list: vi.fn(),
       setAnnotations: vi.fn(),
       remove: vi.fn(),
-      deleteSubSession: vi.fn(),
+      deleteAgent: vi.fn(),
     },
     // The rail's switcher reads both of these. A project is what the rail
     // below belongs to, so a Sidebar rendered without one is not a Sidebar.
@@ -272,7 +272,7 @@ describe("Sidebar sessions", () => {
 });
 
 describe("sub sessions in the rail", () => {
-  function subSession(id: string, parent?: string, status = "idle", title?: string) {
+  function subSession(id: string, parent?: string, status = "idle", title = "a branch") {
     return { id, parent, title, status, createdAtMs: 1, lastActivityMs: 1 };
   }
 

@@ -24,8 +24,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand, SubSessionCommand,
-    TurnCommand,
+    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
@@ -100,6 +99,11 @@ pub enum SessionSupervisorCommand {
     /// been handed the id of.
     Create {
         spec: SessionSpec,
+        /// What to call it, when the caller has something to call it. The name
+        /// belongs to the session's main agent, so this travels beside the
+        /// spec rather than in it — a spec says what a session *is*, and a
+        /// title is not that.
+        name: Option<String>,
         /// Unix epoch millis (supplied by the caller for deterministic tests).
         created_at: u64,
         /// What to say to the new session's main agent. `None` only for a
@@ -147,11 +151,16 @@ pub enum SessionSupervisorCommand {
         agent_id: String,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Delete one sub session of a session. Never automatic — nothing prunes a
-    /// sub session, so this is the only way one goes.
-    DeleteSubSession {
+    /// Delete one agent a session hosts — a subagent's run or a sub session —
+    /// and everything below it. Never automatic: nothing prunes either, so
+    /// this is the only way one goes.
+    ///
+    /// The main agent and a workflow step are refused by the session: the
+    /// first *is* the session (delete the session instead) and the second
+    /// belongs to its run's log.
+    DeleteAgent {
         id: SessionId,
-        sub_session: Uuid,
+        agent: Uuid,
         reply: ReplyTo<Result<(), String>>,
     },
     /// Delete a session; the vendor decides its runtime's fate.
@@ -324,6 +333,10 @@ pub enum SessionSupervisorEvent {
     SessionCreated {
         id: SessionId,
         spec: SessionSpec,
+        /// What to call it, when the caller said. The session journals the
+        /// same name onto its main agent; this is the index copy.
+        #[serde(default)]
+        name: Option<String>,
         created_at: u64,
     },
     SessionDeleted {
@@ -385,7 +398,9 @@ impl std::fmt::Display for RenameSessionError {
 pub struct SubSessionRow {
     pub id: Uuid,
     pub parent: Option<Uuid>,
-    pub title: Option<String>,
+    /// Always set: a sub session is named at the branch, by whoever branched
+    /// it, because it has no `set_session_title` of its own.
+    pub title: String,
     pub status: crate::sessions::session_actor::AgentStatus,
     pub created_at_ms: u64,
     /// The moment of this sub session's last status change — the end of its
@@ -409,6 +424,10 @@ impl SubSessionRow {
             status: self.status.as_wire().to_string(),
             created_at_ms: self.created_at_ms,
             last_activity_ms: self.last_activity_ms,
+            // A list does not read the sessions it lists. Both are the session
+            // actor's to answer, and only its own document asks it to.
+            input: None,
+            stats: None,
         }
     }
 }
@@ -417,6 +436,14 @@ impl SubSessionRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub spec: SessionSpec,
+    /// What this session is called: its main agent's title.
+    ///
+    /// The registry's index copy, and deliberately only that — the truth is
+    /// the main agent's `title` on the session's own root run entry. This is
+    /// here so a session list can name a hundred sessions without loading one
+    /// of them, and it is written by the same rename that journals the title.
+    #[serde(default)]
+    pub name: Option<String>,
     pub created_at: u64,
     /// User-set key-value metadata: a `tag.<name>` key per tag, plus any
     /// future provenance keys. Field-level default so pre-annotations
@@ -667,12 +694,14 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorEvent::SessionCreated {
                 id,
                 spec,
+                name,
                 created_at,
             } => {
                 state.sessions.insert(
                     id,
                     SessionRecord {
                         spec,
+                        name,
                         created_at,
                         annotations: BTreeMap::new(),
                         // Not a guess: a session's runtime is built before it
@@ -688,7 +717,7 @@ impl EventSourcedActor for SessionSupervisor {
             }
             SessionSupervisorEvent::SessionNamed { id, name } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
-                    rec.spec.name = Some(name);
+                    rec.name = Some(name);
                 }
             }
             SessionSupervisorEvent::SessionSubSessionsChanged { id, sub_sessions } => {
@@ -725,6 +754,7 @@ impl EventSourcedActor for SessionSupervisor {
         match cmd.cmd {
             SessionSupervisorCommand::Create {
                 spec,
+                name,
                 created_at,
                 message,
                 reply,
@@ -773,6 +803,7 @@ impl EventSourcedActor for SessionSupervisor {
                     Some(session) => session
                         .tell(SessionCommand::Core(CoreCommand::Create {
                             spec: Box::new(spec.clone()),
+                            name: name.clone(),
                             message: first,
                         }))
                         .await
@@ -831,6 +862,7 @@ impl EventSourcedActor for SessionSupervisor {
                 CommandEffect::persist(vec![SessionSupervisorEvent::SessionCreated {
                     id,
                     spec,
+                    name,
                     created_at,
                 }])
                 .and_ack(ReplyTo::from_sender(written))
@@ -889,22 +921,20 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::DeleteSubSession {
-                id,
-                sub_session,
-                reply,
-            } => {
+            SessionSupervisorCommand::DeleteAgent { id, agent, reply } => {
                 match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(format!("no such session: {id}")));
                     }
-                    // Routed, not decided: which sub sessions exist is the
-                    // session's own state, and the supervisor's copy is a
-                    // projection.
+                    // Routed, not decided — and deliberately routed to *both*
+                    // owners rather than resolved here: which kind of agent an
+                    // id names is the session's own state, and the supervisor's
+                    // copy knows about sub sessions only. Whichever component
+                    // holds it answers; the other would have to guess.
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::SubSession(SubSessionCommand::Delete {
-                                id: sub_session,
+                            .tell(SessionCommand::Core(CoreCommand::DeleteAgent {
+                                id: agent,
                                 reply,
                             }))
                             .await;
@@ -1346,10 +1376,7 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorCommand::PublishSessionTitle { id, name } => {
                 // A rename superseded while its publish was queued must not
                 // broadcast a stale title.
-                let current = state
-                    .sessions
-                    .get(&id)
-                    .and_then(|rec| rec.spec.name.as_deref());
+                let current = state.sessions.get(&id).and_then(|rec| rec.name.as_deref());
                 if current == Some(name.as_str()) {
                     self.list_changed();
                 }
@@ -1428,7 +1455,6 @@ mod tests {
 
     fn spec_fixture() -> SessionSpec {
         SessionSpec {
-            name: Some("test".into()),
             kind: crate::sessions::spec::SessionKind::Agent {
                 settings: Box::new(AgentSettings {
                     source: crate::sessions::spec::AgentSource::AdHoc,
@@ -1650,6 +1676,7 @@ mod tests {
             .await
             .ask(|reply| SessionSupervisorCommand::Create {
                 spec: spec_fixture(),
+                name: None,
                 created_at: 1,
                 message: Some("hi".to_string()),
                 reply,
@@ -1671,6 +1698,7 @@ mod tests {
     async fn create_saying(sup: &SupervisorRef, message: Option<&str>) -> SessionId {
         sup.ask(|reply| SessionSupervisorCommand::Create {
             spec: spec_fixture(),
+            name: None,
             created_at: 1,
             message: message.map(str::to_string),
             reply,
@@ -1723,6 +1751,7 @@ mod tests {
             SessionSupervisorEvent::SessionCreated {
                 id: "s1".into(),
                 spec: spec_fixture(),
+                name: None,
                 created_at: 7,
             },
         );
@@ -1735,7 +1764,7 @@ mod tests {
             },
         );
         assert_eq!(
-            s.sessions.get("s1").unwrap().spec.name.as_deref(),
+            s.sessions.get("s1").unwrap().name.as_deref(),
             Some("Latest")
         );
         let s = SessionSupervisor::apply_event(
@@ -1751,6 +1780,7 @@ mod tests {
             SessionSupervisorEvent::SessionCreated {
                 id: id.into(),
                 spec: spec_fixture(),
+                name: None,
                 created_at: 1,
             },
         )
@@ -2040,7 +2070,7 @@ mod tests {
             sub_sessions: vec![SubSessionRow {
                 id: sub_session,
                 parent: None,
-                title: Some("Other migration".into()),
+                title: "Other migration".into(),
                 status: crate::sessions::session_actor::AgentStatus::Idle,
                 created_at_ms: 5,
                 last_activity_ms: 5,
@@ -2059,10 +2089,7 @@ mod tests {
         let (_, rec) = listed.iter().find(|(s, _)| *s == id).expect("the session");
         assert_eq!(rec.sub_sessions.len(), 1);
         assert_eq!(rec.sub_sessions[0].id, sub_session);
-        assert_eq!(
-            rec.sub_sessions[0].title.as_deref(),
-            Some("Other migration")
-        );
+        assert_eq!(rec.sub_sessions[0].title, "Other migration");
     }
 
     /// Durable is not the same as live.
@@ -2086,7 +2113,7 @@ mod tests {
             sub_sessions: vec![SubSessionRow {
                 id: sub_session,
                 parent: None,
-                title: Some("The other direction".into()),
+                title: "The other direction".into(),
                 status: crate::sessions::session_actor::AgentStatus::Provisioning,
                 created_at_ms: 5,
                 last_activity_ms: 5,
@@ -2117,10 +2144,7 @@ mod tests {
             .sub_sessions;
         assert_eq!(sub_sessions.len(), 1);
         assert_eq!(sub_sessions[0].id, sub_session);
-        assert_eq!(
-            sub_sessions[0].title.as_deref(),
-            Some("The other direction")
-        );
+        assert_eq!(sub_sessions[0].title, "The other direction");
     }
 
     /// The publish rides the same idempotence guard as the write: a session
@@ -2134,7 +2158,7 @@ mod tests {
         let rows = vec![SubSessionRow {
             id: Uuid::from_bytes([9; 16]),
             parent: None,
-            title: None,
+            title: "a branch".into(),
             status: crate::sessions::session_actor::AgentStatus::Idle,
             created_at_ms: 5,
             last_activity_ms: 5,
@@ -2179,7 +2203,7 @@ mod tests {
         let rows = vec![SubSessionRow {
             id: Uuid::from_bytes([7; 16]),
             parent: None,
-            title: None,
+            title: "a branch".into(),
             status: crate::sessions::session_actor::AgentStatus::Idle,
             created_at_ms: 5,
             last_activity_ms: 5,
@@ -2553,10 +2577,8 @@ mod tests {
         let sup = f.supervisor().await;
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
-                spec: SessionSpec {
-                    name: None,
-                    ..spec_fixture()
-                },
+                spec: spec_fixture(),
+                name: None,
                 created_at: 1,
                 message: None,
                 reply,
@@ -2594,7 +2616,7 @@ mod tests {
             listed
                 .iter()
                 .find(|(sid, ..)| *sid == id)
-                .and_then(|(_, rec)| rec.spec.name.as_deref()),
+                .and_then(|(_, rec)| rec.name.as_deref()),
             Some("Investigate login failure"),
         );
     }
@@ -2612,10 +2634,8 @@ mod tests {
         let sup = f.supervisor().await;
         let id = sup
             .ask(|reply| SessionSupervisorCommand::Create {
-                spec: SessionSpec {
-                    name: None,
-                    ..spec_fixture()
-                },
+                spec: spec_fixture(),
+                name: None,
                 created_at: 1,
                 message: None,
                 reply,
@@ -2647,7 +2667,7 @@ mod tests {
             listed
                 .iter()
                 .find(|(sid, ..)| *sid == id)
-                .and_then(|(_, rec)| rec.spec.name.as_deref()),
+                .and_then(|(_, rec)| rec.name.as_deref()),
             Some("Investigate login failure"),
             "the rename is durable, not just broadcast"
         );
@@ -2720,7 +2740,7 @@ mod tests {
             listed
                 .iter()
                 .find(|(sid, ..)| *sid == id)
-                .and_then(|(_, rec)| rec.spec.name.as_deref()),
+                .and_then(|(_, rec)| rec.name.as_deref()),
             Some("Renamed while cold"),
             "and the rename still takes"
         );

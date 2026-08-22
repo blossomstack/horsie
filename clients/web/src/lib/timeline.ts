@@ -16,7 +16,7 @@ import { MAIN_AGENT } from "../api/client";
 import type { SubSessionView, SubAgentView } from "../api/types";
 import type { RenderedMessage, TranscriptItem } from "../hooks/useSessionStream";
 import { isAskCall } from "./askUser";
-import { subSessionTree } from "./subSessionTree";
+import { type AgentKind, hostedTree } from "./agentTree";
 
 /** A gap longer than this is dead air, not part of the work. */
 export const GAP_THRESHOLD_MS = 60_000;
@@ -137,7 +137,7 @@ export function buildScale(spans: Span[]): Scale {
 // Lanes
 
 export type BarKind = "user" | "assistant" | "thinking" | "tool" | "ask" | "compaction";
-export type LaneKind = "main" | "subagent" | "subSession";
+export type LaneKind = AgentKind;
 
 export interface Bar {
   key: string;
@@ -199,14 +199,20 @@ function humanMs(ms: number): string {
   return `${Math.floor(ms / 3_600_000)}h ${Math.round((ms % 3_600_000) / 60_000)}m`;
 }
 
-/** What a lane says about itself beyond its name: what became of it, how long
- * it took, and when it started. The sidebar can only show a truncated name, so
- * this is what the hover card carries. */
-function describe(status: string, startMs: number, endMs: number): string {
-  const parts = [status.replace(/_/g, " ")];
-  if (startMs > 0 && endMs > startMs) parts.push(humanMs(endMs - startMs));
-  if (startMs > 0) parts.push(`started ${clockTime(startMs)}`);
-  return parts.join(" · ");
+/** When a subagent or step reached its result; zero while it is still going. */
+function endOfAgent(agents: SubAgentView[], id: string): number {
+  return agents.find((a) => a.id === id)?.endedAtMs ?? 0;
+}
+
+/** When a sub session last did anything. Not an end — nothing closes a
+ * session — but it is how far along it got, which is what a bar can draw. */
+function endOfSubSession(subSessions: SubSessionView[], id: string): number {
+  return subSessions.find((f) => f.id === id)?.lastActivityMs ?? 0;
+}
+
+/** What the root lane is called when nothing has named it yet. */
+function sessionTitleFallback(kind: LaneKind): string {
+  return kind === "main" ? "this session" : "this agent";
 }
 
 /** 24-hour, so a label is five characters wide however long the session ran. */
@@ -218,8 +224,15 @@ function clockTime(ms: number): string {
   });
 }
 
-/** How close two turn-start labels may sit before the later one is dropped. */
-const TICK_MIN_GAP_PX = 56;
+/**
+ * How close two turn-start labels may sit before the later one is dropped.
+ *
+ * Wide, and deliberately wider than a label: at the old spacing a session of
+ * short turns drew a solid band of overlapping clock times along the axis,
+ * which read as a rendering fault rather than as timestamps. A tick is an
+ * orientation aid — it is better to have four of them than forty.
+ */
+const TICK_MIN_GAP_PX = 120;
 
 /** Statuses that mean the agent has not stopped, so its lane runs to the edge
  * rather than ending at whatever it last did. */
@@ -324,6 +337,14 @@ export function buildTimeline(
    * bars are laid out on the *session's* scale, not one of their own, so a
    * subagent's work lines up under the turn that spawned it. */
   expanded: Record<string, TranscriptItem[]> = {},
+  /** Which agent's work this is a timeline of. Absent means the main agent —
+   * the session's own page. */
+  rootAgentId?: string,
+  /** Members whose children are folded away. Applied here rather than in the
+   * renderer so a fold actually removes the lanes: the renderer could only
+   * skip rows it was handed, and it was handed a flat list in which a
+   * top-level subagent sat at the root's own depth. */
+  collapsed: readonly string[] = [],
 ): Timeline {
   const entries: Entry[] = [];
   for (const item of items) {
@@ -412,30 +433,50 @@ export function buildTimeline(
     ticks.push({ x, label });
   }
 
-  // The main agent is the one nothing spawned. Falling back to the first entry,
-  // and then to the well-known id, so a roster that has not arrived yet still
+  // What this timeline is *of*. A page scoped to one agent draws that agent's
+  // work: the transcript above it is that agent's, and a lane labelled "main
+  // agent" over a subagent's bars was the picture disagreeing with the prose
+  // beside it. Falling back to the main agent — the one nothing spawned — and
+  // then to the well-known id, so a roster that has not arrived yet still
   // produces a lane to draw the transcript on.
   const main = agents.find((a) => !a.parent && a.depth === 0) ?? agents[0];
-  const mainId = main?.id ?? MAIN_AGENT;
+  const rootId = rootAgentId ?? main?.id ?? MAIN_AGENT;
+  const rootAgent = agents.find((a) => a.id === rootId);
+  const rootSubSession = subSessions.find((f) => f.id === rootId);
+  const rootKind: LaneKind = rootSubSession
+    ? "sub_session"
+    : rootAgent && rootAgent.id !== main?.id
+      ? rootAgent.kind === "step"
+        ? "step"
+        : "subagent"
+      : "main";
+  // Orphans belong to the session, not to one agent inside it: scoped to a
+  // subagent, the tree is that subagent's own subtree.
+  const members = hostedTree(agents, subSessions, rootId, collapsed, rootKind === "main");
+
   const lanes: Lane[] = [
     {
-      agentId: mainId,
-      kind: "main",
-      label: "main agent",
-      status: main?.status ?? "idle",
+      agentId: rootId,
+      kind: rootKind,
+      label:
+        rootSubSession?.title ??
+        rootAgent?.title ??
+        rootAgent?.agentType ??
+        sessionTitleFallback(rootKind),
+      status: rootSubSession?.status ?? rootAgent?.status ?? "idle",
       depth: 0,
       bars,
       placed: true,
-      hasChildren: agents.length > 1 || subSessions.length > 0,
-      detail: main?.status ?? "idle",
+      hasChildren: members.length > 0,
+      detail: rootSubSession?.status ?? rootAgent?.status ?? "idle",
     },
   ];
 
-  /** A span, or nothing when there is no stamp to place the agent by.
+  /** A span, or nothing when there is no stamp to place the member by.
    *
-   * `open` is decided by the status, not by a missing end stamp: a sub session always
-   * has a last-activity time, so "it has no end" and "it is still going" are
-   * two different questions and only the status answers the second. */
+   * `open` is decided by the status, not by a missing end stamp: a sub session
+   * always has a last-activity time, so "it has no end" and "it is still
+   * going" are two different questions and only the status answers the second. */
   const spanOf = (startMs: number, endMs: number, status: string) => {
     if (startMs <= 0) return undefined;
     const x = scale.toX(startMs);
@@ -443,86 +484,27 @@ export function buildTimeline(
     return { x, width: Math.max(MIN_BAR_PX, (open ? scale.width : scale.toX(endMs)) - x), open };
   };
 
-  // Render order is a walk of the tree, not the roster's own order: the roster
-  // is keyed by uuid, so a subagent's child could sort above it and the two
-  // read as siblings. The same two rules `subSessionTree` learned — an orphan roots
-  // at the top level, anything the walk cannot reach is appended flat — because
-  // this reads the same journal-derived data.
-  const held = new Set(agents.map((a) => a.id));
-  const kids = new Map<string, SubAgentView[]>();
-  for (const a of agents) {
-    if (a.id === mainId) continue;
-    const key = a.parent && held.has(a.parent) ? a.parent : "";
-    kids.set(key, [...(kids.get(key) ?? []), a]);
-  }
-  for (const level of kids.values()) {
-    level.sort((x, y) => x.spawnedAtMs - y.spawnedAtMs || x.id.localeCompare(y.id));
-  }
-  const seen = new Set<string>();
-  const walk = (parent: string, depth: number) => {
-    for (const a of kids.get(parent) ?? []) {
-      if (seen.has(a.id)) continue;
-      seen.add(a.id);
-      const span = spanOf(a.spawnedAtMs, a.endedAtMs, a.status);
-      lanes.push({
-        agentId: a.id,
-        kind: "subagent",
-        label: a.label ?? a.agentType ?? "subagent",
-        status: a.status,
-        bars: barsFor(a.id, a.spawnedAtMs),
-        depth,
-        span,
-        anchor: span ? { x: span.x, parentAgentId: parent || mainId } : undefined,
-        placed: span !== undefined,
-        hasChildren: (kids.get(a.id) ?? []).length > 0,
-        detail: describe(a.status, a.spawnedAtMs, a.endedAtMs),
-      });
-      walk(a.id, depth + 1);
-    }
-  };
-  walk("", 0);
-  for (const a of agents) {
-    if (a.id === mainId || seen.has(a.id)) continue;
-    const span = spanOf(a.spawnedAtMs, a.endedAtMs, a.status);
+  // Render order, depth and nesting are `hostedTree`'s, shared with the graph:
+  // both pictures answer "what hangs off what" the same way or one of them is
+  // lying. A sub session is drawn exactly like a subagent — from when it
+  // branched to when it last did anything. It has no *end*, nothing closes a
+  // session, but "still running, forever" was a worse lie than "this is how
+  // far it got", and it made every sub session a bar running off the pane.
+  for (const m of members) {
+    const ends = m.kind === "sub_session" ? endOfSubSession(subSessions, m.id) : endOfAgent(agents, m.id);
+    const span = spanOf(m.at, ends, m.status);
     lanes.push({
-      agentId: a.id,
-      kind: "subagent",
-      label: a.label ?? a.agentType ?? "subagent",
-      status: a.status,
-      bars: barsFor(a.id, a.spawnedAtMs),
-      depth: 0,
+      agentId: m.id,
+      kind: m.kind,
+      label: m.label,
+      status: m.status,
+      bars: barsFor(m.id, m.at),
+      depth: m.depth,
       span,
-      anchor: span ? { x: span.x, parentAgentId: mainId } : undefined,
+      anchor: span ? { x: span.x, parentAgentId: m.parent ?? rootId } : undefined,
       placed: span !== undefined,
-      hasChildren: false,
-      detail: describe(a.status, a.spawnedAtMs, a.endedAtMs),
-    });
-  }
-
-  // `subSessionTree` already turns a flat, parent-linked list into render order with
-  // a depth per row, roots an orphan at the top level and refuses to drop a
-  // cycle. All of that is the same problem here.
-  for (const placed of subSessionTree(subSessions)) {
-    const f = placed.subSession;
-    // A sub session is drawn exactly like a subagent: from when it branched to when it
-    // last did anything. It has no *end* — nothing closes a session — but
-    // "still running, forever" was a worse lie than "this is how far it got",
-    // and it made every sub session a bar running off the edge of the pane.
-    const span = spanOf(f.createdAtMs, f.lastActivityMs, f.status);
-    lanes.push({
-      agentId: f.id,
-      kind: "subSession",
-      label: f.title ?? "untitled sub session",
-      status: f.status,
-      bars: barsFor(f.id, f.createdAtMs),
-      depth: placed.depth,
-      span,
-      anchor: span
-        ? { x: span.x, parentAgentId: placed.depth > 0 && f.parent ? f.parent : mainId }
-        : undefined,
-      placed: span !== undefined,
-      hasChildren: subSessions.some((o) => o.parent === f.id),
-      detail: describe(f.status, f.createdAtMs, f.lastActivityMs),
+      hasChildren: m.children > 0,
+      detail: m.detail,
     });
   }
 

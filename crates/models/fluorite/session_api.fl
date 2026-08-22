@@ -76,7 +76,7 @@ struct LogSearchPage {
 }
 
 /// One agent's current values: what it is, what became of it, what it runs
-/// under, and its live numbers. The subagent-only fields (`parent`, `label`,
+/// under, and its live numbers. The subagent-only fields (`parent`, `title`,
 /// `task`, `output`, `error`) are absent for a session's main agent.
 ///
 /// The configuration fields — `model`, `mcp_servers`, `memory_spaces`,
@@ -88,8 +88,10 @@ struct AgentDocument {
     /// Parent agent id; absent → rooted on whatever this session's primary
     /// agent is: its main agent, or the step that spawned it.
     parent: Option<String>,
-    /// A subagent's label, or the step a workflow agent ran.
-    label: Option<String>,
+    /// What this agent is called: the main agent's title (which is the
+    /// session's name), a subagent's or sub session's, or the step a workflow
+    /// agent ran.
+    title: Option<String>,
     /// The task a subagent was spawned to do.
     task: Option<String>,
     depth: u32,

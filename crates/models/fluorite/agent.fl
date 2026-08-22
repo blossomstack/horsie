@@ -41,7 +41,8 @@ struct ThinkingPart {
 /// providers flatten it back to the same text block they have always received.
 struct SubAgentResultPart {
     subagent_id: String,
-    label: String,
+    /// What the subagent was called: the `title` its spawner gave it.
+    title: String,
     /// "completed" | "failed" — the SubAgentView.status vocabulary.
     status: String,
     /// Output on success, error text on failure. Already capped at 50 KB by
@@ -248,7 +249,7 @@ struct AskLifecycle { tool_call_id: Option<String>, question: String }
 
 /// A subagent this agent spawned, and where it got to. Recorded on the
 /// *parent*, because the parent is what a viewer is reading when it matters.
-struct SubAgentLifecycle { id: String, label: String, status: String }
+struct SubAgentLifecycle { id: String, title: String, status: String }
 
 /// A sub session branched from this session. Recorded on the agent it was
 /// branched *from*, because that is what a viewer is reading when it matters —

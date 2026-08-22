@@ -101,7 +101,7 @@ fn running_children(state: &AgentState) -> Vec<(String, String)> {
     let mut latest: BTreeMap<String, (String, String)> = BTreeMap::new();
     for entry in &state.log {
         if let AgentLogBody::Lifecycle(LifecycleEvent::SubAgent(s)) = &entry.body {
-            latest.insert(s.id.clone(), (s.label.clone(), s.status.clone()));
+            latest.insert(s.id.clone(), (s.title.clone(), s.status.clone()));
         }
     }
     latest
@@ -269,13 +269,13 @@ mod tests {
     }
 
     /// Append a subagent-progress entry the way the session would.
-    fn note_subagent(state: &mut AgentState, id: &str, label: &str, status: &str) {
+    fn note_subagent(state: &mut AgentState, id: &str, title: &str, status: &str) {
         state.log.push(AgentLogEntry {
             seq: state.next_seq,
             at_ms: 1,
             body: AgentLogBody::Lifecycle(LifecycleEvent::SubAgent(SubAgentLifecycle {
                 id: id.into(),
-                label: label.into(),
+                title: title.into(),
                 status: status.into(),
             })),
         });

@@ -4,6 +4,7 @@ export * from './annotationEntry';
 export * from './agentSettings';
 export * from './sessionSummary';
 export * from './subSessionView';
+export * from './agentStats';
 export * from './answerAsksRequest';
 export * from './askAnswerInput';
 export * from './sessionDetail';

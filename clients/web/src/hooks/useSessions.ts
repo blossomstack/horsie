@@ -205,12 +205,14 @@ export function useSendMessage() {
   });
 }
 
-/** Remove one sub session. Nothing removes one on its own, so this is the only way. */
-export function useDeleteSubSession() {
+/** Remove one agent a session hosts — a subagent's run or a sub session — and
+ * everything below it. Nothing removes either on its own, so this is the only
+ * way. */
+export function useDeleteAgent() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, subSessionId }: { id: string; subSessionId: string }) =>
-      api.sessions.deleteSubSession(id, subSessionId),
+    mutationFn: ({ id, agentId }: { id: string; agentId: string }) =>
+      api.sessions.deleteAgent(id, agentId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["sessions"] });
     },

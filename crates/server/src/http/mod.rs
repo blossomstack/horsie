@@ -328,7 +328,7 @@ fn scoped() -> Router<AppState> {
         .route("/sessions/{id}/answers", post(handlers::answer_asks))
         .route(
             "/sessions/{id}/agents/{agent_id}",
-            get(handlers::get_agent).delete(handlers::delete_sub_session),
+            get(handlers::get_agent).delete(handlers::delete_agent),
         )
         .route(
             "/sessions/{id}/messages",
@@ -1626,6 +1626,7 @@ mod tests {
                 .ask(
                     |reply| crate::sessions::supervisor::SessionSupervisorCommand::Create {
                         spec,
+                        name: None,
                         created_at: 0,
                         message: None,
                         reply,

@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(d.to, AgentKey::Main);
         assert_eq!(d.child, RunId(id));
         assert_eq!(d.part.text, "three stale crates");
-        assert_eq!(d.part.label, "audit");
+        assert_eq!(d.part.title, "audit");
     }
 
     /// Nothing here gates on what the recipient is doing. A running or parked
@@ -227,6 +227,6 @@ mod tests {
         };
         assert_eq!(d.to, AgentKey::Step(step_agent));
         assert_eq!(d.child, invoked);
-        assert_eq!(d.part.label, "workflow deploy");
+        assert_eq!(d.part.title, "workflow deploy");
     }
 }

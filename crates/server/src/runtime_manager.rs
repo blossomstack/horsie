@@ -725,7 +725,6 @@ mod tests {
 
     fn session_spec(vendor: &str) -> SessionSpec {
         SessionSpec {
-            name: None,
             kind: crate::sessions::spec::SessionKind::Agent {
                 settings: Box::new(AgentSettings {
                     source: crate::sessions::spec::AgentSource::AdHoc,

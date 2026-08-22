@@ -12,13 +12,14 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { subSessionReadyToOpen } from "../lib/subSessionTree";
 import { SessionStatusKind, TaskStatus } from "../api/types";
-import type { SubSessionView } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
 import { ContextGauge } from "../components/ContextGauge";
 import { SessionConfigBar } from "../components/SessionConfigBar";
 import { AgentGraph } from "../components/AgentGraph";
+import { AgentInfoPanel, selectAgent } from "../components/AgentInfoPanel";
+import { EntryInfoPanel } from "../components/EntryInfoPanel";
 import { SessionPane } from "../components/SessionPane";
 import { SessionTimeline } from "../components/SessionTimeline";
 import { SettingsMenu } from "../components/SettingsMenu";
@@ -35,7 +36,7 @@ import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
-  useDeleteSubSession,
+  useDeleteAgent,
   useAnswerAsks,
   useSendMessage,
   useSession,
@@ -94,48 +95,6 @@ function SessionTitle({ name }: { name: string | undefined }) {
   return (
     <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
       {sessionTitle(name)}
-    </h1>
-  );
-}
-
-/** Which conversation this page is, when it is a sub session.
- *
- * Its own component rather than a mode of `SessionTitle`: a sub session is not
- * renamed from here — it names itself, and the session it branched from is the
- * thing with an editable name — so the two share a place in the header and
- * almost none of their behaviour.
- *
- * The session's name stays in front of it, and leads back to it. The page's
- * whole content is one sub session's transcript, and with the rail listing
- * sessions only there is nothing else on screen that says which session this
- * belongs to. */
-function SubSessionTitle({
-  sessionId,
-  sessionName,
-  subSession,
-}: {
-  sessionId: string;
-  sessionName: string | undefined;
-  subSession: SubSessionView;
-}) {
-  return (
-    <h1
-      data-testid="session-title"
-      className="page-title flex min-w-0 flex-1 items-baseline gap-1.5 truncate"
-    >
-      <Link
-        to={`/sessions/${sessionId}`}
-        className="max-w-[40%] shrink-0 truncate text-dim hover:text-legend"
-        title={`Back to ${sessionTitle(sessionName)}`}
-      >
-        {sessionTitle(sessionName)}
-      </Link>
-      <span className="shrink-0 text-faint" aria-hidden>
-        /
-      </span>
-      <span className="min-w-0 truncate" data-testid="sub-session-title">
-        {subSession.title ?? "untitled sub session"}
-      </span>
     </h1>
   );
 }
@@ -203,13 +162,26 @@ export function SessionView() {
   const answerAsks = useAnswerAsks();
   const stop = useStopAgent();
   const del = useDeleteSession();
-  const delSubSession = useDeleteSubSession();
-  /** The sub session this page is showing, when the agent it is scoped to is
-   *  one. A subagent and a workflow step are not: they are read here, never
-   *  named or deleted here. */
+  const delAgent = useDeleteAgent();
+  /** The run this page is scoped to, when it is scoped to one. A sub session
+   *  and a subagent are both here: both can be named, and both can be
+   *  removed. A workflow step is neither — the run owns it. */
   const openSubSession = agentId
     ? detail?.subSessions?.find((row) => row.id === agentId)
     : undefined;
+  const openAgent = agentId
+    ? detail?.agents?.find((row) => row.id === agentId)
+    : undefined;
+  /** What this page is called: the run's own title, never the session's with
+   *  the run's appended. The main agent's title *is* the session's name. */
+  const runTitle = agentId
+    ? (openSubSession?.title ?? openAgent?.title ?? openAgent?.agentType)
+    : detail?.name;
+  /** Only a subagent's run and a sub session can go. The main agent is the
+   *  session — its key deletes the session — and a workflow step belongs to
+   *  its run's log. */
+  const runDeletable =
+    openSubSession != null || (openAgent != null && openAgent.kind === "subagent");
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
 
@@ -242,10 +214,14 @@ export function SessionView() {
   // remembered view is.
   const fresh = (useLocation().state as { fresh?: boolean } | null)?.fresh === true;
   const asked = searchParams.get("view");
-  const view: SessionViewId =
-    agentId || fresh
-      ? "transcript"
-      : (VIEWS.find((v) => v.id === asked)?.id ?? lastView);
+  // A scoped page picks its view like any other. It used to be pinned to the
+  // transcript, because both structural views were the *session's* — drawn
+  // from the main agent, with the whole roster hanging off it — so on a
+  // subagent's page they showed the wrong thing over the right transcript.
+  // Both are now drawn of whichever run the page is on.
+  const view: SessionViewId = fresh
+    ? "transcript"
+    : (VIEWS.find((v) => v.id === asked)?.id ?? lastView);
   const timelineOpen = view === "timeline";
   const graphOpen = view === "graph";
   /** Whether anything has taken the pane from the transcript. */
@@ -265,7 +241,7 @@ export function SessionView() {
   // A remembered view still has to reach the URL, or the page would show one
   // thing and the link in the address bar would promise another.
   useEffect(() => {
-    if (agentId || asked === view || view === "transcript") return;
+    if (asked === view || view === "transcript") return;
     setSearchParams(
       (prev) => {
         const params = new URLSearchParams(prev);
@@ -274,7 +250,7 @@ export function SessionView() {
       },
       { replace: true },
     );
-  }, [agentId, asked, view, setSearchParams]);
+  }, [asked, view, setSearchParams]);
   /** An entry the timeline asked for, held until the transcript is on screen
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
@@ -289,6 +265,13 @@ export function SessionView() {
   const [expanded, setExpanded] = useState<string[]>([]);
   /** Agents whose children are folded away. */
   const [collapsed, setCollapsed] = useState<string[]>([]);
+  /** What the panel beside a structural view is showing: one agent, or one
+   *  entry. Held here rather than in either view because both write it and
+   *  only one panel is ever open — and because switching between the two views
+   *  should not lose what you had selected. */
+  const [selection, setSelection] = useState<
+    { kind: "agent" | "entry"; id: string } | null
+  >(null);
   const [histories, setHistories] = useState<Record<string, TranscriptItem[]>>({});
 
   const toggleExpand = async (agentId: string) => {
@@ -436,8 +419,14 @@ export function SessionView() {
         detail?.subSessions ?? [],
         Date.now(),
         histories,
+        // The run this page is scoped to. `stream.items` is already that
+        // run's transcript, so drawing its bars on a lane labelled "main
+        // agent" — with the whole session's roster hanging off it — was the
+        // picture contradicting the prose it was drawn from.
+        agentId,
+        collapsed,
       ),
-    [stream.items, detail?.agents, detail?.subSessions, histories],
+    [stream.items, detail?.agents, detail?.subSessions, histories, agentId, collapsed],
   );
 
   // Both rosters, because the graph is the session's whole lineage: its agents
@@ -448,6 +437,36 @@ export function SessionView() {
     () => layoutAgentTree(detail?.agents ?? [], detail?.subSessions ?? [], collapsed),
     [detail?.agents, detail?.subSessions, collapsed],
   );
+
+  /** The selected agent, resolved against both rosters. */
+  const selectedAgent = useMemo(
+    () =>
+      selection?.kind === "agent"
+        ? selectAgent(
+            selection.id,
+            detail?.agents ?? [],
+            detail?.subSessions ?? [],
+            detail?.name,
+          )
+        : null,
+    [selection, detail?.agents, detail?.subSessions, detail?.name],
+  );
+
+  /** The selected entry's message. Found in what is loaded rather than
+   *  fetched: the timeline only draws bars for entries it was handed, so a
+   *  bar you can click is a message this page already holds. */
+  const selectedEntry = useMemo(() => {
+    if (selection?.kind !== "entry") return null;
+    for (const item of stream.items) {
+      if (item.kind === "message" && item.value.id === selection.id) return item.value;
+    }
+    for (const history of Object.values(histories)) {
+      for (const item of history) {
+        if (item.kind === "message" && item.value.id === selection.id) return item.value;
+      }
+    }
+    return null;
+  }, [selection, stream.items, histories]);
 
   /** Scroll to a transcript entry by id, to a boundary by seq, or to either end. */
   const seek = (target: number | string) => {
@@ -578,20 +597,28 @@ export function SessionView() {
     }
   };
 
+  /** Remove one run, and everything it delegated. Used by the header key and
+   *  by the panel beside the structural views, so the confirmation and the
+   *  navigation afterwards are written once. */
+  const deleteRun = async (runId: string, name: string) => {
+    if (!(await askConfirm(`Delete “${name}”? This cannot be undone.`))) return;
+    try {
+      await delAgent.mutateAsync({ id, agentId: runId });
+      // Back to the session, which still exists. Only when the page *was* that
+      // run: deleting one from the graph leaves you where you were.
+      if (agentId === runId) navigate(`/sessions/${id}`);
+    } catch {
+      /* reported by the global failure notice */
+    }
+  };
+
   // Deletes what you are looking at. A sub session used to be deletable only
   // from its row in the rail, which no longer lists them — and a control that
   // deleted the whole session from a sub session's page would be the wrong
   // thing under the same key.
   const handleDelete = async () => {
-    if (openSubSession) {
-      const name = openSubSession.title ?? "this sub session";
-      if (!(await askConfirm(`Delete “${name}”? This cannot be undone.`))) return;
-      try {
-        await delSubSession.mutateAsync({ id, subSessionId: openSubSession.id });
-        navigate(`/sessions/${id}`);
-      } catch {
-        /* reported by the global failure notice */
-      }
+    if (runDeletable && agentId) {
+      await deleteRun(agentId, runTitle ?? "this run");
       return;
     }
     if (!(await askConfirm("Delete this session? This cannot be undone.")))
@@ -651,25 +678,27 @@ export function SessionView() {
           >
             <RailToggle />
             {status && <StatusLamp status={status} />}
-            {openSubSession ? (
-              <SubSessionTitle
-                sessionId={id}
-                sessionName={detail?.name}
-                subSession={openSubSession}
-              />
-            ) : (
-              <SessionTitle name={detail?.name} />
-            )}
+            {/* Whatever run this page is, named on its own terms. It used to
+                put the parent session's name and a link in front of a sub
+                session's title, which spent the widest thing in the header on
+                context that the rail already carries — and did it for one kind
+                of run only, so the header said different amounts about
+                different agents. */}
+            <SessionTitle name={runTitle} />
             {/* Beside the title rather than in the key cluster on the right:
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}
-            {!agentId && (
-              <div
-                className="flex shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] bg-screen p-0.5"
-                role="radiogroup"
-                aria-label="View"
-                data-testid="view-switch"
-              >
+            {/* On every run, not just the session's own. The three views are
+                three readings of the same session, and a subagent's page had
+                no way into either structural one — you had to go back to the
+                session first, which is the navigation the graph exists to
+                replace. */}
+            <div
+              className="flex shrink-0 items-center gap-0.5 rounded-[var(--radius-control)] bg-screen p-0.5"
+              role="radiogroup"
+              aria-label="View"
+              data-testid="view-switch"
+            >
                 {/* One control with three settings rather than two independent
                     toggles: the views are answers to the same question, and
                     exactly one of them always holds the pane. The transcript
@@ -698,8 +727,7 @@ export function SessionView() {
                     <v.icon size={15} aria-hidden />
                   </button>
                 ))}
-              </div>
-            )}
+            </div>
             {/* Durability is the product's whole differentiator, so a dropped
                 feed is a first-class state on the panel — not a transcript
                 that quietly stops moving while the lamp still says Running. */}
@@ -715,10 +743,19 @@ export function SessionView() {
                 </span>
               </span>
             )}
-            <div className="flex shrink-0 items-center gap-0.5">
+            {/* Every key here acts on the transcript — its tokens, its plan,
+                its display, its session — and none of them means anything
+                while a structural view holds the pane.
+                Disabled, not hidden. Hiding them kept the row from reflowing
+                but left a hole where four keys had been, which reads as a
+                rendering fault rather than as controls that do not apply.
+                Greyed and unpressable says the same thing and looks like it
+                meant to. */}
+            <div className="flex shrink-0 items-center gap-0.5" data-testid="session-keys">
               <ContextGauge
                 agent={mainAgent}
                 sessionTotal={detail?.usageTotal}
+                disabled={overlayOpen}
               />
               {/* The plan is always reachable, so a session with no list
                   still has somewhere for one to appear. That there IS a plan
@@ -737,6 +774,7 @@ export function SessionView() {
                     "!text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
                   tasksOpen && "bg-raised !text-legend",
                 )}
+                disabled={overlayOpen}
                 onClick={() => setTasksOpen(!tasksOpen)}
                 aria-pressed={tasksOpen}
                 title={
@@ -754,18 +792,23 @@ export function SessionView() {
               >
                 <ListTodo size={15} aria-hidden />
               </button>
-              <SettingsMenu />
-              {/* The session, or the sub session whose page this is. A step is
-                  not deletable on its own — the run is the unit, and its page
-                  carries the control — and neither is a subagent, which its
-                  parent owns. */}
-              {(!agentId || openSubSession) && (
+              <SettingsMenu disabled={overlayOpen} />
+              {/* The session, or whichever run this page is. A workflow step
+                  is the one thing with no key: the run is the unit, and its
+                  page carries the control. */}
+              {(!agentId || runDeletable) && (
                 <button
                   className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
                   onClick={handleDelete}
-                  disabled={del.isPending || delSubSession.isPending}
-                  title={openSubSession ? "Delete sub session" : "Delete session"}
-                  aria-label={openSubSession ? "Delete sub session" : "Delete session"}
+                  disabled={overlayOpen || del.isPending || delAgent.isPending}
+                  title={
+                    !agentId
+                      ? "Delete session"
+                      : openSubSession
+                        ? "Delete sub session"
+                        : "Delete this subagent run"
+                  }
+                  aria-label={!agentId ? "Delete session" : "Delete this run"}
                   data-testid="session-delete"
                 >
                   <Trash2 size={15} aria-hidden />
@@ -789,14 +832,15 @@ export function SessionView() {
                   )
                 }
                 onToggleExpand={(agent) => void toggleExpand(agent)}
-                onSelectEntry={(entryId) => {
-                  // Reading an entry means reading the transcript. Switch back
-                  // and record where to go; the effect above seeks once the
-                  // transcript has actually rendered its anchors.
-                  setPendingSeek(entryId);
-                  showView("transcript");
-                }}
-                onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                // Beside the picture, not instead of it: a bar is unreadable
+                // on its own, and switching to the transcript to identify one
+                // closed the view that raised the question. Reading it in
+                // place is the panel's own key.
+                onSelectEntry={(entryId) => setSelection({ kind: "entry", id: entryId })}
+                onSelectAgent={(agent) => setSelection({ kind: "agent", id: agent })}
+                onOpenAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                selectedAgent={selection?.kind === "agent" ? selection.id : undefined}
+                selectedEntry={selection?.kind === "entry" ? selection.id : undefined}
               />
             </SessionPane>
           )}
@@ -812,7 +856,10 @@ export function SessionView() {
                     prev.includes(agent) ? prev.filter((a) => a !== agent) : [...prev, agent],
                   )
                 }
-                onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                onSelectAgent={(agent) => setSelection({ kind: "agent", id: agent })}
+                onOpenAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
+                selected={selection?.kind === "agent" ? selection.id : undefined}
+                current={agentId}
               />
             </SessionPane>
           )}
@@ -999,9 +1046,44 @@ export function SessionView() {
           </div>
         </div>
 
-        {tasksOpen && (
+        {/* One column, three things that can be in it. The plan belongs to
+            the transcript and the other two to the structural views, so they
+            cannot collide — but the ordering is written out rather than left
+            to whichever condition happens to be true first. */}
+        {overlayOpen && selectedAgent ? (
+          <AgentInfoPanel
+            agent={selectedAgent}
+            onClose={() => setSelection(null)}
+            onOpenTranscript={(agent) =>
+              navigate(
+                agent === MAIN_AGENT || agent === detail?.agents?.[0]?.id
+                  ? `/sessions/${id}`
+                  : `/sessions/${id}/agents/${agent}`,
+              )
+            }
+            onDelete={
+              selectedAgent.kind === "subagent" || selectedAgent.kind === "sub_session"
+                ? (agent) => void deleteRun(agent, selectedAgent.title)
+                : undefined
+            }
+            deleting={delAgent.isPending}
+          />
+        ) : overlayOpen && selectedEntry ? (
+          <EntryInfoPanel
+            message={selectedEntry}
+            onClose={() => setSelection(null)}
+            onOpenTranscript={(entryId) => {
+              // Reading it in place means reading the transcript. Switch back
+              // and record where to go; the effect above seeks once the
+              // transcript has actually rendered its anchors.
+              setPendingSeek(entryId);
+              setSelection(null);
+              showView("transcript");
+            }}
+          />
+        ) : tasksOpen ? (
           <TaskListPanel tasks={tasks} onClose={() => setTasksOpen(false)} />
-        )}
+        ) : null}
       </div>
     </AskAnswerProvider>
   );

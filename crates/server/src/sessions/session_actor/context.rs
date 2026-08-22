@@ -316,6 +316,23 @@ pub(super) fn scoped_client(
     }
 }
 
+/// Appended to a session's main agent, and to nothing else.
+///
+/// Its own suffix rather than a section of the base prompt, because the base
+/// prompt is what *every* agent gets — a subagent, a workflow step and a sub
+/// session all read it. All three were being told to call
+/// `set_session_title` on their first turn, and none of them has the tool:
+/// only the main agent does. A subagent's own suffix then contradicted it two
+/// paragraphs later ("you cannot rename the session"), which is the shape of a
+/// prompt that grew a section for one reader and handed it to four.
+const TITLE_PROMPT_SUFFIX: &str = "\n\n## Session title\n\n\
+On the first turn, call `set_session_title` with a concise, specific title that \
+summarizes the user's request. It is your title as this session's main agent, and \
+the name the session is listed under. The server may already have set a fallback \
+title from the first user message; replace it when you can provide a clearer one. \
+You may call the tool again later if the session's purpose changes; the latest \
+successful call wins.";
+
 /// Appended to a subagent's system prompt: its place in the tree and how its
 /// result travels. Deliberately short — the tools carry their own docs.
 const SUBAGENT_PROMPT_SUFFIX: &str = "\n\n# Subagent role\n\
@@ -360,9 +377,10 @@ done, submit.";
 /// `Fresh` sub session was "carrying its history up to the branch point", which
 /// is the one thing a `Fresh` sub session does not have.
 ///
-/// No title instruction here. The base prompt's `## Session title` section
-/// already tells every session to name itself on the first turn, and a sub
-/// session gets that prompt like any other.
+/// No title instruction here, and none reaches a sub session from anywhere
+/// else: it does not name itself. Whoever branched it chose a title at the
+/// branch — `spawn_subsession` takes one and `/fork` derives one from the
+/// brief — so there is no tool here to tell it about.
 fn sub_session_prompt(origin: &SubSessionOrigin) -> String {
     let source = &origin.source_title;
     let carried = match origin.mode {
@@ -1200,16 +1218,11 @@ impl ContextProvider for SessionContextProvider {
                     result
                 }
             }
-            // A sub session takes the main agent's arms: it is a session, so
-            // it can ask the user — and it names *itself*, not the session.
-            SessionAgentKind::SubSession(id) => {
-                let inner: Arc<dyn Toolbox> = Arc::new(AskUserToolbox::new(with_spawn));
-                Arc::new(SessionTitleToolbox::for_sub_session(
-                    inner,
-                    self.session.clone(),
-                    id,
-                ))
-            }
+            // A sub session takes the main agent's arms except one: it is a
+            // session, so it can ask the user — but it does not name itself.
+            // Whoever branched it named it, which is why `spawn_subsession`
+            // and `/fork` both settle a title at the branch.
+            SessionAgentKind::SubSession(_) => Arc::new(AskUserToolbox::new(with_spawn)),
             SessionAgentKind::Sub(_) => with_spawn,
         };
         let system_prompt = compose_system_prompt(
@@ -1234,9 +1247,13 @@ impl ContextProvider for SessionContextProvider {
         // Owned rather than borrowed because a sub session's is built from its
         // origin — there is no constant to point at.
         let sub_session_role = self.origin.as_ref().map(sub_session_prompt);
+        // The main agent's two suffixes are joined rather than chosen between:
+        // an unattended run still names itself, and it is still the only agent
+        // that can.
+        let unattended_and_title = format!("{UNATTENDED_PROMPT_SUFFIX}{TITLE_PROMPT_SUFFIX}");
         let suffix: Option<&str> = match &self.kind {
-            SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
-            SessionAgentKind::Main => None,
+            SessionAgentKind::Main if self.unattended => Some(&unattended_and_title),
+            SessionAgentKind::Main => Some(TITLE_PROMPT_SUFFIX),
             SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
             // Nothing at all when the origin is missing, which only a spawn
             // that lost the record can produce: a sub session told it branched
@@ -1808,11 +1825,50 @@ mod tests {
         // The shared workspace is the other thing nothing else can tell it.
         for prompt in [&copy, &summary, &fresh] {
             assert!(prompt.contains("share one workspace"), "{prompt}");
-            // The base prompt's `## Session title` section already asks every
-            // session to name itself. Asking again here is what made this
-            // section nag long after the sub session was named.
+            // A sub session does not name itself, so nothing in its prompt
+            // may tell it to: the tool is the main agent's alone.
             assert!(!prompt.contains("set_session_title"), "{prompt}");
         }
+    }
+
+    /// The title instruction goes to the one agent that can act on it.
+    ///
+    /// It used to be a section of the base prompt, which every agent reads —
+    /// so a subagent was told to call `set_session_title` on its first turn,
+    /// and then told two paragraphs later that it could not rename the
+    /// session. A tool the reader does not have is worse than silence: it
+    /// spends a turn discovering the contradiction.
+    #[tokio::test]
+    async fn only_the_main_agent_is_told_to_title_the_session() {
+        let (f, session, id) = agent_harness().await;
+        let sub = spawn_typed(&session, None).await.unwrap();
+
+        // The same provider, differing only in which agent it is building for:
+        // that is the whole of what this test is about.
+        let mut as_main = typed_provider(&f, &session, id, id, None);
+        as_main.kind = SessionAgentKind::Main;
+        as_main.agent_type = None;
+        let main_prompt = as_main
+            .provide()
+            .await
+            .expect("contexts")
+            .system_prompt
+            .unwrap_or_default();
+        assert!(
+            main_prompt.contains("call `set_session_title`"),
+            "the main agent names the session: {main_prompt}"
+        );
+
+        let sub_prompt = typed_provider(&f, &session, id, sub, None)
+            .provide()
+            .await
+            .expect("contexts")
+            .system_prompt
+            .unwrap_or_default();
+        assert!(
+            !sub_prompt.contains("set_session_title"),
+            "a subagent has no title tool and must not be told to call one: {sub_prompt}"
+        );
     }
 
     /// The agent's body is added to the generic subagent role, and its `tools`

@@ -209,7 +209,7 @@ describe("fold", () => {
     reset();
     const f = fold([
       lifecycle("TurnBegan", { consumed: [], answered: [] }),
-      lifecycle("SubAgent", { id: "abc", label: "audit", status: "running" }),
+      lifecycle("SubAgent", { id: "abc", title: "audit", status: "running" }),
     ]);
     expect(f.progression).toEqual({
       stage: "subagent_running",
@@ -263,7 +263,7 @@ describe("fold", () => {
   it("drops a subagent's progress once the turn ends", () => {
     reset();
     const f = fold([
-      lifecycle("SubAgent", { id: "abc", label: "audit", status: "completed" }),
+      lifecycle("SubAgent", { id: "abc", title: "audit", status: "completed" }),
       lifecycle("TurnEnded", { outcome: { kind: "Ended", value: {} } }),
     ]);
     expect(f.progression).toBeNull();
