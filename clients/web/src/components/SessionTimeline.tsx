@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronDown, ChevronRight, MessageSquareText } from "lucide-react";
 import type { Bar, BarKind, Lane, Timeline } from "../lib/timeline";
 import { cn } from "../lib/cn";
 
@@ -17,7 +17,12 @@ import { cn } from "../lib/cn";
 
 const LANE_H = 30;
 const BAR_H = 20;
-const SIDEBAR_W = 170;
+/** The name column. Wide enough for a real title: at 170 a name had about
+ * twenty characters between the chevron and the jump key, so most agents read
+ * as a truncation with an ellipsis where the distinguishing part had been.
+ * It costs the bars nothing — the pane scrolls sideways, and the sidebar is
+ * pinned over it rather than sharing the width. */
+const SIDEBAR_W = 240;
 
 /** Solid, square and borderless: a bar is a block of colour, nothing else.
  *
@@ -291,7 +296,9 @@ function LaneRow({
             aria-label={`Open ${lane.label}'s transcript`}
             onClick={() => onOpenAgent(lane.agentId)}
           >
-            <ExternalLink size={11} aria-hidden />
+            {/* The transcript's own glyph, the one a graph node's key and
+                both panels carry. One action, one icon. */}
+            <MessageSquareText size={12} aria-hidden />
           </button>
         )}
 

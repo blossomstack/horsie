@@ -56,12 +56,14 @@ test("Z1: the graph draws the main agent and what it spawned", async ({
   // node, in its hover title and in its fold's label.
   await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(2);
   // Every node says what kind of thing it is, which is the one claim a shape
-  // alone could never make. Scoped to the graph: "subagent" is a word the rail
-  // uses too, and an unscoped match is a strict-mode failure waiting for the
-  // next component that says it.
+  // alone could never make. It shares the bottom line with the status now —
+  // the name has the two lines above it — so this matches the line, not the
+  // word. Scoped to the graph: "subagent" is a word the rail uses too, and an
+  // unscoped match is a strict-mode failure waiting for the next component
+  // that says it.
   const graph = page.getByTestId("agent-graph");
-  await expect(graph.getByText("main session", { exact: true })).toBeVisible();
-  await expect(graph.getByText("subagent", { exact: true })).toBeVisible();
+  await expect(graph.getByText(/^main session · /)).toBeVisible();
+  await expect(graph.getByText(/^subagent · /)).toBeVisible();
   // The subagent is named for the title its spawner gave it.
   await expect(page.getByRole("button", { name: "Show audit" })).toBeVisible();
 });

@@ -18,10 +18,14 @@ import { cn } from "../lib/cn";
  * structural views of a session read the same way.
  */
 
-/** Where a lane sits and what a rank is worth, in pixels. */
-const NODE_W = 196;
-/** Three lines now — kind, title, status — so the card is taller. */
-const NODE_H = 58;
+/** Where a lane sits and what a rank is worth, in pixels.
+ *
+ * Wider and taller than it was, because the name is what a node is *for* and
+ * the name was the thing being cut: a title now gets the top two lines to
+ * itself, and everything the reader can recover elsewhere — what kind of thing
+ * this is, what became of it, which preset it runs — shares the third. */
+const NODE_W = 212;
+const NODE_H = 66;
 /** Between ranks: wide enough that an edge reads as a run, not a joint. */
 const GAP_X = 76;
 /** One lane, node included. */
@@ -62,14 +66,35 @@ const STATUS_FILL: Record<string, string> = {
   idle: "fill-raised",
 };
 
-/** Measured off the rendered graph. The name is cut short of the jump key. */
-const NAME_MAX = 22;
-const DETAIL_MAX = 26;
+/** Measured off the rendered graph, at the sizes the two lines are drawn in.
+ * The first line of a name stops short of the jump key; the second has the
+ * whole width, because the key is only ever on the first. */
+const NAME_MAX_1 = 25;
+const NAME_MAX_2 = 30;
+const DETAIL_MAX = 38;
 /** One character of the `+3` a fold carries, at 10px. */
 const BADGE_CHAR_W = 6;
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/**
+ * A name across two lines, broken at a word where there is one.
+ *
+ * Measured in characters rather than laid out, which is the trade SVG asks
+ * for: there is no wrapping in `<text>`, and the alternative is a
+ * `foreignObject` per node. A proportional font makes the count approximate,
+ * so both budgets are set from what actually fitted on screen rather than from
+ * arithmetic, and the hover title carries the whole name either way.
+ */
+function twoLines(text: string): [string, string?] {
+  if (text.length <= NAME_MAX_1) return [text];
+  const space = text.lastIndexOf(" ", NAME_MAX_1);
+  // A break more than halfway along is a word break worth taking; anything
+  // earlier would leave a stub of a first line, so the cut is mid-word.
+  const head = space > NAME_MAX_1 / 2 ? text.slice(0, space) : text.slice(0, NAME_MAX_1);
+  return [head, clip(text.slice(head.length).trimStart(), NAME_MAX_2)];
 }
 
 export function AgentGraph({
@@ -192,6 +217,7 @@ export function AgentGraph({
         {tree.nodes.map((n) => {
           const { x, y } = at(n);
           const isCurrent = current === n.id;
+          const name = twoLines(n.label);
           // Every node can be inspected, the main agent included: the panel
           // answers for it too, and a picture in which one node does nothing
           // when you click it teaches that clicking does nothing. Its jump key
@@ -271,19 +297,32 @@ export function AgentGraph({
                     be able to tell a sub session from a subagent — one owes a
                     result and one is a conversation — and every other cue for
                     it was either a shape or a colour already spent on status. */}
-                <text x={12} y={17} className="fill-faint text-[9px] tracking-[0.08em] uppercase">
-                  {KIND_LABEL[n.kind]}
+                {/* The name, over as many of the two lines as it needs. A
+                    one-line name sits where a two-line one's first line would
+                    have been, rather than centred: the meta line is anchored
+                    to the bottom, and a name that moved up and down with its
+                    own length made a row of nodes read as ragged. */}
+                <text x={12} y={24} className="fill-legend text-[12px] font-medium">
+                  {name[0]}
                 </text>
-                <text x={12} y={33} className="fill-legend text-[12px] font-medium">
-                  {clip(n.label, NAME_MAX)}
-                </text>
-                {/* The status in words as well as in colour: a lamp nobody can
-                    name is a lamp only its author can read. */}
-                <text x={12} y={47} className="fill-dim text-[10px]">
+                {name[1] && (
+                  <text x={12} y={40} className="fill-legend text-[12px] font-medium">
+                    {name[1]}
+                  </text>
+                )}
+                {/* What kind of thing this is, what became of it, and which
+                    preset it runs — one line, in that order.
+                    The kind used to be a line of its own above the name, set
+                    in the legend's upper case: a whole line, at the top of the
+                    card, spent on the least specific thing a node has to say.
+                    The status is in words as well as in colour here for the
+                    same reason it always was — a lamp nobody can name is a
+                    lamp only its author can read. */}
+                <text x={12} y={NODE_H - 12} className="fill-dim text-[10px]">
                   {clip(
-                    n.agentType
-                      ? `${n.status.replace(/_/g, " ")} · ${n.agentType}`
-                      : n.status.replace(/_/g, " "),
+                    [KIND_LABEL[n.kind], n.status.replace(/_/g, " "), n.agentType]
+                      .filter(Boolean)
+                      .join(" · "),
                     DETAIL_MAX,
                   )}
                 </text>

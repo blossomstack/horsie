@@ -1,4 +1,4 @@
-import { ExternalLink, Trash2 } from "lucide-react";
+import { MessageSquareText, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
 import { KIND_LABEL, isLive, type AgentKind } from "../lib/agentTree";
 import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/format";
@@ -120,6 +120,10 @@ function AgentStatusChip({ status }: { status: string }) {
   );
 }
 
+/** One heading, shared by both panels beside the two pictures, so a section in
+ *  one does not out-shout a section in the other. */
+export const SECTION_TITLE = "legend !text-legend font-semibold";
+
 function Row({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-[3px]" title={hint}>
@@ -134,7 +138,10 @@ function Row({ label, value, hint }: { label: string; value: string; hint?: stri
 function Section({ title, children }: { title?: string; children: React.ReactNode }) {
   return (
     <section className="border-t px-3 py-2.5 first:border-t-0">
-      {title && <h3 className="legend !text-faint">{title}</h3>}
+      {/* A heading, not a caption. It was `legend !text-faint`: smaller than
+          the body under it *and* quieter, so the one line whose job is to say
+          what the block is came out as the least visible thing in it. */}
+      {title && <h3 className={SECTION_TITLE}>{title}</h3>}
       <div className={title ? "mt-1.5" : undefined}>{children}</div>
     </section>
   );
@@ -263,7 +270,10 @@ export function AgentInfoPanel({
       <div className="min-h-0 flex-1 overflow-y-auto" data-agent-kind={agent.kind}>
         <Section>
           <p
-            className="text-[0.8125rem] leading-snug break-words text-legend"
+            // `item-title`, the system's recipe for the name of one row — the
+            // rail and every list already use it, and this is the same thing:
+            // the name of what the panel is about.
+            className="item-title break-words"
             data-testid="agent-panel-title"
           >
             {agent.title}
@@ -369,7 +379,9 @@ export function AgentInfoPanel({
           onClick={() => onOpenTranscript(agent.id)}
           data-testid="agent-panel-open"
         >
-          <ExternalLink size={13} aria-hidden />
+          {/* The same glyph the jump key on a node carries. One action, one
+              icon: the panel's key and the node's key go to the same place. */}
+          <MessageSquareText size={13} aria-hidden />
           Transcript
         </button>
         {onDelete && (

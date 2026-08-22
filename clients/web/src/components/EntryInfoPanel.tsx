@@ -1,5 +1,6 @@
-import { ExternalLink } from "lucide-react";
+import { MessageSquareText } from "lucide-react";
 import type { RenderedMessage } from "../hooks/useSessionStream";
+import { SECTION_TITLE } from "./AgentInfoPanel";
 import { absoluteTime, clockTime, humanDuration } from "../lib/format";
 import Markdown from "./Markdown";
 import { SidePanel } from "./SidePanel";
@@ -73,7 +74,7 @@ export function EntryInfoPanel({
       <div className="min-h-0 flex-1 overflow-y-auto">
         {at > 0 && (
           <section className="px-3 py-2.5">
-            <h3 className="legend !text-faint">Timing</h3>
+            <h3 className={SECTION_TITLE}>Timing</h3>
             <div className="mt-1.5">
               <TimeRow label="At" value={clockTime(at)} hint={absoluteTime(at)} />
               {took != null && (
@@ -89,7 +90,7 @@ export function EntryInfoPanel({
         )}
         {message.text ? (
           <section className="px-3 py-2.5">
-            <h3 className="legend !text-faint">Message</h3>
+            <h3 className={SECTION_TITLE}>Message</h3>
             <div className="mt-1.5 text-[0.8125rem] leading-snug" data-testid="entry-panel-text">
               <Markdown text={message.text} />
             </div>
@@ -102,7 +103,7 @@ export function EntryInfoPanel({
 
         {message.thinking.length > 0 && (
           <section className="border-t px-3 py-2.5">
-            <h3 className="legend !text-faint">Thinking</h3>
+            <h3 className={SECTION_TITLE}>Thinking</h3>
             <p
               className="mt-1.5 text-[0.8125rem] leading-snug break-words whitespace-pre-wrap text-dim"
               data-testid="entry-panel-thinking"
@@ -114,7 +115,7 @@ export function EntryInfoPanel({
 
         {message.toolCalls.length > 0 && (
           <section className="border-t px-3 py-2.5">
-            <h3 className="legend !text-faint">Tool calls</h3>
+            <h3 className={SECTION_TITLE}>Tool calls</h3>
             <ul className="mt-1.5 space-y-1">
               {message.toolCalls.map((call) => (
                 <li
@@ -150,7 +151,7 @@ export function EntryInfoPanel({
           onClick={() => onOpenTranscript(message.id)}
           data-testid="entry-panel-open"
         >
-          <ExternalLink size={13} aria-hidden />
+          <MessageSquareText size={13} aria-hidden />
           Read in transcript
         </button>
       </div>
