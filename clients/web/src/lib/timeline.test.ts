@@ -430,6 +430,47 @@ describe("folding", () => {
     // A sibling is not a child, so it stays.
     expect(ids).toContain("other");
   });
+
+  /** Folding the root must not take its own chevron with it.
+   *
+   * `hasChildren` was read off the lanes that survived the fold, so a folded
+   * root reported no children, so the renderer drew it without the control
+   * that unfolds it: collapsing the whole session was a one-way door, and the
+   * only way back was a reload. Every other lane was fine — a member's child
+   * count is counted off the roster, which a fold cannot change. */
+  it("keeps the root's disclosure control while the root is folded", () => {
+    const roster = [
+      agent({ id: "main", kind: "main", title: undefined }),
+      agent({ id: "p", title: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+    ];
+    const folded = buildTimeline(SESSION, roster, [], 20_000, {}, undefined, ["main"]);
+    expect(folded.lanes.map((l) => l.agentId)).toEqual(["main"]);
+    expect(folded.lanes[0].hasChildren).toBe(true);
+  });
+
+  it("says the root has nothing to disclose when it really has nothing", () => {
+    const folded = buildTimeline(SESSION, MAIN, [], 20_000, {}, undefined, ["main"]);
+    expect(folded.lanes[0].hasChildren).toBe(false);
+  });
+
+  /** Subagents first, then the sessions branched off — under every agent, at
+   *  every depth. The timeline used to say it with a labelled rule drawn once,
+   *  at the first sub session in a flat list of lanes; with two agents that
+   *  each had both, that rule landed inside one of them. */
+  it("lays the delegated work above the sessions branched from the same agent", () => {
+    const roster = [
+      agent({ id: "main", kind: "main", title: undefined }),
+      agent({ id: "a1", title: "audit", spawnedAtMs: 8_000, endedAtMs: 9_000 }),
+    ];
+    const t = buildTimeline(
+      SESSION,
+      roster,
+      [subSession({ id: "f1", title: "branch", createdAtMs: 6_000, lastActivityMs: 7_000 })],
+      20_000,
+    );
+    // The sub session was branched first and is still drawn second.
+    expect(t.lanes.map((l) => l.agentId)).toEqual(["main", "a1", "f1"]);
+  });
 });
 
 describe("scope", () => {

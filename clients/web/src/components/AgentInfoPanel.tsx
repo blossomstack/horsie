@@ -1,7 +1,7 @@
 import { ExternalLink, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
-import { KIND_LABEL, type AgentKind } from "../lib/agentTree";
-import { compactNumber } from "../lib/format";
+import { KIND_LABEL, isLive, type AgentKind } from "../lib/agentTree";
+import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/format";
 import { cn } from "../lib/cn";
 import { SidePanel } from "./SidePanel";
 
@@ -33,6 +33,17 @@ export interface SelectedAgent {
   output?: string;
   stats?: AgentStats;
   error?: string;
+  /**
+   * When it began, and when it reached its result. Zero when the session's
+   * journal never recorded one — an agent from before these were kept, and the
+   * main agent, which nothing spawned.
+   *
+   * Both pictures draw with these and neither could say them: a bar's length
+   * *is* a duration, and the one question you cannot answer by looking at a
+   * bar is how long it was.
+   */
+  startedAtMs: number;
+  endedAtMs: number;
 }
 
 /** The roster rows, in the one shape this panel reads. */
@@ -51,6 +62,10 @@ export function selectAgent(
       status: sub.status,
       input: sub.input,
       stats: sub.stats,
+      startedAtMs: sub.createdAtMs,
+      // Not an end — nothing closes a session — which is why the panel names
+      // it for what it is rather than filing it under "ended".
+      endedAtMs: sub.lastActivityMs,
     };
   }
   const agent = agents.find((a) => a.id === id);
@@ -69,6 +84,8 @@ export function selectAgent(
     output: agent.output,
     stats: agent.stats,
     error: agent.error,
+    startedAtMs: agent.spawnedAtMs,
+    endedAtMs: agent.endedAtMs,
   };
 }
 
@@ -155,6 +172,58 @@ function ContextBar({ tokens, window }: { tokens: number; window: number }) {
   );
 }
 
+/**
+ * When this agent ran, and for how long.
+ *
+ * Drawn from the roster's own stamps, so it costs nothing and never disagrees
+ * with the lengths the timeline drew from the same two numbers. Absent
+ * entirely when neither was recorded, rather than shown as a row of dashes:
+ * an empty section teaches that the panel has nothing to say about time.
+ */
+function TimingSection({ agent }: { agent: SelectedAgent }) {
+  const { startedAtMs: from, endedAtMs: to } = agent;
+  if (from <= 0 && to <= 0) return null;
+  const live = isLive(agent.status);
+  // A live agent is measured against now, which is what the timeline does with
+  // a bar that has not finished. It moves whenever the panel re-renders, which
+  // a live session does constantly.
+  const until = live ? Date.now() : to;
+  const elapsed = from > 0 && until > from ? until - from : null;
+  return (
+    <Section title="Timing">
+      {from > 0 && (
+        <Row
+          label={
+            agent.kind === "sub_session" ? "Branched" : agent.kind === "main" ? "Opened" : "Spawned"
+          }
+          value={clockTime(from)}
+          hint={absoluteTime(from)}
+        />
+      )}
+      {to > from && (
+        <Row
+          // A session has no end, so the same stamp is named for what it
+          // actually is on one and for what it actually is on the other.
+          label={agent.kind === "sub_session" || live ? "Last activity" : "Ended"}
+          value={clockTime(to)}
+          hint={absoluteTime(to)}
+        />
+      )}
+      {elapsed != null && (
+        <Row
+          label={live ? "Running for" : "Took"}
+          value={humanDuration(elapsed)}
+          hint={
+            live
+              ? "Measured against now: this agent has not stopped."
+              : "From when it began to when it reached this result."
+          }
+        />
+      )}
+    </Section>
+  );
+}
+
 export function AgentInfoPanel({
   agent,
   onClose,
@@ -213,6 +282,8 @@ export function AgentInfoPanel({
             </p>
           )}
         </Section>
+
+        <TimingSection agent={agent} />
 
         {stats && (
           <Section title="Context">

@@ -1,3 +1,4 @@
+import { MessageSquareText } from "lucide-react";
 import type { AgentTree, PlacedAgent } from "../lib/agentTree";
 import { KIND_LABEL } from "../lib/agentTree";
 import { cn } from "../lib/cn";
@@ -28,19 +29,37 @@ const ROW_H = 74;
 const PAD = 20;
 /** The fold control, straddling the edge its children come out of. */
 const TOGGLE_R = 8;
-/** The jump key, inset from the node's top-right corner. */
-const JUMP_R = 9;
+/** The jump key: a square keycap in the node's top-right corner, the size the
+ * console's icon keys are everywhere else. */
+const JUMP_W = 20;
+/** The glyph inside it, which is the transcript's own icon at key size. */
+const JUMP_ICON = 13;
 
 /** A node is a panel key lit by the same lamps the rest of the console uses:
- * live for work in motion, ok for an agent that landed, red for a fault. */
-const STATUS_CLASS: Record<string, string> = {
-  running: "fill-live-quiet stroke-live",
-  provisioning: "fill-live-quiet stroke-live",
-  awaiting_input: "fill-accent-quiet stroke-accent",
-  completed: "fill-raised stroke-lamp-ok",
-  failed: "fill-red-quiet stroke-red",
-  cancelled: "fill-raised stroke-rule-strong",
-  idle: "fill-raised stroke-rule",
+ * live for work in motion, ok for an agent that landed, red for a fault.
+ *
+ * Fill and stroke are two maps rather than one string because the current run
+ * takes the fill over — and two `fill-*` utilities in one class list do not
+ * resolve by the order they were written in, they resolve by whichever
+ * Tailwind emitted last. Picking one is the only way to be sure which wins. */
+const STATUS_STROKE: Record<string, string> = {
+  running: "stroke-live",
+  provisioning: "stroke-live",
+  awaiting_input: "stroke-accent",
+  completed: "stroke-lamp-ok",
+  failed: "stroke-red",
+  cancelled: "stroke-rule-strong",
+  idle: "stroke-rule",
+};
+
+const STATUS_FILL: Record<string, string> = {
+  running: "fill-live-quiet",
+  provisioning: "fill-live-quiet",
+  awaiting_input: "fill-accent-quiet",
+  completed: "fill-raised",
+  failed: "fill-red-quiet",
+  cancelled: "fill-raised",
+  idle: "fill-raised",
 };
 
 /** Measured off the rendered graph. The name is cut short of the jump key. */
@@ -62,7 +81,10 @@ export function AgentGraph({
   onOpenAgent,
 }: {
   tree: AgentTree;
-  /** The agent the panel is showing, if one is selected. */
+  /** The agent the panel is showing, if one is selected. Drawn as a ring
+   *  *outside* the node: it is a passing choice — the next click moves it —
+   *  and it has to be legible on top of both of the other two things a node
+   *  says at once, its status and whether it is the run being read. */
   selected?: string;
   /** The agent whose transcript this page is scoped to, if any. "You are
    *  here": the three views are three readings of one session, and switching
@@ -169,17 +191,35 @@ export function AgentGraph({
 
         {tree.nodes.map((n) => {
           const { x, y } = at(n);
+          const isCurrent = current === n.id;
           // Every node can be inspected, the main agent included: the panel
           // answers for it too, and a picture in which one node does nothing
-          // when you click it teaches that clicking does nothing.
-          const jumpable = n.kind !== "main";
+          // when you click it teaches that clicking does nothing. Its jump key
+          // is the same rule one step on — every node is a run, and every run
+          // has a transcript.
           return (
             <g key={n.id} transform={`translate(${x} ${y})`}>
+              {/* What the panel is showing. A ring around the node rather
+                  than the node's own border, which is spent on status: a
+                  selected failed agent has to be able to read as both, and
+                  overwriting the border made it read as neither. */}
+              {selected === n.id && (
+                <rect
+                  x={-3.5}
+                  y={-3.5}
+                  width={NODE_W + 7}
+                  height={NODE_H + 7}
+                  rx={11}
+                  data-testid={`agent-selected-${n.id}`}
+                  className="fill-none stroke-legend stroke-[1.5]"
+                />
+              )}
               <g
                 data-testid={`agent-node-${n.id}`}
                 data-status={n.status}
                 data-kind={n.kind}
                 data-collapsed={n.collapsed ? "true" : undefined}
+                data-current={isCurrent ? "true" : undefined}
                 onClick={() => onSelectAgent(n.id)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
@@ -197,7 +237,10 @@ export function AgentGraph({
                     fixed width, so both are cut on it; this is where the uncut
                     version lives. It names the kind as well, because that is
                     the thing a shape alone could never say out loud. */}
-                <title>{`${n.label} — ${KIND_LABEL[n.kind]}, ${n.detail}`}</title>
+                <title>
+                  {`${n.label} — ${KIND_LABEL[n.kind]}, ${n.detail}`}
+                  {isCurrent ? " · the run you are reading" : ""}
+                </title>
                 {/* One card, always.
                     A sub session used to get a second card offset behind the
                     first, to say "this is a session, not something delegated".
@@ -205,31 +248,25 @@ export function AgentGraph({
                     edges only, so the node read as a card whose border had
                     slipped off its background rather than as a stack — and the
                     thing it was straining to communicate is now simply written
-                    on the node. */}
+                    on the node.
+
+                    The run this page is reading takes the console's selected
+                    surface — the same fill a picked row has in the rail and in
+                    every table. It used to be a dot at the left edge, three
+                    pixels across, on a card two hundred wide: the one thing
+                    the picture most needed to say was the quietest mark on it.
+                    The status keeps the border and keeps its own line of
+                    words, so nothing is lost by lending it the fill. */}
                 <rect
                   width={NODE_W}
                   height={NODE_H}
                   rx={8}
                   className={cn(
-                    STATUS_CLASS[n.status] ?? "fill-raised stroke-rule",
                     "stroke-[1.5]",
-                    selected === n.id && "stroke-legend stroke-[2.5]",
+                    STATUS_STROKE[n.status] ?? "stroke-rule",
+                    isCurrent ? "fill-accent-quiet" : (STATUS_FILL[n.status] ?? "fill-raised"),
                   )}
                 />
-                {/* The run this page is on. A dot rather than a second border:
-                    the border is already spoken for by status and by
-                    selection, and a node can be all three at once. */}
-                {current === n.id && (
-                  <circle
-                    cx={6}
-                    cy={NODE_H / 2}
-                    r={3}
-                    className="fill-legend"
-                    data-testid={`agent-current-${n.id}`}
-                  >
-                    <title>The run you are reading</title>
-                  </circle>
-                )}
                 {/* What kind of thing this is, above its name. A reader has to
                     be able to tell a sub session from a subagent — one owes a
                     result and one is a conversation — and every other cue for
@@ -252,52 +289,68 @@ export function AgentGraph({
                 </text>
               </g>
 
-              {/* Straight to that agent's transcript, without going through the
-                  panel. Its own <g>, outside the one that selects the node:
-                  nesting two activatable elements makes one of them
-                  unreachable by keyboard. Not drawn on the main agent, whose
-                  transcript is the page this is drawn on. */}
-              {jumpable && (
-                <g
-                  data-testid={`agent-jump-${n.id}`}
-                  onClick={(e) => {
-                    // Or the node behind it selects at the same time, and the
-                    // panel opens on the page you are leaving.
+              {/* Straight to that agent's transcript, without going through
+                  the panel. Its own <g>, outside the one that selects the
+                  node: nesting two activatable elements makes one of them
+                  unreachable by keyboard.
+                  On every node, the main agent included. It used to be left
+                  off the root because "its transcript is the page this is
+                  drawn on" — which is only true of the session's own page, and
+                  is not what the key does anyway: it takes you to a transcript,
+                  and from the graph that is a move whichever node you press.
+                  A run scoped page had no way back to the session at all. */}
+              <g
+                data-testid={`agent-jump-${n.id}`}
+                onClick={(e) => {
+                  // Or the node behind it selects at the same time, and the
+                  // panel opens on the page you are leaving.
+                  e.stopPropagation();
+                  onOpenAgent(n.id);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
                     e.stopPropagation();
                     onOpenAgent(n.id);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      onOpenAgent(n.id);
-                    }
-                  }}
-                  tabIndex={0}
-                  role="button"
-                  aria-label={`Open ${n.label}'s transcript`}
-                  className="cursor-pointer focus:outline-none"
-                >
-                  <title>{`Open ${n.label}'s transcript`}</title>
-                  <circle
-                    cx={NODE_W - JUMP_R - 5}
-                    cy={JUMP_R + 5}
-                    r={JUMP_R}
-                    className="fill-panel stroke-rule stroke-[1]"
-                  />
-                  {/* An arrow leaving a corner: the "open this elsewhere"
-                      glyph the rest of the console uses. */}
-                  <path
-                    d={`M ${NODE_W - JUMP_R - 8} ${JUMP_R + 8} L ${NODE_W - JUMP_R - 1} ${JUMP_R + 1}
-                        M ${NODE_W - JUMP_R - 4.5} ${JUMP_R + 1} L ${NODE_W - JUMP_R - 1} ${JUMP_R + 1}
-                        L ${NODE_W - JUMP_R - 1} ${JUMP_R + 4.5}`}
-                    fill="none"
-                    className="stroke-dim stroke-[1.5]"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </g>
-              )}
+                  }
+                }}
+                tabIndex={0}
+                role="button"
+                aria-label={`Open ${n.label}'s transcript`}
+                className="group/jump cursor-pointer focus:outline-none"
+              >
+                <title>{`Open ${n.label}'s transcript`}</title>
+                {/* An icon key, drawn the way every other icon key in the
+                    console is: nothing at rest, a cap under the pointer.
+                    `screen` rather than `raised`, which is what an icon key
+                    lifts to everywhere else: a node's own fill is already
+                    `raised` on three of the six statuses, and a cap the same
+                    colour as the card it sits on is not a cap. It was a filled white disc with a border and no
+                    hover — a control in a style the rest of the interface had
+                    stopped using, sitting on top of a card whose own fill it
+                    punched a hole in. */}
+                <rect
+                  x={NODE_W - JUMP_W - 4}
+                  y={4}
+                  width={JUMP_W}
+                  height={JUMP_W}
+                  rx={6}
+                  // `fill-transparent`, never `fill-none`: an unpainted
+                  // shape takes no pointer events, so the cap would only
+                  // light up — and only be clickable — over the glyph itself.
+                  className="fill-transparent group-hover/jump:fill-screen"
+                />
+                {/* The transcript's own glyph, the one on the view switch two
+                    inches above. An arrow says "away"; this says where. */}
+                <MessageSquareText
+                  x={NODE_W - JUMP_W - 4 + (JUMP_W - JUMP_ICON) / 2}
+                  y={4 + (JUMP_W - JUMP_ICON) / 2}
+                  width={JUMP_ICON}
+                  height={JUMP_ICON}
+                  className="pointer-events-none text-faint group-hover/jump:text-legend"
+                  aria-hidden
+                />
+              </g>
 
               {/* The fold sits on the edge the children leave by, so what it
                   discloses is the thing it is pointing at. Its own <g>, outside

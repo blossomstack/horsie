@@ -154,9 +154,20 @@ describe("SessionTimeline", () => {
     expect(screen.getByTestId("timeline-lane-s1").getAttribute("data-expanded")).toBe("true");
   });
 
-  it("separates subSessions from subagents", () => {
+  /* Grouping says it, so nothing has to be drawn to say it. The rule could
+     only ever be drawn once — at the first sub session in a flat list of lanes
+     — so under a tree where each agent had both kinds of child it landed in
+     the middle of one agent's children and said nothing true about the rest.
+     `bySibling` in `agentTree` is what orders them now. */
+  it("spends no row on a rule between the two kinds of child", () => {
     view(TIMELINE);
-    expect(screen.getByText("sub sessions")).toBeTruthy();
+    expect(screen.queryByText("sub sessions")).toBeNull();
+    // Every lane it was handed is still drawn, in the order it was handed them.
+    expect(
+      screen
+        .getAllByTestId(/^timeline-lane-/)
+        .map((el) => el.getAttribute("data-testid")),
+    ).toEqual(TIMELINE.lanes.map((l) => `timeline-lane-${l.agentId}`));
   });
 
   it("says what a collapsed gap swallowed", () => {

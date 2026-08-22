@@ -1,7 +1,31 @@
 import { ExternalLink } from "lucide-react";
 import type { RenderedMessage } from "../hooks/useSessionStream";
+import { absoluteTime, clockTime, humanDuration } from "../lib/format";
 import Markdown from "./Markdown";
 import { SidePanel } from "./SidePanel";
+
+/** Label on the left, figure on the right — the row `AgentInfoPanel` uses, so
+ *  the two panels that answer for the same picture read the same way. */
+function TimeRow({
+  label,
+  value,
+  hint,
+  testId,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  testId?: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-[3px]" title={hint}>
+      <span className="legend">{label}</span>
+      <span className="readout text-xs" data-testid={testId}>
+        {value}
+      </span>
+    </div>
+  );
+}
 
 /**
  * What one thing on the timeline actually was.
@@ -26,6 +50,13 @@ export function EntryInfoPanel({
   onOpenTranscript: (entryId: string) => void;
 }) {
   const role = message.role === "User" ? "User" : "Assistant";
+  // The same reading of the stamps the timeline lays out with: a message spans
+  // the provider call that produced it, and each of its tool calls was issued
+  // at the end of that call. A bar's length is a duration and a bar cannot say
+  // what it is, so the panel beside it says it.
+  const at = message.createdAtMs ?? 0;
+  const began = message.startedAtMs ?? at;
+  const took = at > began ? at - began : null;
   return (
     <SidePanel
       legend="Entry"
@@ -40,6 +71,22 @@ export function EntryInfoPanel({
       closeTestId="entry-panel-collapse"
     >
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {at > 0 && (
+          <section className="px-3 py-2.5">
+            <h3 className="legend !text-faint">Timing</h3>
+            <div className="mt-1.5">
+              <TimeRow label="At" value={clockTime(at)} hint={absoluteTime(at)} />
+              {took != null && (
+                <TimeRow
+                  label="Took"
+                  value={humanDuration(took)}
+                  hint="How long the provider call that produced this message took."
+                  testId="entry-panel-took"
+                />
+              )}
+            </div>
+          </section>
+        )}
         {message.text ? (
           <section className="px-3 py-2.5">
             <h3 className="legend !text-faint">Message</h3>
@@ -76,7 +123,20 @@ export function EntryInfoPanel({
                   data-testid="entry-panel-tool"
                 >
                   <span className="readout truncate text-xs">{call.name}</span>
-                  {call.running && <span className="legend">running</span>}
+                  {call.running ? (
+                    <span className="legend">running</span>
+                  ) : (
+                    // Issued at the end of the call that asked for it, which is
+                    // the only interval there is: a tool *result* carries no
+                    // stamps of its own.
+                    call.endedAtMs != null &&
+                    at > 0 &&
+                    call.endedAtMs > at && (
+                      <span className="legend whitespace-nowrap">
+                        {humanDuration(call.endedAtMs - at)}
+                      </span>
+                    )
+                  )}
                 </li>
               ))}
             </ul>

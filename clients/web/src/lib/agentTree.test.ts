@@ -228,14 +228,44 @@ describe("layoutAgentTree", () => {
       expect(tree.nodes[1].label).toBe("the other migration");
     });
 
-    /* One lineage, one ordering: a sub session branched before a subagent was
-       spawned is drawn above it. */
-    it("orders sub sessions and subagents together, oldest first", () => {
+    /* Two kinds of thing hang off one agent, and grouping them is what says so
+       — a subagent is work inside a turn, a sub session is another session.
+       Interleaved by spawn time the reader had to sort them, and the timeline
+       was spending a labelled row on a rule that only said it once. */
+    it("draws the delegated work first, then the sessions branched off", () => {
       const tree = layoutAgentTree(
         [main, agent("late", undefined, 1, 30)],
         [subSession("early", undefined, "early", 10)],
       );
-      expect(tree.nodes.map((n) => n.id)).toEqual(["main", "early", "late"]);
+      expect(tree.nodes.map((n) => n.id)).toEqual(["main", "late", "early"]);
+    });
+
+    it("keeps each group oldest first inside itself", () => {
+      const tree = layoutAgentTree(
+        [main, agent("agent-late", undefined, 1, 40), agent("agent-early", undefined, 1, 20)],
+        [
+          subSession("sub-late", undefined, "later", 50),
+          subSession("sub-early", undefined, "earlier", 10),
+        ],
+      );
+      expect(tree.nodes.map((n) => n.id)).toEqual([
+        "main",
+        "agent-early",
+        "agent-late",
+        "sub-early",
+        "sub-late",
+      ]);
+    });
+
+    /* Under every agent, not just the root: the timeline's old divider was one
+       rule drawn at the first sub session in a flat list of lanes, so with two
+       agents that each had both it landed inside one of them. */
+    it("groups the children of every agent, not only the root's", () => {
+      const tree = layoutAgentTree(
+        [main, agent("branch", undefined, 1, 1), agent("kid", "branch", 2, 40)],
+        [subSession("kid-sub", "branch", "under branch", 20)],
+      );
+      expect(tree.nodes.map((n) => n.id)).toEqual(["main", "branch", "kid", "kid-sub"]);
     });
 
     it("folds a sub session's descendants like any other node", () => {
