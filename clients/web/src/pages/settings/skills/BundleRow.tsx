@@ -144,18 +144,23 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
               })
             }
           />
-          <button
-            className="key shrink-0 !px-2.5 !py-1.5 text-xs"
-            onClick={() => update.mutate(bundle.name)}
-            disabled={update.isPending}
-          >
-            {update.isPending ? (
-              <Loader2 size={13} className="animate-spin" />
-            ) : (
-              <RotateCcw size={13} />
-            )}
-            Update
-          </button>
+          {/* Only a clone has an upstream to re-read. An authored bundle is
+              changed by editing its skills, and the server refuses to update
+              one — so offering the button here would be offering an error. */}
+          {bundle.kind.kind !== "Authored" && (
+            <button
+              className="key shrink-0 !px-2.5 !py-1.5 text-xs"
+              onClick={() => update.mutate(bundle.name)}
+              disabled={update.isPending}
+            >
+              {update.isPending ? (
+                <Loader2 size={13} className="animate-spin" />
+              ) : (
+                <RotateCcw size={13} />
+              )}
+              Update
+            </button>
+          )}
           <button
             className="key-icon shrink-0 text-faint hover:text-red-ink"
             onClick={async () => {

@@ -87,4 +87,19 @@ describe("BundleRow", () => {
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("nothing horsie runs")).toBeTruthy();
   });
+
+  /// An authored bundle has no upstream, and the server refuses to update one.
+  /// A button that can only ever produce an error is worse than no button.
+  it("offers Update for a clone but not for an authored bundle", () => {
+    const { unmount } = render(<BundleRow bundle={bundle()} />);
+    expect(screen.queryByText("Update")).not.toBeNull();
+    unmount();
+
+    render(
+      <BundleRow
+        bundle={bundle({ kind: { kind: "Authored", value: { generation: 3 } } })}
+      />,
+    );
+    expect(screen.queryByText("Update")).toBeNull();
+  });
 });
