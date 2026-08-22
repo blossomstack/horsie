@@ -34,6 +34,8 @@ mod run;
 mod sink;
 mod state;
 mod task_list;
+#[cfg(test)]
+pub(super) mod testing;
 mod timers;
 mod types;
 
@@ -358,5 +360,264 @@ impl EventSourcedActor for AgentActor {
         self.publish_revision();
         Timers::on_load(self, state, ctx).await;
         Run::on_load(self, state, ctx).await;
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink};
+    /// Without a turn-boundary snapshot an agent that only converses — no ask,
+    /// no park, no cancel — never snapshots, and every recovery stays a full
+    /// replay of the whole transcript.
+    #[test]
+    fn a_turn_boundary_snapshots_only_once_enough_events_have_accrued() {
+        let session_id = uuid::Uuid::new_v4();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(StubContext),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(StubParent),
+            journal_id: session_id,
+            ready: true,
+        };
+        let mut agent = AgentActor::new(ctx, AgentParams::from_def(&def_fixture()));
+
+        assert!(
+            !agent.snapshot_due(),
+            "a fresh agent has nothing worth snapshotting"
+        );
+
+        agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS - 1;
+        assert!(
+            !agent.snapshot_due(),
+            "one event short of the interval must not snapshot"
+        );
+
+        agent.events_since_snapshot = SNAPSHOT_EVERY_EVENTS;
+        assert!(
+            agent.snapshot_due(),
+            "reaching the interval snapshots at the turn boundary"
+        );
+        assert_eq!(
+            agent.events_since_snapshot, 0,
+            "the counter resets on request, so a failed write waits one interval"
+        );
+        assert!(
+            !agent.snapshot_due(),
+            "and the very next turn does not snapshot again"
+        );
+    }
+
+    /// The observer replaces journal replay: it must see every durable event,
+    /// after the fold, with the resulting message already in state.
+    #[tokio::test]
+    async fn an_observer_sees_durable_appends_with_folded_state() {
+        use crate::agent_loop::{ContextError, ContextProvider, Contexts};
+        use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+
+        struct NoContext;
+        #[async_trait]
+        impl ContextProvider for NoContext {
+            async fn provide(&self) -> Result<Contexts, ContextError> {
+                Err(ContextError::retryable("no context"))
+            }
+        }
+        struct DeafParent;
+        #[async_trait]
+        impl AgentOutcomeSink for DeafParent {
+            async fn deliver(&self, _: AgentOutcome) {}
+        }
+
+        /// Records `(event, message-count-at-publish)` so the test can prove the
+        /// fold already happened when the observer ran.
+        #[derive(Default)]
+        struct Recorder {
+            seen: std::sync::Mutex<Vec<(String, usize)>>,
+        }
+        impl AgentObserver for Recorder {
+            fn publish(&self, event: &AgentDomainEvent, state: &AgentState) {
+                let label = match event {
+                    AgentDomainEvent::InputMessage { message } => {
+                        format!("input:{}", message.id)
+                    }
+                    AgentDomainEvent::MessageComplete { message } => {
+                        format!("complete:{}", message.id)
+                    }
+                    other => format!("other:{other:?}"),
+                };
+                self.seen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((label, state.log.len()));
+            }
+        }
+
+        let session_id = uuid::Uuid::new_v4();
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let recorder = Arc::new(Recorder::default());
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(NoContext),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(DeafParent),
+            journal_id: session_id,
+            ready: true,
+        };
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::with_observer(ctx, AgentParams::from_def(&def_fixture()), recorder.clone()),
+        );
+
+        let one = user_msg("one");
+        let two = user_msg("two");
+        let (ack, ack_rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Run(RunCommand::PersistProgress {
+                events: vec![
+                    AgentDomainEvent::InputMessage {
+                        message: one.clone(),
+                    },
+                    AgentDomainEvent::MessageComplete {
+                        message: two.clone(),
+                    },
+                ],
+                ack: ReplyTo::from_sender(ack),
+            }))
+            .await
+            .unwrap();
+        ack_rx.await.unwrap().unwrap();
+
+        let seen = recorder.seen.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                (format!("input:{}", one.id), 2),
+                (format!("complete:{}", two.id), 2),
+            ],
+            "both events publish once, and state is already folded when they do"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod interruption_tests {
+    //! What an agent says about the turn its process died inside.
+    //!
+    //! The fact lives here and nowhere else. An owner holds a *status*, which
+    //! cannot say which turn produced it — so recovery used to ask "is the
+    //! session running?" and got yes about a turn that had begun since. These
+    //! are about the agent answering for itself instead.
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::AgentOutcome;
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+    use horsie_models::agent::Usage;
+
+    /// Spawn an agent over a journal that already holds `events`, and hand back
+    /// whatever it reports while recovering.
+    async fn recover_with(
+        events: &[AgentDomainEvent],
+    ) -> tokio::sync::mpsc::UnboundedReceiver<AgentOutcome> {
+        let id = uuid::Uuid::new_v4();
+        let journal = Arc::new(InMemoryJournal::new());
+        let encoded: Vec<Vec<u8>> = events
+            .iter()
+            .map(|e| serde_json::to_vec(e).unwrap())
+            .collect();
+        journal
+            .persist(&AgentActor::persistence_id_for(id), &encoded, 0)
+            .await
+            .unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingContext),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(OutcomeChannel(tx)),
+            journal_id: id,
+            ready: true,
+        };
+        let mut params = AgentParams::from_def(&def_fixture());
+        // Every agent a session spawns is interactive, so this is the only
+        // configuration that matters — and it is the one that returns from
+        // `on_recovery_complete` early, so the report has to precede that.
+        params.interactive = true;
+        let _agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+        // Recovery runs before the first command, so anything reported is
+        // already on its way by the time the spawn returns.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        rx
+    }
+
+    fn began() -> AgentDomainEvent {
+        AgentDomainEvent::TurnBegan {
+            consumed: Vec::new(),
+            answered: Vec::new(),
+            at_ms: 0,
+        }
+    }
+
+    /// A journal ending at `TurnBegan` is what a process killed mid-run leaves
+    /// behind, and the agent is the only thing that can say so: its owner sees
+    /// a status, and a status cannot name a turn.
+    #[tokio::test]
+    async fn a_turn_the_process_died_in_is_reported_at_recovery() {
+        let mut outcomes = recover_with(&[began()]).await;
+        assert!(
+            matches!(outcomes.try_recv(), Ok(AgentOutcome::Interrupted { .. })),
+            "an agent recovering mid-turn must tell its owner the turn is over"
+        );
+    }
+
+    /// The other half. A turn that reached a boundary under its own power is
+    /// not an interruption, and reporting one would end a turn that had already
+    /// ended properly.
+    #[tokio::test]
+    async fn a_turn_that_reached_a_boundary_is_not_reported() {
+        let mut outcomes = recover_with(&[
+            began(),
+            AgentDomainEvent::RunComplete {
+                usage: Usage::without_cache(1, 1),
+                iterations: 1,
+                context_tokens: 0,
+                at_ms: 1,
+            },
+        ])
+        .await;
+        assert!(
+            outcomes.try_recv().is_err(),
+            "a completed turn is not an interruption"
+        );
+    }
+
+    /// A park is a boundary too: the agent is waiting for an answer, not
+    /// stranded mid-run. Reporting it would move the session off
+    /// `AwaitingInput` and lose the question.
+    #[tokio::test]
+    async fn a_parked_turn_is_not_reported() {
+        let mut outcomes = recover_with(&[
+            began(),
+            AgentDomainEvent::AskRecorded {
+                asks: vec![crate::agent_loop::AskedQuestion {
+                    tool_call_id: Some("call-1".into()),
+                    question: "which one?".into(),
+                }],
+                at_ms: 1,
+            },
+        ])
+        .await;
+        assert!(
+            outcomes.try_recv().is_err(),
+            "an agent parked on a question has no interrupted turn to report"
+        );
     }
 }

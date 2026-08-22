@@ -6,9 +6,10 @@
 //! `AgentDomainEvent::TaskListChanged` and folded into `AgentState`, exactly
 //! like [`crate::agent_loop::timers::TimerRecord`] — so it survives an actor restart. The
 //! tool executes by `ask`ing the owning `AgentActor` (see `TaskListToolbox` in
-//! `agent_actor.rs`), never forwarded to the sandboxed runtime. This module
-//! only holds the data model and the pure state-transition/parsing logic; the
-//! actor wiring (command, event, journal fold) lives in `agent_actor.rs`.
+//! `agent_actor/task_list.rs`), never forwarded to the sandboxed runtime. This
+//! module only holds the data model and the pure state-transition/parsing
+//! logic; the actor wiring (command, event, journal fold) lives in
+//! `agent_actor/task_list.rs`.
 //!
 //! See `docs/superpowers/specs/2026-07-20-task-list-tool-design.md`.
 

@@ -397,3 +397,664 @@ impl Component for Queue {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink};
+    use horsie_agentcore::AgentLogBody;
+    // --- The pre-run hook seam ---
+    //
+    // `SessionStart` used to fire inside `provide()`, which runs on the run's
+    // own task *after* the history snapshot — so a record journaled there first
+    // reached the model on the following turn. These pin the seam that moved it
+    // ahead of the snapshot, and the once-per-load bookkeeping that came with
+    // it.
+
+    mod start_hooks {
+        use super::*;
+        use horsie_actor::{ActorRef, ActorSystem, InMemoryJournal, Journal};
+        use horsie_agentcore::EmptyToolbox;
+        use horsie_agentcore::testkit::MockProvider;
+        use horsie_models::hooks::{
+            ContextInjected, HookAction, HookBlocked, HookRecord, SessionStartOutcome,
+            SessionStartRecord, UserPromptSubmitOutcome, UserPromptSubmitRecord,
+        };
+        use std::sync::Mutex;
+
+        /// A provider that answers `start_hooks` from a script and records every
+        /// `StartTurn` it was asked about.
+        struct HookingContext {
+            llm: Arc<MockProvider>,
+            records: Vec<HookRecord>,
+            enabled: bool,
+            seen: Mutex<Vec<crate::agent_loop::StartTurn>>,
+        }
+
+        impl HookingContext {
+            fn new(llm: Arc<MockProvider>, records: Vec<HookRecord>) -> Arc<Self> {
+                Arc::new(Self {
+                    llm,
+                    records,
+                    enabled: true,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn disabled(llm: Arc<MockProvider>) -> Arc<Self> {
+                Arc::new(Self {
+                    llm,
+                    records: Vec::new(),
+                    enabled: false,
+                    seen: Mutex::new(Vec::new()),
+                })
+            }
+
+            fn sources(&self) -> Vec<Option<String>> {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t.start_source.as_ref().map(|s| s.as_wire().to_string()))
+                    .collect()
+            }
+        }
+
+        #[async_trait]
+        impl crate::agent_loop::ContextProvider for HookingContext {
+            async fn provide(
+                &self,
+            ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+                Ok(crate::agent_loop::Contexts {
+                    provider: self.llm.clone(),
+                    toolbox: Arc::new(EmptyToolbox),
+                    tool_narrowing: None,
+                    system_prompt: None,
+                    context_window: None,
+                })
+            }
+
+            fn has_start_hooks(&self) -> bool {
+                self.enabled
+            }
+
+            async fn start_hooks(
+                &self,
+                turn: crate::agent_loop::StartTurn,
+            ) -> Result<crate::agent_loop::TurnPreparation, crate::agent_loop::ContextError>
+            {
+                self.seen.lock().unwrap().push(turn);
+                Ok(crate::agent_loop::TurnPreparation {
+                    records: self.records.clone(),
+                    message: None,
+                })
+            }
+        }
+
+        struct ReportingParent(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+        #[async_trait]
+        impl AgentOutcomeSink for ReportingParent {
+            async fn deliver(&self, outcome: AgentOutcome) {
+                let _ = self.0.send(outcome);
+            }
+        }
+
+        type Outcomes = tokio::sync::mpsc::UnboundedReceiver<AgentOutcome>;
+
+        fn spawn(provider: Arc<HookingContext>) -> (ActorRef<AgentCommand>, Outcomes) {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = AgentRuntimeContext {
+                context_provider: provider,
+                revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+                parent: Arc::new(ReportingParent(tx)),
+                journal_id: uuid::Uuid::new_v4(),
+                ready: true,
+            };
+            let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+            let agent = crate::testing::spawn_detached(
+                &ActorSystem::new(journal),
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            );
+            (agent, rx)
+        }
+
+        async fn prompt(agent: &ActorRef<AgentCommand>, text: &str, rx: &mut Outcomes) {
+            agent
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                    item: crate::agent_loop::Incoming::User {
+                        id: "m2".into(),
+                        text: text.into(),
+                    },
+                    ack: None,
+                }))
+                .await
+                .unwrap();
+            terminal_outcome(rx).await;
+        }
+
+        /// Read past the outcomes that are not how a turn *ended*: `Started`
+        /// precedes the work, and `UsageRecorded` rides alongside the terminal
+        /// one.
+        async fn terminal_outcome(rx: &mut Outcomes) -> AgentOutcome {
+            loop {
+                match rx.recv().await.expect("the turn must report an outcome") {
+                    AgentOutcome::Started { .. }
+                    | AgentOutcome::UsageRecorded { .. }
+                    | AgentOutcome::ForkSummary { .. } => continue,
+                    outcome => return outcome,
+                }
+            }
+        }
+
+        fn session_start(context: &str) -> HookRecord {
+            HookRecord {
+                plugin: "boot".into(),
+                duration_ms: 1,
+                halt: None,
+                action: HookAction::SessionStart(SessionStartRecord {
+                    source: "startup".into(),
+                    system_message: None,
+                    outcome: SessionStartOutcome::Ran(ContextInjected {
+                        additional_context: Some(context.into()),
+                    }),
+                }),
+            }
+        }
+
+        /// The regression the whole seam exists to prevent: `provide()` runs
+        /// after the run has already snapshotted its history, so a record
+        /// journaled there would first appear on turn two — leaving every
+        /// session's opening turn unhooked.
+        #[tokio::test]
+        async fn session_start_context_reaches_the_very_first_prompt() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![session_start("pins node 22")]);
+            let (agent, mut rx) = spawn(provider);
+
+            prompt(&agent, "hi", &mut rx).await;
+
+            let first = llm
+                .requests()
+                .into_iter()
+                .next()
+                .expect("one provider call");
+            assert!(
+                first.texts.iter().any(|t| t.contains("pins node 22")),
+                "the first prompt must carry the start hook's context, got {:?}",
+                first.texts
+            );
+        }
+
+        /// `SessionStart` fired on every turn before this: `provide()` is
+        /// per-run and its call had no guard, so every message re-ran every
+        /// start hook and always reported `source: "startup"`.
+        #[tokio::test]
+        async fn a_second_turn_does_not_fire_the_start_hook_again() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![session_start("pins node 22")]);
+            let (agent, mut rx) = spawn(provider.clone());
+
+            prompt(&agent, "hi", &mut rx).await;
+            prompt(&agent, "again", &mut rx).await;
+
+            assert_eq!(
+                provider.sources(),
+                vec![Some("startup".to_string()), None],
+                "the start hook is due once per load; the prompt hook every turn"
+            );
+        }
+
+        /// A rehydrated agent is a `resume`, and it is the only other lifecycle
+        /// transition horsie has. Detected from the transcript rather than a
+        /// framework flag: a fresh agent has nothing in it.
+        #[tokio::test]
+        async fn an_agent_with_recovered_history_reports_source_resume() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(llm.clone(), vec![]);
+            let (agent, mut rx) = spawn(provider.clone());
+            // Stand in for a recovered load: a transcript that predates this
+            // actor's first command, which is exactly what folding a journal
+            // leaves behind.
+            let (ack, done) = tokio::sync::oneshot::channel();
+            agent
+                .tell(AgentCommand::Run(RunCommand::PersistProgress {
+                    events: vec![AgentDomainEvent::InputMessage {
+                        message: user_msg("from a previous load"),
+                    }],
+                    ack: ReplyTo::from_sender(ack),
+                }))
+                .await
+                .unwrap();
+            done.await.unwrap().unwrap();
+
+            prompt(&agent, "carry on", &mut rx).await;
+
+            assert_eq!(
+                provider.sources(),
+                vec![Some("resume".to_string())],
+                "a transcript that predates this load means the agent was recovered"
+            );
+        }
+
+        /// A blocked prompt never becomes a turn: nothing is journaled as input
+        /// and no run starts. The record still lands, so the user can see which
+        /// plugin refused it.
+        #[tokio::test]
+        async fn a_blocked_prompt_journals_no_input_and_starts_no_run() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::new(
+                llm.clone(),
+                vec![HookRecord {
+                    plugin: "guard".into(),
+                    duration_ms: 1,
+                    halt: None,
+                    action: HookAction::UserPromptSubmit(UserPromptSubmitRecord {
+                        system_message: None,
+                        outcome: UserPromptSubmitOutcome::Blocked(HookBlocked {
+                            reason: Some("secrets in the prompt".into()),
+                        }),
+                    }),
+                }],
+            );
+            let (agent, mut rx) = spawn(provider);
+
+            agent
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                    item: crate::agent_loop::Incoming::User {
+                        id: "m3".into(),
+                        text: "my password is hunter2".into(),
+                    },
+                    ack: None,
+                }))
+                .await
+                .unwrap();
+
+            match terminal_outcome(&mut rx).await {
+                AgentOutcome::Failed { error, .. } => {
+                    assert_eq!(error, "secrets in the prompt");
+                }
+                other => panic!("expected the turn to be refused, got {other:?}"),
+            }
+            assert_eq!(llm.calls(), 0, "the model must never be reached");
+
+            let page = agent
+                .ask(|reply| {
+                    AgentCommand::Read(ReadCommand::PageLog {
+                        before: None,
+                        max: 50,
+                        reply,
+                    })
+                })
+                .await
+                .unwrap();
+            // The queued message, the turn that took it, and the record that
+            // refused it — but no input message, because no run began.
+            assert!(
+                !page
+                    .entries
+                    .iter()
+                    .any(|e| matches!(e.body, AgentLogBody::Llm(_))),
+                "a refused prompt must never reach the transcript: {:?}",
+                page.entries
+            );
+            assert!(
+                page.entries
+                    .iter()
+                    .any(|e| matches!(e.body, AgentLogBody::Hook(_))),
+                "the refusal is auditable: {:?}",
+                page.entries
+            );
+        }
+
+        /// A preparation failure must classify itself exactly as the same
+        /// failure out of `provide` would. Flattening `terminal` here leaves a
+        /// session whose sandbox is gone for good reporting a retryable error,
+        /// so it never reaches `Unrecoverable` and invites the user to try
+        /// again forever.
+        #[tokio::test]
+        async fn a_terminal_preparation_failure_stays_terminal() {
+            struct GoneContext;
+            #[async_trait]
+            impl crate::agent_loop::ContextProvider for GoneContext {
+                async fn provide(
+                    &self,
+                ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError>
+                {
+                    Err(crate::agent_loop::ContextError::terminal("runtime is gone"))
+                }
+                fn has_start_hooks(&self) -> bool {
+                    true
+                }
+                async fn start_hooks(
+                    &self,
+                    _: crate::agent_loop::StartTurn,
+                ) -> Result<crate::agent_loop::TurnPreparation, crate::agent_loop::ContextError>
+                {
+                    Err(crate::agent_loop::ContextError::terminal("runtime is gone"))
+                }
+            }
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let ctx = AgentRuntimeContext {
+                context_provider: Arc::new(GoneContext),
+                revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+                parent: Arc::new(ReportingParent(tx)),
+                journal_id: uuid::Uuid::new_v4(),
+                ready: true,
+            };
+            let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+            let agent = crate::testing::spawn_detached(
+                &ActorSystem::new(journal),
+                AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+            );
+            agent
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                    item: crate::agent_loop::Incoming::User {
+                        id: "m4".into(),
+                        text: "hi".into(),
+                    },
+                    ack: None,
+                }))
+                .await
+                .unwrap();
+
+            match terminal_outcome(&mut rx).await {
+                AgentOutcome::Failed { terminal, .. } => {
+                    assert!(terminal, "a gone sandbox is terminal wherever it surfaces");
+                }
+                other => panic!("expected the turn to fail, got {other:?}"),
+            }
+        }
+
+        /// A session with no plugins pays nothing for a seam it cannot use.
+        #[tokio::test]
+        async fn a_provider_without_start_hooks_makes_no_prepare_round_trip() {
+            let llm = MockProvider::text("done");
+            let provider = HookingContext::disabled(llm.clone());
+            let (agent, mut rx) = spawn(provider.clone());
+
+            prompt(&agent, "hi", &mut rx).await;
+
+            assert!(
+                provider.sources().is_empty(),
+                "`has_start_hooks() == false` must skip the round-trip entirely"
+            );
+            assert_eq!(llm.calls(), 1, "the turn still runs");
+        }
+    }
+
+    #[test]
+    fn park_sets_parked_and_input_clears_it() {
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(state, AgentDomainEvent::Parked { at_ms: 0 });
+        assert!(state.parked);
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::InputMessage {
+                message: user_msg("wake"),
+            },
+        );
+        assert!(!state.parked);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod queue_tests {
+    //! The queue as the agent actually runs it: what a not-ready agent does
+    //! with a message, what a boundary drains, and what an answer resumes.
+    //!
+    //! The *rule* is pure and tested in [`crate::agent_loop::inbox`]. These are about the
+    //! actor around it — the gates it holds, and the events it journals.
+    use super::*;
+    use crate::agent_loop::AgentRunDef;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::AgentOutcome;
+    use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
+    use horsie_actor::ActorRef;
+    use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+    use horsie_agentcore::testkit::MockProvider;
+    use horsie_agentcore::{AgentLogBody, LifecycleEvent, LlmProvider};
+
+    /// Hands the agent a provider that always ends the turn with plain text.
+    struct TextContext(Arc<dyn LlmProvider>);
+    #[async_trait]
+    impl ContextProvider for TextContext {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            Ok(Contexts {
+                provider: self.0.clone(),
+                toolbox: Arc::new(horsie_agentcore::ToolboxImpl::new()),
+                tool_narrowing: None,
+                system_prompt: None,
+                context_window: None,
+            })
+        }
+    }
+
+    fn spawn_with(
+        provider: Arc<dyn ContextProvider>,
+        ready: bool,
+    ) -> (ActorRef<AgentCommand>, Outcomes) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: provider,
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(OutcomeChannel(tx)),
+            journal_id: uuid::Uuid::new_v4(),
+            ready,
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef::default());
+        params.interactive = true;
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+        (agent, rx)
+    }
+
+    fn text_agent(ready: bool) -> (ActorRef<AgentCommand>, Outcomes) {
+        spawn_with(Arc::new(TextContext(MockProvider::text("done"))), ready)
+    }
+
+    /// Exactly what a session sends when its sandbox lands or goes away: the
+    /// same `Runtime` record a reader sees in the log, and nothing else.
+    async fn set_ready(agent: &ActorRef<AgentCommand>, ready: bool) {
+        let status = match ready {
+            true => horsie_agentcore::RuntimeStatus::Ready(horsie_agentcore::EmptyOutcome {}),
+            false => horsie_agentcore::RuntimeStatus::Acquiring(horsie_agentcore::EmptyOutcome {}),
+        };
+        agent
+            .tell(AgentCommand::Log(LogCommand::RecordLifecycle {
+                event: LifecycleEvent::Runtime(horsie_agentcore::RuntimeLifecycle {
+                    status,
+                    detail: None,
+                }),
+                at_ms: 0,
+            }))
+            .await
+            .unwrap();
+    }
+
+    async fn send(agent: &ActorRef<AgentCommand>, id: &str, text: &str) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: id.into(),
+                    text: text.into(),
+                },
+                ack: Some(ReplyTo::from_sender(tx)),
+            }))
+            .await
+            .unwrap();
+        rx.await.unwrap().expect("the message must be durable");
+    }
+
+    /// Every lifecycle entry kind in the agent's log, in order.
+    async fn lifecycle(agent: &ActorRef<AgentCommand>) -> Vec<String> {
+        let page = agent
+            .ask(|reply| {
+                AgentCommand::Read(ReadCommand::PageLog {
+                    before: None,
+                    max: 100,
+                    reply,
+                })
+            })
+            .await
+            .unwrap();
+        page.entries
+            .iter()
+            .filter_map(|e| match &e.body {
+                AgentLogBody::Lifecycle(LifecycleEvent::MessageQueued(_)) => {
+                    Some("MessageQueued".to_string())
+                }
+                AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(_)) => {
+                    Some("TurnBegan".to_string())
+                }
+                AgentLogBody::Lifecycle(LifecycleEvent::AskRecorded(_)) => {
+                    Some("AskRecorded".to_string())
+                }
+                AgentLogBody::Llm(_)
+                | AgentLogBody::Hook(_)
+                | AgentLogBody::Lifecycle(_)
+                | AgentLogBody::Compaction(_) => None,
+            })
+            .collect()
+    }
+
+    /// Wait for `pred` to hold of the agent's lifecycle entries.
+    async fn wait_lifecycle(
+        agent: &ActorRef<AgentCommand>,
+        what: &str,
+        pred: impl Fn(&[String]) -> bool,
+    ) {
+        for _ in 0..200 {
+            let kinds = lifecycle(agent).await;
+            if pred(&kinds) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "{what} not reached within 2s; entries: {:?}",
+            lifecycle(agent).await
+        );
+    }
+
+    /// The ack is the promise. It resolves only once the message is written, so
+    /// a caller holding it holds something that survives a crash.
+    #[tokio::test]
+    async fn a_message_is_acked_only_once_it_is_durable() {
+        let (agent, _rx) = text_agent(true);
+        // `send` awaits the ack, so by the time it returns the write has
+        // happened — and the entry is already there to read.
+        send(&agent, "m1", "hello").await;
+        assert_eq!(
+            lifecycle(&agent).await.first().map(String::as_str),
+            Some("MessageQueued"),
+            "the ack lands after the write, not before it"
+        );
+    }
+
+    /// The one gate an agent cannot answer for itself. A message under a
+    /// session still building its runtime waits — the whole of the fix for a
+    /// first turn outrunning its own create — and the readiness that arrives
+    /// when the create lands is what releases it.
+    #[tokio::test]
+    async fn a_message_waits_for_readiness_and_the_flip_releases_it() {
+        let (agent, _rx) = text_agent(false);
+        send(&agent, "m1", "hello").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            lifecycle(&agent).await,
+            vec!["MessageQueued".to_string()],
+            "a message with nowhere to run must not begin a turn"
+        );
+
+        set_ready(&agent, true).await;
+        wait_lifecycle(&agent, "the released turn", |k| {
+            k.contains(&"TurnBegan".to_string())
+        })
+        .await;
+    }
+
+    /// Losing readiness starts nothing; it only stops the next drain.
+    #[tokio::test]
+    async fn losing_readiness_starts_nothing() {
+        let (agent, _rx) = text_agent(true);
+        set_ready(&agent, false).await;
+        send(&agent, "m1", "hello").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(lifecycle(&agent).await, vec!["MessageQueued".to_string()]);
+    }
+
+    /// A run in flight is not a reason to refuse a message — it is a reason to
+    /// hold it. Two arrive under one hanging run and neither starts a second.
+    #[tokio::test]
+    async fn messages_arriving_mid_run_queue_rather_than_starting_a_second_turn() {
+        let (agent, _rx) = spawn_with(Arc::new(HangingContext), true);
+        send(&agent, "m1", "one").await;
+        // The first drains immediately and hangs inside `provide`.
+        wait_lifecycle(&agent, "the first turn", |k| {
+            k.contains(&"TurnBegan".to_string())
+        })
+        .await;
+        send(&agent, "m2", "two").await;
+        send(&agent, "m3", "three").await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let kinds = lifecycle(&agent).await;
+        assert_eq!(
+            kinds.iter().filter(|k| *k == "TurnBegan").count(),
+            1,
+            "a run in flight must never be drained into a second one: {kinds:?}"
+        );
+        assert_eq!(kinds.iter().filter(|k| *k == "MessageQueued").count(), 3);
+    }
+
+    /// `Started` precedes the work and is how the owner learns a turn began at
+    /// all — it is no longer the thing that began it.
+    #[tokio::test]
+    async fn the_owner_is_told_the_turn_began_before_it_runs() {
+        let (agent, mut rx) = spawn_with(Arc::new(HangingContext), true);
+        send(&agent, "m1", "one").await;
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("the owner must be told")
+            .expect("an outcome");
+        assert!(
+            matches!(first, AgentOutcome::Started { .. }),
+            "the first report of a turn is that it started, got {first:?}"
+        );
+    }
+
+    /// Answering is refused unless it covers the park exactly, and the refusal
+    /// journals nothing — which is what makes retrying it free.
+    #[tokio::test]
+    async fn a_partial_answer_is_refused_and_journals_nothing() {
+        let (agent, _rx) = text_agent(true);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Answer {
+                answers: vec![crate::agent_loop::AskAnswer {
+                    tool_call_id: "call-1".into(),
+                    text: "main".into(),
+                }],
+                reply: ReplyTo::from_sender(tx),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            rx.await.unwrap(),
+            Err(crate::agent_loop::AnswerError::NothingPending)
+        );
+        assert!(lifecycle(&agent).await.is_empty());
+    }
+}

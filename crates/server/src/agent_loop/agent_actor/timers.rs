@@ -312,3 +312,107 @@ impl Component for Timers {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    #[test]
+    fn timer_events_fold_into_state() {
+        use crate::agent_loop::timers::{TimerKind, TimerRecord};
+        use std::time::Duration;
+
+        let rec = TimerRecord::arm(
+            "pr".into(),
+            String::new(),
+            TimerKind::Recurring,
+            Duration::from_secs(60),
+            0,
+        );
+        let id = rec.id.clone();
+        let mut state = AgentActor::initial_state();
+
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: rec,
+            },
+        );
+        assert_eq!(state.timers.len(), 1);
+
+        // Recurring fire re-arms in place with a carried next fire time and bumped count.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerFired {
+                at_ms: 0,
+                id: id.clone(),
+                next_fire_at_unix_ms: Some(120_000),
+            },
+        );
+        assert_eq!(state.timers.len(), 1);
+        assert_eq!(state.timers[0].fire_count, 1);
+        assert_eq!(state.timers[0].fire_at_unix_ms, 120_000);
+
+        // One-shot fire (None) removes it.
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerFired {
+                at_ms: 0,
+                id,
+                next_fire_at_unix_ms: None,
+            },
+        );
+        assert!(state.timers.is_empty());
+    }
+
+    #[test]
+    fn cancel_event_removes_selected_timers() {
+        use crate::agent_loop::timers::{TimerKind, TimerRecord};
+        use std::time::Duration;
+        let a = TimerRecord::arm(
+            "a".into(),
+            String::new(),
+            TimerKind::OneShot,
+            Duration::from_secs(1),
+            0,
+        );
+        let b = TimerRecord::arm(
+            "b".into(),
+            String::new(),
+            TimerKind::OneShot,
+            Duration::from_secs(1),
+            0,
+        );
+        let (ia, ib) = (a.id.clone(), b.id.clone());
+        let mut state = AgentActor::initial_state();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: a,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerArmed {
+                at_ms: 0,
+                record: b,
+            },
+        );
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TimerCancelled {
+                at_ms: 0,
+                ids: vec![ia],
+            },
+        );
+        assert_eq!(state.timers.len(), 1);
+        assert_eq!(state.timers[0].id, ib);
+    }
+}

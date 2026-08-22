@@ -502,3 +502,26 @@ pub struct AgentStateView {
     /// tell whether this read is ahead of it or behind.
     pub as_of_seq: u64,
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    #[test]
+    fn from_def_defaults_to_non_interactive() {
+        assert!(!AgentParams::from_def(&def_fixture()).interactive);
+    }
+
+    /// Only a step owes a result. For everyone else a turn ending with plain
+    /// text *is* the answer, and nudging one would be nonsense.
+    #[test]
+    fn from_def_owes_no_result() {
+        assert!(!AgentParams::from_def(&def_fixture()).requires_result);
+    }
+}

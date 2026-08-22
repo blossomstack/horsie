@@ -133,24 +133,21 @@ impl Forks {
 
 impl Component for Forks {
     /// The history this agent adopted, and the seed appended after it.
-    // The fallthrough is unreachable by construction: `AgentActor::apply_event`
-    // routes every variant to exactly one module, so an event added later fails
-    // to compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
-    #[allow(clippy::wildcard_enum_match_arm)]
+    // `if let` rather than a `match`, because this module owns exactly one
+    // variant. Which one is decided in `AgentActor::apply_event`, so an event
+    // added later fails to compile *there* — where it has to be classified —
+    // rather than silently reaching the wrong fold here.
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::Seeded {
-                state: seeded,
-                seed,
-            } => {
-                // Wholesale, because this is the agent's first event: anything
-                // already here would be a bug rather than a history to merge.
-                *state = *seeded;
-                let at_ms = seed.created_at_ms;
-                state.push(at_ms, AgentLogBody::Llm(*seed));
-            }
-            _ => {}
+        if let AgentDomainEvent::Seeded {
+            state: seeded,
+            seed,
+        } = event
+        {
+            // Wholesale, because this is the agent's first event: anything
+            // already here would be a bug rather than a history to merge.
+            *state = *seeded;
+            let at_ms = seed.created_at_ms;
+            state.push(at_ms, AgentLogBody::Llm(*seed));
         }
     }
 }

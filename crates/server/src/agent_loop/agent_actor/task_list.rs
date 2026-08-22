@@ -90,15 +90,56 @@ impl TaskLists {
 
 impl Component for TaskLists {
     /// The list as the mutation left it.
-    // The fallthrough is unreachable by construction: `AgentActor::apply_event`
-    // routes every variant to exactly one module, so an event added later fails
-    // to compile *there* — where it should be classified — rather than silently
-    // reaching the wrong fold here.
-    #[allow(clippy::wildcard_enum_match_arm)]
+    // `if let` rather than a `match`, because this module owns exactly one
+    // variant. Which one is decided in `AgentActor::apply_event`, so an event
+    // added later fails to compile *there* — where it has to be classified —
+    // rather than silently reaching the wrong fold here.
     fn apply(state: &mut AgentState, event: AgentDomainEvent) {
-        match event {
-            AgentDomainEvent::TaskListChanged { snapshot, .. } => state.task_list = snapshot,
-            _ => {}
+        if let AgentDomainEvent::TaskListChanged { snapshot, .. } = event {
+            state.task_list = snapshot
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    #[test]
+    fn task_list_events_fold_into_state() {
+        let mut state = AgentActor::initial_state();
+        assert_eq!(state.task_list.render(), "No tasks.");
+
+        let mut snapshot = state.task_list.clone();
+        snapshot
+            .apply(crate::agent_loop::task_list::TaskListAction::Create {
+                tasks: vec!["a".to_string(), "b".to_string()],
+            })
+            .unwrap();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
+        );
+        assert!(state.task_list.render().contains("[ ] 1. a"));
+
+        // A later snapshot replaces the whole state -- folding is a plain
+        // assignment, not a merge.
+        let mut snapshot = state.task_list.clone();
+        snapshot
+            .apply(crate::agent_loop::task_list::TaskListAction::UpdateStatus {
+                ids: vec![1],
+                status: crate::agent_loop::task_list::TaskStatus::Completed,
+            })
+            .unwrap();
+        state = AgentActor::apply_event(
+            state,
+            AgentDomainEvent::TaskListChanged { at_ms: 0, snapshot },
+        );
+        assert!(state.task_list.render().contains("Tasks (1/2 done)"));
     }
 }

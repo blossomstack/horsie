@@ -674,3 +674,368 @@ pub(super) async fn run_turn_attempts(
         }
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::{AgentOutcome, AgentOutcomeSink};
+    /// The one seam the conversation id can regress at silently. Everything
+    /// downstream is typed — the field is required, so a provider cannot be
+    /// handed a request without one — but *which* id `start_run` reads is a
+    /// plain assignment, and getting it wrong (a fresh uuid, the run id) costs
+    /// only a colder prompt cache. Nothing fails, so nothing would catch it.
+    #[tokio::test]
+    async fn a_run_tells_the_provider_the_agent_s_own_id() {
+        use horsie_actor::{ActorSystem, InMemoryJournal, Journal};
+        use horsie_agentcore::EmptyToolbox;
+        use horsie_agentcore::testkit::MockProvider;
+
+        struct MockContext(Arc<MockProvider>);
+        #[async_trait]
+        impl crate::agent_loop::ContextProvider for MockContext {
+            async fn provide(
+                &self,
+            ) -> Result<crate::agent_loop::Contexts, crate::agent_loop::ContextError> {
+                Ok(crate::agent_loop::Contexts {
+                    provider: self.0.clone(),
+                    toolbox: Arc::new(EmptyToolbox),
+                    tool_narrowing: None,
+                    system_prompt: None,
+                    context_window: None,
+                })
+            }
+        }
+        /// Forwards outcomes so the test awaits the run's end rather than
+        /// sleeping on it.
+        struct ReportingParent(tokio::sync::mpsc::UnboundedSender<AgentOutcome>);
+        #[async_trait]
+        impl AgentOutcomeSink for ReportingParent {
+            async fn deliver(&self, outcome: AgentOutcome) {
+                let _ = self.0.send(outcome);
+            }
+        }
+
+        let provider = MockProvider::text("done");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // The agent's own identity: a session id for a main agent, its own uuid
+        // for a subagent or a workflow step. Distinct from every other id in
+        // scope, so a test that passes cannot be reading the wrong one.
+        let session_id = uuid::Uuid::new_v4();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(MockContext(provider.clone())),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(ReportingParent(tx)),
+            journal_id: session_id,
+            ready: true,
+        };
+        let journal: Arc<dyn Journal> = Arc::new(InMemoryJournal::new());
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
+        );
+
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: "m1".into(),
+                    text: "hi".into(),
+                },
+                ack: None,
+            }))
+            .await
+            .unwrap();
+
+        // `Started` precedes the work and `UsageRecorded` rides alongside the
+        // terminal outcome, so read past both until the run itself reports.
+        loop {
+            match rx.recv().await.expect("the run must report an outcome") {
+                AgentOutcome::Started { .. }
+                | AgentOutcome::UsageRecorded { .. }
+                | AgentOutcome::ForkSummary { .. } => continue,
+                AgentOutcome::Concluded { .. } => break,
+                other => panic!("expected the turn to conclude, got {other:?}"),
+            }
+        }
+
+        let ids: Vec<String> = provider
+            .requests()
+            .into_iter()
+            .map(|r| r.conversation_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![session_id.to_string()],
+            "the provider must be told this agent's own id, not any other"
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod retry_tests {
+    use super::*;
+    use crate::agent_loop::agent_actor::testing::*;
+    use horsie_agentcore::EventSinkError;
+    use horsie_agentcore::testkit::{
+        CollectingEventSink, FailingEventSink, MockProvider, MockToolbox, Script,
+    };
+    use horsie_agentcore::{AgentInput, ContentPart, ToolOutcome};
+    use horsie_agentcore::{CompletionResponse, EmptyToolbox, LlmError, StopReason, ToolSpec};
+    use horsie_models::agent::{TextPart, ToolCallPart, Usage};
+
+    fn text_response(text: &str) -> CompletionResponse {
+        CompletionResponse {
+            parts: vec![ContentPart::Text(TextPart { text: text.into() })],
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::without_cache(1, 1),
+        }
+    }
+
+    fn tool_response(id: &str, name: &str) -> CompletionResponse {
+        CompletionResponse {
+            parts: vec![ContentPart::ToolCall(ToolCallPart {
+                id: id.into(),
+                name: name.into(),
+                input: serde_json::json!({}),
+            })],
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::without_cache(1, 1),
+        }
+    }
+
+    fn echo_toolbox() -> Arc<MockToolbox> {
+        MockToolbox::new(
+            vec![ToolSpec {
+                name: "echo".into(),
+                description: "echo".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }],
+            Arc::new(|_, input| Ok(ToolOutcome::Result(input))),
+        )
+    }
+
+    async fn run(
+        provider: Arc<MockProvider>,
+        toolbox: Arc<dyn Toolbox>,
+        max_retries: u32,
+    ) -> (RunOutcome, usize) {
+        let sink: Arc<dyn EventSink> = Arc::new(CollectingEventSink::new());
+        let outcome = run_turn_attempts(
+            provider.clone(),
+            toolbox,
+            sink,
+            "test-conversation".to_string(),
+            "sys".into(),
+            None,
+            Some(10),
+            max_retries,
+            None,
+            vec![],
+            AgentInput::user_message("m1", "go"),
+            CancellationToken::new(),
+            // Retry behaviour is what these exercise; compaction is off so a
+            // budget can never change how many calls a retry makes.
+            None,
+            Arc::new(NeverCompacts),
+            0,
+            None,
+            false,
+        )
+        .await;
+        let calls = provider.calls();
+        (outcome, calls)
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_is_retried_when_nothing_was_journaled() {
+        let provider = MockProvider::scripted(Script::of([
+            Err(LlmError::Overloaded),
+            Ok(text_response("second time lucky")),
+        ]));
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 1).await;
+
+        assert!(
+            matches!(outcome, RunOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(calls, 2, "the transient failure should have been retried");
+    }
+
+    /// The accounting event a failed attempt writes must not be mistaken for
+    /// progress. It is written *by* the failure, so counting it as "something
+    /// durable was written" would suppress every retry there is.
+    #[tokio::test]
+    async fn a_runs_own_accounting_does_not_count_as_journaled_progress() {
+        let provider = MockProvider::scripted(Script::of([
+            Err(LlmError::Overloaded),
+            Err(LlmError::Overloaded),
+            Ok(text_response("third time lucky")),
+        ]));
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 2).await;
+        assert!(
+            matches!(outcome, RunOutcome::Completed { .. }),
+            "got {outcome:?}"
+        );
+        assert_eq!(calls, 3, "both transient failures should have been retried");
+    }
+
+    #[tokio::test]
+    async fn a_permanent_error_is_not_retried() {
+        // #61 item 21: every AgentError::Provider used to be retried identically,
+        // so a 401 or a 400 context-length error burned the whole retry budget.
+        let provider = MockProvider::failing(LlmError::ApiError {
+            status: 401,
+            message: "bad key".into(),
+        });
+        let (outcome, calls) = run(provider, Arc::new(EmptyToolbox), 3).await;
+
+        assert_eq!(calls, 1, "a permanent error must not be retried");
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => assert!(
+                !recoverable,
+                "a 401 must not be reported to the user as recoverable"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    async fn run_with_sink(
+        provider: Arc<MockProvider>,
+        sink: Arc<dyn EventSink>,
+        max_retries: u32,
+    ) -> (RunOutcome, usize) {
+        let outcome = run_turn_attempts(
+            provider.clone(),
+            Arc::new(EmptyToolbox),
+            sink,
+            "test-conversation".to_string(),
+            "sys".into(),
+            None,
+            Some(10),
+            max_retries,
+            None,
+            vec![],
+            AgentInput::user_message("m1", "go"),
+            CancellationToken::new(),
+            // Retry behaviour is what these exercise; compaction is off so a
+            // budget can never change how many calls a retry makes.
+            None,
+            Arc::new(NeverCompacts),
+            0,
+            None,
+            false,
+        )
+        .await;
+        let calls = provider.calls();
+        (outcome, calls)
+    }
+
+    /// #61 item 22, half one: the failure raised *inside* `complete()`.
+    ///
+    /// A journal write failure surfacing through the provider arrives as
+    /// `LlmError::EventSink` → `AgentError::Provider`, which this layer used to
+    /// retry against the LLM — burning tokens on a disk fault.
+    #[tokio::test]
+    async fn a_sink_failure_from_the_provider_is_not_retried_against_the_llm() {
+        let provider = MockProvider::scripted(Script::of([]).then_repeating_with(|| {
+            Err(LlmError::EventSink(EventSinkError(
+                "journal write failed: disk full".into(),
+            )))
+        }));
+        let sink: Arc<dyn EventSink> = Arc::new(CollectingEventSink::new());
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(
+            calls, 1,
+            "a journal failure must not be retried against the LLM"
+        );
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(!recoverable, "a disk failure is not a recoverable turn");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// #61 item 22, half two: the same root cause raised by the agent loop's own
+    /// `events.emit(...)?`, which becomes `AgentError::EventSink`.
+    ///
+    /// The issue's complaint was that one root cause got two different verdicts
+    /// depending on where it surfaced. Both paths must agree, and neither may
+    /// retry against the LLM.
+    #[tokio::test]
+    async fn a_sink_failure_at_turn_start_costs_no_tokens() {
+        // `Agent::run` journals the input message before it ever calls the
+        // provider, so a journal that is already down fails the turn for free.
+        let provider = MockProvider::text("hello");
+        let sink: Arc<dyn EventSink> = Arc::new(FailingEventSink::always("journal write failed"));
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(calls, 0, "the provider must never be reached");
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(!recoverable, "a disk failure is not a recoverable turn");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sink_failure_mid_turn_is_not_retried_and_agrees_with_the_provider_path() {
+        // Let the input message and the message-start through, so the provider is
+        // genuinely engaged before the journal dies — the realistic shape.
+        let provider = MockProvider::text("hello");
+        let sink: Arc<dyn EventSink> = Arc::new(FailingEventSink::after(2, "journal write failed"));
+        let (outcome, calls) = run_with_sink(provider, sink, 3).await;
+
+        assert_eq!(
+            calls, 1,
+            "the turn must not be re-run against the LLM after a journal failure"
+        );
+        match outcome {
+            RunOutcome::Failed { recoverable, .. } => {
+                assert!(
+                    !recoverable,
+                    "both sink-failure paths must report the same verdict"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_after_journaled_progress_is_not_retried() {
+        // The crux of #61 item 21: the retry rebuilds the turn from the ORIGINAL
+        // history, which does not contain the events the failed attempt already
+        // persisted. Retrying here would leave a phantom turn in the durable
+        // transcript that the model never saw, replayed into every later turn.
+        let provider = MockProvider::scripted(Script::of([
+            Ok(tool_response("call-1", "echo")),
+            Err(LlmError::Overloaded),
+            Ok(text_response("must never be reached")),
+        ]));
+        let (outcome, calls) = run(provider, echo_toolbox(), 3).await;
+
+        assert_eq!(
+            calls, 2,
+            "once a tool result is journaled the turn must not restart from a \
+             history that omits it"
+        );
+        assert!(
+            matches!(outcome, RunOutcome::Failed { .. }),
+            "got {outcome:?}"
+        );
+    }
+}

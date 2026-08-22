@@ -185,3 +185,69 @@ pub(super) fn coarse_event(e: &AgentEvent) -> Option<AgentDomainEvent> {
         | AgentEvent::ToolExecuting(_) => None,
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    use horsie_agentcore::AgentInput;
+    use horsie_models::agent::Usage;
+
+    #[test]
+    fn coarse_events_carry_the_stamp_the_agent_recorded() {
+        let tool = coarse_event(&AgentEvent::ToolComplete(
+            horsie_models::events::ToolCompleteEvent {
+                message_id: "result:tc1".into(),
+                tool_call_id: "tc1".into(),
+                output: "ok".into(),
+                is_error: false,
+                at_ms: 42,
+            },
+        ))
+        .expect("ToolComplete is journaled");
+        assert!(
+            matches!(tool, AgentDomainEvent::ToolComplete { at_ms, .. } if at_ms == 42),
+            "the streaming event's stamp must survive into the journal"
+        );
+
+        let run = coarse_event(&AgentEvent::RunComplete(
+            horsie_models::events::RunCompleteEvent {
+                message_id: "run".into(),
+                usage: Usage::without_cache(1, 1),
+                iterations: 1,
+                context_tokens: 1,
+                at_ms: 99,
+            },
+        ))
+        .expect("RunComplete is journaled");
+        assert!(matches!(run, AgentDomainEvent::RunComplete { at_ms, .. } if at_ms == 99));
+    }
+
+    #[test]
+    fn coarse_event_filters_streaming_noise_and_input() {
+        use horsie_models::events::{InputMessageEvent, TextChunkEvent};
+        // Streaming noise → None.
+        assert!(
+            coarse_event(&AgentEvent::TextChunk(TextChunkEvent {
+                message_id: "m".into(),
+                index: 0,
+                text: "noise".into()
+            }))
+            .is_none()
+        );
+        // InputMessage is suppressed from the persistence stream (persisted by the
+        // actor instead).
+        assert!(
+            coarse_event(&AgentEvent::InputMessage(InputMessageEvent {
+                message_id: "m".into(),
+                input: AgentInput::user_message("m", "hi")
+            }))
+            .is_none()
+        );
+    }
+}

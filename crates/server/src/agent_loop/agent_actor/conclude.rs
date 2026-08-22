@@ -453,3 +453,333 @@ impl AgentActor {
         CommandEffect::persist(events)
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::wildcard_enum_match_arm
+)]
+mod tests {
+    use super::*;
+    fn stopped(calls: &[(&str, serde_json::Value)]) -> Vec<StoppedCall> {
+        calls
+            .iter()
+            .enumerate()
+            .map(|(i, (tool, input))| StoppedCall {
+                tool: (*tool).to_string(),
+                tool_call_id: format!("toolu_{i}"),
+                input: input.clone(),
+            })
+            .collect()
+    }
+
+    /// The whole of the interpretation: a match on the tool's name. There is no
+    /// payload shape to disambiguate, which is why these are separate tools
+    /// rather than one with a `kind` field.
+    #[test]
+    fn a_submit_is_the_steps_result_verbatim() {
+        let calls = stopped(&[(
+            SUBMIT_RESULT_TOOL,
+            serde_json::json!({"outcome": "p0", "description": "did it"}),
+        )]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Output(v) => {
+                assert_eq!(v["outcome"], "p0");
+                assert_eq!(v["description"], "did it");
+            }
+            other => panic!("expected the step's result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_ask_parks_on_one_question() {
+        let calls = stopped(&[(ASK_USER_TOOL, serde_json::json!({"question": "which?"}))]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Ask(asks) => {
+                assert_eq!(asks.len(), 1);
+                assert_eq!(asks[0].question, "which?");
+                assert_eq!(asks[0].tool_call_id.as_deref(), Some("toolu_0"));
+            }
+            other => panic!("expected an ask, got {other:?}"),
+        }
+    }
+
+    /// Several questions in one turn are ordinary — they are asked together and
+    /// answered together — so all of them are parked on.
+    #[test]
+    fn several_asks_park_on_all_of_them() {
+        let calls = stopped(&[
+            (ASK_USER_TOOL, serde_json::json!({"question": "first?"})),
+            (ASK_USER_TOOL, serde_json::json!({"question": "second?"})),
+        ]);
+        match AgentActor::interpret(calls) {
+            Conclusion::Ask(asks) => {
+                let questions: Vec<&str> = asks.iter().map(|a| a.question.as_str()).collect();
+                assert_eq!(questions, vec!["first?", "second?"]);
+            }
+            other => panic!("expected two asks, got {other:?}"),
+        }
+    }
+
+    /// Finishing and asking at once has no honest reading, and neither does
+    /// submitting twice. Only the model can resolve it, so every call is told
+    /// why and the turn runs again.
+    #[test]
+    fn two_different_finishing_tools_are_a_contradiction() {
+        let calls = stopped(&[
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
+            (ASK_USER_TOOL, serde_json::json!({"question": "or?"})),
+        ]);
+        assert!(matches!(
+            AgentActor::interpret(calls),
+            Conclusion::Contradiction(c) if c.len() == 2
+        ));
+    }
+
+    #[test]
+    fn submitting_twice_is_a_contradiction() {
+        let calls = stopped(&[
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p0"})),
+            (SUBMIT_RESULT_TOOL, serde_json::json!({"outcome": "p2"})),
+        ]);
+        assert!(matches!(
+            AgentActor::interpret(calls),
+            Conclusion::Contradiction(_)
+        ));
+    }
+}
+
+/// The run-id fence: a report can only speak for the run it came from.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod fence_tests {
+    use super::*;
+    use crate::agent_loop::AgentRunDef;
+    use crate::agent_loop::agent_actor::testing::*;
+    use crate::agent_loop::context::AgentOutcome;
+    use crate::agent_loop::context::{ContextError, ContextProvider, Contexts};
+    use horsie_actor::{ActorSystem, InMemoryJournal};
+    use horsie_agentcore::{AgentLogBody, ContentPart, LifecycleEvent, Role};
+
+    struct HangingProvider;
+    #[async_trait]
+    impl ContextProvider for HangingProvider {
+        async fn provide(&self) -> Result<Contexts, ContextError> {
+            std::future::pending().await
+        }
+    }
+
+    /// A run that was superseded can still be unwinding, and its report must not
+    /// be mistaken for the live run's. Taking its word for it would clear the
+    /// live run's handle — leaving a turn nobody can stop and a parent told that
+    /// a turn it never saw is over.
+    #[tokio::test]
+    async fn a_report_from_a_superseded_run_is_ignored() {
+        let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingProvider),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(OutcomeChannel(tx)),
+            journal_id: uuid::Uuid::new_v4(),
+            ready: true,
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        });
+        params.interactive = true;
+        let journal = Arc::new(InMemoryJournal::new());
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+
+        // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: "m5".into(),
+                    text: "first".into(),
+                },
+                ack: None,
+            }))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A report from some earlier run arrives late.
+        agent
+            .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(
+                RunReport {
+                    run_id: 99,
+                    outcome: RunOutcome::Completed {
+                        text: "from a run that is over".into(),
+                    },
+                    fork_summary: None,
+                },
+            ))))
+            .await
+            .unwrap();
+
+        // Run 0 is still in flight, so a second turn is refused — the fence
+        // held. Without it, `running` would have been cleared and this would
+        // start a second background loop against the same journal.
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: "m6".into(),
+                    text: "second".into(),
+                },
+                ack: None,
+            }))
+            .await
+            .unwrap();
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Read(ReadCommand::PageLog {
+                before: None,
+                max: 50,
+                reply: ReplyTo::from_sender(reply),
+            }))
+            .await
+            .unwrap();
+        let page = rx.await.unwrap();
+        // The second message is *queued* — that much is its whole point — but
+        // no second turn took it: one `TurnBegan`, one input message. Without
+        // the fence, the stale report would have cleared `running` and the
+        // second message would have started a run against the same journal.
+        let began = page
+            .entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.body,
+                    AgentLogBody::Lifecycle(LifecycleEvent::TurnBegan(_))
+                )
+            })
+            .count();
+        assert_eq!(
+            began, 1,
+            "the refused turn must not begin: {:?}",
+            page.entries
+        );
+        assert!(
+            outcomes
+                .try_recv()
+                .is_ok_and(|o| matches!(o, AgentOutcome::Started { .. })),
+            "the first turn's own start, and nothing from the superseded run"
+        );
+        assert!(
+            outcomes.try_recv().is_err(),
+            "a superseded run's outcome must not reach the parent"
+        );
+    }
+
+    /// Stopping a turn keeps what it had already written.
+    ///
+    /// Streamed text lives only in the deltas — unjournaled by design, since a
+    /// finished message supersedes them within the second — and a cancelled
+    /// call never produces that finished message. The boundary entry the stop
+    /// appends then cleared them, so twenty-two minutes of generation ended
+    /// with a transcript showing no sign a turn had run.
+    #[tokio::test]
+    async fn a_stopped_turn_keeps_the_text_it_had_already_written() {
+        let (tx, _outcomes) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = AgentRuntimeContext {
+            context_provider: Arc::new(HangingProvider),
+            revision: std::sync::Arc::new(tokio::sync::watch::Sender::new(0)),
+            parent: Arc::new(OutcomeChannel(tx)),
+            journal_id: uuid::Uuid::new_v4(),
+            ready: true,
+        };
+        let mut params = AgentParams::from_def(&AgentRunDef {
+            system_prompt: None,
+            max_iterations: None,
+            max_retries: None,
+            allowed_tools: None,
+        });
+        params.interactive = true;
+        let journal = Arc::new(InMemoryJournal::new());
+        let agent = crate::testing::spawn_detached(
+            &ActorSystem::new(journal),
+            AgentActor::new(ctx, params),
+        );
+
+        agent
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
+                item: crate::agent_loop::Incoming::User {
+                    id: "m1".into(),
+                    text: "write me an essay".into(),
+                },
+                ack: None,
+            }))
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The same road a streamed chunk takes: the sink tells the actor.
+        for chunk in ["Once upon ", "a time"] {
+            agent
+                .tell(AgentCommand::Log(LogCommand::RecordDelta {
+                    text: chunk.to_string(),
+                }))
+                .await
+                .unwrap();
+        }
+
+        let (ack, cancelled) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Run(RunCommand::Cancel {
+                ack: Some(ReplyTo::from_sender(ack)),
+            }))
+            .await
+            .unwrap();
+        cancelled.await.unwrap();
+
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        agent
+            .tell(AgentCommand::Read(ReadCommand::PageLog {
+                before: None,
+                max: 50,
+                reply: ReplyTo::from_sender(reply),
+            }))
+            .await
+            .unwrap();
+        let page = rx.await.unwrap();
+        let kept: Vec<String> = page
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let AgentLogBody::Llm(m) = &e.body else {
+                    return None;
+                };
+                if m.role != Role::Assistant {
+                    return None;
+                }
+                let text: String = m
+                    .parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text(t) => Some(t.text.clone()),
+                        ContentPart::Thinking(_)
+                        | ContentPart::ToolCall(_)
+                        | ContentPart::ToolResult(_)
+                        | ContentPart::SubAgentResult(_) => None,
+                    })
+                    .collect();
+                (!text.is_empty()).then_some(text)
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["Once upon a time"],
+            "the stopped turn's generation is gone: {:?}",
+            page.entries
+        );
+    }
+}
