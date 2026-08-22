@@ -402,12 +402,22 @@ mod tests {
         })
         .await;
 
-        let rows = listing().await;
-        assert_eq!(
-            rows.len(),
-            2,
-            "the session's main agent and its subagent are both runs: {rows:?}"
-        );
+        // Polled, because the index write is spawned off the session's mailbox:
+        // the row lands shortly after the state it describes, not with it.
+        // Reading once here passes on a fast machine and fails under load,
+        // which is the worst of both.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let rows = loop {
+            let rows = listing().await;
+            if rows.len() == 2 {
+                break rows;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session's main agent and its subagent are both runs: {rows:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
         assert!(
             rows.iter().all(|r| r.session_id == id.to_string()),
             "every row addresses the session that hosts it"
@@ -425,6 +435,10 @@ mod tests {
         for _ in 0..3 {
             let _ = current_main_agent(&session).await;
         }
+        // Long enough for a write to have landed if one were spawned. This
+        // direction cannot be polled — "nothing happened" is only observable by
+        // waiting — so the wait has to cover the write it is asserting against.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert_eq!(
             before,
             listing().await,
