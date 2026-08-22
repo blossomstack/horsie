@@ -158,14 +158,12 @@ export function describeRun(steps: SubAgentView[]): string {
   return describeAgent(runStatus(steps), at, ended);
 }
 
-/** The run as the one shape both walks read. `workflow` is its name; without
- * one it is still drawn, because a run with no name is better than a step
- * pretending to be a session. */
-function runMember(steps: SubAgentView[], workflow?: string): Member {
+/** The run as the one shape both walks read. */
+function runMember(steps: SubAgentView[], title: string): Member {
   return {
     id: RUN_ROOT,
     parent: undefined,
-    label: workflow ?? "workflow run",
+    label: title,
     status: runStatus(steps),
     agentType: null,
     detail: describeRun(steps),
@@ -383,17 +381,25 @@ export function layoutAgentTree(
   agents: SubAgentView[],
   subSessions: SubSessionView[] = [],
   collapsed: readonly string[] = [],
-  /** The workflow this session is a run of, when it is one — what the run node
-   * is called. Its presence is not what decides that this is a run: the steps
-   * in the roster are. */
-  workflow?: string,
+  /**
+   * What this run is called, when the session *is* a run — its own title,
+   * which defaults to the workflow's name and can be renamed like any
+   * session's.
+   *
+   * Its absence is the gate, and steps in the roster are not: an agent that
+   * calls `invoke_workflow` starts a run inside an ordinary session, and the
+   * roster lists those executions too — "the session's own and any invoked
+   * one's". Keyed off the steps, such a session would have been rooted on a
+   * run node with its own main agent swept inside it.
+   */
+  runTitle?: string,
 ): AgentTree {
   if (agents.length === 0 && subSessions.length === 0) {
     return { nodes: [], edges: [], depth: 0, rows: 0, hidden: 0 };
   }
 
   const steps = stepRuns(agents);
-  const run = steps.length > 0 ? runMember(steps, workflow) : undefined;
+  const run = runTitle && steps.length > 0 ? runMember(steps, runTitle) : undefined;
 
   // The main agent is the one nothing spawned. The same fallbacks the timeline
   // uses, so the two views agree on which agent is the root. A run has no such

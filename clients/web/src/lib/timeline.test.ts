@@ -531,6 +531,15 @@ describe("workflow runs", () => {
     expect(t.ticks[0].x).toBe(0);
   });
 
+  /* The same gate the graph has: an ordinary session whose agent invoked a
+     workflow has step executions in its roster and is not a run. */
+  it("leaves a session that merely invoked a workflow rooted on its own agent", () => {
+    const roster = [agent({ id: "main", kind: "main", title: undefined }), ...RUN];
+    const t = buildTimeline(SESSION, roster, [], 20_000, {}, undefined, []);
+    expect(t.lanes[0]).toMatchObject({ agentId: "main", kind: "main" });
+    expect(t.lanes.map((l) => l.agentId)).not.toContain(RUN_ROOT);
+  });
+
   it("keeps the run's own chevron while the run is folded", () => {
     const t = buildTimeline([], RUN, [], 20_000, {}, "gather", [RUN_ROOT], "nightly-audit");
     expect(t.lanes.map((l) => l.agentId)).toEqual([RUN_ROOT]);

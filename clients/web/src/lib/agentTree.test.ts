@@ -341,9 +341,18 @@ describe("layoutAgentTree", () => {
       expect(tree.nodes[0]).toMatchObject({ collapsed: true, descendants: 2 });
     });
 
-    it("draws a run with no name rather than none at all", () => {
-      const tree = layoutAgentTree([step("gather", 10)]);
-      expect(tree.nodes[0].label).toBe("workflow run");
+    /** Steps in the roster do not make the session a run.
+     *
+     * An agent that calls `invoke_workflow` starts a run *inside* an ordinary
+     * session, and the roster lists those executions too — the server says so:
+     * "every run's executions, the session's own and any invoked one's". Keyed
+     * off the steps, that session would be rooted on a run node with its own
+     * main agent swept inside it. The title is the gate, and only a session
+     * that *is* a run has one. */
+    it("leaves a session that merely invoked a workflow rooted on its own agent", () => {
+      const tree = layoutAgentTree([main, step("gather", 10), step("review", 20)]);
+      expect(tree.nodes[0]).toMatchObject({ id: "main", kind: "main", depth: 0 });
+      expect(tree.nodes.map((n) => n.id)).not.toContain(RUN_ROOT);
     });
 
     it("orders the run log by when each execution began", () => {

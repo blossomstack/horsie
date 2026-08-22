@@ -255,6 +255,19 @@ export function SessionView() {
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
 
+  /**
+   * What this run is called, when the session is a run of a workflow.
+   *
+   * Its own title first: a run is a session, so it is named like one and can
+   * be renamed like one, and the workflow's name is only what that title
+   * defaults to. Absent unless the session *is* a run — an ordinary session
+   * whose agent invoked a workflow has steps in its roster too, and it is not
+   * one.
+   */
+  const workflowRunTitle = detail?.workflow
+    ? (detail.name?.trim() || detail.workflow)
+    : undefined;
+
   /** The session's own agent, whose page is the session's page. */
   const mainAgentId =
     detail?.agents?.find((a) => !a.parent && a.depth === 0)?.id ??
@@ -462,7 +475,7 @@ export function SessionView() {
         // picture contradicting the prose it was drawn from.
         agentId,
         collapsed,
-        detail?.workflow,
+        workflowRunTitle,
       ),
     [
       stream.items,
@@ -471,7 +484,7 @@ export function SessionView() {
       histories,
       agentId,
       collapsed,
-      detail?.workflow,
+      workflowRunTitle,
     ],
   );
 
@@ -485,9 +498,9 @@ export function SessionView() {
         detail?.agents ?? [],
         detail?.subSessions ?? [],
         collapsed,
-        detail?.workflow,
+        workflowRunTitle,
       ),
-    [detail?.agents, detail?.subSessions, collapsed, detail?.workflow],
+    [detail?.agents, detail?.subSessions, collapsed, workflowRunTitle],
   );
 
   /** The selected agent, resolved against both rosters. */
@@ -499,10 +512,10 @@ export function SessionView() {
             detail?.agents ?? [],
             detail?.subSessions ?? [],
             detail?.name,
-            detail?.workflow,
+            workflowRunTitle,
           )
         : null,
-    [selection, detail?.agents, detail?.subSessions, detail?.name, detail?.workflow],
+    [selection, detail?.agents, detail?.subSessions, detail?.name, workflowRunTitle],
   );
 
   /** The selected entry's message. Found in what is loaded rather than

@@ -55,9 +55,9 @@ export interface SelectedAgent {
  * over each step's *subtree*, so the work a step delegated is counted once and
  * counted here.
  */
-function selectRun(agents: SubAgentView[], workflow: string | undefined): SelectedAgent | null {
+function selectRun(agents: SubAgentView[], runTitle: string | undefined): SelectedAgent | null {
   const steps = stepRuns(agents);
-  if (steps.length === 0) return null;
+  if (steps.length === 0 || !runTitle) return null;
   const usage = steps.reduce(
     (total, s) => ({
       inputTokens: total.inputTokens + s.stats.subtreeUsage.inputTokens,
@@ -67,7 +67,7 @@ function selectRun(agents: SubAgentView[], workflow: string | undefined): Select
   );
   return {
     id: RUN_ROOT,
-    title: workflow ?? "workflow run",
+    title: runTitle,
     kind: "run",
     status: runStatus(steps),
     startedAtMs: steps[0].spawnedAtMs,
@@ -84,10 +84,10 @@ export function selectAgent(
   agents: SubAgentView[],
   subSessions: SubSessionView[],
   sessionName: string | undefined,
-  /** The workflow this session is a run of, when it is one. */
-  workflow?: string,
+  /** What this run is called, when the session is one. */
+  runTitle?: string,
 ): SelectedAgent | null {
-  if (id === RUN_ROOT) return selectRun(agents, workflow);
+  if (id === RUN_ROOT) return selectRun(agents, runTitle);
   const sub = subSessions.find((s) => s.id === id);
   if (sub) {
     return {

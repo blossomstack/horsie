@@ -334,9 +334,10 @@ export function buildTimeline(
    * skip rows it was handed, and it was handed a flat list in which a
    * top-level subagent sat at the root's own depth. */
   collapsed: readonly string[] = [],
-  /** The workflow this session is a run of, when it is one — what the run lane
-   * is called. */
-  workflow?: string,
+  /** What this run is called, when the session *is* a run. Its absence is the
+   * gate: a session that merely invoked a workflow has step executions in its
+   * roster too, and it is not a run — see `layoutAgentTree`. */
+  runTitle?: string,
 ): Timeline {
   const entries: Entry[] = [];
   for (const item of items) {
@@ -373,7 +374,7 @@ export function buildTimeline(
    * one's own bars arrive the way an expanded lane's always have.
    */
   const steps = stepRuns(agents);
-  const run = steps.length > 0;
+  const run = runTitle != null && steps.length > 0;
   const stepSpans = steps.map((s) => ({
     startMs: s.spawnedAtMs,
     // A step still going has no end, so it is measured against now — the same
@@ -497,7 +498,7 @@ export function buildTimeline(
       agentId: rootId,
       kind: rootKind,
       label: run
-        ? (workflow ?? "workflow run")
+        ? runTitle
         : (rootSubSession?.title ??
           rootAgent?.title ??
           rootAgent?.agentType ??
