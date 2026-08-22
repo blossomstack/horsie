@@ -123,10 +123,7 @@ pub(crate) async fn read_page(
             max,
             reply,
         })
-        .await
-        .map_err(|_| {
-            crate::control::ControlError::Internal("session supervisor unavailable".to_string())
-        })?
+        .await?
         .ok_or_else(|| crate::control::ControlError::NotFound("no such agent".to_string()))?;
     let mut entries = page.entries;
     // Thinking signatures are provider-replay artifacts — kilobytes each, and
@@ -171,8 +168,7 @@ async fn stream(
             after: None,
             reply,
         })
-        .await
-        .map_err(|_| Api::internal("session supervisor unavailable"))?
+        .await?
         .ok_or_else(|| Api::not_found("no such agent"))?;
 
     let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(STREAM_BUFFER);

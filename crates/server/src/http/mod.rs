@@ -829,6 +829,48 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
+    /// A node that has stood down refuses reads with 503, not 500.
+    ///
+    /// The distinction is the entire contract: 503 says the request was fine
+    /// and another node can serve it, so a client retries. The read side of the
+    /// session API mapped every delivery failure to 500 instead — it did not
+    /// call the one place that knows the difference — so a node that had merely
+    /// lost touch with a quorum for a moment reported a fault, and a client
+    /// doing exactly what the status codes ask of it never retried.
+    ///
+    /// The id need not exist. A stood-down node refuses before it looks
+    /// anything up, which is why this is expressible without a cluster: what is
+    /// being asserted is what a handler does with an undeliverable ask, and the
+    /// serving watch is the one input that produces one on demand.
+    ///
+    /// Both forms of the read route, because they take separate paths through
+    /// the handler — a page returns a body, a stream returns a connection — and
+    /// only one of them was ever exercised by anything.
+    #[tokio::test]
+    async fn a_stood_down_node_tells_a_reader_to_try_another() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = crate::testing::state(tmp.path()).stood_down().build().await;
+        let app = app(t.state.clone());
+        let id = uuid::Uuid::new_v4();
+
+        for path in [
+            // The page form: `max` with no cursor.
+            t.url(&format!("/sessions/{id}/messages?max=200")),
+            // The stream form: no page parameters at all.
+            t.url(&format!("/sessions/{id}/messages")),
+            // The list, which already went through the shared map — here so a
+            // change that got the reads wrong again cannot look consistent.
+            t.url("/sessions"),
+        ] {
+            let res = app.clone().oneshot(get(&path)).await.unwrap();
+            assert_eq!(
+                res.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} on a stood-down node"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn create_list_get_message_lifecycle_over_http() {
         let tmp = tempfile::tempdir().unwrap();

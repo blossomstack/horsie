@@ -53,6 +53,18 @@ impl Api {
     }
 }
 
+/// Why an actor could not be reached, rendered for HTTP.
+///
+/// Through [`ControlError`] rather than beside it, so the two surfaces cannot
+/// drift: a node standing down is a 503 here because it is `Unavailable` there.
+///
+/// [`ControlError`]: crate::control::ControlError
+impl From<horsie_actor::TellError> for Api {
+    fn from(e: horsie_actor::TellError) -> Self {
+        Self::from(crate::control::ControlError::from(e))
+    }
+}
+
 /// A spec that could not be assembled: the caller's fault is a 422, ours a 500.
 impl From<crate::sessions::builder::SpecError> for Api {
     fn from(e: crate::sessions::builder::SpecError) -> Self {
