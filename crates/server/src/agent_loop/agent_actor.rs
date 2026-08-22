@@ -85,7 +85,31 @@ impl AgentParams {
 const MAX_RESULT_NUDGES: u32 = 2;
 
 /// Commands accepted by an [`AgentActor`].
+///
+/// Grouped the way [`SessionCommand`](crate::sessions::session_actor::SessionCommand) is, and for
+/// the same reason: the outer variant names the module that owns the command, so
+/// dispatch is one line per module rather than one arm per command.
 pub enum AgentCommand {
+    /// What this agent has been asked to answer, and the decision to answer it.
+    Queue(QueueCommand),
+    /// The turn in flight: stopping it, and what it writes and reports.
+    Run(RunCommand),
+    /// Timers this agent has armed against itself.
+    Timer(TimerCommand),
+    /// The agent's own task list.
+    TaskList(TaskListCommand),
+    /// Questions answered from state, which wake nothing.
+    Read(ReadCommand),
+    /// Things written into this agent's log by somebody else.
+    Log(LogCommand),
+    /// Reading this conversation as a fork's starting point, and being one.
+    Fork(ForkCommand),
+    /// The actor's own lifetime.
+    Core(CoreCommand),
+}
+
+/// What this agent has been asked to answer, and the decision to answer it.
+pub enum QueueCommand {
     /// Something addressed to this agent: a person's message, a subagent's
     /// report, a timer firing, a `Stop` hook's continuation.
     ///
@@ -110,6 +134,13 @@ pub enum AgentCommand {
     /// Internal: reconsider whether the queue may start a turn now. Sent after
     /// anything that could have changed the answer.
     Drain,
+    /// Internal: a turn's pre-start hooks finished. Journal their records, then
+    /// start the turn — or abandon it. Boxed to keep the command enum small.
+    StartPrepared(Box<PreparedStart>),
+}
+
+/// The turn in flight: stopping it, and what it writes and reports.
+pub enum RunCommand {
     /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
     /// terminated — immediately when none is in flight — so a caller that must
     /// know this incarnation will write nothing more (e.g. a session about to
@@ -125,17 +156,12 @@ pub enum AgentCommand {
         events: Vec<AgentDomainEvent>,
         ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
-    /// ack: nothing waits on an audit trail, and recording what a hook did must
-    /// never be able to slow the call it describes.
-    HooksRan {
-        records: Vec<horsie_models::hooks::HookRecord>,
-    },
-    /// Internal: a turn's pre-start hooks finished. Journal their records, then
-    /// start the turn — or abandon it. Boxed to keep the command enum small.
-    StartPrepared(Box<PreparedStart>),
     /// Internal: a background run finished. Boxed to keep the command enum small.
     RunFinished(Box<RunReport>),
+}
+
+/// Timers this agent has armed against itself.
+pub enum TimerCommand {
     /// Arm a timer; replies with the new timer id once recorded.
     ArmTimer {
         label: String,
@@ -157,6 +183,10 @@ pub enum AgentCommand {
     TimerFired {
         id: crate::agent_loop::timers::TimerId,
     },
+}
+
+/// The agent's own task list.
+pub enum TaskListCommand {
     /// Apply a `task_list` mutation (or just render `list`); durable like
     /// timers. Replies with the rendered list, or an error message if the
     /// action was rejected (unknown id, out-of-range position, ...).
@@ -164,6 +194,10 @@ pub enum AgentCommand {
         action: crate::agent_loop::task_list::TaskListAction,
         reply: ReplyTo<Result<String, String>>,
     },
+}
+
+/// Questions answered from state, which wake nothing.
+pub enum ReadCommand {
     /// Read forward from a cursor: durable entries plus, when the caller has
     /// caught up to the tail, the deltas of the message still being written.
     ///
@@ -182,6 +216,29 @@ pub enum AgentCommand {
         max: usize,
         reply: ReplyTo<crate::agent_loop::agent_log::LogPage>,
     },
+    /// Where this agent's log stands. A fork's branch point, read before
+    /// anything is written so the number names the moment the fork was asked
+    /// for rather than the moment its seed happened to be built.
+    LogHead { reply: ReplyTo<u64> },
+    /// Read this agent's own usage + context-size snapshot — no messages or
+    /// tasks, cheaper than `GetHistory` when only the numbers are needed.
+    /// Backs the session-level usage aggregation.
+    GetUsage { reply: ReplyTo<AgentUsageSnapshot> },
+    /// Read this agent's current values — task list plus usage — for the agent
+    /// document. Distinct from `GetHistory`, which returns transcript appends:
+    /// these are values a client re-reads rather than accumulates.
+    GetState { reply: ReplyTo<AgentStateView> },
+    /// The exact facts a compaction must carry across verbatim.
+    ///
+    /// Answered from state on the mailbox, and asked from a *running* agent's
+    /// own task: a compaction can happen mid-turn, and the task list it must
+    /// preserve may have been changed by a tool call earlier in that same turn.
+    /// Reading a copy taken at run start would carry a stale one.
+    CarriedState { reply: ReplyTo<String> },
+}
+
+/// Things written into this agent's log by somebody else.
+pub enum LogCommand {
     /// Record something that happened to the session in this agent's log.
     ///
     /// Sent by the session actor, which still owns the fact — this only makes
@@ -197,10 +254,16 @@ pub enum AgentCommand {
     /// ordering is the only reason this is a command at all — nothing here is
     /// journaled.
     RecordDelta { text: String },
-    /// Where this agent's log stands. A fork's branch point, read before
-    /// anything is written so the number names the moment the fork was asked
-    /// for rather than the moment its seed happened to be built.
-    LogHead { reply: ReplyTo<u64> },
+    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
+    /// ack: nothing waits on an audit trail, and recording what a hook did must
+    /// never be able to slow the call it describes.
+    HooksRan {
+        records: Vec<horsie_models::hooks::HookRecord>,
+    },
+}
+
+/// Reading this conversation as a fork's starting point, and being one.
+pub enum ForkCommand {
     /// This agent's state as a fork's starting point, cut at `at_seq` — see
     /// [`AgentState::scrub_for_fork`]. Read-only: forking changes nothing about
     /// the conversation being forked.
@@ -226,25 +289,14 @@ pub enum AgentCommand {
         message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
     },
+}
+
+/// The actor's own lifetime.
+pub enum CoreCommand {
     /// Stop this actor. Sent when the session it belongs to unloads: the agent
     /// is resident for the session's *loaded* lifetime, not forever, and going
     /// cold must not leave a task behind holding a whole transcript in memory.
     Shutdown,
-    /// Read this agent's own usage + context-size snapshot — no messages or
-    /// tasks, cheaper than `GetHistory` when only the numbers are needed.
-    /// Backs the session-level usage aggregation.
-    GetUsage { reply: ReplyTo<AgentUsageSnapshot> },
-    /// Read this agent's current values — task list plus usage — for the agent
-    /// document. Distinct from `GetHistory`, which returns transcript appends:
-    /// these are values a client re-reads rather than accumulates.
-    GetState { reply: ReplyTo<AgentStateView> },
-    /// The exact facts a compaction must carry across verbatim.
-    ///
-    /// Answered from state on the mailbox, and asked from a *running* agent's
-    /// own task: a compaction can happen mid-turn, and the task list it must
-    /// preserve may have been changed by a tool call earlier in that same turn.
-    /// Reading a copy taken at run start would carry a stale one.
-    CarriedState { reply: ReplyTo<String> },
 }
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
@@ -1397,7 +1449,9 @@ impl AgentActor {
                 },
             };
             let _ = self_ref
-                .tell(AgentCommand::StartPrepared(Box::new(prepared)))
+                .tell(AgentCommand::Queue(QueueCommand::StartPrepared(Box::new(
+                    prepared,
+                ))))
                 .await;
         });
         events
@@ -1577,11 +1631,11 @@ impl AgentActor {
                 biased;
                 () = cancel.cancelled() => {
                     let _ = self_ref
-                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
+                        .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(RunReport {
                             run_id,
                             outcome: RunOutcome::Cancelled,
                             fork_summary: None,
-                        })))
+                        }))))
                         .await;
                     return;
                 }
@@ -1599,11 +1653,13 @@ impl AgentActor {
                         })
                         .await;
                     let _ = self_ref
-                        .tell(AgentCommand::RunFinished(Box::new(RunReport {
-                            run_id,
-                            outcome: RunOutcome::AlreadyReported,
-                            fork_summary: None,
-                        })))
+                        .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(
+                            RunReport {
+                                run_id,
+                                outcome: RunOutcome::AlreadyReported,
+                                fork_summary: None,
+                            },
+                        ))))
                         .await;
                     return;
                 }
@@ -1692,11 +1748,13 @@ impl AgentActor {
             // All coarse events were already persisted (each `emit` awaited its ack),
             // so `RunFinished` lands after them in mailbox order.
             let _ = self_ref
-                .tell(AgentCommand::RunFinished(Box::new(RunReport {
-                    run_id,
-                    outcome,
-                    fork_summary,
-                })))
+                .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(
+                    RunReport {
+                        run_id,
+                        outcome,
+                        fork_summary,
+                    },
+                ))))
                 .await;
         });
     }
@@ -2430,11 +2488,14 @@ impl EventSourcedActor for AgentActor {
         ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            AgentCommand::Enqueue { item, ack } => {
+            AgentCommand::Queue(QueueCommand::Enqueue { item, ack }) => {
                 // Decided after the write, never before it: the queue a turn
                 // drains has to be the durable one, so the drain arrives as its
                 // own command and finds this event already folded in.
-                let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
+                let _ = ctx
+                    .self_ref()
+                    .tell(AgentCommand::Queue(QueueCommand::Drain))
+                    .await;
                 let effect = CommandEffect::persist(vec![AgentDomainEvent::Received {
                     item,
                     at_ms: now_ms(),
@@ -2444,8 +2505,10 @@ impl EventSourcedActor for AgentActor {
                     None => effect,
                 }
             }
-            AgentCommand::Drain => CommandEffect::persist(self.try_drain(state, ctx).await),
-            AgentCommand::Answer { answers, reply } => {
+            AgentCommand::Queue(QueueCommand::Drain) => {
+                CommandEffect::persist(self.try_drain(state, ctx).await)
+            }
+            AgentCommand::Queue(QueueCommand::Answer { answers, reply }) => {
                 // A run in flight means the questions are already gone — a turn
                 // beginning is what clears them — so there is nothing to answer.
                 if self.busy() {
@@ -2463,11 +2526,11 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
-            AgentCommand::StartPrepared(prepared) => {
+            AgentCommand::Queue(QueueCommand::StartPrepared(prepared)) => {
                 self.preparing = false;
                 CommandEffect::persist(self.start_prepared(*prepared, state, ctx).await)
             }
-            AgentCommand::HooksRan { records } => {
+            AgentCommand::Log(LogCommand::HooksRan { records }) => {
                 let at_ms = now_ms();
                 // Counted here, against the state as it stands, and carried on
                 // the event: `agent_frame` sees only the event, so deriving the
@@ -2484,10 +2547,10 @@ impl EventSourcedActor for AgentActor {
                     .collect();
                 CommandEffect::persist(events)
             }
-            AgentCommand::PersistProgress { events, ack } => {
+            AgentCommand::Run(RunCommand::PersistProgress { events, ack }) => {
                 CommandEffect::persist(events).and_ack(ack)
             }
-            AgentCommand::Cancel { ack } => {
+            AgentCommand::Run(RunCommand::Cancel { ack }) => {
                 match (&self.running, ack) {
                     (Some(run), ack) => {
                         run.cancel.cancel();
@@ -2504,13 +2567,13 @@ impl EventSourcedActor for AgentActor {
                 }
                 CommandEffect::none()
             }
-            AgentCommand::ArmTimer {
+            AgentCommand::Timer(TimerCommand::ArmTimer {
                 label,
                 message,
                 kind,
                 after_secs,
                 reply,
-            } => {
+            }) => {
                 let now = now_ms();
                 let record = crate::agent_loop::timers::TimerRecord::arm(
                     label,
@@ -2531,13 +2594,13 @@ impl EventSourcedActor for AgentActor {
                     at_ms: now_ms(),
                 }])
             }
-            AgentCommand::ListTimers { reply } => {
+            AgentCommand::Timer(TimerCommand::ListTimers { reply }) => {
                 let now = now_ms();
                 let views = state.timers.iter().map(|t| t.view(now)).collect();
                 let _ = reply.send(views);
                 CommandEffect::none()
             }
-            AgentCommand::CancelTimer { selector, reply } => {
+            AgentCommand::Timer(TimerCommand::CancelTimer { selector, reply }) => {
                 let ids: Vec<crate::agent_loop::timers::TimerId> = match selector {
                     crate::agent_loop::timers::CancelSelector::All => {
                         state.timers.iter().map(|t| t.id.clone()).collect()
@@ -2560,9 +2623,13 @@ impl EventSourcedActor for AgentActor {
                     }])
                 }
             }
-            AgentCommand::TimerFired { id } => self.handle_timer_fired(id, state, ctx).await,
-            AgentCommand::RunFinished(report) => self.handle_finished(*report, state, ctx).await,
-            AgentCommand::TaskListOp { action, reply } => {
+            AgentCommand::Timer(TimerCommand::TimerFired { id }) => {
+                self.handle_timer_fired(id, state, ctx).await
+            }
+            AgentCommand::Run(RunCommand::RunFinished(report)) => {
+                self.handle_finished(*report, state, ctx).await
+            }
+            AgentCommand::TaskList(TaskListCommand::TaskListOp { action, reply }) => {
                 let mut next = state.task_list.clone();
                 match next.apply(action) {
                     Ok(()) => {
@@ -2579,7 +2646,7 @@ impl EventSourcedActor for AgentActor {
                     }
                 }
             }
-            AgentCommand::RecordLifecycle { event, at_ms } => {
+            AgentCommand::Log(LogCommand::RecordLifecycle { event, at_ms }) => {
                 // Almost every one of these is something a reader sees and this
                 // agent does nothing about. The runtime arriving is the one
                 // that changes what it may *do* — so it is read off the record
@@ -2600,56 +2667,59 @@ impl EventSourcedActor for AgentActor {
                 events.extend(self.try_drain(&folded, ctx).await);
                 CommandEffect::persist(events)
             }
-            AgentCommand::RecordDelta { text } => {
+            AgentCommand::Log(LogCommand::RecordDelta { text }) => {
                 self.deltas.push(text);
                 self.publish_revision();
                 CommandEffect::none()
             }
-            AgentCommand::ReadLog { after, reply } => {
+            AgentCommand::Read(ReadCommand::ReadLog { after, reply }) => {
                 let _ = reply.send(state.read_from(after, &self.deltas));
                 CommandEffect::none()
             }
-            AgentCommand::PageLog { before, max, reply } => {
+            AgentCommand::Read(ReadCommand::PageLog { before, max, reply }) => {
                 let _ = reply.send(crate::agent_loop::agent_log::page_before(
                     &state.log, before, max,
                 ));
                 CommandEffect::none()
             }
-            AgentCommand::GetUsage { reply } => {
+            AgentCommand::Read(ReadCommand::GetUsage { reply }) => {
                 let _ = reply.send(state.usage_snapshot());
                 CommandEffect::none()
             }
-            AgentCommand::GetState { reply } => {
+            AgentCommand::Read(ReadCommand::GetState { reply }) => {
                 let _ = reply.send(state.state_view());
                 CommandEffect::none()
             }
-            AgentCommand::CarriedState { reply } => {
+            AgentCommand::Read(ReadCommand::CarriedState { reply }) => {
                 let _ = reply.send(crate::agent_loop::carried_state::render_carried_state(
                     state,
                 ));
                 CommandEffect::none()
             }
-            AgentCommand::LogHead { reply } => {
+            AgentCommand::Read(ReadCommand::LogHead { reply }) => {
                 let _ = reply.send(state.next_seq);
                 CommandEffect::none()
             }
-            AgentCommand::ForkSeed { at_seq, reply } => {
+            AgentCommand::Fork(ForkCommand::ForkSeed { at_seq, reply }) => {
                 let _ = reply.send(Box::new(state.scrub_for_fork(at_seq)));
                 CommandEffect::none()
             }
-            AgentCommand::SeedFrom {
+            AgentCommand::Fork(ForkCommand::SeedFrom {
                 state: seeded,
                 seed,
                 message,
                 reply,
-            } => {
+            }) => {
                 // Already seeded. Not an error: a process that died between
                 // this write and the session journaling `ForkSeeded` comes back
                 // and re-seeds, and the honest answer is that the work is done.
                 // Saying otherwise would fail a fork that is perfectly fine.
                 if !state.log.is_empty() {
                     let _ = reply.send(Ok(()));
-                    let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
+                    let _ = ctx
+                        .self_ref()
+                        .tell(AgentCommand::Queue(QueueCommand::Drain))
+                        .await;
                     return CommandEffect::none();
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2663,7 +2733,10 @@ impl EventSourcedActor for AgentActor {
                 });
                 // Decided after the write, exactly as `Enqueue` does: the queue
                 // a turn drains has to be the durable one.
-                let _ = ctx.self_ref().tell(AgentCommand::Drain).await;
+                let _ = ctx
+                    .self_ref()
+                    .tell(AgentCommand::Queue(QueueCommand::Drain))
+                    .await;
                 CommandEffect::persist(vec![
                     AgentDomainEvent::Seeded {
                         state: seeded,
@@ -2680,7 +2753,7 @@ impl EventSourcedActor for AgentActor {
                 // replays it.
                 .and_snapshot()
             }
-            AgentCommand::Shutdown => CommandEffect::stop(),
+            AgentCommand::Core(CoreCommand::Shutdown) => CommandEffect::stop(),
         }
     }
 
@@ -2740,13 +2813,13 @@ impl EventSourcedActor for AgentActor {
             let ack = ReplyTo::from_sender(ack);
             let _ = ctx
                 .self_ref()
-                .tell(AgentCommand::PersistProgress {
+                .tell(AgentCommand::Run(RunCommand::PersistProgress {
                     events: repairs
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect(),
                     ack,
-                })
+                }))
                 .await;
         }
         // A turn still open in the fold is one no process is running any more.
@@ -2809,7 +2882,9 @@ fn spawn_timer_sleep(
 ) {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        let _ = self_ref.tell(AgentCommand::TimerFired { id }).await;
+        let _ = self_ref
+            .tell(AgentCommand::Timer(TimerCommand::TimerFired { id }))
+            .await;
     });
 }
 
@@ -2873,12 +2948,14 @@ impl Toolbox for TimerToolbox {
                 };
                 let id = self
                     .actor
-                    .ask(|reply| AgentCommand::ArmTimer {
-                        label,
-                        message,
-                        kind,
-                        after_secs,
-                        reply,
+                    .ask(|reply| {
+                        AgentCommand::Timer(TimerCommand::ArmTimer {
+                            label,
+                            message,
+                            kind,
+                            after_secs,
+                            reply,
+                        })
                     })
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
@@ -2887,7 +2964,7 @@ impl Toolbox for TimerToolbox {
             "list_timers" => {
                 let views = self
                     .actor
-                    .ask(|reply| AgentCommand::ListTimers { reply })
+                    .ask(|reply| AgentCommand::Timer(TimerCommand::ListTimers { reply }))
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 serde_json::to_value(views)
@@ -2906,7 +2983,7 @@ impl Toolbox for TimerToolbox {
                 };
                 let ids = self
                     .actor
-                    .ask(|reply| AgentCommand::CancelTimer { selector, reply })
+                    .ask(|reply| AgentCommand::Timer(TimerCommand::CancelTimer { selector, reply }))
                     .await
                     .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
                 let ids: Vec<String> = ids.into_iter().map(|i| i.0).collect();
@@ -2947,7 +3024,7 @@ impl Toolbox for TaskListToolbox {
         let action = crate::agent_loop::task_list::TaskListAction::from_input(&input)?;
         let result = self
             .actor
-            .ask(|reply| AgentCommand::TaskListOp { action, reply })
+            .ask(|reply| AgentCommand::TaskList(TaskListCommand::TaskListOp { action, reply }))
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?;
         result
@@ -3018,9 +3095,11 @@ impl EventSink for PersistSink {
             //   there is nothing to persist to and nothing to wait for; drop quietly.
             match self
                 .actor
-                .ask(|ack| AgentCommand::PersistProgress {
-                    events: vec![coarse],
-                    ack,
+                .ask(|ack| {
+                    AgentCommand::Run(RunCommand::PersistProgress {
+                        events: vec![coarse],
+                        ack,
+                    })
                 })
                 .await
             {
@@ -3038,9 +3117,9 @@ impl EventSink for PersistSink {
         if let AgentEvent::TextChunk(chunk) = &event {
             let _ = self
                 .actor
-                .tell(AgentCommand::RecordDelta {
+                .tell(AgentCommand::Log(LogCommand::RecordDelta {
                     text: chunk.text.clone(),
-                })
+                }))
                 .await;
         }
         Ok(())
@@ -3836,7 +3915,7 @@ mod tests {
         let two = user_msg("two");
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::PersistProgress {
+            .tell(AgentCommand::Run(RunCommand::PersistProgress {
                 events: vec![
                     AgentDomainEvent::InputMessage {
                         message: one.clone(),
@@ -3846,7 +3925,7 @@ mod tests {
                     },
                 ],
                 ack: ReplyTo::from_sender(ack),
-            })
+            }))
             .await
             .unwrap();
         ack_rx.await.unwrap().unwrap();
@@ -3918,13 +3997,13 @@ mod tests {
         );
 
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                 item: crate::agent_loop::Incoming::User {
                     id: "m1".into(),
                     text: "hi".into(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .unwrap();
 
@@ -4069,13 +4148,13 @@ mod tests {
 
         async fn prompt(agent: &ActorRef<AgentCommand>, text: &str, rx: &mut Outcomes) {
             agent
-                .tell(AgentCommand::Enqueue {
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                     item: crate::agent_loop::Incoming::User {
                         id: "m2".into(),
                         text: text.into(),
                     },
                     ack: None,
-                })
+                }))
                 .await
                 .unwrap();
             terminal_outcome(rx).await;
@@ -4166,12 +4245,12 @@ mod tests {
             // leaves behind.
             let (ack, done) = tokio::sync::oneshot::channel();
             agent
-                .tell(AgentCommand::PersistProgress {
+                .tell(AgentCommand::Run(RunCommand::PersistProgress {
                     events: vec![AgentDomainEvent::InputMessage {
                         message: user_msg("from a previous load"),
                     }],
                     ack: ReplyTo::from_sender(ack),
-                })
+                }))
                 .await
                 .unwrap();
             done.await.unwrap().unwrap();
@@ -4208,13 +4287,13 @@ mod tests {
             let (agent, mut rx) = spawn(provider);
 
             agent
-                .tell(AgentCommand::Enqueue {
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                     item: crate::agent_loop::Incoming::User {
                         id: "m3".into(),
                         text: "my password is hunter2".into(),
                     },
                     ack: None,
-                })
+                }))
                 .await
                 .unwrap();
 
@@ -4227,10 +4306,12 @@ mod tests {
             assert_eq!(llm.calls(), 0, "the model must never be reached");
 
             let page = agent
-                .ask(|reply| AgentCommand::PageLog {
-                    before: None,
-                    max: 50,
-                    reply,
+                .ask(|reply| {
+                    AgentCommand::Read(ReadCommand::PageLog {
+                        before: None,
+                        max: 50,
+                        reply,
+                    })
                 })
                 .await
                 .unwrap();
@@ -4295,13 +4376,13 @@ mod tests {
                 AgentActor::new(ctx, AgentParams::from_def(&def_fixture())),
             );
             agent
-                .tell(AgentCommand::Enqueue {
+                .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                     item: crate::agent_loop::Incoming::User {
                         id: "m4".into(),
                         text: "hi".into(),
                     },
                     ack: None,
-                })
+                }))
                 .await
                 .unwrap();
 
@@ -6092,26 +6173,28 @@ mod fence_tests {
 
         // Run 0 starts and hangs in `provide`, so it is genuinely in flight.
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                 item: crate::agent_loop::Incoming::User {
                     id: "m5".into(),
                     text: "first".into(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // A report from some earlier run arrives late.
         agent
-            .tell(AgentCommand::RunFinished(Box::new(RunReport {
-                run_id: 99,
-                outcome: RunOutcome::Completed {
-                    text: "from a run that is over".into(),
+            .tell(AgentCommand::Run(RunCommand::RunFinished(Box::new(
+                RunReport {
+                    run_id: 99,
+                    outcome: RunOutcome::Completed {
+                        text: "from a run that is over".into(),
+                    },
+                    fork_summary: None,
                 },
-                fork_summary: None,
-            })))
+            ))))
             .await
             .unwrap();
 
@@ -6119,23 +6202,23 @@ mod fence_tests {
         // held. Without it, `running` would have been cleared and this would
         // start a second background loop against the same journal.
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                 item: crate::agent_loop::Incoming::User {
                     id: "m6".into(),
                     text: "second".into(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .unwrap();
 
         let (reply, rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::PageLog {
+            .tell(AgentCommand::Read(ReadCommand::PageLog {
                 before: None,
                 max: 50,
                 reply: ReplyTo::from_sender(reply),
-            })
+            }))
             .await
             .unwrap();
         let page = rx.await.unwrap();
@@ -6201,13 +6284,13 @@ mod fence_tests {
         );
 
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                 item: crate::agent_loop::Incoming::User {
                     id: "m1".into(),
                     text: "write me an essay".into(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -6215,29 +6298,29 @@ mod fence_tests {
         // The same road a streamed chunk takes: the sink tells the actor.
         for chunk in ["Once upon ", "a time"] {
             agent
-                .tell(AgentCommand::RecordDelta {
+                .tell(AgentCommand::Log(LogCommand::RecordDelta {
                     text: chunk.to_string(),
-                })
+                }))
                 .await
                 .unwrap();
         }
 
         let (ack, cancelled) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Cancel {
+            .tell(AgentCommand::Run(RunCommand::Cancel {
                 ack: Some(ReplyTo::from_sender(ack)),
-            })
+            }))
             .await
             .unwrap();
         cancelled.await.unwrap();
 
         let (reply, rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::PageLog {
+            .tell(AgentCommand::Read(ReadCommand::PageLog {
                 before: None,
                 max: 50,
                 reply: ReplyTo::from_sender(reply),
-            })
+            }))
             .await
             .unwrap();
         let page = rx.await.unwrap();
@@ -6355,13 +6438,13 @@ mod queue_tests {
             false => horsie_agentcore::RuntimeStatus::Acquiring(horsie_agentcore::EmptyOutcome {}),
         };
         agent
-            .tell(AgentCommand::RecordLifecycle {
+            .tell(AgentCommand::Log(LogCommand::RecordLifecycle {
                 event: LifecycleEvent::Runtime(horsie_agentcore::RuntimeLifecycle {
                     status,
                     detail: None,
                 }),
                 at_ms: 0,
-            })
+            }))
             .await
             .unwrap();
     }
@@ -6369,13 +6452,13 @@ mod queue_tests {
     async fn send(agent: &ActorRef<AgentCommand>, id: &str, text: &str) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(QueueCommand::Enqueue {
                 item: crate::agent_loop::Incoming::User {
                     id: id.into(),
                     text: text.into(),
                 },
                 ack: Some(ReplyTo::from_sender(tx)),
-            })
+            }))
             .await
             .unwrap();
         rx.await.unwrap().expect("the message must be durable");
@@ -6384,10 +6467,12 @@ mod queue_tests {
     /// Every lifecycle entry kind in the agent's log, in order.
     async fn lifecycle(agent: &ActorRef<AgentCommand>) -> Vec<String> {
         let page = agent
-            .ask(|reply| AgentCommand::PageLog {
-                before: None,
-                max: 100,
-                reply,
+            .ask(|reply| {
+                AgentCommand::Read(ReadCommand::PageLog {
+                    before: None,
+                    max: 100,
+                    reply,
+                })
             })
             .await
             .unwrap();
@@ -6523,13 +6608,13 @@ mod queue_tests {
         let (agent, _rx) = text_agent(true);
         let (tx, rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Answer {
+            .tell(AgentCommand::Queue(QueueCommand::Answer {
                 answers: vec![crate::agent_loop::AskAnswer {
                     tool_call_id: "call-1".into(),
                     text: "main".into(),
                 }],
                 reply: ReplyTo::from_sender(tx),
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(

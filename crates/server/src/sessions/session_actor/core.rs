@@ -11,6 +11,7 @@ use super::{
     SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
 };
 use crate::agent_loop::AgentCommand;
+use crate::agent_loop::LogCommand as AgentLogCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::title_tool::normalize_session_title;
@@ -224,10 +225,10 @@ impl SessionActor {
                 };
                 let _ = agent
                     .actor
-                    .tell(AgentCommand::RecordLifecycle {
+                    .tell(AgentCommand::Log(AgentLogCommand::RecordLifecycle {
                         event: payload,
                         at_ms: now_ms(),
-                    })
+                    }))
                     .await;
             }
         }
@@ -242,10 +243,10 @@ impl SessionActor {
         if let Some(agent) = agent {
             let _ = agent
                 .actor
-                .tell(AgentCommand::RecordLifecycle {
+                .tell(AgentCommand::Log(AgentLogCommand::RecordLifecycle {
                     event,
                     at_ms: now_ms(),
-                })
+                }))
                 .await;
         }
     }

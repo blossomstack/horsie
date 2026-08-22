@@ -26,6 +26,10 @@ use horsie_server::agent_loop::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentOutcome, AgentOutcomeSink, AgentParams,
     AgentRuntimeContext, FixedContextProvider,
 };
+use horsie_server::agent_loop::{
+    QueueCommand as AgentQueueCommand, ReadCommand as AgentReadCommand,
+    RunCommand as AgentRunCommand,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
@@ -241,13 +245,13 @@ async fn recovered_agent_repairs_a_stopped_mid_history_tool_call() {
         AgentActor::new(ctx, params),
     );
     agent
-        .tell(AgentCommand::Enqueue {
+        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m1".into(),
                 text: "carry on".into(),
             },
             ack: None,
-        })
+        }))
         .await
         .unwrap();
 
@@ -358,13 +362,13 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
         AgentActor::new(ctx, params),
     );
     agent
-        .tell(AgentCommand::Answer {
+        .tell(AgentCommand::Queue(AgentQueueCommand::Answer {
             answers: vec![horsie_server::agent_loop::AskAnswer {
                 tool_call_id: "ask-1".into(),
                 text: "validate, daemon, job".into(),
             }],
             reply: ReplyTo::from_sender(answered),
-        })
+        }))
         .await
         .unwrap();
 
@@ -380,13 +384,13 @@ async fn a_reloaded_agent_parked_on_an_ask_answers_it_exactly_once() {
     // Take another turn: any synthetic result recovery journaled is in the
     // history by now, so this is what every later turn would carry forever.
     agent
-        .tell(AgentCommand::Enqueue {
+        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
             item: horsie_server::agent_loop::Incoming::User {
                 id: "m2".into(),
                 text: "carry on".into(),
             },
             ack: None,
-        })
+        }))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), outcomes.recv())
@@ -458,13 +462,13 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
             AgentActor::new(ctx, params),
         );
         agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                 item: horsie_server::agent_loop::Incoming::User {
                     id: "m3".into(),
                     text: "start something that wedges".into(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .unwrap();
         // Let the run reach `provide()` and block there.
@@ -474,9 +478,9 @@ async fn cancelling_a_run_stuck_in_provide_returns_promptly() {
         // genuinely over, not when the token was merely flipped.
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         agent
-            .tell(AgentCommand::Cancel {
+            .tell(AgentCommand::Run(AgentRunCommand::Cancel {
                 ack: Some(ReplyTo::from_sender(ack_tx)),
-            })
+            }))
             .await
             .unwrap();
 
@@ -541,11 +545,11 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
         loop {
             let (reply, rx) = tokio::sync::oneshot::channel();
             agent
-                .tell(AgentCommand::PageLog {
+                .tell(AgentCommand::Read(AgentReadCommand::PageLog {
                     before: None,
                     max: 100,
                     reply: ReplyTo::from_sender(reply),
-                })
+                }))
                 .await
                 .unwrap();
             let page = rx.await.unwrap();
@@ -595,11 +599,11 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
-        .tell(AgentCommand::PageLog {
+        .tell(AgentCommand::Read(AgentReadCommand::PageLog {
             before: None,
             max: 100,
             reply: ReplyTo::from_sender(reply),
-        })
+        }))
         .await
         .unwrap();
     let page2 = rx.await.unwrap();
