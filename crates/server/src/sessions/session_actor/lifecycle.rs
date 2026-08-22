@@ -63,9 +63,12 @@ impl RuntimeLifecycle {
                     return CommandEffect::none();
                 }
                 let runtimes = actor.deps().runtimes.clone();
+                // Still the session's own id: this is the session's runtime,
+                // the one its main agent runs on. A sub session that asks for
+                // an environment of its own mints a fresh id instead.
                 let session = actor.id.to_string();
                 let vendor = actor.spec().vendor.clone();
-                let spec = actor.spec().clone();
+                let env = actor.spec().runtime_env();
                 let me = actor.me(ctx);
                 // Minted here and journaled below in the same breath, so the
                 // sandbox this create starts and the entry that records it
@@ -78,20 +81,18 @@ impl RuntimeLifecycle {
                 // throughout. The status it just journaled is what holds the
                 // turn back meanwhile.
                 tokio::spawn(async move {
-                    let (error, terminal, detail) = match runtimes
-                        .create(&session, &incarnation, &vendor, &spec)
-                        .await
-                    {
-                        Ok(detail) => (None, false, detail),
-                        // Exactly the split `get` makes: only a live vendor
-                        // refusing to produce the runtime is terminal. An
-                        // offline vendor or a failed token mint is a bad
-                        // moment, not a dead session.
-                        Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
-                        Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
-                            (Some(e.to_string()), false, None)
-                        }
-                    };
+                    let (error, terminal, detail) =
+                        match runtimes.create(&session, &incarnation, &vendor, &env).await {
+                            Ok(detail) => (None, false, detail),
+                            // Exactly the split `get` makes: only a live vendor
+                            // refusing to produce the runtime is terminal. An
+                            // offline vendor or a failed token mint is a bad
+                            // moment, not a dead session.
+                            Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                            Err(
+                                e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)),
+                            ) => (Some(e.to_string()), false, None),
+                        };
                     // Before the outcome, and separately from it: the vendor
                     // described the runtime it accepted, and that sentence
                     // belongs to the wait rather than to how the wait ended.
@@ -728,7 +729,12 @@ mod tests {
         let id = Uuid::new_v4();
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &actor_spec_fixture().runtime_env(),
+            )
             .await
             .expect("create");
         let provider = BlockingProvider::new();

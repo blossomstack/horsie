@@ -1083,7 +1083,7 @@ mod tests {
         };
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &spec)
+            .create(&id.to_string(), "i1", "mock", &spec.runtime_env())
             .await
             .expect("create");
 

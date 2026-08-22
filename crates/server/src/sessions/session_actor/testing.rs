@@ -364,7 +364,12 @@ pub(super) async fn spawn_session_with_provider(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+        .create(
+            &id.to_string(),
+            "i1",
+            "mock",
+            &actor_spec_fixture().runtime_env(),
+        )
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -523,7 +528,7 @@ pub(super) async fn spawn_run_with_provider(
     };
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &spec)
+        .create(&id.to_string(), "i1", "mock", &spec.runtime_env())
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -1152,7 +1157,12 @@ pub(super) async fn stop_harness_full(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+        .create(
+            &id.to_string(),
+            "i1",
+            "mock",
+            &actor_spec_fixture().runtime_env(),
+        )
         .await
         .expect("create");
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -1362,7 +1372,12 @@ pub(super) async fn catalog_harness_with(
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+        .create(
+            &id.to_string(),
+            "i1",
+            "mock",
+            &actor_spec_fixture().runtime_env(),
+        )
         .await
         .expect("create");
     f.deps.provider_registry.write().unwrap().insert(
@@ -1386,7 +1401,7 @@ pub(super) fn catalog_provider(
             "i1".to_string(),
             false,
             "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
         ),
         registry: f.deps.provider_registry.clone(),
         mcp: None,
@@ -1441,7 +1456,12 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
     let id = Uuid::new_v4();
     f.deps
         .runtimes
-        .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+        .create(
+            &id.to_string(),
+            "i1",
+            "mock",
+            &actor_spec_fixture().runtime_env(),
+        )
         .await
         .expect("create");
     let prompts: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -1495,7 +1515,7 @@ pub(super) fn typed_provider(
             "i1".to_string(),
             false,
             "mock".to_string(),
-            crate::sessions::spec::SessionSpec::for_vendor("mock"),
+            crate::sessions::spec::SessionSpec::for_vendor("mock").runtime_env(),
         ),
         registry: f.deps.provider_registry.clone(),
         mcp: None,

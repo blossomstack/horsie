@@ -226,9 +226,7 @@ pub enum SessionKind {
 /// Opaque to everything below this layer: the vendor names its object after it,
 /// the dial token claims it, and the bus builds the runtime's topics from it,
 /// none of which ever needed it to be a session.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RuntimeId(pub uuid::Uuid);
 
 impl RuntimeId {
@@ -338,6 +336,24 @@ impl SessionSpec {
             origin: SessionOrigin::User,
             environment: None,
             env_vars: vec![],
+        }
+    }
+
+    /// This session's own runtime environment: the half of the spec a vendor
+    /// needs, in the shape a runtime record holds.
+    ///
+    /// A view rather than storage, for now. When a session owns a *map* of
+    /// runtimes the fields move onto the records and this goes away — every
+    /// caller already asks for the environment rather than the spec, which is
+    /// what makes that move a deletion rather than a rewrite.
+    #[must_use]
+    pub fn runtime_env(&self) -> RuntimeEnv {
+        RuntimeEnv {
+            vendor: self.vendor.clone(),
+            workspaces: self.workspaces.clone(),
+            provision: self.provision.clone(),
+            env_vars: self.env_vars.clone(),
+            environment: self.environment.clone(),
         }
     }
 

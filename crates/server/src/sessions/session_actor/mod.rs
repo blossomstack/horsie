@@ -663,7 +663,7 @@ impl SessionActor {
                     crate::sessions::session_actor::ProvisioningState::InFlight { .. }
                 ),
                 self.spec().vendor.clone(),
-                self.spec().clone(),
+                self.spec().runtime_env(),
             ),
             registry: self.deps().provider_registry.clone(),
             mcp: self.deps().mcp.clone(),

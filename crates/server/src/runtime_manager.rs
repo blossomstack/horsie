@@ -23,7 +23,7 @@
 
 use crate::runtime_vendor::RuntimeVendor;
 use crate::runtime_vendor::{RuntimeSpec, RuntimeVendorError, WorkspaceSpec};
-use crate::sessions::spec::{RuntimeVendorMap, SessionSpec};
+use crate::sessions::spec::{RuntimeEnv, RuntimeVendorMap};
 use horsie_models::runtime::RuntimeOutboundMessage;
 use horsie_runtime_host::{InFlight, RuntimeClient};
 use std::collections::HashMap;
@@ -252,12 +252,12 @@ impl RuntimeManager {
     /// else the runtime needs it now fetches for itself.
     async fn runtime_spec(
         &self,
-        session: &str,
+        runtime: &str,
         incarnation: &str,
-        spec: &SessionSpec,
+        env: &RuntimeEnv,
     ) -> Result<RuntimeSpec, RuntimeError> {
         let mut rt_spec = RuntimeSpec {
-            workspaces: spec
+            workspaces: env
                 .workspaces
                 .iter()
                 .map(|w| WorkspaceSpec {
@@ -267,7 +267,7 @@ impl RuntimeManager {
             // The environment's variables first; the server pushes its own
             // (the dial token, below) after. A name that would shadow one
             // cannot reach here — the environment service refuses it at save.
-            env: spec
+            env: env
                 .env_vars
                 .iter()
                 .map(|v| horsie_models::executor::EnvVar {
@@ -288,7 +288,7 @@ impl RuntimeManager {
                 &self.deps.dial_secret,
                 &horsie_support::dial_token::DialClaims {
                     user_id: self.deps.account.clone(),
-                    runtime_id: session.to_string(),
+                    runtime_id: runtime.to_string(),
                     // Not minted here. A fresh value per call would differ
                     // between the create that started the sandbox and the
                     // acquisition that later reaches for it, so the server
@@ -323,20 +323,20 @@ impl RuntimeManager {
     /// finishes on a sink nothing here waits on.
     pub async fn create(
         &self,
-        session: &str,
+        runtime: &str,
         incarnation: &str,
         vendor: &str,
-        spec: &SessionSpec,
+        env: &RuntimeEnv,
     ) -> Result<Option<String>, RuntimeError> {
         let link = self.vendor(vendor)?;
-        let rt_spec = self.runtime_spec(session, incarnation, spec).await?;
+        let rt_spec = self.runtime_spec(runtime, incarnation, env).await?;
         // Not awaited to `Ready`, unlike an acquisition. A create's job is to
         // get the substrate to accept the runtime; the session journals that it
         // happened and the first `get` is what waits for it to come up — a wait
         // that survives this process dying, which one held here would not.
         let (progress, _rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
         let first = link
-            .create(session, &rt_spec.to_wire(), progress)
+            .create(runtime, &rt_spec.to_wire(), progress)
             .await
             .map_err(Self::vendor_error)?;
         Ok(Self::narration(&first))
@@ -375,10 +375,10 @@ impl RuntimeManager {
     /// passes a sink and a caller without one passes `None`.
     pub async fn get(
         &self,
-        session: &str,
+        runtime: &str,
         incarnation: &str,
         vendor: &str,
-        spec: &SessionSpec,
+        env: &RuntimeEnv,
         provisioning: bool,
         narrate: Option<NarrationSink>,
     ) -> Result<RuntimeClient, RuntimeError> {
@@ -390,7 +390,7 @@ impl RuntimeManager {
         let mut dialled = crate::bus::topics::runtime_out(
             self.deps.bus.clone(),
             &self.deps.account,
-            session,
+            runtime,
             incarnation,
         )
         .subscribe()
@@ -402,14 +402,14 @@ impl RuntimeManager {
         // so dropping it loses the `Gone` that says the machine will never come
         // up at all.
         let (progress, mut rx) = tokio::sync::mpsc::channel(PROGRESS_BUFFER);
-        let rt_spec = self.runtime_spec(session, incarnation, spec).await?;
+        let rt_spec = self.runtime_spec(runtime, incarnation, env).await?;
         let first = link
-            .get(session, &rt_spec.to_wire(), provisioning, progress)
+            .get(runtime, &rt_spec.to_wire(), provisioning, progress)
             .await
             .map_err(Self::vendor_error)?;
         let transport = self
             .await_ready(
-                session,
+                runtime,
                 incarnation,
                 first,
                 &mut rx,
@@ -417,8 +417,8 @@ impl RuntimeManager {
                 narrate.as_ref(),
             )
             .await?;
-        let slot = self.slot(session, incarnation, &transport);
-        let client = Self::client(session, transport, slot.in_flight.clone());
+        let slot = self.slot(runtime, incarnation, &transport);
+        let client = Self::client(runtime, transport, slot.in_flight.clone());
 
         // Every acquisition, not only the first. The steps are idempotent, and
         // this is the one party that cannot know whether a hibernated runtime
@@ -426,9 +426,9 @@ impl RuntimeManager {
         // container did not, and the vendor contract deliberately does not say
         // which. So it asks rather than remembering, and the runtime answers
         // from the only place the truth lives.
-        if !spec.provision.is_empty() {
+        if !env.provision.is_empty() {
             client
-                .provision_workspace(Self::wire_steps(&spec.provision))
+                .provision_workspace(Self::wire_steps(&env.provision))
                 .await
                 .map_err(|e| RuntimeError::Provision(e.to_string()))?;
         }
@@ -623,23 +623,28 @@ impl RuntimeManager {
         }
     }
 
-    /// A cheap handle bound to one session, for whoever needs to execute.
+    /// A cheap handle bound to one runtime, for whoever needs to execute.
+    ///
+    /// One agent's view. Which runtime that is was decided by whoever built
+    /// this — the agent's own session or sub session, resolved through the run
+    /// forest — so nothing downstream has to know that a session may own more
+    /// than one.
     #[must_use]
     pub fn provider(
         self: &Arc<Self>,
-        session: String,
+        runtime: String,
         incarnation: String,
         provisioning: bool,
         vendor: String,
-        spec: SessionSpec,
+        env: RuntimeEnv,
     ) -> RuntimeClientProvider {
         RuntimeClientProvider {
             manager: self.clone(),
-            session,
+            runtime,
             incarnation,
             provisioning,
             vendor,
-            spec,
+            env,
         }
     }
 }
@@ -648,12 +653,13 @@ impl RuntimeManager {
 #[derive(Clone)]
 pub struct RuntimeClientProvider {
     manager: Arc<RuntimeManager>,
-    session: String,
+    /// The runtime this agent runs on — its own id, not the session's.
+    runtime: String,
     /// Which provision this provider speaks to. Bound when the provider is
     /// built rather than read per call, so every acquisition in one run
     /// addresses the same sandbox even if the session re-provisions beneath it.
     incarnation: String,
-    /// Whether this session's create was still outstanding when the provider
+    /// Whether this runtime's create was still outstanding when the provider
     /// was built.
     ///
     /// Bound here rather than read per call, exactly as the incarnation is: a
@@ -661,23 +667,23 @@ pub struct RuntimeClientProvider {
     /// mid-run must not be told a create finished while it was waiting for it.
     provisioning: bool,
     vendor: String,
-    /// Held so an acquisition can carry the spec: the server is the only
-    /// durable holder of it, and a vendor keeps no copy on disk.
-    spec: SessionSpec,
+    /// Held so an acquisition can carry it: the server is the only durable
+    /// holder of a runtime's environment, and a vendor keeps no copy on disk.
+    env: RuntimeEnv,
 }
 
 impl RuntimeClientProvider {
-    /// A working client for this session's runtime, resumed if need be.
+    /// A working client for this agent's runtime, resumed if need be.
     ///
     /// `narrate` carries the vendor's account of the wait to whoever asked, and
     /// is `None` for a caller with nowhere to show it.
     pub async fn get(&self, narrate: Option<NarrationSink>) -> Result<RuntimeClient, RuntimeError> {
         self.manager
             .get(
-                &self.session,
+                &self.runtime,
                 &self.incarnation,
                 &self.vendor,
-                &self.spec,
+                &self.env,
                 self.provisioning,
                 narrate,
             )
@@ -797,7 +803,7 @@ mod tests {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let spec = manager
-            .runtime_spec("sess-1", "i1", &session_spec("v"))
+            .runtime_spec("rt-1", "i1", &session_spec("v").runtime_env())
             .await
             .unwrap();
         let token = spec
@@ -806,21 +812,22 @@ mod tests {
             .find(|e| e.name == horsie_models::ENV_CONNECT_TOKEN)
             .expect("the spec must carry a dial token");
         let claims = horsie_support::dial_token::verify(DIAL_SECRET, &token.value).unwrap();
-        assert_eq!(claims.runtime_id, "sess-1");
+        assert_eq!(claims.runtime_id, "rt-1");
         assert_eq!(claims.user_id, "acct-1");
     }
 
-    /// Two sessions must not be able to wear each other's identity.
+    /// Two runtimes must not be able to wear each other's identity — including
+    /// two owned by the same session, which is now an ordinary shape.
     #[tokio::test]
-    async fn each_session_gets_a_token_that_only_names_itself() {
+    async fn each_runtime_gets_a_token_that_only_names_itself() {
         // No vendor: assembling a spec never consults one.
         let manager = manager(Arc::new(RwLock::new(HashMap::new())));
         let one = manager
-            .runtime_spec("sess-1", "i1", &session_spec("v"))
+            .runtime_spec("rt-1", "i1", &session_spec("v").runtime_env())
             .await
             .unwrap();
         let two = manager
-            .runtime_spec("sess-2", "i1", &session_spec("v"))
+            .runtime_spec("rt-2", "i1", &session_spec("v").runtime_env())
             .await
             .unwrap();
         let token_of = |s: &RuntimeSpec| {
@@ -835,7 +842,7 @@ mod tests {
             horsie_support::dial_token::verify(DIAL_SECRET, &token_of(&two))
                 .unwrap()
                 .runtime_id,
-            "sess-2"
+            "rt-2"
         );
     }
 
@@ -856,7 +863,7 @@ mod tests {
                 "s1",
                 "i1",
                 "nope",
-                &SessionSpec::for_vendor("v"),
+                &SessionSpec::for_vendor("v").runtime_env(),
                 false,
                 None,
             )
@@ -882,7 +889,14 @@ mod tests {
         let mut err = None;
         for _ in 0..50 {
             match m
-                .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
+                .get(
+                    "s1",
+                    "i1",
+                    "v",
+                    &SessionSpec::for_vendor("v").runtime_env(),
+                    false,
+                    None,
+                )
                 .await
             {
                 Err(RuntimeError::Unavailable(e)) => {
@@ -903,7 +917,14 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let Err(err) = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
+            .get(
+                "s1",
+                "i1",
+                "v",
+                &SessionSpec::for_vendor("v").runtime_env(),
+                false,
+                None,
+            )
             .await
         else {
             panic!("a get must never provision")
@@ -921,12 +942,19 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
             .await
             .expect("create");
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-            .await
-            .expect("get after create");
+        m.get(
+            "s1",
+            "i1",
+            "v",
+            &SessionSpec::for_vendor("v").runtime_env(),
+            false,
+            None,
+        )
+        .await
+        .expect("get after create");
         assert_eq!(
             agent.signals(),
             vec!["create:s1".to_string(), "get:s1".to_string()]
@@ -940,7 +968,7 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
             .await
             .expect("create");
         let sent = agent.last_create_request().expect("create request");
@@ -959,7 +987,9 @@ mod tests {
             name: "RUST_LOG".into(),
             value: "debug".into(),
         });
-        m.create("s1", "i1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec.runtime_env())
+            .await
+            .expect("create");
         let sent = agent.last_create_request().expect("create request");
         assert_eq!(
             sent.env
@@ -1032,7 +1062,9 @@ mod tests {
         }));
         let mut spec = session_spec("v");
         spec.plugins = vec!["superpowers".to_string()];
-        m.create("s1", "i1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec.runtime_env())
+            .await
+            .expect("create");
 
         let sent = agent.last_create_request().expect("create request");
         let env = |name: &str| {
@@ -1108,7 +1140,9 @@ mod tests {
                 with: vec![("url".into(), "https://github.com/o/repo.git".into())],
             });
 
-        m.create("s1", "i1", "v", &spec).await.expect("create");
+        m.create("s1", "i1", "v", &spec.runtime_env())
+            .await
+            .expect("create");
         let env = agent.last_create_request().expect("create request").env;
         assert!(
             !env.iter().any(|e| e.name == "GITHUB_TOKEN"),
@@ -1262,9 +1296,16 @@ mod tests {
     async fn an_acquisition_follows_a_booting_runtime_to_ready() {
         let vendor = BootingVendor::ready();
         let m = manager(published_vendor(vendor));
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-            .await
-            .expect("a runtime that comes up on the sink must be handed back");
+        m.get(
+            "s1",
+            "i1",
+            "v",
+            &SessionSpec::for_vendor("v").runtime_env(),
+            false,
+            None,
+        )
+        .await
+        .expect("a runtime that comes up on the sink must be handed back");
     }
 
     /// The other half of the fold: a vendor that gives up says so, and says it
@@ -1277,7 +1318,14 @@ mod tests {
         });
         let m = manager(published_vendor(vendor));
         let Err(err) = m
-            .get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
+            .get(
+                "s1",
+                "i1",
+                "v",
+                &SessionSpec::for_vendor("v").runtime_env(),
+                false,
+                None,
+            )
             .await
         else {
             panic!("a runtime reported gone must not yield a client")
@@ -1303,8 +1351,15 @@ mod tests {
         let acquiring = tokio::spawn({
             let m = m.clone();
             async move {
-                m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-                    .await
+                m.get(
+                    "s1",
+                    "i1",
+                    "v",
+                    &SessionSpec::for_vendor("v").runtime_env(),
+                    false,
+                    None,
+                )
+                .await
             }
         });
 
@@ -1340,8 +1395,15 @@ mod tests {
             .map(|_| {
                 let m = m.clone();
                 tokio::spawn(async move {
-                    m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-                        .await
+                    m.get(
+                        "s1",
+                        "i1",
+                        "v",
+                        &SessionSpec::for_vendor("v").runtime_env(),
+                        false,
+                        None,
+                    )
+                    .await
                 })
             })
             .collect();
@@ -1372,7 +1434,7 @@ mod tests {
         let spec = spec_with_checkout();
 
         for _ in 0..2 {
-            m.get("s1", "i1", "v", &spec, false, None)
+            m.get("s1", "i1", "v", &spec.runtime_env(), false, None)
                 .await
                 .expect("acquiring a runtime that is already up");
         }
@@ -1395,9 +1457,16 @@ mod tests {
         let vendors = published_vendor(WarmVendor::over(handle.clone()));
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
 
-        m.get("s1", "i1", "v", &SessionSpec::for_vendor("v"), false, None)
-            .await
-            .expect("acquiring");
+        m.get(
+            "s1",
+            "i1",
+            "v",
+            &SessionSpec::for_vendor("v").runtime_env(),
+            false,
+            None,
+        )
+        .await
+        .expect("acquiring");
 
         assert!(handle.provisions().is_empty());
     }
@@ -1414,7 +1483,14 @@ mod tests {
         let m = manager_on(vendors, Arc::new(crate::bus::MemoryBus::new()));
 
         let Err(err) = m
-            .get("s1", "i1", "v", &spec_with_checkout(), false, None)
+            .get(
+                "s1",
+                "i1",
+                "v",
+                &spec_with_checkout().runtime_env(),
+                false,
+                None,
+            )
             .await
         else {
             panic!("a failed provision must not yield a client")
@@ -1576,7 +1652,7 @@ mod tests {
     async fn a_create_hands_back_what_the_vendor_said_about_the_runtime() {
         let m = manager(published_vendor(BootingVendor::ready()));
         let said = m
-            .create("s1", "i1", "v", &session_spec("v"))
+            .create("s1", "i1", "v", &session_spec("v").runtime_env())
             .await
             .expect("create");
         assert_eq!(
@@ -1597,7 +1673,7 @@ mod tests {
             .unwrap();
         let m = manager(published(&agent, "v"));
         let said = m
-            .create("s1", "i1", "v", &session_spec("v"))
+            .create("s1", "i1", "v", &session_spec("v").runtime_env())
             .await
             .expect("create");
         assert_eq!(said, None);
@@ -1622,7 +1698,7 @@ mod tests {
             "s1",
             "i1",
             "v",
-            &SessionSpec::for_vendor("v"),
+            &SessionSpec::for_vendor("v").runtime_env(),
             false,
             Some(tx),
         )
@@ -1660,7 +1736,7 @@ mod tests {
                 "s1",
                 "i1",
                 "v",
-                &SessionSpec::for_vendor("v"),
+                &SessionSpec::for_vendor("v").runtime_env(),
                 false,
                 Some(tx),
             )
@@ -1683,7 +1759,7 @@ mod tests {
             .await
             .unwrap();
         let m = manager(published(&agent, "v"));
-        m.create("s1", "i1", "v", &session_spec("v"))
+        m.create("s1", "i1", "v", &session_spec("v").runtime_env())
             .await
             .expect("create");
         let provider = m.provider(
@@ -1691,7 +1767,7 @@ mod tests {
             "i1".to_string(),
             false,
             "v".to_string(),
-            SessionSpec::for_vendor("v"),
+            SessionSpec::for_vendor("v").runtime_env(),
         );
         provider.get(None).await.expect("provider get");
         assert_eq!(

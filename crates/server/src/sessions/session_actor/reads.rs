@@ -648,7 +648,7 @@ mod tests {
         };
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &spec)
+            .create(&id.to_string(), "i1", "mock", &spec.runtime_env())
             .await
             .expect("create");
         // The plan step concludes and routes to code; code stays in flight on
@@ -815,7 +815,12 @@ mod tests {
         let id = Uuid::new_v4();
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &actor_spec_fixture().runtime_env(),
+            )
             .await
             .expect("create");
         f.deps.provider_registry.write().unwrap().insert(
