@@ -80,7 +80,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
         />
         <span className="flex w-3.5 shrink-0 justify-center">
           {call.running ? (
-            <span className="lamp lamp-live text-amber-ink" aria-hidden />
+            <span className="lamp lamp-live text-live-ink" aria-hidden />
           ) : call.isError ? (
             <CircleAlert size={12} className="text-red-ink" aria-hidden />
           ) : hasOutput ? (
@@ -185,7 +185,7 @@ export function ToolCallCard({ call }: { call: RenderedToolCall }) {
                       {/* Addressed to the user, not the model — captured since
                           #140 and shown to nobody until now. */}
                       {note && (
-                        <p className="mt-0.5 pl-[18px] text-amber-ink">{note}</p>
+                        <p className="mt-0.5 pl-[18px] text-live-ink">{note}</p>
                       )}
                     </li>
                   );

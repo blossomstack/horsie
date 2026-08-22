@@ -57,7 +57,7 @@ export function MemorySettings() {
       />
 
       <SettingsPane>
-          <section className="panel p-4">
+          <section className="section">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
               title="Memory spaces"
@@ -109,7 +109,7 @@ export function MemorySettings() {
                 />
               )}
               {spaces.data?.length === 0 && (
-                <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                <p className="screen px-3 py-4 text-center text-sm text-faint">
                   No memory spaces yet. Create one above.
                 </p>
               )}
@@ -124,7 +124,7 @@ export function MemorySettings() {
             </div>
           </section>
 
-          <section className="panel p-4">
+          <section className="section">
             <SectionHeading
               icon={<Brain size={15} className="mt-0.5 text-faint" />}
               title={active ? `Memories in ${active}` : "Memories"}
@@ -132,7 +132,7 @@ export function MemorySettings() {
             />
 
             {!active ? (
-              <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+              <p className="screen px-3 py-4 text-center text-sm text-faint">
                 Create a memory space first.
               </p>
             ) : (
@@ -170,7 +170,7 @@ export function MemorySettings() {
                     />
                   )}
                   {memories.data?.length === 0 && (
-                    <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+                    <p className="screen px-3 py-4 text-center text-sm text-faint">
                       No memories in this space yet.
                     </p>
                   )}
@@ -211,14 +211,13 @@ function SpaceRow({
   return (
     <div
       className={cn(
-        "flex items-center gap-3 rounded-[var(--radius-control)] border p-3",
+        "flex items-center gap-3 rounded-[var(--radius-control)] px-2.5 py-1.5 transition-colors hover:bg-raised",
         // Selection is a step in value, like every other selected row in the
         // build. Amber is reserved for a measured, live value — this row is
         // neither, and it only ever looked grey because a `border-color`
         // utility could not win the cascade.
-        active && "border-rule-strong",
+        active && "bg-raised",
       )}
-      style={{ background: "var(--panel-raised)" }}
     >
       <button
         type="button"
@@ -279,7 +278,7 @@ function NewMemoryForm({
 
   return (
     <div
-      className="mb-4 mt-3 rounded-[var(--radius-control)] border border-dashed p-3"
+      className="mb-4 mt-3 screen p-3"
       data-testid="new-memory-form"
     >
       <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,2fr)] gap-3">
@@ -378,8 +377,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
 
   return (
     <div
-      className="rounded-[var(--radius-control)] border p-3"
-      style={{ background: "var(--panel-raised)" }}
+      className="rounded-[var(--radius-control)] px-2.5 py-1.5 transition-colors hover:bg-raised"
     >
       <div className="flex items-start gap-3">
         <button
@@ -406,7 +404,7 @@ function MemoryRow({ memory }: { memory: MemoryView }) {
       </div>
 
       {open && (
-        <div className="mt-3 border-t pt-3">
+        <div className="mt-3 pt-3">
           <label className="block">
             <span className="mb-1 block text-[0.6875rem] font-semibold text-dim">
               Description

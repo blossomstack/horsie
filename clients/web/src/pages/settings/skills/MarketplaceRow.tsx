@@ -46,7 +46,7 @@ export function MarketplaceRow({
 
   return (
     <div
-      className="rounded-[var(--radius-control)] border"
+      className="rounded-[var(--radius-control)] "
       style={{ background: "var(--panel-raised)" }}
       data-testid="marketplace-row"
     >
@@ -111,7 +111,7 @@ export function MarketplaceRow({
       </div>
 
       {expanded && (
-        <div className="border-t px-3 pb-3 pt-3">
+        <div className="px-3 pb-3 pt-3">
           {/* The official catalogue lists ~276 plugins; without this the list is
               a scroll rather than a choice. */}
           <input
@@ -125,14 +125,14 @@ export function MarketplaceRow({
 
           <div className="mt-2.5 space-y-1.5">
             {shown.length === 0 && (
-              <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-3 text-center text-sm text-faint">
+              <p className="screen px-3 py-3 text-center text-sm text-faint">
                 Nothing matches “{filter.trim()}”.
               </p>
             )}
             {shown.map((p) => (
               <div
                 key={p.name}
-                className="flex items-start gap-3 rounded-[var(--radius-control)] border px-3 py-2"
+                className="flex items-start gap-3 rounded-[var(--radius-control)] px-3 py-2"
                 data-testid="marketplace-entry"
               >
                 <div className="min-w-0 flex-1">
@@ -174,7 +174,7 @@ export function MarketplaceRow({
               files, so the entries this index could not parse are named. */}
           {marketplace.skipped.length > 0 && (
             <div
-              className="mt-2.5 rounded-[var(--radius-control)] border border-dashed px-3 py-2 text-xs text-faint"
+              className="mt-2.5 screen px-3 py-2 text-xs text-faint"
               data-testid="marketplace-skipped"
             >
               <p className="mb-1">

@@ -60,7 +60,7 @@ export function SettingsMenu() {
                 className={cn(
                   "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px]",
                   values[def.key]
-                    ? "bg-orange text-orange-ink"
+                    ? "bg-accent text-accent-ink"
                     : "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
                 )}
               >

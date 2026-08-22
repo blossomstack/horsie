@@ -18,22 +18,28 @@ const MODES: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
 ];
 
 /**
- * A miniature of the skin, drawn from its own tokens.
+ * A miniature of one world, drawn from that world's own tokens.
  *
  * `data-skin` and `data-theme` on the swatch itself make every value inside
- * resolve through that skin's block — so the preview is the real palette
- * rather than a hand-copied approximation that can quietly go stale.
+ * resolve through that world's block — so the preview is the real palette
+ * rather than a hand-copied approximation that can quietly go stale. It is
+ * also why the seam defaults live in `@layer base` rather than behind a
+ * higher-specificity `html[data-skin]`: this sets the attribute on a plain
+ * `div`, and an `html`-anchored selector would never match it.
  */
 function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
   return (
     <div
-      data-skin={skin === "console" ? undefined : skin}
+      data-skin={skin === "graphite" ? undefined : skin}
       data-theme={mode}
-      className="pointer-events-none flex h-[4.5rem] w-full flex-col gap-1.5 overflow-hidden rounded-[var(--radius-control)] p-2"
+      className="pointer-events-none flex h-[4.25rem] w-full flex-col gap-1.5 overflow-hidden rounded-[var(--radius-control)] p-2"
       style={{ background: "var(--chassis)" }}
       aria-hidden
     >
-      <div className="panel flex flex-1 items-center gap-1.5 px-1.5">
+      <div
+        className="flex flex-1 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5"
+        style={{ background: "var(--panel)" }}
+      >
         <span className="lamp" style={{ color: "var(--lamp-ok)" }} />
         <span
           className="h-1 flex-1 rounded-[999px]"
@@ -43,14 +49,14 @@ function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
       <div className="flex items-center gap-1.5">
         <span
           className="h-4 w-9 rounded-[var(--radius-cap)]"
-          style={{ background: "var(--orange)" }}
+          style={{ background: "var(--accent)" }}
         />
         <span
           className="h-4 w-6 rounded-[var(--radius-cap)]"
           style={{ background: "var(--keycap)" }}
         />
         <span
-          className="screen h-4 flex-1 rounded-[var(--radius-control)]"
+          className="h-4 flex-1 rounded-[var(--radius-control)]"
           style={{ background: "var(--screen)" }}
         />
       </div>
@@ -58,10 +64,11 @@ function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
   );
 }
 
-/** How the panel looks, and what it shows. Both are per-browser choices — the
- * server has no opinion about either. */
+/** How the interface looks, and what it shows. Both are per-browser choices —
+ * the server has no opinion about either. */
 export function AppearanceSettings() {
-  const { choice, mode, skin, textSize, setChoice, setSkin, setTextSize } = useTheme();
+  const { choice, mode, skin, textSize, setChoice, setSkin, setTextSize } =
+    useTheme();
   const { values, toggle } = useUiSettings();
 
   return (
@@ -91,25 +98,21 @@ export function AppearanceSettings() {
                 data-testid={`skin-option-${s.id}`}
                 className={cn(
                   "flex flex-col gap-2 rounded-[var(--radius-control)] p-2.5 text-left transition-colors",
-                  skin === s.id
-                    ? "bg-raised shadow-[inset_0_0_0_1px_var(--orange)]"
-                    : "shadow-[inset_0_0_0_1px_var(--rule)] hover:bg-raised",
+                  // Selection is a fill and a tick, like every other selected
+                  // thing in the build — not a ring around the card.
+                  skin === s.id ? "bg-raised" : "hover:bg-raised",
                 )}
               >
                 <SkinSwatch skin={s.id} mode={mode} />
                 <span className="flex items-center gap-1.5">
-                  {/* Not `.item-title` — that is the mono face for machine
-                      strings, and a theme's name is a word, not an id. */}
                   <span className="text-[0.8125rem] font-semibold text-legend">
                     {s.name}
                   </span>
                   {skin === s.id && (
-                    <Check size={13} className="text-orange" aria-hidden />
+                    <Check size={13} className="text-accent" aria-hidden />
                   )}
                 </span>
-                <span className="text-xs leading-relaxed text-faint">
-                  {s.blurb}
-                </span>
+                <span className="text-xs leading-snug text-faint">{s.blurb}</span>
               </button>
             ))}
           </div>
@@ -187,7 +190,7 @@ export function AppearanceSettings() {
                 className={cn(
                   "mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px]",
                   values[def.key]
-                    ? "bg-orange text-orange-ink"
+                    ? "bg-accent text-accent-ink"
                     : "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
                 )}
               >

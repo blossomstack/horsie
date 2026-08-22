@@ -64,11 +64,11 @@ function labelText(condition: string): string {
 }
 
 /** A node reads as a panel key, lit by the same lamp colours the rest of the
- * console uses: amber for work in motion, ok for a step that landed, red for a
+ * console uses: live for work in motion, ok for a step that landed, red for a
  * fault. An unlit node is one the run has not reached. */
 const STATE_CLASS: Record<NodeState, string> = {
   idle: "fill-raised stroke-rule",
-  running: "fill-amber-quiet stroke-amber",
+  running: "fill-live-quiet stroke-live",
   done: "fill-raised stroke-lamp-ok",
   failed: "fill-red-quiet stroke-red",
   cancelled: "fill-raised stroke-rule-strong",
@@ -184,7 +184,7 @@ export function WorkflowGraph({
           markerEnd="url(#wf-arrow)"
           className={cn(
             "stroke-[1.5]",
-            e.taken ? "stroke-amber" : "stroke-rule-strong opacity-60",
+            e.taken ? "stroke-live" : "stroke-rule-strong opacity-60",
           )}
           strokeDasharray={e.back ? "4 3" : undefined}
         />
@@ -224,7 +224,7 @@ export function WorkflowGraph({
               className={cn(
                 STATE_CLASS[state],
                 "stroke-[1.5]",
-                selected === p.step && "stroke-amber stroke-[2.5]",
+                selected === p.step && "stroke-live stroke-[2.5]",
                 !p.reachable && "opacity-50",
               )}
             />

@@ -235,7 +235,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="routine-edit-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New routine"}
@@ -458,7 +458,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                             type="button"
                             className={`chip min-h-10 min-w-10 justify-center transition-colors ${
                               weekdays.has(d)
-                                ? "border-amber bg-amber/15 text-amber-ink shadow-[inset_0_0_0_1px_var(--amber)]"
+                                ? "bg-live-quiet text-live-ink"
                                 : "hover:bg-raised hover:text-legend"
                             }`}
                             aria-label={FULL_WEEKDAY_NAMES[d]}

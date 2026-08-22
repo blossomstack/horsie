@@ -54,12 +54,12 @@ function UsageBreakdown({ usage }: { usage: Usage | UsageView }) {
   );
 }
 
-/** How full the context is, as a lamp colour. Green while there is room, amber
+/** How full the context is, as a lamp colour. Green while there is room, live
  * once the window is filling, red when a compaction or a new session is close.
  * The thresholds are the operator's decision points, not decoration. */
 function band(pct: number): { color: string; word: string } {
   if (pct >= 90) return { color: "var(--red)", word: "Nearly full" };
-  if (pct >= 70) return { color: "var(--amber)", word: "Filling" };
+  if (pct >= 70) return { color: "var(--live)", word: "Filling" };
   return { color: "var(--lamp-ok)", word: "Room to spare" };
 }
 
@@ -233,14 +233,14 @@ export function ContextGauge({
           </div>
 
           {agent.lastTurnUsage && (
-            <div className="mt-3.5 border-t pt-2.5">
+            <div className="mt-3.5 pt-2.5">
               <div className="legend mb-1 !text-dim">This turn</div>
               <UsageBreakdown usage={agent.lastTurnUsage} />
             </div>
           )}
 
           {sessionTotal && (
-            <div className="mt-3.5 border-t pt-2.5">
+            <div className="mt-3.5 pt-2.5">
               <div
                 className="legend mb-1 !text-dim"
                 title="Everything this session has spent, across every agent it hosts. This is cost, not context fullness — the dial above is context."

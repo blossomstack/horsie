@@ -101,7 +101,7 @@ export function SubSessionRow({
           cn(
             "flex min-w-0 flex-1 items-start gap-2.5 rounded-[var(--radius-control)] py-1.5 pl-2 pr-9 transition-colors",
             // The fill alone says which row is open. A ring on top of it drew
-            // a second border beside the lineage rails, and the two read as
+            // a second beside the lineage rails, and the two read as
             // competing structure rather than one selected row.
             isActive
               ? "bg-raised text-legend"

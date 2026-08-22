@@ -86,7 +86,7 @@ function GithubSection() {
   }, [connected, oauthError, params, setParams]);
 
   return (
-    <section className="panel p-4">
+    <section className="section">
       <div className="mb-3 flex items-start gap-2">
         <GitBranch size={15} className="mt-0.5 text-faint" />
         <div>
@@ -99,7 +99,7 @@ function GithubSection() {
 
       <div className="space-y-3">
         {status?.connected ? (
-          <div className="flex items-center justify-between rounded-[var(--radius-control)] border px-3 py-2 text-sm">
+          <div className="flex items-center justify-between rounded-[var(--radius-control)] px-3 py-2 text-sm">
             <span>
               Connected as <span className="font-mono">@{status.login}</span>
             </span>
@@ -111,7 +111,7 @@ function GithubSection() {
             </button>
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-3 rounded-[var(--radius-control)] border border-dashed px-3 py-2 text-sm text-dim">
+          <div className="flex items-center justify-between gap-3 screen px-3 py-2 text-sm text-dim">
             <span>
               {status?.appConfigured ? (
                 "App configured — connect your account."
@@ -120,7 +120,7 @@ function GithubSection() {
                   No GitHub App is registered on this server yet. Set one up in{" "}
                   <Link
                     to="/admin/github-app"
-                    className="text-amber-ink underline underline-offset-2"
+                    className="text-live-ink underline underline-offset-2"
                   >
                     Admin → GitHub App
                   </Link>
@@ -202,7 +202,7 @@ function GithubMcpToggle() {
 
   return (
     <div
-      className="rounded-[var(--radius-control)] border px-3 py-2.5"
+      className="rounded-[var(--radius-control)] px-3 py-2.5"
       style={{ background: "var(--panel-raised)" }}
     >
       <div className="flex items-center justify-between gap-2">
@@ -289,7 +289,7 @@ function McpSection() {
   }, [params, setParams]);
 
   return (
-    <section className="panel p-4">
+    <section className="section">
       {banner && (
         <div
           className={`mb-3 rounded-[var(--radius-control)] border px-3 py-2 text-sm ${banner.ok ? "border-lamp-ok bg-lamp-ok-quiet text-lamp-ok" : "border-red bg-red-quiet text-red-ink"}`}
@@ -324,7 +324,7 @@ function McpSection() {
           />
         )}
         {!isError && generic.length === 0 && !adding && (
-          <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+          <p className="screen px-3 py-4 text-center text-sm text-faint">
             No MCP servers configured.
           </p>
         )}
@@ -625,7 +625,7 @@ function ServerInfoCard({ view }: { view: SettingsView }) {
     ["Version", info.version],
   ];
   return (
-    <section className="panel p-4">
+    <section className="section">
       <div className="flex items-center gap-2">
         <Server size={15} className="text-faint" />
         <h2 className="section-title">Server</h2>

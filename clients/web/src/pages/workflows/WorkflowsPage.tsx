@@ -12,7 +12,7 @@ export function WorkflowsPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflows-page">
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2 border-b bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Workflows</h1>
         <button
@@ -28,7 +28,7 @@ export function WorkflowsPage() {
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && <p className="text-sm text-red-ink">Can’t reach the server.</p>}
         {workflows && workflows.length === 0 && (
-          <section className="panel p-4" data-testid="workflows-empty">
+          <section className="section" data-testid="workflows-empty">
             <h2 className="legend">Workflow roster</h2>
             <p className="mt-3 max-w-prose text-sm leading-relaxed text-dim">
               A workflow runs several agents in order, each one deciding where
@@ -39,11 +39,11 @@ export function WorkflowsPage() {
             </p>
           </section>
         )}
-        <div className="space-y-2">
+        <div className="space-y-px">
           {(workflows ?? []).map((w) => (
             <div
               key={w.name}
-              className="flex items-center gap-3 rounded-[var(--radius-control)] border px-4 py-3"
+              className="flex items-center gap-3 row px-2.5 py-2"
               data-testid="workflow-row"
               data-workflow-name={w.name}
             >

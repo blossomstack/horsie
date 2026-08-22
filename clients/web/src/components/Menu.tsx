@@ -69,7 +69,7 @@ export function Menu({
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full z-50 mt-1 min-w-36 rounded-[var(--radius-control)] border bg-panel py-1 shadow-lg"
+          className="absolute right-0 top-full z-50 mt-1 min-w-36 rounded-[var(--radius-control)] bg-panel py-1 shadow-lg"
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();

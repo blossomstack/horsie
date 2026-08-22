@@ -566,7 +566,7 @@ describe("useConfigPickers", () => {
     expect(memory.queryByText(/Create a memory space first/)).toBeNull();
   });
 
-  // The amber dot means "look at this", and a dead config read is exactly
+  // The live dot means "look at this", and a dead config read is exactly
   // that — but a healthy server with a model chosen must not wear one.
   it("marks the config-fed keys as needing attention only when the read failed", () => {
     const failed = pickers(sessionDraft(), failRead(seededClient(), settingsKey));

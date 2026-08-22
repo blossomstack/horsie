@@ -90,7 +90,7 @@ export function PopoverMenu({
   disabled = false,
   /** Something other than the default is selected — draws the dot in `icon`. */
   marked = false,
-  /** Overrides the dot's colour to amber: the control is reachable but the
+  /** Overrides the dot's colour to live: the control is reachable but the
    * thing it configures is in a state the operator should look at. */
   warn = false,
   testId,
@@ -289,10 +289,10 @@ export function PopoverMenu({
             "key-icon",
             // State is the control's own colour, not a badge stuck on it. A
             // dot in the corner of a 2rem key is four pixels doing the work of
-            // a whole control, and orange there competes with the one orange
+            // a whole control, and accent there competes with the one accent
             // key that actually commits.
             warn
-              ? "!bg-amber-quiet !text-amber-ink"
+              ? "!bg-live-quiet !text-live-ink"
               : marked
                 ? "bg-raised !text-legend"
                 : "!text-faint",
@@ -317,7 +317,6 @@ export function PopoverMenu({
           type="button"
           className={cn(
             "flex w-full items-center gap-1.5 rounded-[var(--radius-control)] px-2 py-1 text-left transition-colors",
-            "shadow-[inset_0_0_0_1px_var(--row-ring)]",
             disabled ? "cursor-default opacity-70" : "hover:bg-raised",
             open && "bg-raised",
           )}
@@ -351,7 +350,7 @@ export function PopoverMenu({
             // the DOM, so a tie went to the panel. Its scrim happens to make
             // the config bar unreachable while it is open, but a menu should
             // not depend on that to be on top.
-            "panel absolute left-0 z-30 overflow-y-auto p-1.5 shadow-[var(--panel-lift)]",
+            "panel absolute left-0 z-30 overflow-y-auto p-1.5 shadow-[var(--float)]",
             // 18rem suits a list of bare names. A picker whose options each
             // carry a description and a badge says so — see `PickerSpec.height`
             // — because a two-line option in an 18rem box shows four of them

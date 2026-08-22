@@ -20,12 +20,12 @@ describe("status presentation metadata", () => {
     expect(meta.tone).not.toBe(statusMeta(SessionStatusKind.Idle).tone);
   });
 
-  it("keeps Running prominent, amber, and animated", () => {
+  it("keeps Running prominent, live, and animated", () => {
     const meta = statusMeta(SessionStatusKind.Running);
 
     expect(meta.tone).toBe("live");
     expect(meta.busy).toBe(true);
-    expect(TONE_TEXT[meta.tone]).toBe("text-amber-ink");
+    expect(TONE_TEXT[meta.tone]).toBe("text-live-ink");
   });
 
   it("renders Idle with a subdued neutral tone and no animation", () => {

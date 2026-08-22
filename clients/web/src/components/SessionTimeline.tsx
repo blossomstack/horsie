@@ -23,25 +23,25 @@ const DIVIDER_H = 26;
 
 /** Solid, square and borderless: a bar is a block of colour, nothing else.
  *
- * The `-quiet` fills plus a border read as little containers with rounded
- * corners — at the width a fast tool call earns, a 1px border on each side and
+ * The `-quiet` fills plus a read as little containers with rounded
+ * corners — at the width a fast tool call earns, a 1px on each side and
  * a radius left almost no fill to see, so a lane of real work looked like a row
  * of empty chips. The strong lamp colours carry it on their own. */
 const BAR_CLASS: Record<BarKind, string> = {
   user: "bg-legend",
   assistant: "bg-lamp-ok",
   thinking: "bg-rule-strong",
-  tool: "bg-amber",
-  ask: "bg-orange",
+  tool: "bg-live",
+  ask: "bg-accent",
   compaction: "bg-rule-strong",
 };
 
 /** A lane's own colour is what became of the agent, which is the one thing a
  * span can say that a bar cannot. */
 const SPAN_CLASS: Record<string, string> = {
-  running: "bg-amber",
-  provisioning: "bg-amber",
-  awaiting_input: "bg-orange",
+  running: "bg-live",
+  provisioning: "bg-live",
+  awaiting_input: "bg-accent",
   completed: "bg-lamp-ok",
   failed: "bg-red",
   cancelled: "bg-rule-strong",
@@ -172,7 +172,7 @@ export function SessionTimeline({
         ))}
 
         {unplaced.length > 0 && (
-          <div className="mt-3 border-t pt-2">
+          <div className="mt-3 pt-2">
             {/* Shown rather than dropped: an agent nobody can find is worse
                 than one drawn outside the axis and said to be. */}
             <p className="legend pb-1 pl-3">not on the timeline — nothing was recorded about when these ran</p>
@@ -229,7 +229,7 @@ function LaneRow({
       {/* The sidebar. Sticky rather than a separate column so it cannot drift
           out of vertical step with the lanes it names. */}
       <div
-        className="sticky left-0 z-20 flex h-full shrink-0 items-center gap-1 border-r bg-chassis pr-2"
+        className="sticky left-0 z-20 flex h-full shrink-0 items-center gap-1 bg-chassis pr-2"
         style={{ width: SIDEBAR_W, paddingLeft: 8 + lane.depth * 10 }}
       >
         {/* The chevron discloses the lanes *hanging off* this one — the
@@ -270,7 +270,7 @@ function LaneRow({
           <div
             data-testid={`timeline-card-${lane.agentId}`}
             role="tooltip"
-            className="pointer-events-none absolute top-1/2 left-[calc(100%-0.5rem)] z-30 hidden w-60 -translate-y-1/2 rounded-[var(--radius-control)] border bg-panel px-2.5 py-1.5 shadow-lg group-hover:block"
+            className="pointer-events-none absolute top-1/2 left-[calc(100%-0.5rem)] z-30 hidden w-60 -translate-y-1/2 rounded-[var(--radius-control)] bg-panel px-2.5 py-1.5 shadow-lg group-hover:block"
           >
             <p className="text-xs leading-snug break-words text-legend">{lane.label}</p>
             {/* Not `legend`: that class upper-cases and letter-spaces, which

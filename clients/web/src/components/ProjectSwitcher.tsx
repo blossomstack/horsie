@@ -26,11 +26,10 @@ export function ProjectSwitcher() {
   const here = data?.find((p) => p.id === current);
 
   return (
-    <div className="px-2 pt-2">
+    <div className="min-w-0 flex-1">
       <PopoverMenu
         label={here?.name ?? "…"}
-        legend="Project"
-        placement="down"
+        placement="up"
         className="w-full"
         testId="project-switcher"
       >
@@ -56,7 +55,7 @@ export function ProjectSwitcher() {
               to="/settings/projects"
               data-popover-option
               data-testid="manage-projects"
-              className="mt-1 flex w-full items-center gap-2 border-t px-2 pb-1.5 pt-2 text-left text-sm hover:bg-raised"
+              className="mt-1 flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-raised"
               onClick={close}
             >
               <Plus size={14} aria-hidden className="shrink-0 text-faint" />

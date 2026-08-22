@@ -1,554 +1,385 @@
 /* ==================================================================== *
- * SKINS
+ * THE OTHER THREE WORLDS
  *
- * Three alternate visual worlds for the same layouts. A skin is
- * `data-skin` on <html>; Console is the default and lives in index.css.
+ * Graphite is the default and lives in index.css; these are the three
+ * alternates. A skin is `data-skin` on <html>, orthogonal to `data-theme`.
  *
- * A skin may replace materials, borders, radii, shadows and type. It may
- * not move anything: every surface keeps its structure, its testids and
- * its behaviour, so switching skins is a change of material and never a
- * change of where things are.
+ * A skin varies MATERIAL, never STRUCTURE. Everything below is reached
+ * through the seam declared in index.css — the two faces, the four radii,
+ * the float shadow, and the palette — so no component and no testid moves
+ * when you switch. If a skin needs something the seam does not expose, the
+ * fix is a new seam variable, never an override at a call site.
  *
- * The four invariants from index.css bind every block below:
- *   material roles hold across modes; status is a lamp AND a word; code
- *   keeps its own palette; AA is measured by scripts/contrast.mjs.
+ * All four obey the same three rules index.css states:
+ *   1. nothing is separated by a line
+ *   2. a fill means something happened
+ *   3. one accent
+ * A skin that reintroduces a border is not a skin, it is a different
+ * design.
  *
- * Each skin defines its FULL palette per mode rather than patching the
- * Console values. That is deliberate — the contrast script reads these
+ * Each block declares its FULL palette per mode rather than patching
+ * Graphite's. That is deliberate: `scripts/contrast.mjs` reads these
  * blocks directly, and a skin that inherited half its ramp would be
  * verified against numbers it does not actually use.
  * ==================================================================== */
 
 /* ==================================================================== *
- * PAPER — editorial calm.
+ * INK — bright minimal.
  *
- * Paper under daylight, not lamplight. The obvious rendition of "paper" is
- * a cream ground with a serif display face and a terracotta accent; that
- * is the house style of every generated interface, so this is its cool
- * neutral opposite — near-white with a trace of blue, one humanist sans
- * doing all the work, and ink blue as the colour that commits.
- *
- * Separation comes from whitespace. Panels have no border at all, and the
- * hairline rules that remain are structural: a header from its body, a row
- * from the next row.
+ * True neutral, and the accent is ink itself: near-black on white,
+ * near-white on black. The control that commits is therefore the
+ * highest-contrast object on the screen rather than the most colourful,
+ * which is the whole idea — in a world with no hue, emphasis is the only
+ * currency left, so it cannot be spent twice.
  * ==================================================================== */
-[data-skin="paper"] {
-  --face-sans: "Libre Franklin Variable", system-ui, sans-serif;
+[data-skin="ink"] {
+  --face-sans: "Geist Variable", system-ui, sans-serif;
 
-  --r-chip: 3px;
-  --r-control: 4px;
-  --r-cap: 4px;
-  --r-panel: 6px;
-
-  /* Legends stop shouting: sentence case, in the reading face, at a size
-   * that belongs to the same document as the prose. */
-  --legend-face: var(--face-sans);
-  --legend-transform: none;
-  --legend-tracking: 0.01em;
-  --legend-width: 100;
-  --legend-size: 0.71875rem;
-
-  --prose-measure: 66ch;
-  --prose-heading-face: var(--face-sans);
-
-  /* Readouts drop Console's condensed axis and its amber. In a world with one
-   * accent, a second hue for "0/3 done" is a colour with no meaning. */
-  --readout-width: 100;
-  --readout-ink: var(--legend-dim);
-
-  /* Borderless means borderless: no hairline on list rows, form pickers or
-   * user bubbles either. */
-  --row-ring: transparent;
+  --r-chip: 5px;
+  --r-control: 7px;
+  --r-cap: 7px;
+  --r-panel: 10px;
 }
 
-[data-skin="paper"][data-theme="dark"] {
-  --chassis: oklch(0.165 0.004 255);
-  --panel: oklch(0.205 0.005 255);
-  --panel-raised: oklch(0.255 0.006 255);
-  --screen: oklch(0.135 0.005 255);
+[data-skin="ink"][data-theme="dark"] {
+  --chassis: oklch(0.148 0 0);
+  --panel: oklch(0.178 0 0);
+  --panel-raised: oklch(0.245 0 0);
+  --screen: oklch(0.132 0 0);
 
-  --rule: oklch(0.285 0.006 255);
-  --rule-strong: oklch(0.38 0.008 255);
+  --rule: oklch(0.262 0 0);
+  --rule-strong: oklch(0.352 0 0);
 
-  --legend: oklch(0.945 0.004 255);
-  --legend-dim: oklch(0.72 0.008 255);
-  --legend-faint: oklch(0.66 0.009 255);
+  --legend: oklch(0.975 0 0);
+  --legend-dim: oklch(0.752 0 0);
+  --legend-faint: oklch(0.672 0 0);
 
-  --keycap: oklch(0.325 0.008 255);
-  --keycap-hover: oklch(0.375 0.009 255);
-  --keycap-ink: oklch(0.95 0.004 255);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.282 0 0);
+  --keycap-hover: oklch(0.328 0 0);
+  --keycap-ink: oklch(0.965 0 0);
 
-  --orange: oklch(0.66 0.15 258);
-  --orange-hover: oklch(0.71 0.145 258);
-  --orange-ink: oklch(0.16 0.03 258);
-  --orange-quiet: oklch(0.28 0.06 258);
+  --accent: oklch(0.965 0 0);
+  --accent-hover: oklch(0.895 0 0);
+  --accent-ink: oklch(0.155 0 0);
+  --accent-quiet: oklch(0.302 0 0);
 
-  --amber: oklch(0.8 0.12 75);
-  --amber-ink: oklch(0.8 0.12 75);
-  --amber-quiet: oklch(0.3 0.05 75);
+  --live: oklch(0.822 0.135 82);
+  --live-ink: oklch(0.822 0.135 82);
+  --live-quiet: oklch(0.318 0.058 82);
 
-  --red: oklch(0.65 0.2 25);
-  --red-ink: oklch(0.7 0.19 25);
-  --red-quiet: oklch(0.3 0.08 25);
+  --red: oklch(0.618 0.218 25);
+  --red-ink: oklch(0.722 0.185 25);
+  --red-quiet: oklch(0.312 0.085 25);
 
-  --lamp-ok: oklch(0.78 0.14 155);
-  --lamp-ok-quiet: oklch(0.3 0.06 155);
+  --lamp-ok: oklch(0.798 0.155 158);
+  --lamp-ok-quiet: oklch(0.312 0.065 158);
 
-  --code-keyword: oklch(0.78 0.13 262);
-  --code-string: oklch(0.8 0.11 155);
-  --code-number: oklch(0.82 0.11 75);
-  --code-type: oklch(0.8 0.09 210);
+  --code-keyword: oklch(0.782 0.128 292);
+  --code-string: oklch(0.822 0.122 160);
+  --code-number: oklch(0.845 0.112 82);
+  --code-type: oklch(0.815 0.098 225);
 
-  --focus-ring: oklch(0.72 0.15 258 / 0.45);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 2px 8px oklch(0.08 0.01 255 / 0.5);
-  --screen-inset: none;
+  --focus-ring: oklch(0.965 0 0 / 0.55);
+  /* Even a world with no shadows owes a floating menu some separation —
+   * with no border and no elevation a popover sits on the content it
+   * covers. Tight and dark rather than soft and wide: this is a hairline
+   * of depth, not a lift. */
+  --float: 0 1px 3px oklch(0 0 0 / 0.6), 0 6px 16px oklch(0 0 0 / 0.5);
   color-scheme: dark;
 }
 
-[data-skin="paper"][data-theme="light"] {
-  --chassis: oklch(0.968 0.002 255);
-  --panel: oklch(0.995 0.001 255);
-  --panel-raised: oklch(1 0 0);
-  --screen: oklch(0.945 0.003 255);
+[data-skin="ink"][data-theme="light"] {
+  --chassis: oklch(0.972 0 0);
+  --panel: oklch(0.995 0 0);
+  --panel-raised: oklch(0.932 0 0);
+  --screen: oklch(0.955 0 0);
 
-  --rule: oklch(0.905 0.004 255);
-  --rule-strong: oklch(0.8 0.006 255);
+  --rule: oklch(0.922 0 0);
+  --rule-strong: oklch(0.845 0 0);
 
-  --legend: oklch(0.235 0.008 255);
-  --legend-dim: oklch(0.42 0.01 255);
-  --legend-faint: oklch(0.475 0.011 255);
+  --legend: oklch(0.185 0 0);
+  --legend-dim: oklch(0.432 0 0);
+  --legend-faint: oklch(0.508 0 0);
 
-  --keycap: oklch(0.888 0.005 255);
-  --keycap-hover: oklch(0.845 0.006 255);
-  --keycap-ink: oklch(0.245 0.008 255);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.905 0 0);
+  --keycap-hover: oklch(0.862 0 0);
+  --keycap-ink: oklch(0.212 0 0);
 
-  --orange: oklch(0.47 0.16 258);
-  --orange-hover: oklch(0.42 0.16 258);
-  --orange-ink: oklch(0.99 0.005 258);
-  --orange-quiet: oklch(0.94 0.03 258);
+  --accent: oklch(0.185 0 0);
+  --accent-hover: oklch(0.288 0 0);
+  --accent-ink: oklch(0.995 0 0);
+  --accent-quiet: oklch(0.928 0 0);
 
-  --amber: oklch(0.7 0.13 75);
-  --amber-ink: oklch(0.47 0.11 68);
-  --amber-quiet: oklch(0.95 0.035 75);
+  --live: oklch(0.722 0.148 82);
+  --live-ink: oklch(0.482 0.112 72);
+  --live-quiet: oklch(0.952 0.042 82);
 
-  --red: oklch(0.52 0.2 25);
-  --red-ink: oklch(0.49 0.2 25);
-  --red-quiet: oklch(0.95 0.03 25);
+  --red: oklch(0.525 0.212 25);
+  --red-ink: oklch(0.498 0.208 25);
+  --red-quiet: oklch(0.952 0.032 25);
 
-  --lamp-ok: oklch(0.45 0.11 155);
-  --lamp-ok-quiet: oklch(0.94 0.04 155);
+  --lamp-ok: oklch(0.452 0.118 158);
+  --lamp-ok-quiet: oklch(0.945 0.045 158);
 
-  --code-keyword: oklch(0.45 0.15 262);
-  --code-string: oklch(0.43 0.11 155);
-  --code-number: oklch(0.46 0.11 65);
-  --code-type: oklch(0.45 0.09 235);
+  --code-keyword: oklch(0.458 0.182 292);
+  --code-string: oklch(0.438 0.122 160);
+  --code-number: oklch(0.468 0.118 68);
+  --code-type: oklch(0.452 0.105 235);
 
-  --focus-ring: oklch(0.395 0.16 258 / 0.8);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 2px 10px oklch(0.5 0.01 255 / 0.14);
-  --screen-inset: none;
+  --focus-ring: oklch(0.185 0 0 / 0.85);
+  --float: 0 1px 2px oklch(0.4 0 0 / 0.16), 0 6px 16px oklch(0.4 0 0 / 0.14);
   color-scheme: light;
 }
 
 /* ==================================================================== *
- * SOFT — a modern product surface.
+ * AURORA — tinted and vivid.
  *
- * Borders replaced by elevation, generous radii, warm neutral greys
- * rather than the blue-greys that are this register's tell. Keys are flat
- * fills with no travel; lamps are plain dots with no glow.
+ * No ground here is neutral: every surface carries the accent's own hue
+ * at low chroma, so the world reads as one colour rather than as grey
+ * with a highlight stuck on it. Mint is the action. Radii open up and the
+ * face changes with them — a rounder world in a rounder letter.
  * ==================================================================== */
-[data-skin="soft"] {
-  --face-sans: "Manrope Variable", system-ui, sans-serif;
+[data-skin="aurora"] {
+  --face-sans: "Plus Jakarta Sans Variable", system-ui, sans-serif;
 
-  --r-chip: 6px;
+  --r-chip: 7px;
   --r-control: 10px;
   --r-cap: 10px;
-  --r-panel: 14px;
-
-  --legend-face: var(--face-sans);
-  --legend-transform: none;
-  --legend-tracking: 0.005em;
-  --legend-width: 100;
-  --legend-size: 0.71875rem;
-
-  --prose-measure: 68ch;
-  --prose-heading-face: var(--face-sans);
-
-  /* Readouts drop Console's condensed axis and its amber. In a world with one
-   * accent, a second hue for "0/3 done" is a colour with no meaning. */
-  --readout-width: 100;
-  --readout-ink: var(--legend-dim);
-
-  /* Borderless means borderless: no hairline on list rows, form pickers or
-   * user bubbles either. */
-  --row-ring: transparent;
+  --r-panel: 16px;
 }
 
-[data-skin="soft"][data-theme="dark"] {
-  --chassis: oklch(0.175 0.005 285);
-  --panel: oklch(0.225 0.006 285);
-  --panel-raised: oklch(0.275 0.007 285);
-  --screen: oklch(0.145 0.005 285);
+[data-skin="aurora"][data-theme="dark"] {
+  --chassis: oklch(0.178 0.026 196);
+  --panel: oklch(0.212 0.028 196);
+  --panel-raised: oklch(0.272 0.03 196);
+  --screen: oklch(0.155 0.024 196);
 
-  --rule: oklch(0.3 0.007 285);
-  --rule-strong: oklch(0.4 0.009 285);
+  --rule: oklch(0.292 0.03 196);
+  --rule-strong: oklch(0.388 0.036 196);
 
-  --legend: oklch(0.945 0.004 285);
-  --legend-dim: oklch(0.725 0.008 285);
-  --legend-faint: oklch(0.665 0.009 285);
+  --legend: oklch(0.968 0.012 186);
+  --legend-dim: oklch(0.762 0.028 186);
+  --legend-faint: oklch(0.688 0.032 186);
 
-  --keycap: oklch(0.345 0.009 285);
-  --keycap-hover: oklch(0.395 0.01 285);
-  --keycap-ink: oklch(0.95 0.004 285);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.305 0.032 196);
+  --keycap-hover: oklch(0.348 0.036 196);
+  --keycap-ink: oklch(0.958 0.012 186);
 
-  --orange: oklch(0.62 0.19 292);
-  --orange-hover: oklch(0.67 0.18 292);
-  --orange-ink: oklch(0.16 0.03 292);
-  --orange-quiet: oklch(0.29 0.08 292);
+  --accent: oklch(0.822 0.152 174);
+  --accent-hover: oklch(0.872 0.135 174);
+  --accent-ink: oklch(0.192 0.045 174);
+  --accent-quiet: oklch(0.318 0.075 174);
 
-  --amber: oklch(0.8 0.14 78);
-  --amber-ink: oklch(0.8 0.14 78);
-  --amber-quiet: oklch(0.31 0.06 78);
+  --live: oklch(0.838 0.135 78);
+  --live-ink: oklch(0.838 0.135 78);
+  --live-quiet: oklch(0.322 0.06 78);
 
-  --red: oklch(0.65 0.21 25);
-  --red-ink: oklch(0.7 0.2 25);
-  --red-quiet: oklch(0.3 0.08 25);
+  --red: oklch(0.648 0.208 18);
+  --red-ink: oklch(0.742 0.172 18);
+  --red-quiet: oklch(0.322 0.082 18);
 
-  --lamp-ok: oklch(0.78 0.15 158);
-  --lamp-ok-quiet: oklch(0.3 0.06 158);
+  --lamp-ok: oklch(0.828 0.152 158);
+  --lamp-ok-quiet: oklch(0.318 0.065 158);
 
-  --code-keyword: oklch(0.78 0.14 292);
-  --code-string: oklch(0.8 0.12 158);
-  --code-number: oklch(0.82 0.12 78);
-  --code-type: oklch(0.8 0.1 220);
+  --code-keyword: oklch(0.792 0.132 318);
+  --code-string: oklch(0.832 0.128 158);
+  --code-number: oklch(0.852 0.115 78);
+  --code-type: oklch(0.822 0.105 228);
 
-  --focus-ring: oklch(0.765 0.19 292 / 0.45);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 1px 2px oklch(0.08 0.01 285 / 0.3), 0 8px 24px oklch(0.08 0.01 285 / 0.35);
-  --screen-inset: none;
+  --focus-ring: oklch(0.822 0.152 174 / 0.55);
+  --float: 0 1px 2px oklch(0.08 0.02 196 / 0.4), 0 10px 30px oklch(0.08 0.03 196 / 0.42);
   color-scheme: dark;
 }
 
-[data-skin="soft"][data-theme="light"] {
-  --chassis: oklch(0.965 0.004 75);
-  --panel: oklch(0.99 0.002 75);
-  --panel-raised: oklch(1 0 0);
-  --screen: oklch(0.945 0.005 75);
+[data-skin="aurora"][data-theme="light"] {
+  --chassis: oklch(0.962 0.018 192);
+  --panel: oklch(0.99 0.008 192);
+  --panel-raised: oklch(0.922 0.028 192);
+  --screen: oklch(0.945 0.022 192);
 
-  --rule: oklch(0.915 0.005 75);
-  --rule-strong: oklch(0.82 0.007 75);
+  --rule: oklch(0.902 0.022 192);
+  --rule-strong: oklch(0.812 0.032 192);
 
-  --legend: oklch(0.24 0.008 285);
-  --legend-dim: oklch(0.42 0.01 285);
-  --legend-faint: oklch(0.475 0.011 285);
+  --legend: oklch(0.222 0.032 196);
+  --legend-dim: oklch(0.432 0.038 196);
+  --legend-faint: oklch(0.505 0.04 196);
 
-  --keycap: oklch(0.885 0.006 75);
-  --keycap-hover: oklch(0.842 0.007 75);
-  --keycap-ink: oklch(0.25 0.008 285);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.898 0.026 192);
+  --keycap-hover: oklch(0.855 0.032 192);
+  --keycap-ink: oklch(0.248 0.034 196);
 
-  --orange: oklch(0.5 0.2 292);
-  --orange-hover: oklch(0.45 0.2 292);
-  --orange-ink: oklch(0.99 0.005 292);
-  --orange-quiet: oklch(0.945 0.035 292);
+  --accent: oklch(0.508 0.108 178);
+  --accent-hover: oklch(0.452 0.098 178);
+  --accent-ink: oklch(0.995 0.006 178);
+  --accent-quiet: oklch(0.938 0.048 178);
 
-  --amber: oklch(0.7 0.14 78);
-  --amber-ink: oklch(0.47 0.11 68);
-  --amber-quiet: oklch(0.95 0.04 78);
+  --live: oklch(0.728 0.145 78);
+  --live-ink: oklch(0.482 0.112 70);
+  --live-quiet: oklch(0.95 0.045 78);
 
-  --red: oklch(0.52 0.2 25);
-  --red-ink: oklch(0.49 0.2 25);
-  --red-quiet: oklch(0.95 0.03 25);
+  --red: oklch(0.528 0.212 22);
+  --red-ink: oklch(0.502 0.208 22);
+  --red-quiet: oklch(0.95 0.035 22);
 
-  --lamp-ok: oklch(0.45 0.115 158);
-  --lamp-ok-quiet: oklch(0.94 0.045 158);
+  --lamp-ok: oklch(0.455 0.118 158);
+  --lamp-ok-quiet: oklch(0.942 0.048 158);
 
-  --code-keyword: oklch(0.45 0.17 292);
-  --code-string: oklch(0.43 0.12 158);
-  --code-number: oklch(0.46 0.12 65);
-  --code-type: oklch(0.45 0.1 235);
+  --code-keyword: oklch(0.462 0.172 318);
+  --code-string: oklch(0.438 0.122 158);
+  --code-number: oklch(0.468 0.118 65);
+  --code-type: oklch(0.452 0.105 232);
 
-  --focus-ring: oklch(0.415 0.2 292 / 0.8);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 1px 2px oklch(0.6 0.01 75 / 0.1), 0 8px 24px oklch(0.6 0.01 75 / 0.12);
-  --screen-inset: none;
+  --focus-ring: oklch(0.462 0.105 178 / 0.98);
+  --float: 0 1px 2px oklch(0.6 0.02 192 / 0.1), 0 10px 30px oklch(0.6 0.03 192 / 0.14);
   color-scheme: light;
 }
 
 /* ==================================================================== *
- * SLATE — reductive monochrome.
+ * GLASS — soft depth.
  *
- * No borders, no shadows: separation is a step in background value and
- * nothing else. True neutral greys and a single accent, which stays the
- * Console orange — in a world with one colour, that colour should keep
- * meaning "this commits".
+ * A tinted ground with two coloured lights on it, and the interface as a
+ * frosted sheet laid over the top. The other three separate regions by a
+ * step in value; this one separates them by how much of the ground you
+ * can see through each.
  *
- * Reuses Archivo, already bundled. The reductive skin reusing the
- * incumbent face is on concept and costs nothing to download.
+ * The tokens below stay OPAQUE. They are what the contrast gate measures,
+ * and a measured pair that is never painted is not a measurement. The
+ * translucency is composited in the recipe block at the bottom, over a
+ * ground of the same hue and within a few points of the same value, so
+ * what lands on screen stays close to what was gated.
  * ==================================================================== */
-[data-skin="slate"] {
-  --r-chip: 4px;
-  --r-control: 6px;
-  --r-cap: 6px;
-  --r-panel: 8px;
-
-  --legend-face: var(--face-sans);
-  --legend-transform: none;
-  --legend-tracking: 0.015em;
-  --legend-width: 100;
-  --legend-size: 0.6875rem;
-
-  --prose-measure: 70ch;
-  --prose-heading-face: var(--face-sans);
-
-  /* Readouts drop Console's condensed axis and its amber. In a world with one
-   * accent, a second hue for "0/3 done" is a colour with no meaning. */
-  --readout-width: 100;
-  --readout-ink: var(--legend-dim);
-
-  /* Borderless means borderless: no hairline on list rows, form pickers or
-   * user bubbles either. */
-  --row-ring: transparent;
+[data-skin="glass"] {
+  --r-chip: 8px;
+  --r-control: 11px;
+  --r-cap: 11px;
+  --r-panel: 18px;
 }
 
-[data-skin="slate"][data-theme="dark"] {
-  --chassis: oklch(0.155 0 0);
-  --panel: oklch(0.195 0 0);
-  --panel-raised: oklch(0.245 0 0);
-  --screen: oklch(0.125 0 0);
+[data-skin="glass"][data-theme="dark"] {
+  --chassis: oklch(0.162 0.016 262);
+  --panel: oklch(0.212 0.018 262);
+  --panel-raised: oklch(0.268 0.02 262);
+  --screen: oklch(0.145 0.014 262);
 
-  --rule: oklch(0.27 0 0);
-  --rule-strong: oklch(0.37 0 0);
+  --rule: oklch(0.298 0.02 262);
+  --rule-strong: oklch(0.392 0.024 262);
 
-  --legend: oklch(0.945 0 0);
-  --legend-dim: oklch(0.72 0 0);
-  --legend-faint: oklch(0.66 0 0);
+  --legend: oklch(0.968 0.006 262);
+  --legend-dim: oklch(0.758 0.016 262);
+  --legend-faint: oklch(0.682 0.018 262);
 
-  --keycap: oklch(0.315 0 0);
-  --keycap-hover: oklch(0.365 0 0);
-  --keycap-ink: oklch(0.95 0 0);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.306 0.022 262);
+  --keycap-hover: oklch(0.35 0.024 262);
+  --keycap-ink: oklch(0.958 0.006 262);
 
-  --orange: oklch(0.688 0.196 42);
-  --orange-hover: oklch(0.735 0.19 42);
-  --orange-ink: oklch(0.19 0.02 42);
-  --orange-quiet: oklch(0.3 0.075 42);
+  --accent: oklch(0.665 0.168 242);
+  --accent-hover: oklch(0.715 0.155 242);
+  --accent-ink: oklch(0.155 0.035 242);
+  --accent-quiet: oklch(0.312 0.075 242);
 
-  --amber: oklch(0.8 0.155 78);
-  --amber-ink: oklch(0.8 0.155 78);
-  --amber-quiet: oklch(0.31 0.07 78);
+  --live: oklch(0.828 0.135 80);
+  --live-ink: oklch(0.828 0.135 80);
+  --live-quiet: oklch(0.322 0.058 80);
 
-  --red: oklch(0.655 0.215 27);
-  --red-ink: oklch(0.7 0.2 27);
-  --red-quiet: oklch(0.3 0.09 27);
+  --red: oklch(0.632 0.212 22);
+  --red-ink: oklch(0.732 0.178 22);
+  --red-quiet: oklch(0.318 0.082 22);
 
-  --lamp-ok: oklch(0.78 0.16 158);
-  --lamp-ok-quiet: oklch(0.3 0.07 158);
+  --lamp-ok: oklch(0.808 0.152 158);
+  --lamp-ok-quiet: oklch(0.318 0.065 158);
 
-  --code-keyword: oklch(0.78 0.15 40);
-  --code-string: oklch(0.8 0.13 155);
-  --code-number: oklch(0.82 0.13 78);
-  --code-type: oklch(0.8 0.1 220);
+  --code-keyword: oklch(0.788 0.128 288);
+  --code-string: oklch(0.828 0.122 158);
+  --code-number: oklch(0.848 0.112 80);
+  --code-type: oklch(0.818 0.098 225);
 
-  --focus-ring: oklch(0.748 0.196 42 / 0.45);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 4px 16px oklch(0.05 0 0 / 0.5);
-  --screen-inset: none;
+  /* The two lights on the ground. Both from the accent's own family — an
+   * earlier pass reused the warm `live` token here and the right-hand side
+   * of every screen went ochre. */
+  --glass-tint-a: oklch(0.34 0.105 258);
+  --glass-tint-b: oklch(0.3 0.085 302);
+
+  --focus-ring: oklch(0.665 0.168 242 / 0.6);
+  --float: 0 2px 6px oklch(0.05 0.02 262 / 0.45), 0 16px 40px oklch(0.05 0.02 262 / 0.5);
   color-scheme: dark;
 }
 
-[data-skin="slate"][data-theme="light"] {
-  --chassis: oklch(0.955 0 0);
-  --panel: oklch(0.985 0 0);
-  --panel-raised: oklch(1 0 0);
-  --screen: oklch(0.925 0 0);
+[data-skin="glass"][data-theme="light"] {
+  --chassis: oklch(0.955 0.012 254);
+  --panel: oklch(0.99 0.004 254);
+  --panel-raised: oklch(0.922 0.02 254);
+  --screen: oklch(0.945 0.014 254);
 
-  --rule: oklch(0.895 0 0);
-  --rule-strong: oklch(0.79 0 0);
+  --rule: oklch(0.905 0.014 254);
+  --rule-strong: oklch(0.818 0.02 254);
 
-  --legend: oklch(0.235 0 0);
-  --legend-dim: oklch(0.415 0 0);
-  --legend-faint: oklch(0.475 0 0);
+  --legend: oklch(0.218 0.022 262);
+  --legend-dim: oklch(0.432 0.026 262);
+  --legend-faint: oklch(0.505 0.028 262);
 
-  --keycap: oklch(0.875 0 0);
-  --keycap-hover: oklch(0.832 0 0);
-  --keycap-ink: oklch(0.24 0 0);
-  --keycap-edge: transparent;
+  --keycap: oklch(0.898 0.016 254);
+  --keycap-hover: oklch(0.855 0.02 254);
+  --keycap-ink: oklch(0.245 0.024 262);
 
-  --orange: oklch(0.545 0.2 42);
-  --orange-hover: oklch(0.5 0.2 42);
-  --orange-ink: oklch(0.99 0.01 42);
-  --orange-quiet: oklch(0.94 0.045 42);
+  --accent: oklch(0.512 0.185 252);
+  --accent-hover: oklch(0.458 0.178 252);
+  --accent-ink: oklch(0.995 0.004 252);
+  --accent-quiet: oklch(0.94 0.038 252);
 
-  --amber: oklch(0.7 0.16 78);
-  --amber-ink: oklch(0.47 0.12 68);
-  --amber-quiet: oklch(0.95 0.05 78);
+  --live: oklch(0.725 0.145 80);
+  --live-ink: oklch(0.482 0.112 70);
+  --live-quiet: oklch(0.95 0.045 80);
 
-  --red: oklch(0.53 0.215 27);
-  --red-ink: oklch(0.5 0.21 27);
-  --red-quiet: oklch(0.95 0.04 27);
+  --red: oklch(0.525 0.212 22);
+  --red-ink: oklch(0.5 0.208 22);
+  --red-quiet: oklch(0.95 0.035 22);
 
-  --lamp-ok: oklch(0.44 0.115 158);
-  --lamp-ok-quiet: oklch(0.94 0.05 158);
+  --lamp-ok: oklch(0.452 0.118 158);
+  --lamp-ok-quiet: oklch(0.942 0.048 158);
 
-  --code-keyword: oklch(0.47 0.17 40);
-  --code-string: oklch(0.44 0.12 155);
-  --code-number: oklch(0.46 0.12 65);
-  --code-type: oklch(0.45 0.1 235);
+  --code-keyword: oklch(0.46 0.178 288);
+  --code-string: oklch(0.438 0.122 158);
+  --code-number: oklch(0.468 0.118 65);
+  --code-type: oklch(0.452 0.105 232);
 
-  --focus-ring: oklch(0.475 0.2 42 / 0.85);
-  --cap-lift: none;
-  --cap-flat: none;
-  --panel-lift: 0 4px 16px oklch(0.6 0 0 / 0.14);
-  --screen-inset: none;
+  --glass-tint-a: oklch(0.905 0.055 254);
+  --glass-tint-b: oklch(0.925 0.045 302);
+
+  --focus-ring: oklch(0.512 0.185 252 / 0.98);
+  --float: 0 2px 6px oklch(0.55 0.02 254 / 0.1), 0 16px 40px oklch(0.55 0.02 254 / 0.16);
   color-scheme: light;
 }
 
-/* ==================================================================== *
- * Recipe overrides
+/* -------------------------------------------------------------------- *
+ * Glass recipes — the one place a skin changes how a surface is built
+ * rather than what it is made of.
  *
- * The materials above change what things are made of; these change how
- * they are built. Grouped by what they do rather than by skin, so the
- * shared decisions stay visible.
- * ==================================================================== */
-
-/* No panel borders in any of the three. Console draws a 1px rule around
- * every panel; here separation is space and elevation. */
-[data-skin="paper"] .panel,
-[data-skin="soft"] .panel,
-[data-skin="slate"] .panel {
-  border: none;
+ * The rail deliberately keeps no fill of its own: it is a column of text
+ * standing directly on the ground, which is what makes the frosted
+ * content sheet beside it read as a sheet.
+ * -------------------------------------------------------------------- */
+[data-skin="glass"] body {
+  background:
+    radial-gradient(78rem 44rem at 8% -12%, var(--glass-tint-a), transparent 62%),
+    radial-gradient(64rem 38rem at 92% 4%, var(--glass-tint-b), transparent 64%),
+    var(--chassis);
+  background-attachment: fixed;
 }
-[data-skin="soft"] .panel {
-  box-shadow: var(--panel-lift);
+[data-skin="glass"] aside,
+[data-skin="glass"] .bg-chassis {
+  background: transparent;
 }
-
-/* Screens stop being recessed hardware and become quiet regions. */
-[data-skin="paper"] .screen,
-[data-skin="soft"] .screen,
-[data-skin="slate"] .screen {
-  border: none;
-  box-shadow: none;
+[data-skin="glass"] #main {
+  background: color-mix(in oklab, var(--panel) 74%, transparent);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
 }
-
-/* Keys lose their travel and their edge: nothing here is a moulded cap. */
-[data-skin="paper"] .key,
-[data-skin="soft"] .key,
-[data-skin="slate"] .key {
-  /* A hairline ring rather than no boundary at all. With the cap shadow gone
-   * the only thing separating a secondary key from its panel is a value step,
-   * and the contrast gate measured that step at 1.19 — a button you have to
-   * hunt for. The step was widened *and* bounded; either alone was thin. */
-  box-shadow: inset 0 0 0 1px var(--rule-strong);
-  font-family: var(--font-sans);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  letter-spacing: 0;
-  text-transform: none;
-  font-variation-settings: normal;
-  padding: 0.4375rem 0.8125rem;
+[data-skin="glass"] .panel,
+[data-skin="glass"] .floating {
+  background: color-mix(in oklab, var(--panel) 82%, transparent);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
 }
-[data-skin="paper"] .key:active:not(:disabled),
-[data-skin="soft"] .key:active:not(:disabled),
-[data-skin="slate"] .key:active:not(:disabled) {
-  transform: none;
-}
-[data-skin="paper"] .key-blank,
-[data-skin="soft"] .key-blank,
-[data-skin="slate"] .key-blank {
-  box-shadow: inset 0 0 0 1px var(--rule);
-}
-/* The filled keys carry their own colour, so a ring on top reads as a seam. */
-[data-skin="paper"] .key-go,
-[data-skin="soft"] .key-go,
-[data-skin="slate"] .key-go,
-[data-skin="paper"] .key-stop,
-[data-skin="soft"] .key-stop,
-[data-skin="slate"] .key-stop,
-[data-skin="paper"] .key-flat,
-[data-skin="soft"] .key-flat,
-[data-skin="slate"] .key-flat,
-[data-skin="paper"] .key-danger,
-[data-skin="soft"] .key-danger,
-[data-skin="slate"] .key-danger {
-  box-shadow: none;
-}
-
-/* Fields are outlined, not carved. */
-[data-skin="paper"] .field,
-[data-skin="soft"] .field,
-[data-skin="slate"] .field {
-  background: var(--panel-raised);
-  border-color: var(--rule-strong);
-  box-shadow: none;
-  font-family: var(--font-sans);
-}
-[data-skin="paper"] .field:focus,
-[data-skin="soft"] .field:focus,
-[data-skin="slate"] .field:focus {
-  border-color: var(--orange);
-  box-shadow: 0 0 0 3px var(--focus-ring);
-}
-
-/* Chips and kbd shed the mono legend along with the rest. */
-[data-skin="paper"] .chip,
-[data-skin="soft"] .chip,
-[data-skin="slate"] .chip {
-  font-family: var(--font-sans);
-  font-size: 0.6875rem;
-  letter-spacing: 0;
-  font-variation-settings: normal;
-  background: var(--screen);
-  border-color: transparent;
-}
-
-/* A lamp stays a lamp — it is half of every status readout — but stops
- * glowing where the world has no light sources in it. */
-[data-skin="paper"] .lamp,
-[data-skin="soft"] .lamp,
-[data-skin="slate"] .lamp {
-  box-shadow: none;
-}
-
-/* Section titles follow the legend into sentence case. */
-[data-skin="paper"] .section-title,
-[data-skin="soft"] .section-title,
-[data-skin="slate"] .section-title {
-  font-size: 0.8125rem;
-  font-weight: 650;
-}
-
-/* The focus ring takes the skin's own accent rather than Console amber. */
-[data-skin="paper"] :focus-visible,
-[data-skin="soft"] :focus-visible,
-[data-skin="slate"] :focus-visible {
-  outline-color: var(--orange);
-}
-
-/* Prose: the streaming caret is a bar again, not a lit phosphor segment. */
-[data-skin="paper"] .caret,
-[data-skin="soft"] .caret,
-[data-skin="slate"] .caret {
-  box-shadow: none;
-  width: 0.12em;
-  background: var(--legend-dim);
-}
-
-/* Code blocks keep a hairline in Paper, which has no other way to bound
- * them once the inset shadow is gone. */
-[data-skin="paper"] .prose pre {
-  border-color: var(--rule);
-}
-[data-skin="soft"] .prose pre,
-[data-skin="slate"] .prose pre {
-  border: none;
+[data-skin="glass"] .screen {
+  background: color-mix(in oklab, var(--screen) 76%, transparent);
 }

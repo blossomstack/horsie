@@ -77,7 +77,7 @@ export function WorkGroup({
         className="flex items-center gap-2 py-0.5"
         data-testid="work-group-pulse"
       >
-        <span className="lamp lamp-live text-amber-ink" aria-hidden />
+        <span className="lamp lamp-live text-live-ink" aria-hidden />
         <span className="legend">Working</span>
       </div>
     );
@@ -123,7 +123,7 @@ export function WorkGroup({
           )}
           aria-hidden
         />
-        {live && <span className="lamp lamp-live text-amber-ink" aria-hidden />}
+        {live && <span className="lamp lamp-live text-live-ink" aria-hidden />}
         <span className="legend" data-testid="work-group-summary">
           {label}
         </span>
@@ -134,7 +134,7 @@ export function WorkGroup({
         )}
       </button>
       {open && (
-        <div className="mt-1.5 ml-1.5 space-y-1.5 border-l pl-3.5">
+        <div className="mt-1.5 ml-1.5 space-y-1.5 border-l border-rule pl-3.5">
           {visibleWithIndices.map(({ item, index }) =>
             renderItem(item, getItemKey(item, index)),
           )}

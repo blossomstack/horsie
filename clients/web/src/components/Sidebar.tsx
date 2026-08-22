@@ -48,7 +48,7 @@ function PrimaryLink({
       data-testid={testId}
       className={({ isActive }) =>
         cn(
-          "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors",
+          "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-1.5 text-[0.8125rem] transition-colors",
           // Fill only, like every other selected row in the app.
           isActive
             ? "bg-raised text-legend"
@@ -62,7 +62,9 @@ function PrimaryLink({
   );
 }
 
-/** Small mono link for the rail footer — server-level, visited rarely. */
+/** Icon-only footer link — server-level, visited rarely. The word lives in
+ * the tooltip and the accessible name, which is where a label belongs when
+ * the destination is one of a few fixed icons you learn once. */
 function FooterLink({
   to,
   icon,
@@ -76,20 +78,13 @@ function FooterLink({
     <NavLink
       to={to}
       data-testid={`${label.toLowerCase()}-link`}
+      title={label}
+      aria-label={label}
       className={({ isActive }) =>
-        cn(
-          // `.legend` rather than a hard-coded mono uppercase: these are
-          // engraved labels by role, so they follow whatever the active skin
-          // decided legends look like.
-          "legend flex min-w-0 items-center gap-1.5 rounded-[var(--radius-control)] px-1.5 py-1.5 transition-colors",
-          isActive
-            ? "bg-raised !text-legend"
-            : "hover:bg-raised hover:!text-legend",
-        )
+        cn("key-icon shrink-0", isActive && "bg-raised text-legend")
       }
     >
       {icon}
-      {label}
     </NavLink>
   );
 }
@@ -143,11 +138,11 @@ export function Sidebar() {
   const navigate = useNavigate();
 
   return (
-    <aside className="flex h-full w-[17.5rem] shrink-0 flex-col border-r bg-panel">
+    <aside className="flex h-full w-[17.5rem] shrink-0 flex-col bg-chassis">
       {/* Nameplate. The lamp reports the rail's own link to the server, so a
           dead feed is visible before you click anything. Height is shared with
           the session and task-panel headers so the three columns line up. */}
-      <div className="flex h-[3.25rem] shrink-0 items-center gap-2.5 border-b px-4">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2.5 px-3">
         <Link
           to="/"
           data-testid="home-link"
@@ -155,7 +150,7 @@ export function Sidebar() {
         >
           <span
             aria-hidden
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] bg-orange font-mono text-[0.8125rem] font-bold text-orange-ink shadow-[var(--cap-lift)]"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[4px] bg-accent font-mono text-[0.8125rem] font-bold text-accent-ink"
           >
             h
           </span>
@@ -180,11 +175,8 @@ export function Sidebar() {
         )}
       </div>
 
-      {/* The scope everything below belongs to, before the things in it. */}
-      <ProjectSwitcher />
-
       {/* The things you keep, before the things you accumulate. */}
-      <div className="space-y-px px-2 pt-3">
+      <div className="space-y-px px-2 pt-1">
         <PrimaryLink
           to="/agents"
           testId="agents-link"
@@ -211,7 +203,7 @@ export function Sidebar() {
         />
       </div>
 
-      <div className="flex items-center justify-between pb-1.5 pl-4 pr-2 pt-4">
+      <div className="flex items-center justify-between pb-1 pl-3.5 pr-2 pt-3">
         <span className="legend">Sessions</span>
         <div className="flex items-center gap-0.5">
           {/* Nothing to filter by until a tag exists, and an empty panel
@@ -262,7 +254,7 @@ export function Sidebar() {
       {((sessions?.length ?? 0) > 8 || filterText !== "") && (
         <div className="px-2 pb-1.5">
           <input
-            className="w-full rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none placeholder:text-faint focus:border-[var(--rule-strong)]"
+            className="field !py-1 !text-[0.8125rem]"
             value={filterText}
             onChange={(e) => setFilterText(e.target.value)}
             onKeyDown={(e) => {
@@ -335,20 +327,23 @@ export function Sidebar() {
           ))}
       </nav>
 
-      <div className="flex items-center gap-0.5 border-t px-1.5 py-2">
+      {/* The scope everything above belongs to, and the server-level
+          destinations, on one strip. The switcher used to sit under the
+          nameplate with the word "Project" over it — two rows of rail height
+          for one string that is also in the URL. */}
+      <div className="flex items-center gap-0.5 px-1.5 py-1.5">
+        <ProjectSwitcher />
         <FooterLink
           to="/settings"
-          icon={<Settings size={13} aria-hidden />}
+          icon={<Settings size={14} aria-hidden />}
           label="Settings"
         />
         <FooterLink
           to="/admin"
-          icon={<ShieldCheck size={13} aria-hidden />}
+          icon={<ShieldCheck size={14} aria-hidden />}
           label="Admin"
         />
-        <div className="ml-auto">
-          <ThemeToggle />
-        </div>
+        <ThemeToggle />
       </div>
     </aside>
   );

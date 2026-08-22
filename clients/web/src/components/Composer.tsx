@@ -153,7 +153,7 @@ export function Composer({
         {menuOpen && (
           <EntryMenu entries={matches} activeIndex={index} onPick={pick} />
         )}
-        <div className="panel relative overflow-hidden transition-shadow focus-within:border-amber focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
+        <div className="screen relative overflow-hidden rounded-[var(--radius-panel)] transition-shadow focus-within:shadow-[0_0_0_2px_var(--focus-ring)] focus-within:shadow-[0_0_0_3px_var(--focus-ring)]">
           <textarea
             ref={ref}
             rows={1}

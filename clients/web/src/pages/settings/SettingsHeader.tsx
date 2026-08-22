@@ -46,7 +46,7 @@ export function SettingsHeader({
     // The bar spans the pane; its contents share the content column's left
     // edge, so the title sits directly above the first panel rather than
     // floating 100px to its left.
-    <header className="border-b bg-panel">
+    <header className="bg-panel">
       <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">
@@ -64,12 +64,12 @@ export function SettingsHeader({
               it vanished entirely on the pages that save per item, which are
               exactly the ones with no button to colour instead. */}
             {saving ? (
-              <span className="flex items-center gap-1.5 text-amber-ink">
+              <span className="flex items-center gap-1.5 text-live-ink">
                 <span className="lamp lamp-live" aria-hidden />
                 <span className="legend text-current">Saving</span>
               </span>
             ) : dirty ? (
-              <span className="flex items-center gap-1.5 text-amber-ink">
+              <span className="flex items-center gap-1.5 text-live-ink">
                 <span className="lamp" aria-hidden />
                 <span className="legend text-current">Unsaved</span>
               </span>

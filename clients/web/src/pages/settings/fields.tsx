@@ -13,7 +13,7 @@ import { cn } from "../../lib/cn";
 export function SettingsPane({ children }: { children: ReactNode }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
+      <div className="mx-auto max-w-3xl space-y-7 px-4 py-5 sm:px-6">
         {children}
       </div>
     </div>
@@ -46,16 +46,16 @@ export function Section({
   empty?: string | null;
 }) {
   return (
-    <section className="panel p-4">
+    <section className="section">
       {/* Wraps rather than overlapping: at 768px the Add key drew on top of
           the heading it was meant to sit beside. */}
-      <div className="mb-4 flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+      <div className="mb-2.5 flex flex-wrap items-start justify-between gap-x-4 gap-y-1.5">
         {/* Both strings can carry a name someone chose, and a provider named
             without spaces has nowhere to wrap: `break-words` is what keeps
             `Models · <long-name>` inside the panel. */}
         <div className="min-w-0">
           <h2 className="section-title break-words">{title}</h2>
-          <p className="mt-1.5 max-w-prose text-xs leading-relaxed text-faint">
+          <p className="mt-1 max-w-prose text-xs leading-snug text-faint">
             {desc}
           </p>
         </div>
@@ -71,9 +71,9 @@ export function Section({
           </button>
         )}
       </div>
-      <div className="space-y-2.5">
+      <div className="space-y-px">
         {empty && (
-          <p className="screen break-words px-3 py-5 text-center text-sm text-faint">
+          <p className="screen break-words px-3 py-4 text-center text-sm text-faint">
             {empty}
           </p>
         )}
@@ -171,13 +171,13 @@ export function ListRow({
   return (
     <div
       className={cn(
-        "rounded-[var(--radius-control)] bg-raised shadow-[inset_0_0_0_1px_var(--row-ring)]",
-        active && "shadow-[inset_0_0_0_1px_var(--rule-strong)]",
+        "rounded-[var(--radius-control)] transition-colors hover:bg-raised",
+        active && "bg-raised",
       )}
       data-testid={testId}
       data-active={active ? "true" : undefined}
     >
-      <div className="flex items-center gap-2 px-3 py-2">
+      <div className="flex items-center gap-2 px-2.5 py-1.5">
         {onActivate ? (
           <button
             type="button"
@@ -192,13 +192,13 @@ export function ListRow({
         )}
         {actions && <span className="flex shrink-0 items-center gap-0.5">{actions}</span>}
       </div>
-      {children && <div className="border-t px-3 py-3">{children}</div>}
+      {children && <div className="px-2.5 pb-2.5">{children}</div>}
     </div>
   );
 }
 
 export function RowLabel({ children }: { children: ReactNode }) {
-  return <span className="legend mb-1 block">{children}</span>;
+  return <span className="legend mb-0.5 block">{children}</span>;
 }
 
 /**
@@ -329,7 +329,7 @@ export function RowShell({
   children: ReactNode;
 }) {
   return (
-    <div className="rounded-[var(--radius-control)] bg-raised p-3 shadow-[inset_0_0_0_1px_var(--row-ring)]">
+    <div className="rounded-[var(--radius-control)] bg-raised p-2.5">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">{children}</div>
         <button

@@ -17,12 +17,12 @@ export function SettingsNav({
   const { confirmLeave } = useSettingsDirty();
   return (
     <nav
-      className="flex shrink-0 flex-col border-rule bg-chassis md:h-full md:w-48 md:border-r"
+      className="flex shrink-0 flex-col border-rule bg-chassis md:h-full md:w-48 "
       data-testid="settings-nav"
       aria-label={title}
     >
       <p className="legend hidden px-4 pb-2 pt-4 md:block">{title}</p>
-      <div className="flex gap-1 overflow-x-auto border-b px-2 py-2 [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] md:mask-none md:flex-col md:gap-px md:overflow-visible md:border-b-0 md:py-0">
+      <div className="flex gap-1 overflow-x-auto px-2 py-2 [mask-image:linear-gradient(to_right,black_calc(100%-2rem),transparent)] md:mask-none md:flex-col md:gap-px md:overflow-visible md:md:py-0">
         {items.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}

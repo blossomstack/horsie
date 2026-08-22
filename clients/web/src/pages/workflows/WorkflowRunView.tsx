@@ -158,7 +158,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-run-view">
-      <header className="flex items-center gap-4 border-b px-6 py-3">
+      <header className="flex items-center gap-4 px-6 py-3">
         <div className="min-w-0">
           <h1 className="page-title truncate">{graph.workflow}</h1>
           <span
@@ -199,7 +199,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
       {parked && (
         <div
-          className="flex items-center gap-3 border-b border-orange bg-orange-quiet px-6 py-2 text-sm text-orange-ink"
+          className="flex items-center gap-3 border-b border-accent bg-accent-quiet px-6 py-2 text-sm text-accent-ink"
           data-testid="run-awaiting"
         >
           <MessageCircleQuestion size={15} className="shrink-0" />
@@ -224,7 +224,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
       {resume && (
         <div
-          className="flex items-center gap-3 border-b border-orange bg-orange-quiet px-6 py-2 text-sm text-orange-ink"
+          className="flex items-center gap-3 border-b border-accent bg-accent-quiet px-6 py-2 text-sm text-accent-ink"
           data-testid="run-suspended"
         >
           <PauseCircle size={15} className="shrink-0" />
@@ -262,7 +262,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
               only by opening its last step. Above the step panel because it is
               what the page is *for* once the run is over. */}
           {graph.output !== undefined && graph.output !== null && (
-            <div className="panel p-4" data-testid="run-output">
+            <div className="section" data-testid="run-output">
               <h2 className="legend">Result</h2>
               <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words text-xs text-dim">
                 {formatOutput(graph.output)}
@@ -271,7 +271,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           )}
 
           {!selectedNode ? (
-            <div className="panel p-4">
+            <div className="section">
               <h2 className="legend">Steps</h2>
               <p className="mt-2 text-xs text-faint">
                 Choose a step to see its attempts, or open one to read what it
@@ -279,7 +279,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
               </p>
             </div>
           ) : (
-            <div className="panel p-4" data-testid="step-detail">
+            <div className="section" data-testid="step-detail">
               <h2 className="legend">{selectedNode.step}</h2>
               {selectedNode.runs.length === 0 ? (
                 <p className="mt-2 text-xs text-faint">This run never reached it.</p>
@@ -291,7 +291,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                     .map((r) => (
                       <div
                         key={r.index}
-                        className="rounded-[var(--radius-control)] border p-2"
+                        className="rounded-[var(--radius-control)] p-2"
                         data-testid="step-attempt"
                       >
                         <div className="flex items-center gap-2">
@@ -303,7 +303,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                               r.status.type === "Failed"
                                 ? "text-red-ink"
                                 : r.status.type === "Running"
-                                  ? "text-amber-ink"
+                                  ? "text-live-ink"
                                   : "text-faint"
                             }`}
                           >
