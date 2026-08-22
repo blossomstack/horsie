@@ -86,11 +86,16 @@ impl Seeding {
                 reply,
             } => {
                 // Already seeded. Not an error: a process that died between
-                // this write and the session journaling `ForkSeeded` comes
-                // back and re-seeds, and the honest answer is that the work is
-                // done. Saying otherwise would fail a sub session that is
-                // perfectly fine.
-                if !state.log.is_empty() {
+                // this write and the session journaling `SubSessionSeeded`
+                // comes back and re-seeds, and the honest answer is that the
+                // work is done. Saying otherwise would fail a sub session that
+                // is perfectly fine.
+                //
+                // The inbox as well as the log, because only a summary seeds a
+                // message: the other two modes leave the queued brief as the
+                // whole of this write's trace, and a brief that is not a
+                // person's message would not even log a `MessageQueued`.
+                if !state.log.is_empty() || !state.inbox.is_empty() {
                     let _ = reply.send(Ok(()));
                     let _ = ctx
                         .self_ref()
@@ -148,8 +153,10 @@ impl Component for Seeding {
             // Wholesale, because this is the agent's first event: anything
             // already here would be a bug rather than a history to merge.
             *state = *seeded;
-            let at_ms = seed.created_at_ms;
-            state.push(at_ms, AgentLogBody::Llm(*seed));
+            if let Some(seed) = seed {
+                let at_ms = seed.created_at_ms;
+                state.push(at_ms, AgentLogBody::Llm(*seed));
+            }
         }
     }
 }

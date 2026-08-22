@@ -512,7 +512,7 @@ export function buildTimeline(
     lanes.push({
       agentId: f.id,
       kind: "subSession",
-      label: f.title ?? "untitled subSession",
+      label: f.title ?? "untitled sub session",
       status: f.status,
       bars: barsFor(f.id, f.createdAtMs),
       depth: placed.depth,

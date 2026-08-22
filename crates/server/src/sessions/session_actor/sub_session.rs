@@ -417,6 +417,7 @@ impl SessionActor {
                 settings,
                 step_result: Default::default(),
                 agent_type: None,
+                origin: self.sub_session_origin(state, id),
             },
         )
         .map(|resident| resident.actor)
@@ -562,7 +563,6 @@ impl SessionActor {
             tracing::warn!(sub_session = %id, "no agents to seed a sub session between");
             return;
         };
-        let source_title = self.source_title(state, parent);
         let self_ref = self.me(ctx);
         tokio::spawn(async move {
             let queued = Incoming::User {
@@ -572,15 +572,7 @@ impl SessionActor {
                 id: format!("sub_session-message:{id}"),
                 text: message,
             };
-            let cmd = match seed_sub_session(
-                &source,
-                &sub_session,
-                seed,
-                source_seq,
-                &source_title,
-                queued,
-            )
-            .await
+            let cmd = match seed_sub_session(&source, &sub_session, seed, source_seq, queued).await
             {
                 Ok(()) => SubSessionCommand::Seeded { id },
                 Err(error) => SubSessionCommand::SeedFailed { id, error },
@@ -589,10 +581,30 @@ impl SessionActor {
         });
     }
 
-    /// What to call the session a sub session came from, in the sub session's
-    /// own seed. A sub session of a sub session names that sub session;
-    /// anything unnamed falls back to a phrase rather than to an id, which
-    /// means nothing to a reader.
+    /// Where a sub session came from, for the `# Sub session` section of its
+    /// system prompt.
+    ///
+    /// Read from the record rather than passed in, because this runs on every
+    /// spawn — including the one recovery does for a sub session created by a
+    /// process that is gone.
+    fn sub_session_origin(
+        &self,
+        state: &SessionState,
+        id: Uuid,
+    ) -> Option<crate::sessions::session_actor::context::SubSessionOrigin> {
+        let parent = state
+            .forest
+            .owner_of_agent(id)
+            .and_then(|(_, entry)| entry.parent)?;
+        Some(crate::sessions::session_actor::context::SubSessionOrigin {
+            mode: state.forest.sub_session(id)?.seed,
+            source_title: self.source_title(state, parent),
+        })
+    }
+
+    /// What to call the session a sub session came from. A sub session of a
+    /// sub session names that sub session; anything unnamed falls back to a
+    /// phrase rather than to an id, which means nothing to a reader.
     fn source_title(&self, state: &SessionState, parent: Uuid) -> String {
         let named = match parent == self.id {
             true => self.spec().name.clone(),
@@ -658,16 +670,22 @@ enum Seed {
 
 /// Build a sub session's history from its source and hand it over.
 ///
-/// Every mode ends with one synthetic `Role::User` message carrying a `sub
-/// session:` id — the device compaction already uses for `compaction:{n}`, so
-/// `prompt_messages` needs no change and a client special-cases an id prefix
-/// it already special-cases.
+/// Only a `Summary` ends with a synthetic `Role::User` message — the summary
+/// itself, which is content the model needs and has nowhere else to be. It
+/// carries a `sub_session:` id, the device compaction already uses for
+/// `compaction:{n}`, so `prompt_messages` needs no change and a client
+/// special-cases an id prefix it already special-cases.
+///
+/// The other two seed no message at all. What a sub session *is* — what it
+/// branched from and what history that left it with — is standing context
+/// rather than a turn, so it is a section of the system prompt
+/// (`sub_session_prompt`). Written here instead, it read as a message the
+/// person had typed, and said the same thing the prompt was already saying.
 async fn seed_sub_session(
     source: &ActorRef<AgentCommand>,
     sub_session: &ActorRef<AgentCommand>,
     seed: Seed,
     source_seq: u64,
-    source_title: &str,
     message: Incoming,
 ) -> Result<(), String> {
     // Only a copy reads the source, and only at the branch point — the source
@@ -686,20 +704,12 @@ async fn seed_sub_session(
             .await
             .map_err(|e| format!("read the session to branch: {e}"))?,
     };
-    let seed = Message {
-        id: format!("sub_session:{}", Uuid::new_v4()),
-        role: Role::User,
-        parts: vec![ContentPart::Text(TextPart {
-            text: sub_session_seed_text(source_title, &seed),
-        })],
-        created_at_ms: now_ms(),
-        started_at_ms: None,
-    };
+    let seed = summary_message(&seed);
     sub_session
         .ask(|reply| {
             AgentCommand::Seed(AgentSeedCommand::SeedFrom {
                 state,
-                seed: Box::new(seed),
+                seed: seed.map(Box::new),
                 message,
                 reply,
             })
@@ -708,32 +718,25 @@ async fn seed_sub_session(
         .map_err(|e| format!("seed the sub_session: {e}"))?
 }
 
-/// What a sub session reads first.
+/// The one seeded message: a `Summary`'s summary, and nothing for the other
+/// two modes.
 ///
-/// The title instruction rides here rather than in the system prompt: a prompt
-/// section is re-sent every turn and would go on nagging long after the sub
-/// session was named.
-fn sub_session_seed_text(source_title: &str, seed: &Seed) -> String {
-    // A `Fresh` sub session says so plainly. It has no history to scroll back
-    // into, and a model told it was "branched, carrying this session" would go
-    // looking for one — then answer around a gap instead of asking.
-    let mut out = match seed {
-        Seed::Fresh => format!(
-            "This session was started from \"{source_title}\", which is working in \
-             the same place. You carry none of its history: the message that follows was \
-             written for you and is all you have been given. Call set_session_title once \
-             the direction is clear."
-        ),
-        Seed::Copy | Seed::Summary(_) => format!(
-            "This session was branched from \"{source_title}\". The message that \
-             follows sets a new direction — call set_session_title once it is clear."
-        ),
+/// A `Copy` has the conversation itself and a `Fresh` has the brief queued
+/// behind it, so in both cases a message here would be a second telling of
+/// something the sub session already holds.
+fn summary_message(seed: &Seed) -> Option<Message> {
+    let Seed::Summary(summary) = seed else {
+        return None;
     };
-    if let Seed::Summary(summary) = seed {
-        out.push_str("\n\n# Summary of the session this was branched from\n\n");
-        out.push_str(summary);
-    }
-    out
+    Some(Message {
+        id: format!("sub_session:{}", Uuid::new_v4()),
+        role: Role::User,
+        parts: vec![ContentPart::Text(TextPart {
+            text: format!("# Summary of the session this was branched from\n\n{summary}"),
+        })],
+        created_at_ms: now_ms(),
+        started_at_ms: None,
+    })
 }
 
 #[cfg(test)]
@@ -1233,12 +1236,15 @@ mod tests {
             "a copy sub_session carries the session it came from: {branched}"
         );
         assert!(
-            branched.contains("branched from"),
-            "and is told where it came from: {branched}"
-        );
-        assert!(
             branched.contains("try the other migration"),
             "and holds the message that created it: {branched}"
+        );
+        // Where it came from is its system prompt's to say, not its
+        // transcript's: a copy seeds no message at all, so nothing stands
+        // between the copied history and the brief.
+        assert!(
+            !branched.contains("set_session_title"),
+            "a copy sub_session is seeded no orientation message: {branched}"
         );
     }
 
@@ -1266,8 +1272,8 @@ mod tests {
             "a summary sub_session discards the history it summarised: {branched}"
         );
         assert!(
-            branched.contains("branched from"),
-            "but is still told where it came from: {branched}"
+            branched.contains("# Summary of the session this was branched from"),
+            "and carries the summary it was seeded with instead: {branched}"
         );
     }
 
@@ -1488,6 +1494,54 @@ mod tests {
         );
     }
 
+    /// A sub session's turn runs with the `# Sub session` section, naming the
+    /// session it branched from and what that mode left it holding.
+    ///
+    /// Asserted on the prompt the session actually handed the provider, not on
+    /// `sub_session_prompt`: the section is built from an origin snapshotted at
+    /// spawn, and a spawn that forgot to fill it would compile, pass every unit
+    /// test, and run every sub session with no section at all.
+    #[tokio::test]
+    async fn a_sub_sessions_turn_carries_the_sub_session_section() {
+        let provider =
+            Arc::new(crate::sessions::session_actor::testing::PromptRecordingProvider::default());
+        let (_f, session, id, journal) = spawn_session_with_provider(provider.clone()).await;
+        send(&session, "the original question").await;
+        wait_for_turn_end(&session, None, 1).await;
+
+        let sub_session = branch_via(&session, None, "/fork try the other migration")
+            .await
+            .expect("a sub session");
+        let sub_session_id = Uuid::parse_str(&sub_session).unwrap();
+        wait_for_state(&journal, id, "the sub_session is seeded", |s| {
+            s.forest
+                .sub_session(sub_session_id)
+                .is_some_and(|f| f.status != AgentStatus::Provisioning)
+        })
+        .await;
+
+        for _ in 0..200 {
+            if let Some(prompt) = provider
+                .prompts()
+                .into_iter()
+                .find(|p| p.contains("# Sub session"))
+            {
+                assert!(
+                    prompt.contains("carry \"untitled session\"'s history")
+                        || prompt.contains("'s history up to the moment you were branched"),
+                    "a copy is told what it carries: {prompt}"
+                );
+                assert!(prompt.contains("share one workspace"), "{prompt}");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "no turn ran with the sub session section: {:?}",
+            provider.prompts()
+        );
+    }
+
     /// Branching a session that is parked on a question.
     ///
     /// The copied log carries the `ask_user` `tool_use` with no result. A
@@ -1629,35 +1683,31 @@ mod tests {
         provider.release();
     }
 
-    /// The seed always frames where the sub session came from; only a summary
-    /// sub session carries a summary, because only it discarded the history.
+    /// Only a summary seeds a message, and that message is the summary.
+    ///
+    /// The other two modes seed nothing: a copy's history is the context and a
+    /// fresh sub session's brief is queued behind the seed, so a message here
+    /// would be a second telling of something already in hand — and it read as
+    /// one the person had typed.
     #[test]
-    fn the_seed_frames_the_source_and_carries_a_summary_only_when_there_is_one() {
-        let copy = sub_session_seed_text("Migrate the journal", &Seed::Copy);
-        assert!(copy.contains("branched from \"Migrate the journal\""));
-        assert!(copy.contains("set_session_title"));
-        assert!(!copy.contains("# Summary"));
+    fn only_a_summary_seeds_a_message() {
+        assert!(summary_message(&Seed::Copy).is_none());
+        assert!(summary_message(&Seed::Fresh).is_none());
 
-        let summarised = sub_session_seed_text(
-            "Migrate the journal",
-            &Seed::Summary("We chose sqlx::Any.".to_string()),
-        );
-        assert!(summarised.contains("# Summary"));
-        assert!(summarised.contains("We chose sqlx::Any."));
-    }
-
-    /// A `Fresh` sub session must not be told it carries a history it does not
-    /// have — a model that believes it does answers around the gap instead of
-    /// asking.
-    #[test]
-    fn a_fresh_sub_session_is_told_it_carries_nothing() {
-        let fresh = sub_session_seed_text("Migrate the journal", &Seed::Fresh);
+        let summarised = summary_message(&Seed::Summary("We chose sqlx::Any.".to_string()))
+            .expect("a summary seeds its summary");
+        let ContentPart::Text(text) = &summarised.parts[0] else {
+            panic!("the summary is text");
+        };
         assert!(
-            fresh.contains("started from \"Migrate the journal\""),
-            "{fresh}"
+            text.text
+                .contains("# Summary of the session this was branched from")
         );
-        assert!(fresh.contains("carry none of its history"), "{fresh}");
-        assert!(fresh.contains("set_session_title"), "{fresh}");
-        assert!(!fresh.contains("# Summary"), "{fresh}");
+        assert!(text.text.contains("We chose sqlx::Any."));
+        // Nothing about being a sub session, and nothing about naming itself:
+        // both are the system prompt's, and saying either here is what made
+        // this message read as orientation rather than as content.
+        assert!(!text.text.contains("set_session_title"));
+        assert!(!text.text.contains("branched from \""));
     }
 }

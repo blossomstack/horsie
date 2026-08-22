@@ -271,12 +271,15 @@ describe("Sidebar sessions", () => {
   });
 });
 
-describe("subSessions in the rail", () => {
+describe("sub sessions in the rail", () => {
   function subSession(id: string, parent?: string, status = "idle", title?: string) {
     return { id, parent, title, status, createdAtMs: 1, lastActivityMs: 1 };
   }
 
-  it("nests a subSession of a subSession under the subSession it came from", async () => {
+  /* The rail lists sessions. A session's sub sessions are its shape, and the
+     graph draws that — lineage, status, and what each one spawned — so a row
+     per sub session here was a second structural view with less to say. */
+  it("lists sessions only, never the sub sessions under them", async () => {
     const s = session("s1");
     s.subSessions = [
       subSession("a", undefined, "idle", "first"),
@@ -285,49 +288,25 @@ describe("subSessions in the rail", () => {
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar();
 
-    const rows = await screen.findAllByTestId("subSession-row");
-    expect(rows.map((r) => r.getAttribute("data-subSession-id"))).toEqual(["a", "b"]);
-    expect(rows.map((r) => r.getAttribute("data-depth"))).toEqual(["0", "1"]);
+    await screen.findByTestId("session-row");
+    expect(screen.queryAllByTestId("subSession-row")).toHaveLength(0);
+    expect(screen.queryByText("first")).toBeNull();
+    expect(screen.queryByText("second")).toBeNull();
   });
 
-  /* The session row is the main agent, each sub session row is itself. A rollup would
-     be a derived status that can disagree with the durable one. */
-  it("badges each row with its own status, never a rollup", async () => {
-    const s = session("s1");
-    s.status = SessionStatusKind.Idle;
-    s.subSessions = [subSession("a", undefined, "running", "busy one")];
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    renderSidebar();
-
-    const subSessionRow = await screen.findByTestId("subSession-row");
-    expect(subSessionRow.getAttribute("title")).toMatch(/running|working/i);
-    const sessionRow = screen.getByTestId("session-row");
-    expect(sessionRow.getAttribute("title")).not.toMatch(/running|working/i);
-  });
-
-  it("names an unnamed subSession rather than showing its id", async () => {
-    const s = session("s1");
-    s.subSessions = [subSession("a")];
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    renderSidebar();
-
-    expect(await screen.findByText("Untitled subSession")).toBeTruthy();
-  });
-
-  /* A sub session's route is a descendant of its session's, and a `NavLink` counts a
-     descendant as active. So opening a subSession lit both rows and the rail claimed
-     two sessions were on screen at once. */
-  it("marks only the subSession as open when a subSession is the page", async () => {
+  /* With no row of its own, a sub session's session is the only thing that can
+     say where the reader is. While each sub session had a row this was the
+     opposite: the session row deliberately went dark so two rows could not
+     both claim to be on screen. */
+  it("marks the session as open while one of its sub sessions is the page", async () => {
     const s = session("s1");
     s.subSessions = [subSession("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar("/sessions/s1/agents/a");
 
-    const subSessionRow = await screen.findByTestId("subSession-row");
-    expect(subSessionRow.getAttribute("aria-current")).toBe("page");
     expect(
-      screen.getByTestId("session-row").getAttribute("aria-current"),
-    ).toBeNull();
+      (await screen.findByTestId("session-row")).getAttribute("aria-current"),
+    ).toBe("page");
   });
 
   it("marks the session as open when the session itself is the page", async () => {
@@ -336,20 +315,21 @@ describe("subSessions in the rail", () => {
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar("/sessions/s1");
 
-    const sessionRow = await screen.findByTestId("session-row");
-    expect(sessionRow.getAttribute("aria-current")).toBe("page");
     expect(
-      screen.getByTestId("subSession-row").getAttribute("aria-current"),
-    ).toBeNull();
+      (await screen.findByTestId("session-row")).getAttribute("aria-current"),
+    ).toBe("page");
   });
 
-  it("links a subSession to its own agent page", async () => {
-    const s = session("s1");
-    s.subSessions = [subSession("a", undefined, "idle", "branch")];
-    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
-    renderSidebar();
+  it("leaves another session's row dark", async () => {
+    const one = session("s1");
+    const two = session("s2");
+    two.subSessions = [subSession("a", undefined, "idle", "branch")];
+    vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [one, two] });
+    renderSidebar("/sessions/s2/agents/a");
 
-    const row = await screen.findByTestId("subSession-row");
-    expect(row.getAttribute("href")).toBe("/sessions/s1/agents/a");
+    await screen.findAllByTestId("session-row");
+    const rows = screen.getAllByTestId("session-row");
+    const current = rows.filter((r) => r.getAttribute("aria-current") === "page");
+    expect(current.map((r) => r.getAttribute("data-session-id"))).toEqual(["s2"]);
   });
 });

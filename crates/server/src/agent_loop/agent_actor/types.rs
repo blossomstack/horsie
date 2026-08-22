@@ -258,8 +258,8 @@ pub enum SeedCommand {
         at_seq: u64,
         reply: ReplyTo<Box<AgentState>>,
     },
-    /// Adopt `state` as this agent's whole history, append `seed` after it, and
-    /// queue `message` — all in one write.
+    /// Adopt `state` as this agent's whole history, append `seed` after it if
+    /// there is one, and queue `message` — all in one write.
     ///
     /// Sent once, to a sub session, before it has run anything, which is what
     /// makes replacing state wholesale safe. Journaled as one batch rather
@@ -272,7 +272,7 @@ pub enum SeedCommand {
     /// crash in between leaves a seeded sub session with nothing to do.
     SeedFrom {
         state: Box<AgentState>,
-        seed: Box<Message>,
+        seed: Option<Box<Message>>,
         message: crate::agent_loop::Incoming,
         reply: ReplyTo<Result<(), String>>,
     },
@@ -314,19 +314,24 @@ pub enum AbandonedStart {
 /// (text/tool-input deltas) are emitted to the event sink but never journaled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentDomainEvent {
-    /// This agent was seeded from another session: `state` is the history
-    /// it adopts, `seed` the synthetic message appended after it.
+    /// This agent was seeded from another session: `state` is the history it
+    /// adopts, `seed` a synthetic message appended after it.
     ///
     /// One event rather than a snapshot written behind the actor's back, so a
     /// sub session's own journal explains where its history came from. Only
     /// ever the *first* event an agent has — replacing state wholesale is safe
     /// precisely because nothing has run.
     ///
+    /// `seed` is `None` for every mode but a summary. A copy's history *is* the
+    /// context and a fresh sub session's brief is queued behind this event, so
+    /// only a summary has something to say that is nowhere else.
+    ///
     /// Boxed: a whole session is far larger than any other variant here,
     /// and an enum is as big as its widest arm.
     Seeded {
         state: Box<AgentState>,
-        seed: Box<Message>,
+        #[serde(default)]
+        seed: Option<Box<Message>>,
     },
     InputMessage {
         message: Message,

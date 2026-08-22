@@ -140,7 +140,7 @@ describe("SessionTimeline", () => {
 
   it("separates subSessions from subagents", () => {
     view(TIMELINE);
-    expect(screen.getByText("subSessioned sessions")).toBeTruthy();
+    expect(screen.getByText("sub sessions")).toBeTruthy();
   });
 
   it("says what a collapsed gap swallowed", () => {

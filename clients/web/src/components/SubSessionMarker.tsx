@@ -9,11 +9,11 @@ import type { RenderedSubSession } from "../hooks/useSessionStream";
 function subSessionLabel(seed: string) {
   switch (seed) {
     case "summary":
-      return "subSessioned from here, with a summary";
+      return "branched from here, with a summary";
     case "fresh":
       return "handed off from here";
     default:
-      return "subSessioned from here";
+      return "branched from here";
   }
 }
 

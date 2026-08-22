@@ -23,8 +23,6 @@ import {
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionList } from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
-import { SubSessionRow } from "./SubSessionRow";
-import { subSessionTree } from "../lib/subSessionTree";
 import { SessionRow } from "./SessionRow";
 import { TagFilterPanel } from "./TagFilterPanel";
 import { ThemeToggle } from "./ThemeToggle";
@@ -307,24 +305,11 @@ export function Sidebar() {
           ))}
         {!isLoading &&
           !isError &&
-          shown.map((s) => (
-            <div key={s.id}>
-              <SessionRow s={s} tags={tags} />
-              {/* Sub sessions nest under the session they branched from. Built
-                  from the flat, parent-linked list the registry holds, so
-                  listing sessions still loads none of them. */}
-              {subSessionTree(s.subSessions).map(({ subSession, depth, rails, last }) => (
-                <SubSessionRow
-                  key={subSession.id}
-                  sessionId={s.id}
-                  subSession={subSession}
-                  depth={depth}
-                  rails={rails}
-                  last={last}
-                />
-              ))}
-            </div>
-          ))}
+          // Sessions only. A session's sub sessions are its *shape*, and the
+          // graph draws that — lineage, what each one is doing, and what each
+          // one spawned — so listing them here as well was a second structural
+          // view of the same thing, and the one with less to say.
+          shown.map((s) => <SessionRow key={s.id} s={s} tags={tags} />)}
       </nav>
 
       {/* The scope everything above belongs to, and the server-level

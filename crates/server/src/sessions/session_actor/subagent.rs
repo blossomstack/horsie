@@ -250,6 +250,7 @@ impl SessionActor {
                 settings,
                 step_result: Default::default(),
                 agent_type,
+                origin: None,
             },
         )
         .map(|resident| resident.actor)

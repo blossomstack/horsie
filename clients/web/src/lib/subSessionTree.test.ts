@@ -29,49 +29,8 @@ describe("subSessionTree", () => {
   it("shows a subSession whose parent is gone at the top level", () => {
     const placed = subSessionTree([subSession("orphan", "deleted")]);
     expect(placed).toEqual([
-      { subSession: subSession("orphan", "deleted"), depth: 0, rails: [], last: true },
+      { subSession: subSession("orphan", "deleted"), depth: 0 },
     ]);
-  });
-
-  it("marks the last child of a level, so it draws an elbow and not a tee", () => {
-    const placed = subSessionTree([subSession("a", undefined, 1), subSession("b", undefined, 2)]);
-    expect(placed.map((p) => [p.subSession.id, p.last])).toEqual([
-      ["a", false],
-      ["b", true],
-    ]);
-  });
-
-  /* The rail that makes a deep sub session read as descended from its grandparent
-     rather than merely printed below it. */
-  it("carries a rail through the column of an ancestor with more siblings", () => {
-    //  a          <- has a sibling below (c), so its column keeps a rail
-    //  └ b        <- and b's own column is drawn beside that rail
-    //  c
-    const placed = subSessionTree([
-      subSession("a", undefined, 1),
-      subSession("b", "a", 2),
-      subSession("c", undefined, 3),
-    ]);
-    expect(placed.map((p) => [p.subSession.id, p.rails])).toEqual([
-      ["a", []],
-      ["b", [true]],
-      ["c", []],
-    ]);
-  });
-
-  it("leaves the column blank once an ancestor has nothing below it", () => {
-    // `a` is last at its level, so nothing continues past it in that column.
-    const placed = subSessionTree([subSession("a", undefined, 1), subSession("b", "a", 2)]);
-    expect(placed.map((p) => p.rails)).toEqual([[], [false]]);
-  });
-
-  it("gives a rail per ancestor level, however deep", () => {
-    const placed = subSessionTree([
-      subSession("a", undefined, 1),
-      subSession("b", "a", 2),
-      subSession("c", "b", 3),
-    ]);
-    expect(placed.map((p) => p.rails.length)).toEqual([0, 1, 2]);
   });
 
   it("shows a subSession the descent cannot reach rather than dropping it", () => {
@@ -80,7 +39,7 @@ describe("subSessionTree", () => {
     expect(subSessionTree(cyclic).map((p) => p.subSession.id).sort()).toEqual(["a", "b"]);
   });
 
-  it("is empty for a session nobody subSessioned", () => {
+  it("is empty for a session nobody branched", () => {
     expect(subSessionTree([])).toEqual([]);
   });
 });

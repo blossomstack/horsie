@@ -20,6 +20,7 @@ use crate::agent_loop::{
     StartTurn, ToolboxFactory, TurnPreparation, compose_system_prompt, scan_workspace,
 };
 use crate::sessions::addressing::SessionRef;
+use crate::sessions::run_forest::SeedMode;
 use crate::{
     runtime_manager::{NARRATION_BUFFER, RuntimeClientProvider, RuntimeError},
     sessions::{
@@ -131,6 +132,20 @@ pub(crate) struct StepResultDef {
     pub(crate) outcomes: Vec<horsie_models::workflow::StepOutcome>,
     pub(crate) fields: Vec<horsie_models::workflow::StepField>,
     pub(crate) interactive: bool,
+}
+
+/// Where a sub session came from: how its history was seeded, and what to call
+/// the session it branched from.
+///
+/// Snapshotted when the sub session's actor is spawned rather than read per
+/// run. Both facts are stable — the mode never changes, and the source's title
+/// at the moment of the branch is what "branched from X" means — and a live
+/// re-read would rewrite the system prompt, and so invalidate the prompt cache,
+/// every time the source renamed itself.
+#[derive(Clone, Debug)]
+pub(crate) struct SubSessionOrigin {
+    pub(crate) mode: SeedMode,
+    pub(crate) source_title: String,
 }
 
 /// Wrap `base` with the control-plane tools, and render the command index for
@@ -295,14 +310,44 @@ done, submit.";
 /// Appended to a sub session's system prompt.
 ///
 /// A sub session is a session, so almost nothing a subagent is told applies: it
-/// can ask the user, and it owes nobody a report. What it does need is to know
-/// it is one of several under one session sharing one workspace, and that its
-/// title is how a person tells them apart.
-const FORK_PROMPT_SUFFIX: &str = "\n\n# Forked session\n\
-You are a sub_session: a session branched from another one in this session, carrying its \
-history up to the branch point. You share one workspace with it — what you change on disk \
-is what it sees. Name yourself with set_session_title as soon as the new direction is \
-clear; that title is how a person tells this session from the one it came from.";
+/// can ask the user, and it owes nobody a report. What it does need is the two
+/// things nothing else in its prompt can tell it: which session it branched
+/// from and what history that actually left it with, and that the workspace
+/// under it is shared with sessions running right now.
+///
+/// Built per mode rather than written once, because the three modes leave a
+/// sub session in genuinely different places. One sentence for all three said a
+/// `Fresh` sub session was "carrying its history up to the branch point", which
+/// is the one thing a `Fresh` sub session does not have.
+///
+/// No title instruction here. The base prompt's `## Session title` section
+/// already tells every session to name itself on the first turn, and a sub
+/// session gets that prompt like any other.
+fn sub_session_prompt(origin: &SubSessionOrigin) -> String {
+    let source = &origin.source_title;
+    let carried = match origin.mode {
+        SeedMode::Copy => format!(
+            "You carry \"{source}\"'s history up to the moment you were branched: \
+             everything before the message that started you is its conversation, not \
+             yours."
+        ),
+        SeedMode::Summary => format!(
+            "You carry a summary of \"{source}\" rather than its messages — it is the \
+             first message here. Anything the summary leaves out, you do not have."
+        ),
+        SeedMode::Fresh => format!(
+            "You carry none of \"{source}\"'s history. The first message is a brief \
+             written for you by the session that started you, and is all you have been \
+             given: if it leaves something out, ask rather than answering around it."
+        ),
+    };
+    format!(
+        "\n\n# Sub session\n\
+         You are a sub session: a session branched from \"{source}\", which is still \
+         running. {carried} You share one workspace with it — what you change on disk is \
+         what it sees, and what it changes is what you see."
+    )
+}
 
 /// Appended to an unattended session's system prompt (a routine run). It has
 /// no `ask_user` tool, so the prompt says why rather than leaving the model to
@@ -341,6 +386,9 @@ pub(super) struct SessionContextProvider {
     /// the library scan on every `provide()`, so a subagent that outlives its
     /// plugin fails rather than running a prompt nobody can point at.
     pub(super) agent_type: Option<String>,
+    /// Where this sub session came from, for the `# Sub session` section of its
+    /// prompt. `None` for every other kind of agent.
+    pub(super) origin: Option<SubSessionOrigin>,
     /// Whether nobody is watching this session (a routine run). Decides one
     /// thing: the main agent gets no `ask_user`, and is told why.
     pub(super) unattended: bool,
@@ -1039,11 +1087,17 @@ impl ContextProvider for SessionContextProvider {
                 a.def.name, a.def.prompt
             )
         });
+        // Owned rather than borrowed because a sub session's is built from its
+        // origin — there is no constant to point at.
+        let sub_session_role = self.origin.as_ref().map(sub_session_prompt);
         let suffix: Option<&str> = match &self.kind {
             SessionAgentKind::Main if self.unattended => Some(UNATTENDED_PROMPT_SUFFIX),
             SessionAgentKind::Main => None,
             SessionAgentKind::Step(_) => Some(STEP_PROMPT_SUFFIX),
-            SessionAgentKind::SubSession(_) => Some(FORK_PROMPT_SUFFIX),
+            // Nothing at all when the origin is missing, which only a spawn
+            // that lost the record can produce: a sub session told it branched
+            // from a session nobody can name learns less than one told nothing.
+            SessionAgentKind::SubSession(_) => sub_session_role.as_deref(),
             SessionAgentKind::Sub(_) => {
                 Some(subagent_role.as_deref().unwrap_or(SUBAGENT_PROMPT_SUFFIX))
             }
@@ -1186,6 +1240,7 @@ mod tests {
             step_result: StepResultDef::default(),
             session_id: id,
             kind,
+            origin: None,
             unattended: false,
             session: session.clone(),
             plugins: Vec::new(),
@@ -1251,6 +1306,7 @@ mod tests {
             session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
+            origin: None,
             unattended: false,
             session: session.clone(),
             plugins: Vec::new(),
@@ -1296,6 +1352,7 @@ mod tests {
             session_id: id,
             kind: SessionAgentKind::Main,
             agent_type: None,
+            origin: None,
             unattended,
             session: session.clone(),
             plugins: Vec::new(),
@@ -1534,6 +1591,51 @@ mod tests {
         );
     }
 
+    /// Each mode says what that mode actually left the sub session holding.
+    ///
+    /// One sentence for all three used to tell a `Fresh` sub session it was
+    /// "carrying its history up to the branch point" — the one thing a fresh
+    /// one does not have, and a model that believes it answers around the gap
+    /// instead of asking.
+    #[test]
+    fn the_sub_session_section_says_what_each_mode_carries() {
+        let of = |mode| {
+            sub_session_prompt(&SubSessionOrigin {
+                mode,
+                source_title: "Migrate the journal".to_string(),
+            })
+        };
+
+        let copy = of(SeedMode::Copy);
+        assert!(
+            copy.contains("branched from \"Migrate the journal\""),
+            "{copy}"
+        );
+        assert!(
+            copy.contains("carry \"Migrate the journal\"'s history"),
+            "{copy}"
+        );
+
+        let summary = of(SeedMode::Summary);
+        assert!(summary.contains("carry a summary"), "{summary}");
+
+        let fresh = of(SeedMode::Fresh);
+        assert!(fresh.contains("carry none of"), "{fresh}");
+        assert!(
+            !fresh.contains("up to the moment you were branched"),
+            "a fresh sub session must not be told it carries a history: {fresh}"
+        );
+
+        // The shared workspace is the other thing nothing else can tell it.
+        for prompt in [&copy, &summary, &fresh] {
+            assert!(prompt.contains("share one workspace"), "{prompt}");
+            // The base prompt's `## Session title` section already asks every
+            // session to name itself. Asking again here is what made this
+            // section nag long after the sub session was named.
+            assert!(!prompt.contains("set_session_title"), "{prompt}");
+        }
+    }
+
     /// The agent's body is added to the generic subagent role, and its `tools`
     /// allowlist reaches the toolbox through the same alias table hook matchers
     /// use.
@@ -1614,6 +1716,7 @@ mod tests {
             session_id: id,
             kind: SessionAgentKind::Sub(Uuid::new_v4()),
             agent_type: Some("uninstalled-agent".to_string()),
+            origin: None,
             unattended: false,
             session: session.clone(),
             plugins: Vec::new(),
@@ -1816,6 +1919,7 @@ mod tests {
             step_result: StepResultDef::default(),
             session_id: id,
             kind,
+            origin: None,
             unattended: false,
             session,
             plugins: Vec::new(),

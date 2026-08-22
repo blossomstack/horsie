@@ -96,6 +96,9 @@ middle setting is a **timeline**: the same session drawn along one axis instead
 of down a page. Use it to find where the time went, or to see what a session
 delegated without scrolling for it.
 
+The message box belongs to the transcript, so neither picture has one under it
+— press the switch's left setting to go back to the conversation and type.
+
 The top lane is the main agent, one bar per entry — what you said, what it
 thought, each tool call, each answer — coloured by kind and as wide as it took.
 Subagents and sub sessions get their own lanes below, each running from
@@ -124,16 +127,20 @@ The view is in the address bar, so a link to it opens on the timeline.
 
 ## See what it spawned
 
-The switch's third setting is a **graph**: every agent the session holds, drawn
-as the tree it is. Where the timeline answers *when*, this answers
-*what spawned what* — reach for it when a session has delegated deeply enough
-that the lineage is the thing you are trying to follow.
+The switch's third setting is a **graph**: every agent the session holds and
+every sub session branched from it, drawn as the one tree they are. Where the
+timeline answers *when*, this answers *what spawned what* — reach for it when a
+session has branched or delegated deeply enough that the lineage is the thing
+you are trying to follow. It is also how you reach a sub session: the rail
+lists sessions, and this is where their shape lives.
 
-The main agent sits on the left, and everything it spawned hangs off it to the
-right, generation by generation. Each box gives an agent's name, what it is
-doing right now, and the preset it runs; its colour is its status, the same
-lamp colours the rest of the console uses. Hover one for its full name, how
-long it took and when it started.
+The main agent sits on the left, and everything below it hangs off to the
+right, generation by generation. Each box gives a name, what it is doing right
+now, and the preset it runs; its colour is its status, the same lamp colours
+the rest of the console uses. A sub session is drawn on a second card behind
+the first, because it is a session you talk to rather than an agent the session
+delegated to. Hover one for its full name, how long it took and when it
+started.
 
 From there:
 
@@ -199,8 +206,10 @@ happened, linking to the sub session that left.
 
 A sub session is a session in every way that matters: it can ask you questions,
 spawn its own subagents, and be branched again. It names itself once the
-direction is clear, and appears in the rail nested under the session it belongs
-to, with its own status lamp. Branching a sub session nests one level deeper.
+direction is clear, and appears on the session's [graph](#see-what-it-spawned)
+hanging off whatever it branched from, with its own status lamp. Branching a
+sub session nests one level deeper. Its own page carries its name after the
+session's, so you always know which conversation you are in.
 
 The agent can also start one on its own, without waiting to be asked. Its
 `spawn_subsession` tool hands a *task* to a sub session — no copy, no
@@ -209,12 +218,13 @@ same way it writes one for a subagent. When the work splits into a direction you
 will want to steer separately, it can give that direction its own sub session
 and carry on with the rest.
 
-The sub session appears in the rail the moment it exists, shares the workspace
+The sub session appears on the graph the moment it exists, shares the workspace
 like any other, and starts on the brief and nothing else — so it is yours to
 talk to from the first message. The agent hears nothing back from it.
 
-Nothing ever removes a sub session on its own. Delete one from its menu in the
-rail when you are done with it; deleting a session removes its sub sessions too.
+Nothing ever removes a sub session on its own. Delete one with the bin key on
+its own page when you are done with it; deleting a session removes its sub
+sessions too.
 
 ## Stop, or delete
 
@@ -226,7 +236,9 @@ by any one session, so it keeps running.
 
 ## The session rail
 
-The left rail lists every session with a status lamp, and carries its own lamp
+The left rail lists every session with a status lamp — sessions only; a
+session's sub sessions are its shape, and the graph draws that — and carries
+its own lamp
 for the rail's connection to the server — so a dead feed is visible before you
 click anything. From it you can search by name, create a session, and reach
 **Agents**, **Settings** and **Admin** from the footer. On a narrow screen it

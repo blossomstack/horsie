@@ -468,6 +468,7 @@ impl SessionActor {
                     interactive: step.interactive,
                 },
                 agent_type: None,
+                origin: None,
             },
         )
         .map(|resident| resident.actor)

@@ -170,3 +170,70 @@ test("Z5: the view you picked is remembered, and a link still overrides it", asy
   await expect(page.getByTestId("agent-graph")).toHaveCount(0);
   await expect(page.getByTestId("transcript-toggle")).toHaveAttribute("aria-checked", "true");
 });
+
+/** A sub session is on the graph, and the graph is how you reach one.
+ *
+ * The rail lists sessions only, so this is the surface that has to work: with
+ * sub sessions missing from the roster it laid out, a session made entirely of
+ * them drew one node and said it had branched nothing.
+ */
+test("Z6: a sub session is drawn under the session it branched from, and opens from there", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.reset();
+  await mock.queueText("the original answer");
+  await mock.queueText("the sub session's answer");
+
+  await createSession(page, appBase);
+  await sendMessage(page, "start the migration");
+  await expectStatus(page, "Idle");
+
+  // `/fork` redirects to the sub session it just made; the graph is the
+  // session's, so go back to it.
+  await sendMessage(page, "/fork try the other way");
+  await page.waitForURL(/\/agents\/[0-9a-f-]+$/);
+  const subSessionUrl = page.url();
+  await page.goBack();
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+(\?.*)?$/);
+
+  await page.getByTestId("graph-toggle").click();
+  await expect(page.getByTestId("agent-graph")).toBeVisible();
+  // The main agent and the sub session — not the "nothing has branched from
+  // this session" line, which is what a roster of agents alone produced.
+  await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(2);
+  await expect(page.getByTestId("agent-graph-lonely")).toHaveCount(0);
+  const branched = page.locator('[data-testid^="agent-node-"][data-kind="sub_session"]');
+  await expect(branched).toHaveCount(1);
+
+  await branched.click();
+  await expect(page).toHaveURL(subSessionUrl.replace(/\?.*$/, ""));
+});
+
+/** The composer belongs to the transcript.
+ *
+ * Under a picture of the session it was an input wired to something the reader
+ * was not looking at. */
+test("Z7: the timeline and the graph have no composer under them", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await delegatingSession(page, appBase, mock);
+
+  await expect(page.getByTestId("composer-input")).toBeVisible();
+
+  await page.getByTestId("graph-toggle").click();
+  await expect(page.getByTestId("agent-graph")).toBeVisible();
+  await expect(page.getByTestId("composer-input")).toHaveCount(0);
+  await expect(page.getByTestId("session-config-bar")).toHaveCount(0);
+
+  await page.getByTestId("timeline-toggle").click();
+  await expect(page.getByTestId("session-timeline")).toBeVisible();
+  await expect(page.getByTestId("composer-input")).toHaveCount(0);
+
+  // And it comes back with the conversation.
+  await page.getByTestId("transcript-toggle").click();
+  await expect(page.getByTestId("composer-input")).toBeVisible();
+});

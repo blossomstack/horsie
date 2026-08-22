@@ -29,9 +29,15 @@ export function SessionRow({
   const navigate = useNavigate();
   const [draft, setDraft] = useState("");
   const mine = new Set(sessionTags(s));
-  // Whether this row is the session on screen. `useMatch` rather than
-  // `useParams`, because the rail is mounted outside the route that names one.
-  const open = useMatch("/sessions/:id")?.params.id === s.id;
+  // Whether this row is the session on screen — including when what is on
+  // screen is one of its sub sessions or one of its workflow's steps, both of
+  // which live at `/sessions/:id/agents/:agentId`. The rail lists sessions
+  // only, so this row is the only thing that can say where you are; matching
+  // the exact path alone left a reader inside a sub session with no lit row at
+  // all. `useMatch` rather than `useParams`, because the rail is mounted
+  // outside the route that names one.
+  const inside = useMatch("/sessions/:id/*")?.params.id;
+  const open = (useMatch("/sessions/:id")?.params.id ?? inside) === s.id;
 
   const remove = async () => {
     if (!(await askConfirm(`Delete “${title}”? This cannot be undone.`))) return;
@@ -60,12 +66,11 @@ export function SessionRow({
     <div className="group relative">
       <NavLink
         to={`/sessions/${s.id}`}
-        // A sub session lives at `/sessions/:id/agents/:forkId`, which is a
-        // *descendant* of this path — so without `end` opening a sub session lit its
-        // parent session up as well and two rows claimed to be the one on
-        // screen. `open` below already made this distinction; the styling
-        // simply never got it.
-        end
+        // Deliberately not `end`: a sub session lives at
+        // `/sessions/:id/agents/:agentId`, a *descendant* of this path, and
+        // this row is what says which session that sub session belongs to.
+        // It was `end` while the rail drew a row per sub session — then two
+        // rows claimed to be the one on screen — and the rail no longer does.
         data-testid="session-row"
         data-session-id={s.id}
         title={`${title} — ${meta.hint}`}
