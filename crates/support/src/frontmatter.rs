@@ -41,6 +41,25 @@ pub fn pairs(front: &str) -> Option<Vec<(String, String)>> {
     Some(out)
 }
 
+/// Render a `---`-fenced header from scalar pairs, so that [`split`] and
+/// [`pairs`] read back exactly what was written.
+///
+/// Through `serde_yaml` rather than `format!`, because frontmatter is real
+/// YAML: a value holding `: `, a leading `-`, or a newline is not a scalar
+/// unless it is quoted, and a hand-built header carrying one either fails to
+/// parse or — worse — parses as something else. Anything writing a header this
+/// crate will later read must come through here.
+#[must_use]
+pub fn render(pairs: &[(&str, &str)]) -> String {
+    let mut mapping = serde_yaml::Mapping::new();
+    for (key, value) in pairs {
+        mapping.insert((*key).into(), (*value).into());
+    }
+    let body = serde_yaml::to_string(&serde_yaml::Value::Mapping(mapping))
+        .unwrap_or_else(|_| String::new());
+    format!("---\n{}---\n", body)
+}
+
 /// Strip one matched pair of surrounding quotes.
 #[must_use]
 pub fn unquote(s: &str) -> &str {
@@ -73,6 +92,37 @@ pub fn comma_list(value: &str) -> Vec<String> {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
+
+    /// The round trip that makes the renderer safe to point at agent-authored
+    /// text: whatever goes in comes back out, including the values that would
+    /// break a header built by hand.
+    #[test]
+    fn rendered_pairs_read_back_verbatim() {
+        for value in [
+            "plain",
+            "has: a colon",
+            "first\n---\nname: evil",
+            "- leading dash",
+            "#hash",
+            "  padded  ",
+            "quote\"inside",
+            "",
+        ] {
+            let doc = format!("{}body", render(&[("name", "x"), ("description", value)]));
+            let (front, body) = split(&doc).expect("a rendered header must split");
+            let pairs = pairs(front).expect("a rendered header must parse");
+            let got: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            assert_eq!(
+                got,
+                vec![("name", "x"), ("description", value)],
+                "value {value:?} did not survive"
+            );
+            assert_eq!(body, "body");
+        }
+    }
     use super::*;
 
     #[test]

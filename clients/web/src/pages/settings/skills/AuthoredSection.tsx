@@ -1,0 +1,256 @@
+import { ChevronRight, History, Loader2, PenLine, Plus, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { askConfirm } from "../../../lib/confirm";
+import type { AuthoredPluginView, AuthoredSkillSummary } from "../../../api/types";
+import {
+  useCreateAuthoredPlugin,
+  useRemoveAuthoredPlugin,
+  useRemoveSkill,
+  useRestoreSkill,
+  useSkillRevisions,
+} from "../../../hooks/useAuthored";
+
+/**
+ * A skill's revisions, fetched only once someone asks for them.
+ *
+ * The history is the reason the rows are append-only, so it is worth surfacing
+ * — but a page listing every plugin must not fetch every skill's history to
+ * render a list nobody has opened.
+ */
+function Revisions({ plugin, skill }: { plugin: string; skill: string }) {
+  const { data, isLoading, isError } = useSkillRevisions(plugin, skill, true);
+  const restore = useRestoreSkill();
+
+  if (isLoading) {
+    return <p className="px-2 py-1.5 text-xs text-faint">Loading history…</p>;
+  }
+  if (isError || !data) {
+    return (
+      <p className="px-2 py-1.5 text-xs text-faint">
+        Could not read this skill's history.
+      </p>
+    );
+  }
+  return (
+    <ul className="mt-1 space-y-1" data-testid="skill-revisions">
+      {data.map((r) => (
+        <li
+          key={r.revision}
+          className="flex items-center gap-2 px-2 text-[0.6875rem] text-dim"
+        >
+          <span className="chip !py-0 text-[0.625rem]">r{r.revision}</span>
+          <span className="min-w-0 flex-1 truncate">
+            {r.deleted ? <em className="text-faint">deleted</em> : r.description}
+          </span>
+          {/* Restoring the current revision is a no-op that still costs a
+              generation bump, so it is not offered. */}
+          {!r.deleted && r.revision !== data[0]?.revision && (
+            <button
+              type="button"
+              className="text-faint hover:text-dim"
+              onClick={() =>
+                restore.mutate({ plugin, skill, revision: r.revision })
+              }
+            >
+              restore
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SkillRow({ skill }: { skill: AuthoredSkillSummary }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const remove = useRemoveSkill();
+
+  return (
+    <li
+      className="rounded-[var(--radius-control)] border px-2.5 py-2"
+      data-testid="authored-skill"
+    >
+      <div className="flex items-center gap-2">
+        <PenLine size={12} className="shrink-0 text-faint" />
+        <span className="min-w-0 flex-1">
+          <span className="truncate text-sm">{skill.name}</span>
+          <span className="ml-2 text-[0.6875rem] text-faint">
+            r{skill.revision}
+          </span>
+          <p className="truncate text-xs text-dim">{skill.description}</p>
+        </span>
+        <button
+          type="button"
+          className="text-faint hover:text-dim"
+          aria-label={`History of ${skill.name}`}
+          aria-expanded={showHistory}
+          onClick={() => setShowHistory((v) => !v)}
+        >
+          <History size={13} />
+        </button>
+        <button
+          type="button"
+          className="text-faint hover:text-[var(--danger)]"
+          aria-label={`Delete ${skill.name}`}
+          onClick={async () => {
+            if (
+              await askConfirm(
+                `Delete skill "${skill.name}"? Its history is kept, so it can be restored.`,
+              )
+            ) {
+              remove.mutate({ plugin: skill.plugin, skill: skill.name });
+            }
+          }}
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+      {showHistory && <Revisions plugin={skill.plugin} skill={skill.name} />}
+    </li>
+  );
+}
+
+function PluginRow({ plugin }: { plugin: AuthoredPluginView }) {
+  const [open, setOpen] = useState(false);
+  const remove = useRemoveAuthoredPlugin();
+
+  return (
+    <div
+      className="rounded-[var(--radius-control)] border p-3"
+      style={{ background: "var(--panel-raised)" }}
+      data-testid="authored-plugin-row"
+    >
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="item-title truncate">{plugin.name}</span>
+            {/* The generation, not a semver: it is what a runtime fetches by,
+                and it moves on every edit. */}
+            <span className="chip !py-0 text-[0.625rem]">
+              gen {plugin.generation}
+            </span>
+          </div>
+          {plugin.description && (
+            <p className="mt-0.5 text-xs text-dim">{plugin.description}</p>
+          )}
+          <button
+            type="button"
+            className="mt-0.5 flex items-center gap-1 text-[0.6875rem] text-faint hover:text-dim"
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            disabled={plugin.skills.length === 0}
+          >
+            <ChevronRight
+              size={11}
+              className={open ? "rotate-90 transition-transform" : "transition-transform"}
+            />
+            {plugin.skills.length === 1
+              ? "1 skill"
+              : `${plugin.skills.length} skills`}
+          </button>
+        </div>
+        <button
+          type="button"
+          className="text-faint hover:text-[var(--danger)]"
+          aria-label={`Delete ${plugin.name}`}
+          onClick={async () => {
+            if (
+              await askConfirm(
+                `Delete "${plugin.name}"? This removes every skill in it and its entry in the bundle library.`,
+              )
+            ) {
+              remove.mutate(plugin.name);
+            }
+          }}
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+      {open && (
+        <ul className="mt-2 space-y-1.5">
+          {plugin.skills.map((s) => (
+            <SkillRow key={s.name} skill={s} />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Plugins written on this server rather than cloned into it.
+ *
+ * A section of its own rather than rows mixed into the library, because the
+ * actions differ: there is nothing to update from, and there is a history to
+ * roll back through. The published bundle still appears under Installed
+ * bundles, which is where it is switched on for new sessions.
+ */
+export function AuthoredSection({
+  plugins,
+}: {
+  plugins: AuthoredPluginView[];
+}) {
+  const [name, setName] = useState("");
+  const create = useCreateAuthoredPlugin();
+
+  return (
+    <section className="panel p-4" data-testid="authored-section">
+      <div className="mb-3 flex items-start gap-2">
+        <PenLine size={15} className="mt-0.5 text-faint" />
+        <div>
+          <h2 className="section-title">Authored here</h2>
+          <p className="mt-0.5 text-xs text-faint">
+            Plugins whose skills live in this server's database. Agents write
+            them through the authoring tools; you can read, roll back and remove
+            them here.
+          </p>
+        </div>
+      </div>
+
+      <div className="mb-3 flex gap-2">
+        <input
+          className="input flex-1"
+          placeholder="new-plugin-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          aria-label="New authored plugin name"
+        />
+        <button
+          type="button"
+          className="btn"
+          disabled={!name.trim() || create.isPending}
+          onClick={() =>
+            create.mutate(
+              { name: name.trim(), description: undefined },
+              { onSuccess: () => setName("") },
+            )
+          }
+        >
+          {create.isPending ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <Plus size={15} />
+          )}
+          Create
+        </button>
+      </div>
+      {create.isError && (
+        <p className="mb-2 text-xs text-[var(--danger)]">
+          {(create.error as Error).message}
+        </p>
+      )}
+
+      <div className="space-y-2.5">
+        {plugins.length === 0 && (
+          <p className="rounded-[var(--radius-control)] border border-dashed px-3 py-4 text-center text-sm text-faint">
+            Nothing authored yet. A session with the authoring tools selected
+            can write skills here.
+          </p>
+        )}
+        {plugins.map((p) => (
+          <PluginRow key={p.name} plugin={p} />
+        ))}
+      </div>
+    </section>
+  );
+}

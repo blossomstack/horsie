@@ -40,6 +40,7 @@ pub const GROUP_TIMERS: &str = "timers";
 pub const GROUP_DELEGATION: &str = "delegation";
 pub const GROUP_WORKFLOWS: &str = "workflows";
 pub const GROUP_SESSION: &str = "session";
+pub const GROUP_AUTHORING: &str = "authoring";
 pub const GROUP_CONTROL: &str = "control";
 
 /// The prefix every control-plane tool carries. Mirrors `control::toolbox`'s own
@@ -133,6 +134,38 @@ const SESSION: &[Row] = &[
     write(
         "ask_user",
         "Put a question to the person and wait for an answer.",
+    ),
+];
+
+/// Authoring is authority, so this group is out of the default set: a skill
+/// written here is loadable by every session the account starts afterwards.
+/// Governed rather than gated by a channel of its own — unlike `memory_*`,
+/// whose spaces are the sharper question — because the selection is the whole
+/// grant and a second flag could only disagree with it.
+const AUTHORING: &[Row] = &[
+    write(
+        crate::plugins::authored::toolbox::PLUGIN_WRITE,
+        "Create a plugin to hold skills you author.",
+    ),
+    write(
+        crate::plugins::authored::toolbox::SKILL_WRITE,
+        "Write or edit a skill in one of your plugins.",
+    ),
+    write(
+        crate::plugins::authored::toolbox::SKILL_DELETE,
+        "Remove a skill you wrote.",
+    ),
+    read(
+        crate::plugins::authored::toolbox::SKILL_LIST,
+        "List the skills you have written.",
+    ),
+    read(
+        crate::plugins::authored::toolbox::SKILL_HISTORY,
+        "Show a skill's past revisions.",
+    ),
+    write(
+        crate::plugins::authored::toolbox::SKILL_RESTORE,
+        "Put a skill back to one of its revisions.",
     ),
 ];
 
@@ -264,6 +297,15 @@ pub fn catalog() -> ToolCatalog {
                 SESSION,
                 true,
             ),
+            group(
+                GROUP_AUTHORING,
+                "Authoring",
+                "Write skills of your own and keep them, so a later session can load \
+                 what you worked out in this one. Anything written here is offered to \
+                 every session this account starts, so selecting these grants that.",
+                AUTHORING,
+                false,
+            ),
             control_group(),
         ],
     }
@@ -354,15 +396,30 @@ mod tests {
         assert!(!resolve(None).is_empty());
     }
 
+    /// A resource the model can reach must be selectable, and one it cannot
+    /// must not appear in the picker at all.
+    ///
+    /// Both directions, because each is a different mistake. A resource that
+    /// gained a tool without a catalogue row would be ungovernable; one that is
+    /// `Expose::Api` throughout — as `authored-plugins` is, since agents author
+    /// through the `authoring` group instead — would otherwise be offered as a
+    /// grant that hands out nothing.
     #[test]
-    fn every_control_resource_has_a_tool() {
+    fn a_control_resource_is_catalogued_exactly_when_it_offers_a_tool() {
         let group = control_group();
         let names: HashSet<String> = group.tools.iter().map(|t| t.name.clone()).collect();
         for resource in crate::control::resources() {
-            assert!(
+            let reachable = resource
+                .operations()
+                .iter()
+                .any(|o| o.expose != crate::control::Expose::Api);
+            assert_eq!(
                 names.contains(&control_tool_name(resource.name())),
-                "control resource '{}' is missing from the catalogue",
-                resource.name()
+                reachable,
+                "control resource '{}' is catalogued as {}, but exposes {} to the model",
+                resource.name(),
+                if reachable { "absent" } else { "present" },
+                if reachable { "a tool" } else { "nothing" }
             );
         }
     }

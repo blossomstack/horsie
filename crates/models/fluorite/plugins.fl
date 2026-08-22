@@ -16,26 +16,70 @@ struct CatalogEntryView {
     argument_hint: Option<String>,
 }
 
+/// A bundle cloned from git. Both external kinds carry the same fields — they
+/// differ only in the packaging convention the checked-out tree follows, which
+/// decides which manifest is re-read on update and whether the bundle is
+/// already portable to other clients.
+struct ExternalOrigin {
+    url: String,
+    git_ref: Option<String>,
+    /// The subdirectory within the clone that is the plugin, when the source
+    /// named one.
+    subpath: Option<String>,
+    /// The marketplace this bundle was picked from, when it came from one. A
+    /// bundle installed from a plain git URL has none.
+    marketplace: Option<String>,
+    /// The entry's name in that marketplace, which need not match the bundle's
+    /// own — `42crunch-api-security-testing` installs as `api-security-testing`.
+    marketplace_entry: Option<String>,
+}
+
+/// A bundle whose source is rows in this server's database.
+struct AuthoredOrigin {
+    /// Bumped on every save. Names one revision of the plugin's rows, and is
+    /// what a runtime fetches the rendered package by.
+    generation: u64,
+}
+
+/// What a bundle is: where its bytes come from, and therefore how it is
+/// identified, updated and rendered.
+///
+/// A union rather than a `source_kind` string beside four optional columns, so
+/// "no URL" cannot mean two different things — the same strengthening
+/// `IngestTarget` made on the ingest side. Refusing to re-clone something that
+/// was never cloned is then a match arm rather than a guard someone has to
+/// remember to write.
+#[type_tag = "kind"]
+union PluginKind {
+    /// Claude Code's layout: `.claude-plugin/plugin.json`, `.mcp.json`, and
+    /// horsie's hooks, agents and commands conventions.
+    Claude(ExternalOrigin),
+    /// Agent Plugins 1.0: a root `plugin.json` carrying a `$schema`, skills
+    /// fixed at `skills/`, MCP servers at `mcp.json`.
+    AgentPlugin(ExternalOrigin),
+    /// Authored here. Rendered as Agent Plugins 1.0 when a runtime asks for it.
+    Authored(AuthoredOrigin),
+}
+
 /// A library entry as shown in the web UI (metadata only — never the bytes).
 struct PluginView {
     /// Canonical bundle name (from plugin.json, else the marketplace entry's
     /// name, else the repo basename).
     name: String,
     description: Option<String>,
-    /// Resolved version (manifest version, else the cloned commit sha).
+    /// Resolved version (manifest version, else the cloned commit sha, else an
+    /// authored plugin's generation).
     version: Option<String>,
-    source_url: String,
-    source_ref: Option<String>,
+    kind: PluginKind,
     /// Everything the bundle offers, sorted by kind then name.
     catalog: Vec<CatalogEntryView>,
     /// Whether the bundle ships hooks horsie will run.
     has_hooks: bool,
     /// Pre-checked in the new-session bundle picker.
     enabled_default: bool,
+    /// Size of the packed zip. For an authored bundle this is the size of the
+    /// package as last rendered.
     artifact_size: u64,
-    /// The marketplace this bundle came from, when it came from one. A bundle
-    /// installed from a plain git URL has none.
-    marketplace: Option<String>,
 }
 
 /// One plugin a marketplace offers, as cached from its index.
@@ -91,4 +135,85 @@ union InstallOutcome {
 /// Toggle whether a bundle is pre-selected for new sessions.
 struct PluginDefaultInput {
     enabled_default: bool,
+}
+
+
+/// One file that sits beside a skill's `SKILL.md` — `scripts/run.sh`,
+/// `references/api.md`. The path is relative to the skill's own directory.
+struct AuthoredFileView {
+    path: String,
+    content: String,
+}
+
+/// An authored skill without its body: what a list needs, and what the agent's
+/// index shows.
+struct AuthoredSkillSummary {
+    plugin: String,
+    name: String,
+    description: String,
+    /// Head revision. Every save appends one.
+    revision: u64,
+    updated_at: String,
+}
+
+/// One authored skill in full.
+struct AuthoredSkillView {
+    plugin: String,
+    name: String,
+    description: String,
+    body: String,
+    files: Vec<AuthoredFileView>,
+    revision: u64,
+    updated_at: String,
+}
+
+/// One past state of a skill. A deleted skill keeps its history: the tombstone
+/// is a revision like any other, so "what did this say before someone removed
+/// it" is answerable.
+struct AuthoredRevisionView {
+    revision: u64,
+    description: String,
+    body: String,
+    files: Vec<AuthoredFileView>,
+    deleted: bool,
+    created_at: String,
+}
+
+/// An authored plugin and the skills it currently holds.
+struct AuthoredPluginView {
+    name: String,
+    description: Option<String>,
+    generation: u64,
+    skills: Vec<AuthoredSkillSummary>,
+}
+
+/// Create an authored plugin, or change its description. `name` must satisfy
+/// the Agent Plugins name grammar — it is rendered into a `plugin.json` that
+/// any conformant client has to be able to read, not just this one.
+struct AuthoredPluginWriteInput {
+    name: String,
+    description: Option<String>,
+}
+
+/// Create or replace one skill. Supplied fields are replaced wholesale; omitted
+/// ones are left as they were, so a caller fixing a typo in the description
+/// does not have to resend the body.
+///
+/// Creating a skill requires `description` and `body`: a skill a picker cannot
+/// label and a model cannot choose between is not one, and the reader refuses
+/// it at both ends anyway.
+struct AuthoredSkillWriteInput {
+    plugin: String,
+    name: String,
+    description: Option<String>,
+    body: Option<String>,
+    files: Option<Vec<AuthoredFileView>>,
+}
+
+/// Roll a skill back to one of its own past revisions. The restore is itself a
+/// new revision, so nothing in the history is lost by undoing.
+struct AuthoredSkillRestoreInput {
+    plugin: String,
+    name: String,
+    revision: u64,
 }

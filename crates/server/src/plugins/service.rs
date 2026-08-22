@@ -7,7 +7,9 @@ use super::artifact::ArtifactStore;
 use super::ingest::{self, IngestTarget, Ingested, ParsedMarketplace, PluginBundle};
 use super::marketplace_store::{MarketplaceRow, MarketplaceStore};
 use super::store::{PluginRow, PluginStore};
-use super::{PluginArtifactRef, PluginProvisioner};
+use super::{PluginProvisioner, kind};
+use horsie_models::plugins::PluginKind;
+use horsie_models::runtime::{BundleGeneration, BundleHash, BundleRef, BundleVersion};
 use horsie_models::plugins::{
     CatalogEntryView, InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput,
     PluginInstallInput, PluginView,
@@ -17,13 +19,6 @@ use horsie_support::remote_url::redact_url_credentials;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Where a bundle came from, for the `plugins` row. Both halves or neither: a
-/// bundle either came through a catalogue or did not.
-enum Provenance {
-    Direct,
-    FromMarketplace { name: String, entry: String },
-}
-
 pub struct PluginService {
     store: PluginStore,
     marketplaces: MarketplaceStore,
@@ -31,6 +26,11 @@ pub struct PluginService {
     /// the hash of their own bytes, so there is one file per bundle version on
     /// the whole deployment.
     artifacts: Arc<ArtifactStore>,
+    /// The authored source of truth, for reading only. Provisioning has to be
+    /// able to render an authored package; changing one is the authoring
+    /// service's job, and keeping the write side out of here is what stops the
+    /// two services depending on each other.
+    authored: super::authored::AuthoredStore,
 }
 
 impl PluginService {
@@ -38,11 +38,85 @@ impl PluginService {
         store: PluginStore,
         marketplaces: MarketplaceStore,
         artifacts: Arc<ArtifactStore>,
+        authored: super::authored::AuthoredStore,
     ) -> Self {
         Self {
             store,
             marketplaces,
             artifacts,
+            authored,
+        }
+    }
+
+    /// Write a row directly. Test-only: every real path goes through
+    /// `persist`, which derives the row from bytes it packed itself.
+    #[cfg(test)]
+    pub async fn upsert_for_test(&self, row: &PluginRow) -> Result<(), String> {
+        self.store.upsert(row).await
+    }
+
+    /// The stored row for `name`, for callers that need the kind rather than
+    /// the view.
+    pub async fn row(&self, name: &str) -> Result<Option<PluginRow>, String> {
+        self.store.get(name).await
+    }
+
+    /// Record a freshly rendered authored package.
+    ///
+    /// No artifact is written: the bytes are reproducible from the tables, so a
+    /// file on disk would be a cache with nothing to invalidate it. The digest
+    /// and size are stored for display; what a runtime verifies against is
+    /// recomputed at resolve time.
+    pub async fn persist_authored(
+        &self,
+        bundle: PluginBundle,
+        generation: u64,
+    ) -> Result<PluginView, String> {
+        let kind = PluginKind::Authored(horsie_models::plugins::AuthoredOrigin { generation });
+        self.persist(bundle, kind).await
+    }
+
+    /// Drop the published row for an authored plugin that no longer renders
+    /// anything installable. Silent when there is nothing to remove, and never
+    /// touches a bundle that came from a clone.
+    pub async fn remove_if_authored(&self, name: &str) -> Result<(), String> {
+        match self.store.get(name).await? {
+            Some(row) if kind::is_authored(&row.kind) => self.remove(name).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// The zip a runtime fetches, for either kind of bundle.
+    ///
+    /// An external bundle is read from the artifact store by its hash. An
+    /// authored one is rendered from the tables — which is why a stale
+    /// generation is refused rather than served: the rows only hold their
+    /// current state, so there is no revision of the package to hand back but
+    /// the current one, and quietly substituting it would give the caller
+    /// bytes whose digest it was never told.
+    pub async fn package(&self, name: &str, version: &BundleVersion) -> Result<Vec<u8>, String> {
+        let row = self
+            .store
+            .get(name)
+            .await?
+            .ok_or_else(|| format!("no such bundle '{name}'"))?;
+        match (version, &row.kind) {
+            (BundleVersion::Hash(h), _) => {
+                std::fs::read(self.artifacts.path(&h.hash)).map_err(|e| e.to_string())
+            }
+            (BundleVersion::Generation(g), PluginKind::Authored(current)) => {
+                if g.generation != current.generation {
+                    return Err(format!(
+                        "'{name}' is at generation {}, not {} — provision again",
+                        current.generation, g.generation
+                    ));
+                }
+                let (bundle, _) = super::authored::pack(&self.authored, name).await?;
+                Ok(bundle.zip_bytes)
+            }
+            (BundleVersion::Generation(_), _) => Err(format!(
+                "'{name}' is not an authored bundle, so it has no generations"
+            )),
         }
     }
 
@@ -58,7 +132,8 @@ impl PluginService {
             .list()
             .await?
             .into_iter()
-            .map(|row| row.artifact_hash)
+            .filter(|row| !kind::is_authored(&row.kind))
+            .map(|row| row.digest)
             .collect())
     }
 
@@ -83,7 +158,7 @@ impl PluginService {
     /// Best-effort throughout: a bundle whose artifact has been collected stays
     /// empty rather than failing a list nobody could then repair.
     async fn backfill(&self, row: &mut PluginRow) {
-        let path = self.artifacts.path(&row.artifact_hash);
+        let path = self.artifacts.path(&row.digest);
         let Ok(bytes) = std::fs::read(&path) else {
             tracing::warn!(plugin = %row.name, "no artifact to catalogue from");
             return;
@@ -144,9 +219,10 @@ impl PluginService {
     ) -> Result<InstallOutcome, String> {
         let target = IngestTarget::Url { url, git_ref };
         match blocking_ingest(target).await? {
-            Ingested::Plugin(bundle) => Ok(InstallOutcome::Installed(
-                self.persist(bundle, Provenance::Direct).await?,
-            )),
+            Ingested::Plugin(bundle, origin) => {
+                let kind = kind::from_dialect(bundle.dialect, origin);
+                Ok(InstallOutcome::Installed(self.persist(bundle, kind).await?))
+            }
             Ingested::Marketplace(parsed) => {
                 Ok(InstallOutcome::Marketplace(self.record(parsed).await?))
             }
@@ -175,7 +251,7 @@ impl PluginService {
         let (url, git_ref, subpath) =
             source_location(&entry.source, &row.source_url, row.source_ref.as_deref());
         let entry_name = entry.name.clone();
-        let bundle = match blocking_ingest(IngestTarget::Resolved {
+        let (bundle, mut origin) = match blocking_ingest(IngestTarget::Resolved {
             url,
             git_ref,
             subpath,
@@ -183,21 +259,16 @@ impl PluginService {
         })
         .await?
         {
-            Ingested::Plugin(b) => b,
+            Ingested::Plugin(b, o) => (b, o),
             // Unreachable by construction: `Resolved` never classifies.
             Ingested::Marketplace(m) => {
                 return Err(format!("'{}' resolved to a marketplace", m.url));
             }
         };
-        let view = self
-            .persist(
-                bundle,
-                Provenance::FromMarketplace {
-                    name: market.to_string(),
-                    entry: entry_name,
-                },
-            )
-            .await?;
+        origin.marketplace = Some(market.to_string());
+        origin.marketplace_entry = Some(entry_name);
+        let kind = kind::from_dialect(bundle.dialect, origin);
+        let view = self.persist(bundle, kind).await?;
         Ok(InstallOutcome::Installed(view))
     }
 
@@ -210,18 +281,28 @@ impl PluginService {
             .get(name)
             .await?
             .ok_or_else(|| format!("no such bundle '{name}'"))?;
-        let outcome = match (&existing.marketplace, &existing.marketplace_entry) {
+        // An authored bundle has no upstream. Re-cloning it is not "no-op", it
+        // is meaningless — which the union makes a match arm rather than a
+        // guard someone has to remember to write.
+        let Some(origin) = kind::external(&existing.kind) else {
+            return Err(format!(
+                "'{name}' was authored here, so there is nothing to update it from. \
+                 Edit its skills instead."
+            ));
+        };
+        let outcome = match (&origin.marketplace, &origin.marketplace_entry) {
             (Some(market), Some(entry)) => self.install_entry(market, entry).await?,
             _ => {
                 let target = IngestTarget::Resolved {
-                    url: existing.source_url.clone(),
-                    git_ref: existing.source_ref.clone(),
-                    subpath: existing.source_subpath.clone(),
+                    url: origin.url.clone(),
+                    git_ref: origin.git_ref.clone(),
+                    subpath: origin.subpath.clone(),
                     name_hint: Some(existing.name.clone()),
                 };
                 match blocking_ingest(target).await? {
-                    Ingested::Plugin(b) => {
-                        InstallOutcome::Installed(self.persist(b, Provenance::Direct).await?)
+                    Ingested::Plugin(b, o) => {
+                        let kind = kind::from_dialect(b.dialect, o);
+                        InstallOutcome::Installed(self.persist(b, kind).await?)
                     }
                     Ingested::Marketplace(m) => {
                         return Err(format!("'{}' resolved to a marketplace", m.url));
@@ -355,38 +436,33 @@ impl PluginService {
         self.gc().await
     }
 
-    /// Write the artifact and the row. The source recorded is what ingest
-    /// actually cloned, not what the caller asked for — a marketplace entry may
-    /// name another repo, and `update` has to re-clone the same tree.
-    async fn persist(
-        &self,
-        bundle: PluginBundle,
-        provenance: Provenance,
-    ) -> Result<PluginView, String> {
+    /// Write the artifact and the row.
+    ///
+    /// The kind is what ingest actually resolved, not what the caller asked
+    /// for — a marketplace entry may name another repo, and `update` has to
+    /// re-clone the same tree.
+    ///
+    /// An authored bundle writes no artifact. Its package is rendered from the
+    /// tables on demand, so a file on disk would be a cache with no one to
+    /// invalidate it.
+    async fn persist(&self, bundle: PluginBundle, kind: PluginKind) -> Result<PluginView, String> {
         let existing = self.store.get(&bundle.name).await?;
-        self.artifacts
-            .write(&bundle.hash, &bundle.zip_bytes)
-            .map_err(|e| e.to_string())?;
-        let (marketplace, marketplace_entry) = match provenance {
-            Provenance::Direct => (None, None),
-            Provenance::FromMarketplace { name, entry } => (Some(name), Some(entry)),
-        };
+        if !kind::is_authored(&kind) {
+            self.artifacts
+                .write(&bundle.hash, &bundle.zip_bytes)
+                .map_err(|e| e.to_string())?;
+        }
         let now = now_string();
         let row = PluginRow {
             name: bundle.name,
-            source_kind: "git".to_string(),
-            source_url: bundle.url,
-            source_ref: bundle.git_ref,
-            source_subpath: bundle.subpath,
+            kind,
             version: bundle.version,
             description: bundle.description,
             catalog: bundle.catalog,
             has_hooks: bundle.has_hooks,
-            artifact_hash: bundle.hash,
+            digest: bundle.hash,
             artifact_size: bundle.zip_bytes.len() as u64,
             enabled_default: existing.as_ref().is_some_and(|e| e.enabled_default),
-            marketplace,
-            marketplace_entry,
             created_at: existing
                 .as_ref()
                 .map(|e| e.created_at.clone())
@@ -406,7 +482,7 @@ impl PluginService {
 
 #[async_trait::async_trait]
 impl PluginProvisioner for PluginService {
-    async fn resolve(&self, names: &[String]) -> Result<Vec<PluginArtifactRef>, String> {
+    async fn resolve(&self, names: &[String]) -> Result<Vec<BundleRef>, String> {
         let mut refs = Vec::with_capacity(names.len());
         for name in names {
             let row = self
@@ -414,10 +490,25 @@ impl PluginProvisioner for PluginService {
                 .get(name)
                 .await?
                 .ok_or_else(|| format!("no such bundle '{name}'"))?;
-            refs.push(PluginArtifactRef {
-                name: row.name,
-                hash: row.artifact_hash,
-            });
+            let mut bundle = bundle_ref(&row);
+            // An authored package is rendered, so its bytes are a function of
+            // this server's renderer as well as of its rows. Recomputing the
+            // digest here means the value a runtime is told to check against is
+            // always the value of the bytes this server will serve it — an
+            // upgrade that changed the renderer cannot leave the two disagreeing.
+            if kind::is_authored(&row.kind) {
+                let (rendered, _) = super::authored::pack(&self.authored, name).await?;
+                if rendered.hash != row.digest {
+                    tracing::info!(
+                        plugin = %name,
+                        was = %row.digest,
+                        now = %rendered.hash,
+                        "authored package re-rendered to different bytes"
+                    );
+                }
+                bundle.digest = rendered.hash;
+            }
+            refs.push(bundle);
         }
         Ok(refs)
     }
@@ -488,7 +579,7 @@ async fn blocking_ingest(target: IngestTarget) -> Result<Ingested, String> {
     let ingested = tokio::task::spawn_blocking(move || ingest::ingest_git(&target))
         .await
         .map_err(|e| e.to_string())??;
-    if let Ingested::Plugin(b) = &ingested {
+    if let Ingested::Plugin(b, _) = &ingested {
         for reason in &b.unsupported_hooks {
             tracing::warn!(
                 plugin = b.name,
@@ -500,20 +591,49 @@ async fn blocking_ingest(target: IngestTarget) -> Result<Ingested, String> {
     Ok(ingested)
 }
 
+/// How a runtime names one revision of this bundle, and what it checks the
+/// bytes against once it has them.
+fn bundle_ref(row: &PluginRow) -> BundleRef {
+    let version = match kind::generation(&row.kind) {
+        Some(generation) => BundleVersion::Generation(BundleGeneration { generation }),
+        None => BundleVersion::Hash(BundleHash {
+            hash: row.digest.clone(),
+        }),
+    };
+    BundleRef {
+        name: row.name.clone(),
+        version,
+        digest: row.digest.clone(),
+    }
+}
+
 fn row_to_view(row: PluginRow) -> PluginView {
     PluginView {
         name: row.name,
         description: row.description,
         version: row.version,
-        // See `marketplace_view`: the stored URL can hold a credential, and
-        // this is the shape `GET /api/plugins` returns to a browser.
-        source_url: redact_url_credentials(&row.source_url),
-        source_ref: row.source_ref,
+        kind: redact_kind(row.kind),
         catalog: row.catalog.into_iter().map(entry_to_view).collect(),
         has_hooks: row.has_hooks,
         enabled_default: row.enabled_default,
         artifact_size: row.artifact_size,
-        marketplace: row.marketplace,
+    }
+}
+
+/// See `marketplace_view`: a stored URL can hold a credential, and this is the
+/// shape `GET /api/plugins` returns to a browser.
+fn redact_kind(kind: PluginKind) -> PluginKind {
+    match kind {
+        PluginKind::Claude(mut e) => {
+            e.url = redact_url_credentials(&e.url);
+            PluginKind::Claude(e)
+        }
+        PluginKind::AgentPlugin(mut e) => {
+            e.url = redact_url_credentials(&e.url);
+            PluginKind::AgentPlugin(e)
+        }
+        // Nothing to redact: an authored bundle has no remote at all.
+        PluginKind::Authored(a) => PluginKind::Authored(a),
     }
 }
 
@@ -546,14 +666,23 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    /// The catalogue a view says it came through, whichever external arm it is.
+    fn marketplace_of(view: &PluginView) -> Option<String> {
+        kind::external(&view.kind).and_then(|e| e.marketplace.clone())
+    }
+
     async fn service() -> (PluginService, Arc<ArtifactStore>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::db::testing::db().await;
         let artifacts = Arc::new(ArtifactStore::new(tmp.path().join("artifacts")));
         let svc = PluginService::new(
             PluginStore::new(db.clone(), crate::projects::ProjectId::new("1")),
-            MarketplaceStore::new(db, crate::projects::ProjectId::new("1")),
+            MarketplaceStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             artifacts.clone(),
+            crate::plugins::authored::AuthoredStore::new(
+                db,
+                crate::projects::ProjectId::new("1"),
+            ),
         );
         (svc, artifacts, tmp)
     }
@@ -751,17 +880,21 @@ mod tests {
         assert_eq!(view.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
 
         // Artifact resolves + is fetchable-by-hash, and the account's installed
-        // set is what the artifact route authorizes against.
+        // set is what the bundle route authorizes against.
         let refs = svc.resolve(&["demo".into()]).await.unwrap();
         assert_eq!(refs.len(), 1);
-        assert_eq!(
-            refs[0].hash.len(),
-            64,
-            "the ref carries the content hash; the agent builds the URL from it"
+        assert!(
+            matches!(&refs[0].version, BundleVersion::Hash(h) if h.hash.len() == 64),
+            "a cloned bundle is named by its content hash, not a generation"
         );
-        assert!(artifacts.path(&refs[0].hash).is_file());
+        assert_eq!(
+            refs[0].digest.len(),
+            64,
+            "the ref carries the digest the runtime checks the bytes against"
+        );
+        assert!(artifacts.path(&refs[0].digest).is_file());
         let installed = svc.installed_hashes().await.unwrap();
-        assert!(installed.contains(&refs[0].hash));
+        assert!(installed.contains(&refs[0].digest));
         assert!(!installed.contains("deadbeef"));
 
         // Unknown name errors.
@@ -816,7 +949,7 @@ mod tests {
         let v = expect_installed(svc.install(pick("catalogue", "beta")).await.unwrap());
         assert_eq!(v.name, "beta");
         assert_eq!(v.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
-        assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
+        assert_eq!(marketplace_of(&v).as_deref(), Some("catalogue"));
 
         // The picker now knows not to offer it again.
         let listed = svc.list_marketplaces().await.unwrap();
@@ -961,7 +1094,7 @@ mod tests {
         svc.refresh_marketplace("catalogue").await.unwrap();
 
         let v = svc.update("beta").await.unwrap();
-        assert_eq!(v.marketplace.as_deref(), Some("catalogue"));
+        assert_eq!(marketplace_of(&v).as_deref(), Some("catalogue"));
         assert_eq!(v.catalog.iter().filter(|e| e.kind == "skill").count(), 1);
     }
 }

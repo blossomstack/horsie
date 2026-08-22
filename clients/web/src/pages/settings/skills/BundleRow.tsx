@@ -1,7 +1,11 @@
 import { ChevronRight, Loader2, RotateCcw, Trash2, Webhook } from "lucide-react";
 import { useState } from "react";
 import { askConfirm } from "../../../lib/confirm";
-import type { CatalogEntryView, PluginView } from "../../../api/types";
+import type {
+  CatalogEntryView,
+  PluginKind,
+  PluginView,
+} from "../../../api/types";
 import { cn } from "../../../lib/cn";
 import {
   useRemovePlugin,
@@ -30,6 +34,22 @@ function summarise(catalog: CatalogEntryView[]): string {
   return parts.length === 0 ? "nothing horsie runs" : parts.join(" · ");
 }
 
+/** What a bundle is, in the fewest words that still distinguish the three. */
+function kindLabel(kind: PluginKind): string {
+  switch (kind.kind) {
+    case "Claude":
+      return "claude";
+    case "AgentPlugin":
+      return "agent-plugin";
+    case "Authored":
+      return "authored here";
+  }
+}
+
+function marketplaceOf(kind: PluginKind): string | undefined {
+  return kind.kind === "Authored" ? undefined : (kind.value.marketplace ?? undefined);
+}
+
 export function BundleRow({ bundle }: { bundle: PluginView }) {
   const setDefault = useSetPluginDefault();
   const update = useUpdatePlugin();
@@ -50,11 +70,16 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
             {bundle.version && (
               <span className="chip !py-0 text-[0.625rem]">{bundle.version}</span>
             )}
+            {/* What it is, so an authored bundle is not indistinguishable
+                from a clone — and so a portable one can say so. */}
+            <span className="chip !py-0 text-[0.625rem]">
+              {kindLabel(bundle.kind)}
+            </span>
             {/* Where it came from, so a bundle installed through a catalogue is
                 not indistinguishable from one pasted by URL. */}
-            {bundle.marketplace && (
+            {marketplaceOf(bundle.kind) && (
               <span className="chip !py-0 text-[0.625rem]">
-                {bundle.marketplace}
+                {marketplaceOf(bundle.kind)}
               </span>
             )}
             {bundle.hasHooks && (

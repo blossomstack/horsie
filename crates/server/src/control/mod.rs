@@ -15,6 +15,7 @@ use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 
+mod authored;
 pub mod agents;
 pub mod environments;
 pub mod http;
@@ -53,6 +54,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(mcp::Mcp),
         Box::new(marketplaces::Marketplaces),
         Box::new(plugins::Plugins),
+        Box::new(authored::AuthoredPlugins),
         Box::new(models::Models),
         Box::new(runtime_vendors::RuntimeVendors),
         Box::new(memory_spaces::MemorySpaces),

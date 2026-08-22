@@ -76,7 +76,7 @@ pub const NON_OPERATIONS: &[(&str, &str)] = &[
         "the runtime's own credential channel",
     ),
     // Bytes, not JSON.
-    ("/api/plugin-artifacts/{file}", "serves a file"),
+    ("/api/plugin-bundles/{name}/{version}", "serves a file"),
     // Session traffic that is a conversation rather than management. A tool
     // that could message a session could talk to itself.
     (

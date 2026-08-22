@@ -5,8 +5,10 @@
 //! `horsie_shared`) is unchanged — this only manages bundles and delivers their
 //! bytes to a plugins dir the runtime fetches into.
 
+pub mod authored;
+pub mod kind;
 mod artifact;
-mod ingest;
+pub(crate) mod ingest;
 mod marketplace_store;
 mod service;
 mod store;
@@ -16,29 +18,20 @@ pub use marketplace_store::{MarketplaceRow, MarketplaceStore};
 pub use service::PluginService;
 pub use store::{PluginRow, PluginStore};
 
-use serde::Serialize;
-
-/// A resolved bundle the runtime should fetch: canonical name, content hash,
-/// and the authed URL to GET its zip from. Serialized into the runtime env as
-/// the `HORSIE_PLUGIN_MANIFEST` JSON array.
-#[derive(Clone, Debug, Serialize)]
-pub struct PluginArtifactRef {
-    pub name: String,
-    pub hash: String,
-}
+use horsie_models::runtime::BundleRef;
 
 /// The subset of plugin operations the session layer needs at provisioning:
 /// resolve selected bundle names to fetchable refs, and fall back to the
 /// default-enabled set. Injected into `ServerDeps`.
 #[async_trait::async_trait]
 pub trait PluginProvisioner: Send + Sync {
-    /// Resolve bundle `names` to `{name, hash}` refs. Errs if any name is
-    /// unknown.
+    /// Resolve bundle `names` to the refs a runtime fetches by. Errs if any
+    /// name is unknown.
     ///
     /// No base URL: the agent that runs the runtime knows the address its
-    /// runtimes can reach the server at, and builds the fetch URL from the
-    /// hash itself. The server has no opinion about it.
-    async fn resolve(&self, names: &[String]) -> Result<Vec<PluginArtifactRef>, String>;
+    /// runtimes can reach the server at, and builds the fetch URL from the ref
+    /// itself. The server has no opinion about it.
+    async fn resolve(&self, names: &[String]) -> Result<Vec<BundleRef>, String>;
 
     /// Bundle names flagged `enabled_default` — used when a session selects none.
     async fn default_names(&self) -> Vec<String>;
@@ -57,4 +50,15 @@ pub trait PluginProvisioner: Send + Sync {
     /// loser is logged. The rule skills and agents already use.
     async fn catalog(&self, names: &[String])
     -> Vec<horsie_support::plugin::catalog::CatalogEntry>;
+}
+
+/// sha256 of some bytes, for tests that need to check a served package against
+/// the digest its ref carried.
+#[cfg(test)]
+#[must_use]
+pub fn sha256_hex_for_test(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }

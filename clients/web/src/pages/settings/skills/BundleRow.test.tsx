@@ -18,13 +18,20 @@ function bundle(over: Partial<PluginView> = {}): PluginView {
     name: "feature-dev",
     description: "d",
     version: "1.0.0",
-    sourceUrl: "https://example.com/x.git",
-    sourceRef: undefined,
+    kind: {
+      kind: "Claude",
+      value: {
+        url: "https://example.com/x.git",
+        gitRef: undefined,
+        subpath: undefined,
+        marketplace: undefined,
+        marketplaceEntry: undefined,
+      },
+    },
     catalog: [],
     hasHooks: false,
     enabledDefault: false,
     artifactSize: 1,
-    marketplace: undefined,
     ...over,
   };
 }

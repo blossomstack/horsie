@@ -38,7 +38,7 @@ fn is_public(path: &str) -> bool {
         || path == "/api/device/auth/code"
         || path == "/api/device/auth/token"
         || path == "/api/device/auth/refresh"
-        || path.starts_with("/api/plugin-artifacts/")
+        || path.starts_with("/api/plugin-bundles/")
         // Public to *this* layer only. A runtime holds no session credential
         // and never will — it presents a per-account HMAC dial token, which
         // `verify` below has no way to check and would answer 401 to. The route

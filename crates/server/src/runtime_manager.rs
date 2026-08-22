@@ -985,12 +985,17 @@ mod tests {
         async fn resolve(
             &self,
             names: &[String],
-        ) -> Result<Vec<crate::plugins::PluginArtifactRef>, String> {
+        ) -> Result<Vec<horsie_models::runtime::BundleRef>, String> {
             Ok(names
                 .iter()
-                .map(|n| crate::plugins::PluginArtifactRef {
+                .map(|n| horsie_models::runtime::BundleRef {
                     name: n.clone(),
-                    hash: format!("hash-of-{n}"),
+                    version: horsie_models::runtime::BundleVersion::Hash(
+                        horsie_models::runtime::BundleHash {
+                            hash: format!("hash-of-{n}"),
+                        },
+                    ),
+                    digest: format!("hash-of-{n}"),
                 })
                 .collect())
         }
