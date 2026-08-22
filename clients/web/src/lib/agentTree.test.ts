@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { layoutAgentTree } from "./agentTree";
-import type { SubAgentView } from "../api/types";
+import type { SubAgentView, SubSessionView } from "../api/types";
 
 function agent(
   id: string,
@@ -18,6 +18,22 @@ function agent(
     error: undefined,
     spawnedAtMs,
     endedAtMs: spawnedAtMs + 1000,
+  };
+}
+
+function subSession(
+  id: string,
+  parent?: string,
+  title?: string,
+  createdAtMs = 1,
+): SubSessionView {
+  return {
+    id,
+    parent,
+    title,
+    status: "idle",
+    createdAtMs,
+    lastActivityMs: createdAtMs + 1000,
   };
 }
 
@@ -88,14 +104,14 @@ describe("layoutAgentTree", () => {
     const roster = [main, agent("a"), agent("b", "a", 2), agent("c", "b", 3)];
 
     it("drops a folded agent's descendants from the picture", () => {
-      const tree = layoutAgentTree(roster, ["a"]);
+      const tree = layoutAgentTree(roster, [], ["a"]);
       expect(tree.nodes.map((n) => n.id)).toEqual(["main", "a"]);
       expect(tree.edges).toEqual([{ from: "main", to: "a" }]);
       expect(tree.hidden).toBe(2);
     });
 
     it("reports what a fold stands for, so the node can say how much is hidden", () => {
-      const tree = layoutAgentTree(roster, ["a"]);
+      const tree = layoutAgentTree(roster, [], ["a"]);
       expect(tree.nodes[1]).toMatchObject({ collapsed: true, children: 1, descendants: 2 });
     });
 
@@ -103,7 +119,7 @@ describe("layoutAgentTree", () => {
      * node would claim to hide less the deeper you folded. */
     it("counts descendants the same whether or not they are drawn", () => {
       const open = layoutAgentTree(roster);
-      const shut = layoutAgentTree(roster, ["a"]);
+      const shut = layoutAgentTree(roster, [], ["a"]);
       const descendants = (t: typeof open, id: string) =>
         t.nodes.find((n) => n.id === id)?.descendants;
       expect(descendants(shut, "a")).toBe(descendants(open, "a"));
@@ -112,6 +128,7 @@ describe("layoutAgentTree", () => {
     it("closes the rows a fold freed, rather than leaving a gap", () => {
       const tree = layoutAgentTree(
         [main, agent("a", undefined, 1, 1), agent("x", "a", 2), agent("b", undefined, 1, 2)],
+        [],
         ["a"],
       );
       expect(lanes(tree.nodes)).toEqual({ main: 0.5, a: 0, b: 1 });
@@ -119,7 +136,7 @@ describe("layoutAgentTree", () => {
     });
 
     it("ignores a fold on an agent that has nothing under it", () => {
-      const tree = layoutAgentTree([main, agent("a")], ["a"]);
+      const tree = layoutAgentTree([main, agent("a")], [], ["a"]);
       expect(tree.nodes[1].collapsed).toBe(false);
     });
   });
@@ -151,6 +168,72 @@ describe("layoutAgentTree", () => {
         ["main", 0],
         ["a", 1],
       ]);
+    });
+  });
+
+  describe("sub sessions", () => {
+    /* They are not agents the session spawned, but they are the same lineage,
+       and the graph is the one place a person can reach one now that the rail
+       lists sessions only. */
+    it("draws a sub session hanging off the session it branched from", () => {
+      const tree = layoutAgentTree([main], [subSession("s", undefined, "the other migration")]);
+      expect(tree.nodes.map((n) => [n.id, n.kind, n.depth])).toEqual([
+        ["main", "main", 0],
+        ["s", "sub_session", 1],
+      ]);
+      expect(tree.edges).toEqual([{ from: "main", to: "s" }]);
+      expect(tree.nodes[1].label).toBe("the other migration");
+    });
+
+    it("nests a sub session of a sub session under the one it came from", () => {
+      const tree = layoutAgentTree(
+        [main],
+        [subSession("a", undefined, "first", 1), subSession("b", "a", "second", 2)],
+      );
+      expect(tree.nodes.map((n) => [n.id, n.depth])).toEqual([
+        ["main", 0],
+        ["a", 1],
+        ["b", 2],
+      ]);
+    });
+
+    /* The reason both rosters have to be laid out together. A subagent spawned
+       by a sub session names it as its parent; with only the agents in hand
+       there was nothing to hang it on, so it came out rooted on the main agent
+       — beside the sub session that spawned it rather than under it. */
+    it("hangs a subagent spawned by a sub session under that sub session", () => {
+      const tree = layoutAgentTree([main, agent("sub", "s", 2)], [subSession("s")]);
+      expect(tree.nodes.map((n) => [n.id, n.depth])).toEqual([
+        ["main", 0],
+        ["s", 1],
+        ["sub", 2],
+      ]);
+      expect(tree.edges).toEqual([
+        { from: "main", to: "s" },
+        { from: "s", to: "sub" },
+      ]);
+    });
+
+    it("says what an unnamed sub session is rather than showing its id", () => {
+      const tree = layoutAgentTree([main], [subSession("s")]);
+      expect(tree.nodes[1].label).toBe("untitled sub session");
+    });
+
+    /* One lineage, one ordering: a sub session branched before a subagent was
+       spawned is drawn above it. */
+    it("orders sub sessions and subagents together, oldest first", () => {
+      const tree = layoutAgentTree(
+        [main, agent("late", undefined, 1, 30)],
+        [subSession("early", undefined, "early", 10)],
+      );
+      expect(tree.nodes.map((n) => n.id)).toEqual(["main", "early", "late"]);
+    });
+
+    it("folds a sub session's descendants like any other node", () => {
+      const tree = layoutAgentTree([main, agent("sub", "s", 2)], [subSession("s")], ["s"]);
+      expect(tree.nodes.map((n) => n.id)).toEqual(["main", "s"]);
+      expect(tree.nodes[1]).toMatchObject({ collapsed: true, descendants: 1 });
+      expect(tree.hidden).toBe(1);
     });
   });
 

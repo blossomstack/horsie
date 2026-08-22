@@ -97,7 +97,7 @@ export function SessionTimeline({
   const placed = visible.filter((l) => l.placed);
   const unplaced = visible.filter((l) => !l.placed);
   // Subagents are work inside a turn; sub sessions are other sessions. The same
-  // distinction `SubAgentCard` and `ForkMarker` already draw, carried here.
+  // distinction `SubAgentCard` and `SubSessionMarker` already draw, carried here.
   const firstSubSessionAt = placed.findIndex((l) => l.kind === "subSession");
 
   // Every lane's top, so a connector can be drawn from a lane all the way back
@@ -154,7 +154,7 @@ export function SessionTimeline({
                 className="flex items-center gap-3 pr-6 pl-3"
                 style={{ height: DIVIDER_H }}
               >
-                <span className="legend whitespace-nowrap">subSessioned sessions</span>
+                <span className="legend whitespace-nowrap">sub sessions</span>
                 <span className="h-px flex-1 bg-[var(--rule)]" />
               </div>
             )}
@@ -233,7 +233,7 @@ function LaneRow({
         style={{ width: SIDEBAR_W, paddingLeft: 8 + lane.depth * 10 }}
       >
         {/* The chevron discloses the lanes *hanging off* this one — the
-            subagents it spawned, the subSessions taken from it. Its own work is the
+            subagents it spawned, the sub sessions taken from it. Its own work is the
             span out on the timeline, which is where you already are looking. */}
         {lane.hasChildren ? (
           <button

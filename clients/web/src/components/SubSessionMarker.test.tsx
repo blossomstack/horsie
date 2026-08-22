@@ -25,8 +25,8 @@ describe("SubSessionMarker", () => {
   });
 
   /* The modes give the sub session genuinely different histories, so the marker says
-     which — otherwise "subSessioned from here" means three things. */
-  it("says when the subSession got a summary rather than the history", () => {
+     which — otherwise "branched from here" means three things. */
+  it("says when the sub session got a summary rather than the history", () => {
     renderMarker("summary");
     expect(screen.getByRole("link").textContent).toMatch(/summary/);
     cleanup();
@@ -36,9 +36,9 @@ describe("SubSessionMarker", () => {
 
   /* A fresh sub session carries nothing from here, so "branched from here" would claim
      a history it does not have. */
-  it("says a fresh subSession was handed off rather than subSessioned", () => {
+  it("says a fresh sub session was handed off rather than branched", () => {
     renderMarker("fresh");
     expect(screen.getByRole("link").textContent).toMatch(/handed off/);
-    expect(screen.getByRole("link").textContent).not.toMatch(/forked/);
+    expect(screen.getByRole("link").textContent).not.toMatch(/branched/);
   });
 });

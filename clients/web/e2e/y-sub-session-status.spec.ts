@@ -116,3 +116,42 @@ test("Y3: stopping a sub session stops it, and leaves the session it came from a
   );
   await expectStatus(page, "Idle");
 });
+
+/** Which conversation you are in, and getting rid of it.
+ *
+ * Both used to live only on the sub session's row in the rail, which lists
+ * sessions now: without a home in the header, a sub session's page showed the
+ * *session's* name and offered no way to delete the thing on screen. */
+test("Y4: a sub session's page names it, and the delete key deletes it", async ({
+  page,
+  appBase,
+  mock,
+}) => {
+  await mock.reset();
+  await mock.queueText("the original answer");
+  await mock.queueToolCall("set_session_title", { title: "the other way" });
+  await mock.queueText("the sub session's answer");
+
+  await createSession(page, appBase);
+  const session = await sendMessage(page, "start the migration");
+  await expectStatus(page, "Idle");
+
+  await sendMessage(page, "/fork try the other way");
+  await page.waitForURL(/\/agents\/[0-9a-f-]+$/);
+  await expect(page.getByTestId("transcript-scroll")).toContainText(
+    "the sub session's answer",
+  );
+
+  // The header says which conversation this is — the sub session's own title,
+  // with the session it branched from in front of it.
+  await expect(page.getByTestId("sub-session-title")).toHaveText("the other way");
+
+  await page.getByTestId("session-delete").click();
+  await page.getByTestId("confirm-accept").click();
+
+  // Back on the session it came from, which is still there.
+  await expect(page).toHaveURL(new RegExp(`/sessions/${session}$`));
+  await expect(page.getByTestId("transcript-scroll")).toContainText(
+    "the original answer",
+  );
+});

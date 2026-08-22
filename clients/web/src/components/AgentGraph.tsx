@@ -26,6 +26,8 @@ const ROW_H = 62;
 const PAD = 20;
 /** The fold control, straddling the edge its children come out of. */
 const TOGGLE_R = 8;
+/** How far a sub session's second card sits behind the first. */
+const CARD_OFFSET = 5;
 
 /** A node is a panel key lit by the same lamps the rest of the console uses:
  * live for work in motion, ok for an agent that landed, red for a fault. */
@@ -92,7 +94,10 @@ export function AgentGraph({
     tree.nodes.reduce((right, n) => {
       const badge = n.collapsed ? 6 + `+${n.descendants}`.length * BADGE_CHAR_W : 0;
       const toggle = n.children > 0 ? TOGGLE_R : 0;
-      return Math.max(right, at(n).x + NODE_W + toggle + badge);
+      // A sub session's second card sits `CARD_OFFSET` to the right of the
+      // first, so it is part of the node's extent even when nothing else is.
+      const card = n.kind === "sub_session" ? CARD_OFFSET : 0;
+      return Math.max(right, at(n).x + NODE_W + Math.max(toggle + badge, card));
     }, 0);
   const height = PAD * 2 + (tree.rows - 1) * ROW_H + NODE_H;
 
@@ -153,11 +158,13 @@ export function AgentGraph({
         {tree.nodes.map((n) => {
           const { x, y } = at(n);
           const openable = n.kind !== "main";
+          const branched = n.kind === "sub_session";
           return (
             <g key={n.id} transform={`translate(${x} ${y})`}>
               <g
                 data-testid={`agent-node-${n.id}`}
                 data-status={n.status}
+                data-kind={n.kind}
                 data-collapsed={n.collapsed ? "true" : undefined}
                 onClick={openable ? () => onSelectAgent(n.id) : undefined}
                 onKeyDown={
@@ -175,10 +182,31 @@ export function AgentGraph({
                 aria-label={openable ? `Open ${n.label}` : undefined}
                 className={cn(openable && "cursor-pointer focus:outline-none")}
               >
-                {/* The whole of the name and what became of the agent. The node
-                    is a fixed width, so both are cut on it; this is where the
-                    uncut version lives. */}
-                <title>{`${n.label} — ${n.detail}`}</title>
+                {/* The whole of the name and what became of it. The node is a
+                    fixed width, so both are cut on it; this is where the uncut
+                    version lives. It names the kind as well, because the one
+                    thing the shape says is the one thing a screen reader
+                    cannot see. */}
+                <title>
+                  {branched
+                    ? `${n.label} — sub session, ${n.detail}`
+                    : `${n.label} — ${n.detail}`}
+                </title>
+                {/* A second card behind the first: a sub session is a session,
+                    not something this one delegated to, and the picture has to
+                    say which it is drawing before the label is read. Offset up
+                    and right so it never touches the edge an incoming wire
+                    lands on. */}
+                {branched && (
+                  <rect
+                    x={CARD_OFFSET}
+                    y={-CARD_OFFSET}
+                    width={NODE_W}
+                    height={NODE_H}
+                    rx={8}
+                    className="fill-panel stroke-rule stroke-[1.5]"
+                  />
+                )}
                 <rect
                   width={NODE_W}
                   height={NODE_H}
@@ -269,10 +297,11 @@ export function AgentGraph({
 
       {/* Only when there is genuinely nothing below the main agent. Keyed on
           what is drawn, this told a session with three folded subagents that it
-          had never spawned one. */}
+          had never spawned one — and, before sub sessions were drawn here, it
+          told a session made entirely of them the same thing. */}
       {tree.nodes.length === 1 && tree.hidden === 0 && (
         <p className="px-6 pb-4 text-center text-sm text-dim" data-testid="agent-graph-lonely">
-          This session has not spawned any subagents yet.
+          Nothing has branched from this session, and it has delegated nothing.
         </p>
       )}
     </div>

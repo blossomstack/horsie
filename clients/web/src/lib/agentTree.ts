@@ -1,15 +1,20 @@
 import { MAIN_AGENT } from "../api/client";
-import type { SubAgentView } from "../api/types";
+import type { SubAgentView, SubSessionView } from "../api/types";
 
 /**
- * Placing a session's agents as a tree.
+ * Placing everything a session hosts as one tree: its agents *and* its sub
+ * sessions.
  *
- * The roster arrives flat and parent-linked — the same shape `subSessionTree` reads,
- * for the same reason: the nesting is the client's to derive, which keeps an
- * arbitrarily deep chain off the wire. What is different here is that the
- * picture has drawn edges, so this produces coordinates rather than indents:
- * depth on one axis, a tidy walk on the other, exactly like `graphLayout` does
- * for a workflow.
+ * Both rosters arrive flat and parent-linked — the nesting is the client's to
+ * derive, which keeps an arbitrarily deep chain off the wire — and both name
+ * ids out of the same space, so they lay out as one lineage rather than two
+ * pictures. They have to: a subagent spawned by a sub session names that sub
+ * session as its parent, and with only the agents in hand there was nothing to
+ * hang it on, so it came out rooted on the main agent.
+ *
+ * What is different from `subSessionTree` is that the picture has drawn edges,
+ * so this produces coordinates rather than indents: depth on one axis, a tidy
+ * walk on the other, exactly like `graphLayout` does for a workflow.
  *
  * Positions come out in rows and ranks rather than pixels. What a row is worth
  * is the renderer's business, and a layout that has already multiplied by it
@@ -27,8 +32,13 @@ export interface PlacedAgent {
   agentType: string | null;
   /** Status, duration and start: what the node itself has no room for. */
   detail: string;
-  /** The session's own agent, or something the session spawned. */
-  kind: "main" | "subagent";
+  /**
+   * The session's own agent, something it delegated to, or a session branched
+   * from it. A sub session is not an agent the session spawned — it is talked
+   * to, it owes nobody a result, and it is opened rather than inspected — so
+   * the picture has to be able to say which it is drawing.
+   */
+  kind: "main" | "subagent" | "sub_session";
   /** Distance from the main agent, in edges. */
   depth: number;
   /**
@@ -61,31 +71,78 @@ export interface AgentTree {
   depth: number;
   /** Rows the tree occupies. */
   rows: number;
-  /** Agents in the roster that the fold is hiding. */
+  /** Members of either roster that the fold is hiding. */
   hidden: number;
 }
 
 /** Statuses that mean the agent has not stopped, so it has no duration yet. */
 const LIVE_STATUS = new Set(["running", "provisioning", "awaiting_input"]);
 
+/** One drawable thing, from either roster, in the one shape the walk reads. */
+interface Member {
+  id: string;
+  parent: string | undefined;
+  label: string;
+  status: string;
+  agentType: string | null;
+  detail: string;
+  kind: "subagent" | "sub_session";
+  /** When it came into being — the order siblings are drawn in. */
+  at: number;
+}
+
+function agentMember(a: SubAgentView): Member {
+  return {
+    id: a.id,
+    parent: a.parent,
+    label: a.label ?? a.agentType ?? "subagent",
+    status: a.status,
+    agentType: a.agentType ?? null,
+    detail: describeAgent(a.status, a.spawnedAtMs, a.endedAtMs),
+    kind: "subagent",
+    at: a.spawnedAtMs,
+  };
+}
+
 /**
- * Lay a session's agents out as a tree, minus whatever is folded away.
+ * A sub session, as the same shape.
  *
- * `collapsed` names agents whose children are not to be drawn. It is passed in
+ * Measured from when it was branched to when it last did anything, which is
+ * what the timeline draws too. It has no *end* — nothing closes a session —
+ * but "still running, forever" was a worse lie than "this is how far it got".
+ */
+function subSessionMember(s: SubSessionView): Member {
+  return {
+    id: s.id,
+    parent: s.parent,
+    label: s.title ?? "untitled sub session",
+    status: s.status,
+    agentType: null,
+    detail: describeAgent(s.status, s.createdAtMs, s.lastActivityMs),
+    kind: "sub_session",
+    at: s.createdAtMs,
+  };
+}
+
+/**
+ * Lay everything a session hosts out as a tree, minus whatever is folded away.
+ *
+ * `collapsed` names members whose children are not to be drawn. It is passed in
  * rather than held here because it is view state — the page owns it, and the
  * timeline beside this reads the same list, so folding an agent in one view
  * folds it in the other.
  *
- * The two cases `subSessionTree` learned are the same here, because this reads the
- * same journal-derived data: an agent whose parent nobody holds roots at the
- * top level rather than vanishing, and anything a descent cannot reach is
+ * The two cases `subSessionTree` learned are the same here, because this reads
+ * the same journal-derived data: a member whose parent nobody holds roots at
+ * the top level rather than vanishing, and anything a descent cannot reach is
  * appended flat rather than silently dropped.
  */
 export function layoutAgentTree(
   agents: SubAgentView[],
+  subSessions: SubSessionView[] = [],
   collapsed: readonly string[] = [],
 ): AgentTree {
-  if (agents.length === 0) {
+  if (agents.length === 0 && subSessions.length === 0) {
     return { nodes: [], edges: [], depth: 0, rows: 0, hidden: 0 };
   }
 
@@ -94,23 +151,27 @@ export function layoutAgentTree(
   const main = agents.find((a) => !a.parent && a.depth === 0) ?? agents[0];
   const mainId = main?.id ?? MAIN_AGENT;
 
-  const held = new Set(agents.map((a) => a.id));
+  const members: Member[] = [
+    ...agents.filter((a) => a.id !== mainId).map(agentMember),
+    ...subSessions.map(subSessionMember),
+  ];
+
+  const held = new Set(members.map((m) => m.id));
   /** Children by parent id; `""` is the main agent's own bucket.
    *
    * A top-level subagent reaches us with no parent at all — the schema says an
    * absent parent means "rooted on the session's primary agent" — but one that
    * names the main agent outright means the same thing, and both have to land
    * in the same bucket or one of the two conventions draws a forest. */
-  const kids = new Map<string, SubAgentView[]>();
-  for (const a of agents) {
-    if (a.id === mainId) continue;
-    const linked = a.parent && a.parent !== a.id && held.has(a.parent);
-    const key = linked && a.parent !== mainId ? (a.parent ?? "") : "";
-    kids.set(key, [...(kids.get(key) ?? []), a]);
+  const kids = new Map<string, Member[]>();
+  for (const m of members) {
+    const linked = m.parent && m.parent !== m.id && held.has(m.parent);
+    const key = linked && m.parent !== mainId ? (m.parent ?? "") : "";
+    kids.set(key, [...(kids.get(key) ?? []), m]);
   }
-  // Oldest first, so an agent does not move because a sibling was relabelled.
+  // Oldest first, so a member does not move because a sibling was relabelled.
   for (const level of kids.values()) {
-    level.sort((x, y) => x.spawnedAtMs - y.spawnedAtMs || x.id.localeCompare(y.id));
+    level.sort((x, y) => x.at - y.at || x.id.localeCompare(y.id));
   }
   const bucket = (id: string) => (id === mainId ? "" : id);
 
@@ -129,7 +190,7 @@ export function layoutAgentTree(
   /** Everything under `id`, marked as accounted for without being drawn.
    *
    * A fold has to swallow the whole subtree, not just the row below it: the
-   * pass that rescues unreachable agents cannot tell "hidden on purpose" from
+   * pass that rescues unreachable members cannot tell "hidden on purpose" from
    * "lost", so a grandchild left unmarked comes back as an orphan hanging off
    * the main agent — the one thing folding is supposed to prevent. */
   const swallow = (id: string) => {
@@ -141,42 +202,39 @@ export function layoutAgentTree(
   };
 
   const place = (
-    agent: SubAgentView | null,
+    member: Member | null,
     id: string,
     depth: number,
     parent: string | null,
   ): Subtree => {
     // Filtered against `reached` rather than trusted: this walks a journal, and
-    // a cycle must not put an agent in two places.
+    // a cycle must not put a member in two places.
     const children = (kids.get(bucket(id)) ?? []).filter((c) => !reached.has(c.id));
     for (const c of children) reached.add(c.id);
 
     const folded = children.length > 0 && collapsed.includes(id);
     if (folded) for (const c of children) swallow(c.id);
-    const below = folded
-      ? []
-      : children.map((c) => place(c, c.id, depth + 1, id));
+    const below = folded ? [] : children.map((c) => place(c, c.id, depth + 1, id));
 
-    // A leaf — or a folded agent, which is a leaf as far as the picture goes —
+    // A leaf — or a folded member, which is a leaf as far as the picture goes —
     // takes the next row. Everything else centres on the children it spans.
     const first = below[0]?.node.lane;
     const last = below[below.length - 1]?.node.lane;
     const lane =
       first === undefined || last === undefined ? nextLane++ : (first + last) / 2;
 
-    const isMain = id === mainId;
     return {
       node: {
         id,
         // The main agent is named for what it is. It is the session, and a
         // session already has a title at the top of the page.
-        label: isMain ? "main agent" : (agent?.label ?? agent?.agentType ?? "subagent"),
-        status: agent?.status ?? "idle",
-        agentType: agent?.agentType ?? null,
-        detail: agent
-          ? describeAgent(agent.status, agent.spawnedAtMs, agent.endedAtMs)
-          : "idle",
-        kind: isMain ? "main" : "subagent",
+        label: member?.label ?? "main agent",
+        status: member?.status ?? main?.status ?? "idle",
+        agentType: member?.agentType ?? null,
+        detail:
+          member?.detail ??
+          (main ? describeAgent(main.status, main.spawnedAtMs, main.endedAtMs) : "idle"),
+        kind: member?.kind ?? "main",
         depth,
         lane,
         parent,
@@ -188,7 +246,7 @@ export function layoutAgentTree(
     };
   };
 
-  const root = place(main ?? null, mainId, 0, null);
+  const root = place(null, mainId, 0, null);
 
   const nodes: PlacedAgent[] = [];
   const edges: AgentEdge[] = [];
@@ -202,18 +260,18 @@ export function layoutAgentTree(
   flatten(root);
 
   // Only reachable if the roster is not a tree. Shown hanging off the main
-  // agent, because an agent nobody can find is worse than one drawn in the
+  // agent, because a member nobody can find is worse than one drawn in the
   // wrong place.
-  for (const a of agents) {
-    if (reached.has(a.id)) continue;
-    reached.add(a.id);
+  for (const m of members) {
+    if (reached.has(m.id)) continue;
+    reached.add(m.id);
     nodes.push({
-      id: a.id,
-      label: a.label ?? a.agentType ?? "subagent",
-      status: a.status,
-      agentType: a.agentType ?? null,
-      detail: describeAgent(a.status, a.spawnedAtMs, a.endedAtMs),
-      kind: "subagent",
+      id: m.id,
+      label: m.label,
+      status: m.status,
+      agentType: m.agentType,
+      detail: m.detail,
+      kind: m.kind,
       depth: 1,
       lane: nextLane++,
       parent: mainId,
@@ -221,7 +279,7 @@ export function layoutAgentTree(
       descendants: 0,
       collapsed: false,
     });
-    edges.push({ from: mainId, to: a.id });
+    edges.push({ from: mainId, to: m.id });
   }
 
   const drawn = new Set(nodes.map((n) => n.id));
@@ -230,18 +288,18 @@ export function layoutAgentTree(
     edges,
     depth: nodes.reduce((d, n) => Math.max(d, n.depth + 1), 0),
     rows: Math.max(nextLane, 1),
-    hidden: agents.filter((a) => !drawn.has(a.id)).length,
+    hidden: members.filter((m) => !drawn.has(m.id)).length,
   };
 }
 
 /**
- * How many agents sit below each one, memoised.
+ * How many members sit below each one, memoised.
  *
- * Counted over the whole roster rather than over what is drawn: the number is
+ * Counted over both rosters rather than over what is drawn: the number is
  * what a folded node reports, so folding must not change it.
  */
 function countDescendants(
-  kids: Map<string, SubAgentView[]>,
+  kids: Map<string, Member[]>,
   bucket: (id: string) => string,
 ): (id: string) => number {
   const memo = new Map<string, number>();

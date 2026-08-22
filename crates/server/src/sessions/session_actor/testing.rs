@@ -275,6 +275,47 @@ impl LlmProvider for BlockingProvider {
 }
 
 /// A provider whose every call immediately ends the turn with plain text.
+/// An [`EchoProvider`] that keeps the system prompt of every turn it answered.
+///
+/// The only way to assert on a prompt an agent was *actually run with*: the
+/// composition happens inside the context provider the session builds for
+/// itself, so a test that builds its own provider proves nothing about what the
+/// session hands its agents.
+#[derive(Default)]
+pub(super) struct PromptRecordingProvider {
+    prompts: std::sync::Mutex<Vec<String>>,
+}
+
+impl PromptRecordingProvider {
+    /// Every system prompt seen so far, oldest first.
+    pub(super) fn prompts(&self) -> Vec<String> {
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for PromptRecordingProvider {
+    fn model_id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        request: horsie_agentcore::CompletionRequest<'_>,
+        message_id: &str,
+        events: &dyn horsie_agentcore::EventSink,
+    ) -> Result<horsie_agentcore::CompletionResponse, horsie_agentcore::LlmError> {
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.system.clone().unwrap_or_default());
+        EchoProvider.complete(request, message_id, events).await
+    }
+}
+
 pub(super) struct EchoProvider;
 
 #[async_trait]
@@ -1320,6 +1361,7 @@ pub(super) fn catalog_provider(
         session_id: id,
         kind: SessionAgentKind::Main,
         agent_type: None,
+        origin: None,
         unattended: false,
         session: session.clone(),
         plugins: Vec::new(),
@@ -1428,6 +1470,7 @@ pub(super) fn typed_provider(
         session_id: id,
         kind: SessionAgentKind::Sub(sub),
         agent_type: Some("code-reviewer".to_string()),
+        origin: None,
         unattended: false,
         session: session.clone(),
         plugins: Vec::new(),

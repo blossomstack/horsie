@@ -182,13 +182,20 @@ fn sub_session_entry(id: Uuid, forest: &RunForest, rec: &SubSessionRun) -> Agent
 fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
     AgentEntry {
         id: id.to_string(),
-        // Reported only when the parent is itself a subagent: a node rooted
-        // directly on main, a step or a sub session is a top-level one to a
-        // reader.
+        // Reported when the parent is another subagent or the sub session
+        // that spawned it — both are rows the client holds, so both are things
+        // it can hang this one off. A step's is not: a run's shape is its
+        // workflow graph's, drawn from the run rather than from this roster.
+        //
+        // A sub session's used to be dropped here too, as "top-level to a
+        // reader". It is not: the session graph draws both rosters as one
+        // lineage, and without this the agent a sub session delegated to came
+        // out beside it, hanging off the main agent, as though the main agent
+        // had spawned it.
         parent: forest
             .owner_of_agent(id)
             .and_then(|(_, e)| e.parent)
-            .filter(|pid| forest.sub(*pid).is_some()),
+            .filter(|pid| forest.sub(*pid).is_some() || forest.sub_session(*pid).is_some()),
         label: Some(rec.label.clone()),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
@@ -426,6 +433,54 @@ mod tests {
             agents.iter().any(|a| a.id == sub.to_string()),
             "a subagent is an agent of its session: {agents:?}"
         );
+    }
+
+    /// A subagent a sub session spawned names that sub session as its parent.
+    ///
+    /// It used to name nobody: the roster reported a parent only when the
+    /// parent was another subagent, so an agent a sub session delegated to
+    /// reached the client rooted on the main agent — drawn beside the sub
+    /// session that spawned it, as though the session itself had.
+    #[tokio::test]
+    async fn a_subagent_of_a_sub_session_names_the_sub_session_as_its_parent() {
+        let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
+        let sub_session = session
+            .ask(|reply| {
+                SessionCommand::SubSession(
+                    crate::sessions::session_actor::SubSessionCommand::Create {
+                        parent: id,
+                        seed: crate::sessions::run_forest::SeedMode::Fresh,
+                        message: "try the other migration".into(),
+                        reply,
+                    },
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |f| f.sub_session(sub_session).is_some()).await;
+
+        let sub = session
+            .ask(|reply| {
+                SessionCommand::SubAgent(SubAgentCommand::Spawn {
+                    caller: sub_session,
+                    label: "audit".into(),
+                    task: "audit the dependencies".into(),
+                    agent_type: None,
+                    reply,
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;
+
+        let agents = roster(&session).await;
+        let entry = agents
+            .iter()
+            .find(|a| a.id == sub.to_string())
+            .expect("the subagent is in the roster");
+        assert_eq!(entry.parent, Some(sub_session));
     }
 
     /// A run has no main agent — it *is* its steps. Reporting one anyway meant

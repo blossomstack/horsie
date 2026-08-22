@@ -12,6 +12,7 @@ import { Link, useLocation, useNavigate, useParams, useSearchParams } from "reac
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
 import { subSessionReadyToOpen } from "../lib/subSessionTree";
 import { SessionStatusKind, TaskStatus } from "../api/types";
+import type { SubSessionView } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
 import { RailToggle } from "../components/rail";
@@ -33,6 +34,7 @@ import { useEntryCatalog } from "../hooks/useEntryCatalog";
 import { useUiSettings } from "../hooks/useUiSettings";
 import {
   useDeleteSession,
+  useDeleteSubSession,
   useAnswerAsks,
   useRenameSession,
   useSendMessage,
@@ -171,6 +173,48 @@ function SessionTitle({
   );
 }
 
+/** Which conversation this page is, when it is a sub session.
+ *
+ * Its own component rather than a mode of `SessionTitle`: a sub session is not
+ * renamed from here — it names itself, and the session it branched from is the
+ * thing with an editable name — so the two share a place in the header and
+ * almost none of their behaviour.
+ *
+ * The session's name stays in front of it, and leads back to it. The page's
+ * whole content is one sub session's transcript, and with the rail listing
+ * sessions only there is nothing else on screen that says which session this
+ * belongs to. */
+function SubSessionTitle({
+  sessionId,
+  sessionName,
+  subSession,
+}: {
+  sessionId: string;
+  sessionName: string | undefined;
+  subSession: SubSessionView;
+}) {
+  return (
+    <h1
+      data-testid="session-title"
+      className="page-title flex min-w-0 flex-1 items-baseline gap-1.5 truncate"
+    >
+      <Link
+        to={`/sessions/${sessionId}`}
+        className="max-w-[40%] shrink-0 truncate text-dim hover:text-legend"
+        title={`Back to ${sessionTitle(sessionName)}`}
+      >
+        {sessionTitle(sessionName)}
+      </Link>
+      <span className="shrink-0 text-faint" aria-hidden>
+        /
+      </span>
+      <span className="min-w-0 truncate" data-testid="sub-session-title">
+        {subSession.title ?? "untitled sub session"}
+      </span>
+    </h1>
+  );
+}
+
 /** A session id the server will not serve.
  *
  * Rendered instead of the session chrome, which otherwise reported the failed
@@ -234,6 +278,13 @@ export function SessionView() {
   const answerAsks = useAnswerAsks();
   const stop = useStopAgent();
   const del = useDeleteSession();
+  const delSubSession = useDeleteSubSession();
+  /** The sub session this page is showing, when the agent it is scoped to is
+   *  one. A subagent and a workflow step are not: they are read here, never
+   *  named or deleted here. */
+  const openSubSession = agentId
+    ? detail?.subSessions?.find((row) => row.id === agentId)
+    : undefined;
   const { values: uiSettings } = useUiSettings();
   const [sendError, setSendError] = useState<string | null>(null);
 
@@ -464,11 +515,13 @@ export function SessionView() {
     [stream.items, detail?.agents, detail?.subSessions, histories],
   );
 
-  // The same `collapsed` list the timeline reads: folding an agent is a
-  // statement about the agent, not about the view it was folded in.
+  // Both rosters, because the graph is the session's whole lineage: its agents
+  // and the sessions branched from it. The same `collapsed` list the timeline
+  // reads — folding something is a statement about it, not about the view it
+  // was folded in.
   const agentTree = useMemo(
-    () => layoutAgentTree(detail?.agents ?? [], collapsed),
-    [detail?.agents, collapsed],
+    () => layoutAgentTree(detail?.agents ?? [], detail?.subSessions ?? [], collapsed),
+    [detail?.agents, detail?.subSessions, collapsed],
   );
 
   /** Scroll to a transcript entry by id, to a boundary by seq, or to either end. */
@@ -568,7 +621,22 @@ export function SessionView() {
     }
   };
 
+  // Deletes what you are looking at. A sub session used to be deletable only
+  // from its row in the rail, which no longer lists them — and a control that
+  // deleted the whole session from a sub session's page would be the wrong
+  // thing under the same key.
   const handleDelete = async () => {
+    if (openSubSession) {
+      const name = openSubSession.title ?? "this sub session";
+      if (!(await askConfirm(`Delete “${name}”? This cannot be undone.`))) return;
+      try {
+        await delSubSession.mutateAsync({ id, subSessionId: openSubSession.id });
+        navigate(`/sessions/${id}`);
+      } catch {
+        /* reported by the global failure notice */
+      }
+      return;
+    }
     if (!(await askConfirm("Delete this session? This cannot be undone.")))
       return;
     try {
@@ -622,7 +690,15 @@ export function SessionView() {
               its context is. Settled facts sit behind the info key. */}
           <header className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
             <RailToggle />
-            <SessionTitle id={id} name={detail?.name} editable={!agentId} />
+            {openSubSession ? (
+              <SubSessionTitle
+                sessionId={id}
+                sessionName={detail?.name}
+                subSession={openSubSession}
+              />
+            ) : (
+              <SessionTitle id={id} name={detail?.name} editable={!agentId} />
+            )}
             {/* Beside the title rather than in the key cluster on the right:
                 this changes *what you are looking at*, and that cluster is for
                 acting on what you are already looking at. */}
@@ -719,15 +795,17 @@ export function SessionView() {
                 <ListTodo size={15} aria-hidden />
               </button>
               <SettingsMenu />
-              {/* A step is not deletable on its own: the run is the unit, and
-                  its page carries the control. */}
-              {!agentId && (
+              {/* The session, or the sub session whose page this is. A step is
+                  not deletable on its own — the run is the unit, and its page
+                  carries the control — and neither is a subagent, which its
+                  parent owns. */}
+              {(!agentId || openSubSession) && (
                 <button
                   className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
                   onClick={handleDelete}
-                  disabled={del.isPending}
-                  title="Delete session"
-                  aria-label="Delete session"
+                  disabled={del.isPending || delSubSession.isPending}
+                  title={openSubSession ? "Delete sub session" : "Delete session"}
+                  aria-label={openSubSession ? "Delete sub session" : "Delete session"}
                   data-testid="session-delete"
                 >
                   <Trash2 size={15} aria-hidden />
@@ -899,16 +977,22 @@ export function SessionView() {
             </div>
           )}
 
-          {/* Composer */}
+          {/* Composer, and the channels it runs on. Both belong to the
+              transcript: the timeline and the graph are pictures of the
+              session rather than the conversation, and an input wired to
+              something you are not reading is an invitation to type into the
+              wrong place. The stop control lives on the composer and goes with
+              it — the transcript is one key away, and the header keeps the
+              status lamp either way. */}
           {/* The channels this session runs on, in the same place the draft
               row occupied before it existed. Read-only — each key opens its
               value rather than a picker. */}
-          {detail && mainAgent && (
+          {!overlayOpen && detail && mainAgent && (
             <SessionConfigBar mode="locked" detail={detail} agent={mainAgent} />
           )}
           {/* A workflow step takes no messages — the definition drives it — so
               it gets the stop control without the send one. */}
-          {agentId && detail?.workflow ? (
+          {overlayOpen ? null : agentId && detail?.workflow ? (
             <div className="flex items-center gap-3 px-4 py-2">
               <span className="text-xs text-faint">
                 This is a workflow step. It works from its definition, not from

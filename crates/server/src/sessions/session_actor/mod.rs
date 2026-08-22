@@ -165,6 +165,9 @@ struct AgentPlan {
     step_result: crate::sessions::session_actor::context::StepResultDef,
     /// The plugin-declared agent type a typed subagent runs as.
     agent_type: Option<String>,
+    /// Where a sub session came from, for the section of its system prompt
+    /// that says so. `None` for every other kind of agent.
+    origin: Option<crate::sessions::session_actor::context::SubSessionOrigin>,
 }
 
 pub struct SessionActor {
@@ -528,6 +531,7 @@ impl SessionActor {
             session_id: self.id,
             kind: plan.kind,
             agent_type: plan.agent_type,
+            origin: plan.origin,
             unattended: self.spec().is_unattended(),
             session: self.me(ctx),
             plugins: self.spec().plugins.clone(),
@@ -606,6 +610,7 @@ impl SessionActor {
                 settings: settings.clone(),
                 step_result: Default::default(),
                 agent_type: None,
+                origin: None,
             },
         );
     }
