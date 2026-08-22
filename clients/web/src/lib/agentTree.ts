@@ -94,7 +94,7 @@ export function isLive(status: string): boolean {
  * and only one is itself a session. The server says which on every roster
  * entry, so this is read rather than inferred from which fields are set.
  */
-export type AgentKind = "main" | "subagent" | "step" | "sub_session";
+export type AgentKind = "main" | "subagent" | "step" | "sub_session" | "run";
 
 /** What each kind is called, where a picture has room to say so. */
 export const KIND_LABEL: Record<AgentKind, string> = {
@@ -102,7 +102,75 @@ export const KIND_LABEL: Record<AgentKind, string> = {
   subagent: "subagent",
   step: "workflow step",
   sub_session: "sub session",
+  run: "workflow run",
 };
+
+/**
+ * The node a workflow run's steps hang off.
+ *
+ * A run has no main agent — it *is* its steps, and the server says so: every
+ * step reaches the roster with no parent, because the definition chose it and
+ * no agent delegated to it. Both pictures then rooted on whichever step
+ * happened to be first and hung the rest off it, so a three-step run drew as
+ * one step labelled "main session" that had somehow spawned the other two.
+ *
+ * The run itself is the honest root, and it is not an agent, so it is not on
+ * the roster and cannot be: it has no transcript, no context and no id of its
+ * own. This is that id — a constant rather than a uuid, so it can never
+ * collide with one, and so a fold or a selection naming it survives a reload.
+ */
+export const RUN_ROOT = "workflow-run";
+
+/**
+ * The run's executions, in the order the run log holds them.
+ *
+ * A run is a sequence: one step at a time, each handed the last one's result.
+ * A step reached twice — by a loop or by a retry — is two executions and two
+ * entries here, which is what makes the log a chain rather than a set.
+ */
+export function stepRuns(agents: SubAgentView[]): SubAgentView[] {
+  return agents
+    .filter((a) => a.kind === "step")
+    .sort((x, y) => x.spawnedAtMs - y.spawnedAtMs || x.id.localeCompare(y.id));
+}
+
+/** What the run is doing, folded from its steps.
+ *
+ * A run has no status of its own on the roster — the session's own status is
+ * in a different vocabulary, one where a session is `Finished` and an agent is
+ * `completed` — so it is read off the steps, which speak the vocabulary both
+ * pictures paint in. A fault outranks a finish: a run whose middle step failed
+ * and whose last one landed has still failed. */
+export function runStatus(steps: SubAgentView[]): string {
+  const live = steps.find((s) => isLive(s.status));
+  if (live) return live.status;
+  if (steps.some((s) => s.status === "failed")) return "failed";
+  if (steps.some((s) => s.status === "cancelled")) return "cancelled";
+  return steps.length > 0 && steps.every((s) => s.status === "completed") ? "completed" : "idle";
+}
+
+/** What the run is doing, how long it has taken so far, and when it began —
+ * folded from its steps, the way an agent's own detail is folded from its two
+ * stamps. */
+export function describeRun(steps: SubAgentView[]): string {
+  const at = steps[0]?.spawnedAtMs ?? 0;
+  const ended = steps.reduce((last, s) => Math.max(last, s.endedAtMs), 0);
+  return describeAgent(runStatus(steps), at, ended);
+}
+
+/** The run as the one shape both walks read. */
+function runMember(steps: SubAgentView[], title: string): Member {
+  return {
+    id: RUN_ROOT,
+    parent: undefined,
+    label: title,
+    status: runStatus(steps),
+    agentType: null,
+    detail: describeRun(steps),
+    kind: "run",
+    at: steps[0]?.spawnedAtMs ?? 0,
+  };
+}
 
 /** One drawable thing, from either roster, in the one shape the walk reads. */
 interface Member {
@@ -131,9 +199,23 @@ interface Member {
  * Oldest first inside each group, and by id when two share a stamp, so nothing
  * moves because a sibling was relabelled.
  */
+const SIBLING_ORDER: Record<AgentKind, number> = {
+  main: 0,
+  subagent: 0,
+  run: 0,
+  sub_session: 1,
+  // Last, and only ever reached in the graph, where the run is drawn as a
+  // chain: a step under another step is what the run did *next*, so it belongs
+  // below everything that step delegated rather than among it.
+  step: 2,
+};
+
 function bySibling(x: Member, y: Member): number {
-  const group = (m: Member) => (m.kind === "sub_session" ? 1 : 0);
-  return group(x) - group(y) || x.at - y.at || x.id.localeCompare(y.id);
+  return (
+    SIBLING_ORDER[x.kind] - SIBLING_ORDER[y.kind] ||
+    x.at - y.at ||
+    x.id.localeCompare(y.id)
+  );
 }
 
 function agentMember(a: SubAgentView): Member {
@@ -299,15 +381,31 @@ export function layoutAgentTree(
   agents: SubAgentView[],
   subSessions: SubSessionView[] = [],
   collapsed: readonly string[] = [],
+  /**
+   * What this run is called, when the session *is* a run — its own title,
+   * which defaults to the workflow's name and can be renamed like any
+   * session's.
+   *
+   * Its absence is the gate, and steps in the roster are not: an agent that
+   * calls `invoke_workflow` starts a run inside an ordinary session, and the
+   * roster lists those executions too — "the session's own and any invoked
+   * one's". Keyed off the steps, such a session would have been rooted on a
+   * run node with its own main agent swept inside it.
+   */
+  runTitle?: string,
 ): AgentTree {
   if (agents.length === 0 && subSessions.length === 0) {
     return { nodes: [], edges: [], depth: 0, rows: 0, hidden: 0 };
   }
 
+  const steps = stepRuns(agents);
+  const run = runTitle && steps.length > 0 ? runMember(steps, runTitle) : undefined;
+
   // The main agent is the one nothing spawned. The same fallbacks the timeline
-  // uses, so the two views agree on which agent is the root.
+  // uses, so the two views agree on which agent is the root. A run has no such
+  // agent and the run node stands in its place.
   const main = agents.find((a) => !a.parent && a.depth === 0) ?? agents[0];
-  const mainId = main?.id ?? MAIN_AGENT;
+  const mainId = run ? RUN_ROOT : (main?.id ?? MAIN_AGENT);
 
   const members: Member[] = [
     ...agents.filter((a) => a.id !== mainId).map(agentMember),
@@ -327,6 +425,22 @@ export function layoutAgentTree(
     const key = linked && m.parent !== mainId ? (m.parent ?? "") : "";
     kids.set(key, [...(kids.get(key) ?? []), m]);
   }
+  // The run is a sequence, and a sequence drawn as a fan is not one: every
+  // step arrives parentless, so they all land in the root's bucket and the
+  // picture claims the run did three things at once. Re-linked into the chain
+  // the log actually is — each execution hanging off the one before it — which
+  // is the same left-to-right flow `WorkflowGraph` draws the definition in.
+  if (run) {
+    const byId = new Map(members.map((m) => [m.id, m]));
+    const chain = steps.map((s) => byId.get(s.id)).filter((m): m is Member => m != null);
+    const root = (kids.get("") ?? []).filter((m) => !chain.includes(m));
+    kids.set("", chain.length > 0 ? [...root, chain[0]] : root);
+    for (let i = 1; i < chain.length; i++) {
+      const under = chain[i - 1].id;
+      kids.set(under, [...(kids.get(under) ?? []), chain[i]]);
+    }
+  }
+
   for (const level of kids.values()) level.sort(bySibling);
   const bucket = (id: string) => (id === mainId ? "" : id);
 
@@ -403,7 +517,7 @@ export function layoutAgentTree(
     };
   };
 
-  const root = place(null, mainId, 0, null);
+  const root = place(run ?? null, mainId, 0, null);
 
   const nodes: PlacedAgent[] = [];
   const edges: AgentEdge[] = [];

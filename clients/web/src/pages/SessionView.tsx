@@ -46,7 +46,7 @@ import {
 import { cn } from "../lib/cn";
 import { sessionTitle } from "../lib/format";
 import { buildTimeline } from "../lib/timeline";
-import { layoutAgentTree } from "../lib/agentTree";
+import { RUN_ROOT, layoutAgentTree } from "../lib/agentTree";
 import { progressionLabel, showsProgression, statusMeta } from "../lib/status";
 
 type SessionViewId = "transcript" | "timeline" | "graph";
@@ -255,6 +255,19 @@ export function SessionView() {
    * again — its anchors do not exist while the timeline has the pane. */
   const [pendingSeek, setPendingSeek] = useState<string | null>(null);
 
+  /**
+   * What this run is called, when the session is a run of a workflow.
+   *
+   * Its own title first: a run is a session, so it is named like one and can
+   * be renamed like one, and the workflow's name is only what that title
+   * defaults to. Absent unless the session *is* a run — an ordinary session
+   * whose agent invoked a workflow has steps in its roster too, and it is not
+   * one.
+   */
+  const workflowRunTitle = detail?.workflow
+    ? (detail.name?.trim() || detail.workflow)
+    : undefined;
+
   /** The session's own agent, whose page is the session's page. */
   const mainAgentId =
     detail?.agents?.find((a) => !a.parent && a.depth === 0)?.id ??
@@ -279,7 +292,10 @@ export function SessionView() {
   const openRun = (agent: string) => {
     setLastView("transcript");
     setSelection(null);
-    const own = agent === mainAgentId || agent === MAIN_AGENT;
+    // The run node is the session — and a workflow run's session page is its
+    // graph, not a transcript, which is the one place worth landing from a
+    // step. `RUN_ROOT` is not an agent, so it has no page of its own.
+    const own = agent === mainAgentId || agent === MAIN_AGENT || agent === RUN_ROOT;
     navigate(own ? `/sessions/${id}` : `/sessions/${id}/agents/${agent}`);
   };
 
@@ -290,7 +306,9 @@ export function SessionView() {
    * dozen requests on open, to draw detail nobody had asked to see yet. One
    * read per lane, the first time it is opened, kept for as long as the page
    * lives. */
-  const [expanded, setExpanded] = useState<string[]>([]);
+  // The run this page is on starts expanded, because its history is already
+  // here — it is the transcript above. Every other lane is fetched on demand.
+  const [expanded, setExpanded] = useState<string[]>(agentId ? [agentId] : []);
   /** Agents whose children are folded away. */
   const [collapsed, setCollapsed] = useState<string[]>([]);
   /** What the panel beside a structural view is showing: one agent, or one
@@ -446,15 +464,28 @@ export function SessionView() {
         detail?.agents ?? [],
         detail?.subSessions ?? [],
         Date.now(),
-        histories,
+        // The page's own transcript, offered as this agent's history. On a
+        // workflow run the root lane is the *run*, so the step being read
+        // draws its bars on its own lane like any other member — from what is
+        // already loaded, not from a second read of the same messages.
+        agentId ? { ...histories, [agentId]: stream.items } : histories,
         // The run this page is scoped to. `stream.items` is already that
         // run's transcript, so drawing its bars on a lane labelled "main
         // agent" — with the whole session's roster hanging off it — was the
         // picture contradicting the prose it was drawn from.
         agentId,
         collapsed,
+        workflowRunTitle,
       ),
-    [stream.items, detail?.agents, detail?.subSessions, histories, agentId, collapsed],
+    [
+      stream.items,
+      detail?.agents,
+      detail?.subSessions,
+      histories,
+      agentId,
+      collapsed,
+      workflowRunTitle,
+    ],
   );
 
   // Both rosters, because the graph is the session's whole lineage: its agents
@@ -462,8 +493,14 @@ export function SessionView() {
   // reads — folding something is a statement about it, not about the view it
   // was folded in.
   const agentTree = useMemo(
-    () => layoutAgentTree(detail?.agents ?? [], detail?.subSessions ?? [], collapsed),
-    [detail?.agents, detail?.subSessions, collapsed],
+    () =>
+      layoutAgentTree(
+        detail?.agents ?? [],
+        detail?.subSessions ?? [],
+        collapsed,
+        workflowRunTitle,
+      ),
+    [detail?.agents, detail?.subSessions, collapsed, workflowRunTitle],
   );
 
   /** The selected agent, resolved against both rosters. */
@@ -475,9 +512,10 @@ export function SessionView() {
             detail?.agents ?? [],
             detail?.subSessions ?? [],
             detail?.name,
+            workflowRunTitle,
           )
         : null,
-    [selection, detail?.agents, detail?.subSessions, detail?.name],
+    [selection, detail?.agents, detail?.subSessions, detail?.name, workflowRunTitle],
   );
 
   /** The selected entry's message. Found in what is loaded rather than

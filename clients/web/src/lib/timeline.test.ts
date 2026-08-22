@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SubSessionView, SubAgentView } from "../api/types";
 import type { TranscriptItem } from "../hooks/useSessionStream";
+import { RUN_ROOT } from "./agentTree";
 import {
   buildScale,
   buildTimeline,
@@ -470,6 +471,79 @@ describe("folding", () => {
     );
     // The sub session was branched first and is still drawn second.
     expect(t.lanes.map((l) => l.agentId)).toEqual(["main", "a1", "f1"]);
+  });
+});
+
+/** A workflow run is a session with no main agent: it *is* its steps.
+ *
+ * Rooted on whichever step's page you were on, the others were orphans rescued
+ * onto it — and worse, the axis was built from that one step's transcript, so
+ * `toX` clamped every step that ran before or after it to an edge. On the
+ * first step's page the two that followed drew as slivers *inside* it. */
+describe("workflow runs", () => {
+  const step = (id: string, at: number, took: number, status = "completed"): SubAgentView =>
+    agent({ id, kind: "step", title: id, status, spawnedAtMs: at, endedAtMs: at + took });
+
+  const RUN = [step("gather", 1_000, 4_000), step("review", 5_000, 2_000), step("report", 7_000, 1_000)];
+
+  it("roots on the run, with every step hanging off it", () => {
+    const t = buildTimeline([], RUN, [], 20_000, {}, "gather", [], "nightly-audit");
+    expect(t.lanes.map((l) => [l.agentId, l.kind, l.depth])).toEqual([
+      [RUN_ROOT, "run", 0],
+      ["gather", "step", 1],
+      ["review", "step", 1],
+      ["report", "step", 1],
+    ]);
+    expect(t.lanes[0].label).toBe("nightly-audit");
+    // Nothing of its own: what a run did is what its steps did.
+    expect(t.lanes[0].bars).toEqual([]);
+    expect(t.lanes[0].hasChildren).toBe(true);
+  });
+
+  it("lays the axis over the whole run, not over one step's transcript", () => {
+    const t = buildTimeline([], RUN, [], 20_000, {}, "gather", [], "nightly-audit");
+    const [, gather, review, report] = t.lanes;
+    // Each step starts where the last one ended, left to right, and none of
+    // them is clamped onto another.
+    expect(gather.span?.x).toBe(0);
+    expect(review.span?.x).toBeGreaterThan((gather.span?.x ?? 0) + (gather.span?.width ?? 0) - 1);
+    expect(report.span?.x).toBeGreaterThan(review.span?.x ?? 0);
+    // The longest step is the widest, which is the scale doing its job.
+    expect(gather.span?.width).toBeGreaterThan(review.span?.width ?? 0);
+  });
+
+  it("draws the step being read on its own lane, from the history it is handed", () => {
+    const own: TranscriptItem[] = [
+      msg("s1", "User", 1_000, { text: "gather it" }),
+      msg("s2", "Assistant", 3_000, { startedAtMs: 1_500, text: "gathered" }),
+    ];
+    const t = buildTimeline([], RUN, [], 20_000, { gather: own }, "gather", [], "nightly-audit");
+    const gather = t.lanes.find((l) => l.agentId === "gather");
+    expect(gather?.bars.length).toBe(2);
+    // On the run's axis, so a step's own work lines up inside its own span.
+    const first = gather?.bars[0];
+    expect(first?.x).toBeGreaterThanOrEqual(gather?.span?.x ?? 0);
+  });
+
+  it("marks a tick per step rather than per turn of whichever step this is", () => {
+    const t = buildTimeline([], RUN, [], 20_000, {}, "gather", [], "nightly-audit");
+    expect(t.ticks.length).toBeGreaterThan(0);
+    expect(t.ticks[0].x).toBe(0);
+  });
+
+  /* The same gate the graph has: an ordinary session whose agent invoked a
+     workflow has step executions in its roster and is not a run. */
+  it("leaves a session that merely invoked a workflow rooted on its own agent", () => {
+    const roster = [agent({ id: "main", kind: "main", title: undefined }), ...RUN];
+    const t = buildTimeline(SESSION, roster, [], 20_000, {}, undefined, []);
+    expect(t.lanes[0]).toMatchObject({ agentId: "main", kind: "main" });
+    expect(t.lanes.map((l) => l.agentId)).not.toContain(RUN_ROOT);
+  });
+
+  it("keeps the run's own chevron while the run is folded", () => {
+    const t = buildTimeline([], RUN, [], 20_000, {}, "gather", [RUN_ROOT], "nightly-audit");
+    expect(t.lanes.map((l) => l.agentId)).toEqual([RUN_ROOT]);
+    expect(t.lanes[0].hasChildren).toBe(true);
   });
 });
 

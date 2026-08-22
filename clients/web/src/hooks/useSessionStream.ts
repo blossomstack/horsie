@@ -262,6 +262,18 @@ function reducer(state: State, action: Action): State {
 interface Folded {
   status: SessionStatusKind | null;
   statusSeq: number;
+  /**
+   * Bumped by every frame that changes what the session *hosts* — an agent
+   * spawned or finished, a step started or concluded.
+   *
+   * Its own counter, beside `statusSeq`, because the two answer different
+   * questions and one of them was going unasked: a subagent spawned mid-turn
+   * changes no status, so nothing re-read the session document until the turn
+   * ended, and the graph and the timeline sat on a roster up to a whole turn
+   * old while the transcript beside them streamed. A delegating turn that runs
+   * for ten minutes drew no subagent for ten minutes.
+   */
+  rosterSeq: number;
   reason: string | null;
   error: string | null;
   pendingAsks: AskLifecycle[];
@@ -289,6 +301,7 @@ export function fold(entries: AgentLogEntry[]): Folded {
   const out: Folded = {
     status: null,
     statusSeq: 0,
+    rosterSeq: 0,
     reason: null,
     error: null,
     pendingAsks: [],
@@ -378,6 +391,9 @@ export function fold(entries: AgentLogEntry[]): Folded {
           stage: `subagent_${ev.value.status}`,
           detail: `"${ev.value.title}" (${ev.value.id})`,
         };
+        // A new member, or one that has just finished: the roster changed, and
+        // the two structural views are drawn from the roster.
+        out.rosterSeq += 1;
         break;
       // A step's own turn boundary. A step never gets a `TurnEnded` — its
       // outcome is journaled as `StepConcluded`/`StepFailed`/`StepCancelled`,
@@ -386,6 +402,8 @@ export function fold(entries: AgentLogEntry[]): Folded {
       // cold tabs, while the session itself said `Idle`.
       case "Step": {
         const step = ev.value.status;
+        // A run's roster *is* its steps, so every step boundary is one.
+        out.rosterSeq += 1;
         if (step === "started") {
           out.status = SessionStatusKind.Running;
           out.statusSeq += 1;
@@ -681,12 +699,19 @@ export function useSessionStream(
   // Re-read the documents when a turn boundary passes. Only the numbers live
   // there now — usage, context size — plus the task list, which is compared by
   // seq rather than latched.
-  const statusSeq = useMemo(() => fold(state.entries).statusSeq, [state.entries]);
+  //
+  // …and again whenever the roster moves, which is not the same moment. The
+  // graph and the timeline are drawn from the session document, and it was
+  // only re-read at a turn boundary: a subagent spawned in the middle of a
+  // long turn appeared in neither picture until the turn ended. Both counters
+  // feed the same read; a frame that bumps both costs one invalidation,
+  // because react-query coalesces them.
+  const { statusSeq, rosterSeq } = useMemo(() => fold(state.entries), [state.entries]);
   useEffect(() => {
-    if (!sessionId || statusSeq === 0) return;
+    if (!sessionId || statusSeq + rosterSeq === 0) return;
     void queryClient.invalidateQueries({ queryKey: qk.agent(sessionId, agentId) });
     void queryClient.invalidateQueries({ queryKey: qk.session(sessionId) });
-  }, [sessionId, agentId, statusSeq, queryClient]);
+  }, [sessionId, agentId, statusSeq, rosterSeq, queryClient]);
 
   const docTasks = agentDoc?.tasks;
   const docSeq = agentDoc?.asOfSeq;

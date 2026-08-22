@@ -217,6 +217,32 @@ describe("fold", () => {
     });
   });
 
+  /** The graph and the timeline are drawn from the session document, and it
+   *  was re-read only when a *status* moved. A subagent spawned in the middle
+   *  of a turn moves no status, so a long delegating turn streamed into the
+   *  transcript while both pictures sat on a roster from before it started. */
+  it("counts a roster change as its own reason to re-read", () => {
+    reset();
+    const turn = fold([lifecycle("TurnBegan", { consumed: [], answered: [] })]);
+    expect(turn.rosterSeq).toBe(0);
+
+    reset();
+    const spawned = fold([
+      lifecycle("TurnBegan", { consumed: [], answered: [] }),
+      lifecycle("SubAgent", { id: "abc", title: "audit", status: "running" }),
+      lifecycle("SubAgent", { id: "abc", title: "audit", status: "completed" }),
+    ]);
+    // Both ends of the subagent: it appears when it starts and its lane stops
+    // growing when it finishes, and neither is a turn boundary.
+    expect(spawned.rosterSeq).toBe(2);
+    expect(spawned.statusSeq).toBe(turn.statusSeq);
+
+    // A run's roster is its steps, so every step boundary is one of these too.
+    reset();
+    const stepped = fold([lifecycle("Step", { index: 0, name: "review", status: "started" })]);
+    expect(stepped.rosterSeq).toBe(1);
+  });
+
   it("shows a workflow step's progress from its own entry", () => {
     reset();
     const f = fold([

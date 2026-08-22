@@ -16,7 +16,15 @@ import { MAIN_AGENT } from "../api/client";
 import type { SubSessionView, SubAgentView } from "../api/types";
 import type { RenderedMessage, TranscriptItem } from "../hooks/useSessionStream";
 import { isAskCall } from "./askUser";
-import { type AgentKind, hostedTree, isLive } from "./agentTree";
+import {
+  type AgentKind,
+  RUN_ROOT,
+  describeRun,
+  hostedTree,
+  isLive,
+  runStatus,
+  stepRuns,
+} from "./agentTree";
 import { clockTime, humanDuration } from "./format";
 
 /** A gap longer than this is dead air, not part of the work. */
@@ -326,6 +334,10 @@ export function buildTimeline(
    * skip rows it was handed, and it was handed a flat list in which a
    * top-level subagent sat at the root's own depth. */
   collapsed: readonly string[] = [],
+  /** What this run is called, when the session *is* a run. Its absence is the
+   * gate: a session that merely invoked a workflow has step executions in its
+   * roster too, and it is not a run — see `layoutAgentTree`. */
+  runTitle?: string,
 ): Timeline {
   const entries: Entry[] = [];
   for (const item of items) {
@@ -350,9 +362,34 @@ export function buildTimeline(
   }
   entries.sort((a, b) => a.startMs - b.startMs);
 
-  const scale = buildScale(entries.map((e) => ({ startMs: e.startMs, endMs: e.endMs })));
+  /**
+   * A workflow run is a session with no main agent: it *is* its steps, one
+   * after another, and no one of them is the session.
+   *
+   * That makes the axis the run's rather than one step's. `items` is whichever
+   * step's page this is, so scaled to it every other step fell outside the
+   * range and `toX` clamped it: on the first step's page the two that ran
+   * after it drew as slivers at the left edge, inside the step they came
+   * after. The steps are the spans the axis is built from instead, and each
+   * one's own bars arrive the way an expanded lane's always have.
+   */
+  const steps = stepRuns(agents);
+  const run = runTitle != null && steps.length > 0;
+  const stepSpans = steps.map((s) => ({
+    startMs: s.spawnedAtMs,
+    // A step still going has no end, so it is measured against now — the same
+    // rule a running bar is drawn by.
+    endMs: s.endedAtMs > 0 ? s.endedAtMs : nowMs,
+  }));
 
-  const bars: Bar[] = entries.map((e, i) => {
+  const scale = buildScale(
+    run ? stepSpans : entries.map((e) => ({ startMs: e.startMs, endMs: e.endMs })),
+  );
+
+  // A run's own lane carries nothing: what it did is what its steps did, and
+  // each of those has a lane. The step whose page this is draws its bars on
+  // its own lane, from the history the page seeds.
+  const bars: Bar[] = (run ? [] : entries).map((e, i) => {
     const x = scale.toX(e.startMs);
     return {
       key: `${e.entryId}:${e.kind}:${i}`,
@@ -404,11 +441,16 @@ export function buildTimeline(
     });
   };
 
+  // One tick per turn start — and a run's turns are its steps: `entries` is
+  // one step's transcript, so a run scaled to every step would have taken its
+  // marks from whichever step's page it happened to be.
   const ticks: { x: number; label: string }[] = [];
-  for (const e of entries) {
-    if (!e.turnStart) continue;
-    const x = scale.toX(e.startMs);
-    const label = clockTime(e.startMs);
+  const marks = run
+    ? steps.map((s) => s.spawnedAtMs)
+    : entries.filter((e) => e.turnStart).map((e) => e.startMs);
+  for (const at of marks) {
+    const x = scale.toX(at);
+    const label = clockTime(at);
     const last = ticks[ticks.length - 1];
     if (last && (x - last.x < TICK_MIN_GAP_PX || label === last.label)) continue;
     ticks.push({ x, label });
@@ -421,43 +463,56 @@ export function buildTimeline(
   // then to the well-known id, so a roster that has not arrived yet still
   // produces a lane to draw the transcript on.
   const main = agents.find((a) => !a.parent && a.depth === 0) ?? agents[0];
-  const rootId = rootAgentId ?? main?.id ?? MAIN_AGENT;
+  // A run is rooted on the run, not on whichever step this page is: every step
+  // belongs to it, and rooted on one step the others were orphans rescued onto
+  // it — a step drawn as though it had spawned the rest of the run.
+  const rootId = run ? RUN_ROOT : (rootAgentId ?? main?.id ?? MAIN_AGENT);
   const rootAgent = agents.find((a) => a.id === rootId);
   const rootSubSession = subSessions.find((f) => f.id === rootId);
-  const rootKind: LaneKind = rootSubSession
-    ? "sub_session"
-    : rootAgent && rootAgent.id !== main?.id
-      ? rootAgent.kind === "step"
-        ? "step"
-        : "subagent"
-      : "main";
+  const rootKind: LaneKind = run
+    ? "run"
+    : rootSubSession
+      ? "sub_session"
+      : rootAgent && rootAgent.id !== main?.id
+        ? rootAgent.kind === "step"
+          ? "step"
+          : "subagent"
+        : "main";
   // Orphans belong to the session, not to one agent inside it: scoped to a
   // subagent, the tree is that subagent's own subtree.
-  const members = hostedTree(agents, subSessions, rootId, collapsed, rootKind === "main");
+  // Orphans belong to the root when the root is the whole of what is drawn:
+  // the session, or the run that *is* its steps.
+  const rescue = rootKind === "main" || run;
+  const members = hostedTree(agents, subSessions, rootId, collapsed, rescue);
   // Whether the root hosts anything is a question about the *roster*, and a
   // fold must not be able to change the answer: folded, `members` is empty, so
   // the root reported no children, so it was drawn without the chevron that
   // unfolds it — collapsing the root was a one-way door. Every other lane was
   // fine, because a member's own child count is counted off the roster.
   const rootHasChildren = collapsed.includes(rootId)
-    ? hostedTree(agents, subSessions, rootId, [], rootKind === "main").length > 0
+    ? hostedTree(agents, subSessions, rootId, [], rescue).length > 0
     : members.length > 0;
 
   const lanes: Lane[] = [
     {
       agentId: rootId,
       kind: rootKind,
-      label:
-        rootSubSession?.title ??
-        rootAgent?.title ??
-        rootAgent?.agentType ??
-        sessionTitleFallback(rootKind),
-      status: rootSubSession?.status ?? rootAgent?.status ?? "idle",
+      label: run
+        ? runTitle
+        : (rootSubSession?.title ??
+          rootAgent?.title ??
+          rootAgent?.agentType ??
+          sessionTitleFallback(rootKind)),
+      status: run
+        ? runStatus(steps)
+        : (rootSubSession?.status ?? rootAgent?.status ?? "idle"),
       depth: 0,
       bars,
       placed: true,
       hasChildren: rootHasChildren,
-      detail: rootSubSession?.status ?? rootAgent?.status ?? "idle",
+      detail: run
+        ? describeRun(steps)
+        : (rootSubSession?.status ?? rootAgent?.status ?? "idle"),
     },
   ];
 

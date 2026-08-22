@@ -83,7 +83,15 @@ export function SessionTimeline({
   /** Whichever entry the panel is showing. */
   selectedEntry?: string;
 }) {
-  if (timeline.lanes.length === 0 || timeline.lanes[0].bars.length === 0) {
+  // An empty axis, rather than a first lane with no bars on it. Two things
+  // break that older reading: a workflow run's root lane is the run, which has
+  // no transcript of its own and so never has bars, and folding the root hides
+  // every lane that does — so a run reported an empty session, and folding one
+  // up replaced it with "nothing has happened yet".
+  //
+  // The width is the scale's, and the scale is built from everything the
+  // session has done. Zero means there was nothing to lay out at all.
+  if (timeline.lanes.length === 0 || timeline.width === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6" data-testid="timeline-empty">
         <p className="max-w-sm text-center text-sm leading-relaxed text-dim">
@@ -292,8 +300,9 @@ function LaneRow({
             type="button"
             data-testid={`timeline-open-${lane.agentId}`}
             className="shrink-0 text-faint opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-legend"
-            title={`Open ${lane.label}'s transcript`}
-            aria-label={`Open ${lane.label}'s transcript`}
+            // A run has no transcript of its own: its page is its graph.
+            title={openLabel(lane)}
+            aria-label={openLabel(lane)}
             onClick={() => onOpenAgent(lane.agentId)}
           >
             {/* The transcript's own glyph, the one a graph node's key and
@@ -449,6 +458,13 @@ function BarView({
       }}
     />
   );
+}
+
+/** What a lane's jump key opens, in the words of what it opens. */
+function openLabel(lane: Lane): string {
+  return lane.kind === "run"
+    ? `Open the ${lane.label} run`
+    : `Open ${lane.label}'s transcript`;
 }
 
 function humanGap(ms: number): string {

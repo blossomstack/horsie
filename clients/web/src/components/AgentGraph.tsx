@@ -1,5 +1,5 @@
 import { MessageSquareText } from "lucide-react";
-import type { AgentTree, PlacedAgent } from "../lib/agentTree";
+import type { AgentKind, AgentTree, PlacedAgent } from "../lib/agentTree";
 import { KIND_LABEL } from "../lib/agentTree";
 import { cn } from "../lib/cn";
 
@@ -38,6 +38,9 @@ const TOGGLE_R = 8;
 const JUMP_W = 20;
 /** The glyph inside it, which is the transcript's own icon at key size. */
 const JUMP_ICON = 13;
+/** Air between a run's outermost members and the box drawn around them. Under
+ * `PAD`, so the box never reaches the edge of the canvas it is measured in. */
+const GROUP_PAD = 14;
 
 /** A node is a panel key lit by the same lamps the rest of the console uses:
  * live for work in motion, ok for an agent that landed, red for a fault.
@@ -74,6 +77,13 @@ const NAME_MAX_2 = 30;
 const DETAIL_MAX = 38;
 /** One character of the `+3` a fold carries, at 10px. */
 const BADGE_CHAR_W = 6;
+/** One character of a run box's caption: 9px, upper case, letter-spaced. */
+const CAPTION_CHAR_W = 7;
+
+/** What the jump key on a node opens, said in the words of what it opens. */
+function openLabel(kind: AgentKind, label: string): string {
+  return kind === "run" ? `Open the ${label} run` : `Open ${label}'s transcript`;
+}
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -138,9 +148,14 @@ export function AgentGraph({
     );
   }
 
+  const runNode = tree.nodes.find((n) => n.kind === "run");
+  // A run's box is captioned above its own top edge, and a caption drawn above
+  // the topmost row lands off the canvas. The extra ground is taken once, at
+  // the origin, rather than by shifting the box down into the nodes it holds.
+  const top = runNode ? PAD + GROUP_PAD : PAD;
   const at = (n: PlacedAgent) => ({
     x: PAD + n.depth * (NODE_W + GAP_X),
-    y: PAD + n.lane * ROW_H,
+    y: top + n.lane * ROW_H,
   });
   const placed = new Map(tree.nodes.map((n) => [n.id, n]));
 
@@ -154,7 +169,44 @@ export function AgentGraph({
       const toggle = n.children > 0 ? TOGGLE_R : 0;
       return Math.max(right, at(n).x + NODE_W + toggle + badge);
     }, 0);
-  const height = PAD * 2 + (tree.rows - 1) * ROW_H + NODE_H;
+  const height = top + PAD + (tree.rows - 1) * ROW_H + NODE_H;
+
+  /**
+   * What a run contains, boxed.
+   *
+   * A run is one thing made of several, and edges alone cannot say so: they
+   * say "this came after that", which is true of a chain of steps and equally
+   * true of a chain of anything else. The box is the claim the edges cannot
+   * make — everything inside it is this run — and it is what tells a reader
+   * where the run ends when a step has spawned subagents of its own.
+   *
+   * Drawn around the members rather than around the run node too: the node is
+   * the run's handle, the thing you fold, select and open it by, and a handle
+   * inside the container it operates on is a control with nowhere to sit when
+   * the container is folded away.
+   */
+  const grouped = runNode ? tree.nodes.filter((n) => n.id !== runNode.id) : [];
+  // Where each execution sits in the run. "workflow step" on all three of them
+  // says what they are and nothing about which one this is; the run log's own
+  // numbering is the thing a reader is actually looking for, and a step
+  // reached twice by a loop is two numbers rather than one node seen twice.
+  const steps = tree.nodes.filter((n) => n.kind === "step");
+  const ordinals = new Map(steps.map((n, i) => [n.id, `step ${i + 1} of ${steps.length}`]));
+  const box =
+    grouped.length > 0
+      ? grouped.reduce(
+          (b, n) => {
+            const { x, y } = at(n);
+            return {
+              x: Math.min(b.x, x - GROUP_PAD),
+              y: Math.min(b.y, y - GROUP_PAD),
+              right: Math.max(b.right, x + NODE_W + GROUP_PAD),
+              bottom: Math.max(b.bottom, y + NODE_H + GROUP_PAD),
+            };
+          },
+          { x: Infinity, y: Infinity, right: 0, bottom: 0 },
+        )
+      : undefined;
 
   // Out of the parent's right edge, into the child's left edge. Flat-tangent
   // curves rather than elbows: at this rank spacing a fan of six children is
@@ -166,14 +218,21 @@ export function AgentGraph({
     if (!from || !to) return [];
     const a = at(from);
     const b = at(to);
+    // An edge into a step is the run moving on, and that is a different claim
+    // from the one every other edge makes: elsewhere an edge means "spawned
+    // this", here it means "then this ran". Only the second has a direction
+    // worth drawing, so only the second gets a head — and the line stops short
+    // of the node so the head lands against it rather than under it.
+    const flow = to.kind === "step";
     const x1 = a.x + NODE_W;
     const y1 = a.y + NODE_H / 2;
-    const x2 = b.x;
+    const x2 = b.x - (flow ? 7 : 0);
     const y2 = b.y + NODE_H / 2;
     return [
       {
         key: `${e.from}-${e.to}`,
         live: to.status === "running" || to.status === "provisioning",
+        flow,
         d: `M ${x1} ${y1} C ${x1 + GAP_X / 2} ${y1}, ${x2 - GAP_X / 2} ${y2}, ${x2} ${y2}`,
       },
     ];
@@ -202,11 +261,70 @@ export function AgentGraph({
         // fill a screen it never needed.
         className="mx-auto block"
       >
+        {/* Behind everything: a container, not a mark on any one node. */}
+        {box && runNode && (
+          <g data-testid="agent-group-run" aria-hidden>
+            <rect
+              x={box.x}
+              y={box.y}
+              width={box.right - box.x}
+              height={box.bottom - box.y}
+              rx={14}
+              // Dashed, quiet, and unfilled: a boundary rather than a surface.
+              // A fill would put a second background behind cards whose own
+              // fill is how each of them reports its status, and no pointer
+              // events, so the box can never take a click meant for a node.
+              className="pointer-events-none fill-none stroke-rule-strong opacity-60"
+              strokeDasharray="5 5"
+            />
+            {/* Above the border, not on it: set inside the box it labels, a
+                caption sits on the dashes and is read through them.
+                Named, because the box is what a reader's eye lands on first
+                and "workflow run" alone leaves them to work out *which* run by
+                reading the card outside it. Cut to the box's own width — a
+                caption wider than the thing it captions is not a caption. */}
+            <text
+              x={box.x + 2}
+              y={box.y - 6}
+              className="fill-faint text-[9px] tracking-[0.08em] uppercase"
+            >
+              {clip(
+                `${KIND_LABEL.run} · ${runNode.label}`,
+                Math.floor((box.right - box.x) / CAPTION_CHAR_W),
+              )}
+            </text>
+          </g>
+        )}
+
+        <defs>
+          {/* Two heads, because a marker cannot inherit the line's colour:
+              `context-stroke` is not in Safari, and a lit edge with a grey
+              head reads as a rendering fault. */}
+          {["flow", "flow-live"].map((id) => (
+            <marker
+              key={id}
+              id={id}
+              viewBox="0 0 8 8"
+              refX={7}
+              refY={4}
+              markerWidth={6}
+              markerHeight={6}
+              orient="auto-start-reverse"
+            >
+              <path
+                d="M 0 0.5 L 7.5 4 L 0 7.5 z"
+                className={id === "flow-live" ? "fill-live" : "fill-rule-strong"}
+              />
+            </marker>
+          ))}
+        </defs>
+
         {wires.map((w) => (
           <path
             key={w.key}
             d={w.d}
             fill="none"
+            markerEnd={w.flow ? `url(#${w.live ? "flow-live" : "flow"})` : undefined}
             className={cn(
               "stroke-[1.5]",
               w.live ? "stroke-live" : "stroke-rule-strong opacity-70",
@@ -320,7 +438,11 @@ export function AgentGraph({
                     lamp only its author can read. */}
                 <text x={12} y={NODE_H - 12} className="fill-dim text-[10px]">
                   {clip(
-                    [KIND_LABEL[n.kind], n.status.replace(/_/g, " "), n.agentType]
+                    [
+                      ordinals.get(n.id) ?? KIND_LABEL[n.kind],
+                      n.status.replace(/_/g, " "),
+                      n.agentType,
+                    ]
                       .filter(Boolean)
                       .join(" · "),
                     DETAIL_MAX,
@@ -355,10 +477,13 @@ export function AgentGraph({
                 }}
                 tabIndex={0}
                 role="button"
-                aria-label={`Open ${n.label}'s transcript`}
+                // A run's page is its own graph, not a transcript — it has no
+                // transcript to open, which is the whole reason it is drawn as
+                // a node rather than as an agent.
+                aria-label={openLabel(n.kind, n.label)}
                 className="group/jump cursor-pointer focus:outline-none"
               >
-                <title>{`Open ${n.label}'s transcript`}</title>
+                <title>{openLabel(n.kind, n.label)}</title>
                 {/* An icon key, drawn the way every other icon key in the
                     console is: nothing at rest, a cap under the pointer.
                     `screen` rather than `raised`, which is what an icon key
