@@ -300,6 +300,15 @@ impl LlmProvider for EchoProvider {
     }
 }
 
+/// A live session on a fake runtime, with `provider` behind its model.
+///
+/// Returns only once the create the session started has landed. A session
+/// answers commands the moment it exists, so without this the fixture hands
+/// back a session whose own `Provision` is still in flight — and a test that
+/// restarts the deployment then plants a history on a log that says
+/// `InFlight`, which `RuntimeLifecycle::on_load` re-attempts and whose finish
+/// flushes the turn boundary. That is a real boundary, so the seeded test then
+/// fails for a reason it never set up.
 pub(super) async fn spawn_session_with_provider(
     provider: Arc<dyn LlmProvider>,
 ) -> (
@@ -321,6 +330,10 @@ pub(super) async fn spawn_session_with_provider(
     );
     let journal = f.journal();
     let session = f.start(id, actor_spec_fixture()).await;
+    wait_for_state(&journal, id, "the session's create lands", |s| {
+        matches!(s.provisioning, ProvisioningState::Ready { .. })
+    })
+    .await;
     (f, session, id, journal)
 }
 
@@ -604,6 +617,11 @@ pub(super) async fn wait_for_tree(
 /// The `Create` at the end is a no-op the log already answers — and provisions
 /// nothing, for the same reason. It is there because a command is what brings
 /// the actor into being, and the test that follows wants to find it recovered.
+///
+/// What is planted lands on top of whatever the previous life journaled, so a
+/// caller that started this session first must have waited for that start to
+/// settle — otherwise the seeded state is whatever the stop happened to
+/// interrupt, and the test asserts against a history it did not write.
 pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
