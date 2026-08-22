@@ -24,7 +24,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, FirstMessage, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
@@ -707,57 +707,62 @@ impl EventSourcedActor for SessionSupervisor {
                 let id = Uuid::new_v4().to_string();
                 // The session owns its runtime's whole life, so creating one is
                 // the first thing it is asked to do rather than something done
-                // to it. Three things follow, and all three are the point.
+                // to it. What this session is, the runtime it runs on and the
+                // first thing said to it all travel in **one** send.
                 //
-                // `Provision` is enqueued here — so it is ahead of the first
-                // message in the same mailbox, and the wait is ordinary actor
-                // sequencing rather than a gate beside the runtime manager. And
-                // the attempt is journaled by the session, so a process that
-                // dies mid-create leaves a session that knows to finish it,
-                // which no in-memory gate could.
+                // Three sends is what this used to be — a `RecordSpec`, a
+                // `Provision` and a `UserMessage` — and that was the bug. Each
+                // is addressed through the session shard separately, placement
+                // is resolved once per send, and the first send's failure was
+                // swallowed. So the command that *materialised* the actor was
+                // not reliably the one carrying the spec: the session recovered
+                // an empty log, found no spec, and died on the first handler to
+                // read one. `POST /sessions` reported that as a 500, a 404 or a
+                // 409 depending on which half of the create lost the race. The
+                // session fans the other two out to itself, in-process and in
+                // order, once it knows what it is.
                 //
-                // The message goes into that same mailbox, right behind them,
-                // rather than travelling back out to the caller and in again as
-                // a second command. A second command is addressed a second
-                // time, and placement can have moved between the two.
-                let queued = match self.reach(ctx, &id) {
-                    None => None,
-                    Some(session) => {
-                        // What this session is, ahead of everything else it will
-                        // ever be told. Nothing else can have addressed a uuid
-                        // generated on this line, so this command is what brings the
-                        // actor into being and is therefore first in its mailbox —
-                        // which is what an empty journal needs, since a session
-                        // recovers nothing and waits to be told what it is.
-                        let _ = session
-                            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
-                                spec: Box::new(spec.clone()),
-                            }))
-                            .await;
-                        let _ = session
-                            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
-                            .await;
-                        match message {
-                            None => None,
-                            Some(text) => {
-                                // The session answers this itself, once the
-                                // agent's write is durable — the same promise
-                                // `UserMessage` makes, forwarded rather than
-                                // resolved here so this mailbox never waits on
-                                // a journal.
-                                let (tx, rx) = oneshot::channel();
-                                let _ = session
-                                    .tell(SessionCommand::Turn(TurnCommand::UserMessage {
-                                        agent_id: None,
-                                        text,
-                                        reply: ReplyTo::from_sender(tx),
-                                    }))
-                                    .await;
-                                Some(rx)
-                            }
-                        }
+                // Provisioning stays the session's own work either way, and is
+                // journaled by it, so a process that dies mid-create leaves a
+                // session that knows to finish it — which no in-memory gate
+                // could.
+                //
+                // The message's reply is forwarded rather than resolved here,
+                // so this mailbox never waits on a journal: the session answers
+                // it once the agent's write is durable.
+                let (queued, first) = match message {
+                    None => (None, None),
+                    Some(text) => {
+                        let (tx, rx) = oneshot::channel();
+                        (
+                            Some(rx),
+                            Some(FirstMessage {
+                                text,
+                                reply: ReplyTo::from_sender(tx),
+                            }),
+                        )
                     }
                 };
+                let delivered = match self.reach(ctx, &id) {
+                    None => Err("this session could not be addressed".to_string()),
+                    Some(session) => session
+                        .tell(SessionCommand::Core(CoreCommand::Create {
+                            spec: Box::new(spec.clone()),
+                            message: first,
+                        }))
+                        .await
+                        .map_err(|e| format!("the session could not be reached: {e}")),
+                };
+                // Not swallowed, because this is now the *only* send that
+                // creates the session: one that did not arrive is a session
+                // that does not exist, and nothing is journaled for it. The old
+                // shape could not tell the difference — it recorded the session
+                // either way and left the caller holding an id for an actor
+                // that had never been told what it was.
+                if let Err(why) = delivered {
+                    let _ = reply.send(Err(CreateSessionError::NotRecorded(why)));
+                    return CommandEffect::none();
+                }
                 // Not a guess: a fresh session is provisioning, and says so
                 // until its vendor confirms the runtime. Recorded by the fold
                 // of `SessionCreated`, which is why nothing is inserted here.

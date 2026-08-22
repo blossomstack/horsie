@@ -99,14 +99,15 @@ impl ActorFixture {
 
     /// Bring a session into being by telling it what it is.
     ///
-    /// Exactly what the supervisor does on `Create`, and for the same reason: a
-    /// session with no log yet cannot know its own spec, and the command that
-    /// creates the actor is the only one guaranteed to reach it first.
+    /// Exactly what the supervisor does on `Create`, and in one command for the
+    /// same reason: a session with no log yet cannot know its own spec, so
+    /// everything the create does has to travel with it rather than behind it.
     pub(super) async fn start(&self, id: Uuid, spec: SessionSpec) -> SessionRef {
         let session = self.node.session(id);
         let _ = session
-            .tell(SessionCommand::Core(CoreCommand::RecordSpec {
+            .tell(SessionCommand::Core(CoreCommand::Create {
                 spec: Box::new(spec),
+                message: None,
             }))
             .await;
         session
@@ -600,9 +601,9 @@ pub(super) async fn wait_for_tree(
 /// has none, because a session that never recorded one is a session that was
 /// never created — recovery would have nothing to adopt and nothing to repair.
 ///
-/// The `RecordSpec` at the end is a no-op the log already answers. It is there
-/// because a command is what brings the actor into being, and the test that
-/// follows wants to find it recovered.
+/// The `Create` at the end is a no-op the log already answers — and provisions
+/// nothing, for the same reason. It is there because a command is what brings
+/// the actor into being, and the test that follows wants to find it recovered.
 pub(crate) async fn seed_session(
     f: &ActorFixture,
     id: Uuid,
@@ -1353,7 +1354,11 @@ pub(super) async fn agent_harness() -> (ActorFixture, SessionRef, Uuid) {
             Arc::new(PromptRecorder(prompts.clone())) as Arc<dyn LlmProvider>
         ),
     );
-    let session = f.start(id, actor_spec_fixture()).await;
+    // Seeded rather than created: this harness built the runtime above, and a
+    // `Create` would provision a second one that nothing here ever runs on.
+    // Seeding puts the spec in the log first, which is what makes the create
+    // the no-op a reload is.
+    let session = seed_session(&f, id, actor_spec_fixture(), &[]).await;
     drop(prompts);
     (f, session, id)
 }

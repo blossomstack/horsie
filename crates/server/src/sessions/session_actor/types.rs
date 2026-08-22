@@ -347,6 +347,18 @@ pub enum HookCommand {
     Halt { key: AgentKey, reason: String },
 }
 
+/// The first thing said to a session, carried by the command that creates it.
+///
+/// Travels *with* the spec rather than behind it: a message is the one thing a
+/// create cannot lose without a caller noticing, and a second addressed send is
+/// exactly what could lose it. Answered by the session once the write is
+/// durable — the same promise [`TurnCommand::UserMessage`] makes.
+#[derive(Serialize, Deserialize)]
+pub struct FirstMessage {
+    pub text: String,
+    pub reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
+}
+
 /// The session's own bookkeeping.
 #[derive(Serialize, Deserialize)]
 pub enum CoreCommand {
@@ -362,14 +374,30 @@ pub enum CoreCommand {
     /// shows; this one is what the running session reads, and a session's own
     /// journal is the truth about that session.
     TitleSet { name: String },
-    /// Internal: write this session's spec into its own log.
+    /// Bring this session into being: what it is, and the first thing said to
+    /// it, in one message.
     ///
-    /// Self-sent by recovery when the log has no spec, which is true exactly
-    /// twice — for a session being created, and for one whose process died
-    /// between the supervisor recording it and this write. Both take the same
-    /// path, so the crash case is not a special case.
-    RecordSpec {
+    /// **One command and not three, and that is the whole point.** This used to
+    /// be a `RecordSpec` the supervisor followed with a `Provision` and a
+    /// `UserMessage`. Each was addressed through the session shard separately,
+    /// and placement is resolved once per send — so the command that
+    /// *materialised* the actor was not guaranteed to be the one carrying the
+    /// spec. When it was not, the session recovered an empty log, found no
+    /// spec, and the first handler to read one took the actor down with it.
+    /// `POST /sessions` reported that as a 500, a 404 or a 409 depending on
+    /// which half of the create lost the race.
+    ///
+    /// Everything this fans out to is a *self*-send, which is in-process and
+    /// ordered behind this command, so nothing below here can be reordered or
+    /// placed on another node.
+    ///
+    /// Idempotent against a log that already has a spec, which is what makes a
+    /// redelivery — and a process that died between the supervisor's record and
+    /// this write — the same path rather than a special case.
+    Create {
         spec: Box<crate::sessions::spec::SessionSpec>,
+        /// The first thing said to this session, when it was created with one.
+        message: Option<FirstMessage>,
     },
     /// Record one turn-preparation stage in `key`'s log. Sent by the context
     /// provider as it assembles a turn.

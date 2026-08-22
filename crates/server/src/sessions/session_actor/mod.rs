@@ -171,8 +171,12 @@ pub struct SessionActor {
     /// id.
     account: crate::projects::ProjectId,
     /// What this session is. `None` until its own log says, or until the
-    /// `RecordSpec` that brought this actor into being is handled — which is
-    /// the first thing in the mailbox of a session that has no log yet.
+    /// `Create` that brought this actor into being is handled.
+    ///
+    /// It is *not* safe to assume that command comes first: addressing a
+    /// session is what materialises its actor, so anything holding this id can
+    /// arrive ahead of it. `handle_command` refuses everything else while this
+    /// is `None`, which is what makes the readers below sound.
     spec: Option<SessionSpec>,
     /// Where this account's bundle is resolved from. A shard recipe is
     /// synchronous, so nothing below can be handed in at construction.
@@ -251,8 +255,8 @@ impl SessionActor {
     /// What this session is.
     ///
     /// Expects for the same reason [`Self::services`] does, one step further
-    /// on: nothing reads a spec before the command that records it, because
-    /// that command is what created this actor.
+    /// on: `handle_command` refuses every command but the one that records a
+    /// spec while there is none, so nothing below it can reach this unset.
     #[expect(
         clippy::expect_used,
         reason = "a session is told what it is before anything else can reach it"
@@ -280,11 +284,45 @@ impl SessionActor {
         SessionRef::new(ctx.self_ref(), self.account.clone(), self.id, None)
     }
 
+    /// Answer a command that reached this session before it was told what it
+    /// is, without touching any state that is not there yet.
+    ///
+    /// Answered rather than dropped wherever the command has a reply: "no such
+    /// session" is the truthful answer — nothing has created this one — and it
+    /// is the answer the caller can act on. A dropped reply says the same thing
+    /// far less clearly, and a panic said it by killing the actor and whatever
+    /// else was still arriving for it.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "refusing is the safe default, so a command added later should \
+                  fall here rather than have to be classified"
+    )]
+    fn refuse_until_told(&self, cmd: SessionCommand) -> CommandEffect<SessionDomainEvent> {
+        match cmd {
+            SessionCommand::Turn(TurnCommand::UserMessage { reply, .. }) => {
+                let _ = reply.send(Err(crate::sessions::UserMessageError::NotFound));
+            }
+            SessionCommand::Turn(TurnCommand::Stop { reply, .. }) => {
+                let _ = reply.send(Err("no such session".to_string()));
+            }
+            _other => {
+                // The rest carry no reply this layer can build, so the caller
+                // learns the same thing from a closed channel. Logged because
+                // reaching a session that does not exist is worth seeing.
+                tracing::warn!(
+                    session = %self.id,
+                    "a command reached a session before it was told what it is"
+                );
+            }
+        }
+        CommandEffect::none()
+    }
+
     /// Take up a spec, start the agents it calls for, and put right whatever
     /// the state it is handed says was interrupted.
     ///
     /// Two callers, and the pair is the whole of how a session learns what it
-    /// is: recovery, from what its log already says, and `RecordSpec`, for a
+    /// is: recovery, from what its log already says, and `Create`, for a
     /// session whose log is empty because it was created a moment ago. Both go
     /// through here so that a run started for the first time and one resumed
     /// after a restart take exactly the same path.
@@ -305,7 +343,7 @@ impl SessionActor {
         }
         // Each component repairs itself. A self-send rather than direct work,
         // because neither caller may write here — recovery must not persist at
-        // all, and `RecordSpec` is already returning an effect of its own — so
+        // all, and `Create` is already returning an effect of its own — so
         // anything that needs to journal arrives as an ordinary command, down
         // the same path a live one would take.
         let repairs: Vec<SessionCommand> = [
@@ -1164,6 +1202,20 @@ impl EventSourcedActor for SessionActor {
         cmd: SessionInbox,
         ctx: &mut ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
+        // A session that has not been told what it is cannot serve anything:
+        // every handler below reads its spec, and reading a missing one used to
+        // take the actor down mid-create.
+        //
+        // Reachable whenever something addresses a session that does not exist
+        // — a stale id from a client, and in a cluster a read that races the
+        // `Create` making one, because addressing a session is what materialises
+        // its actor. `Create` is the one command that answers this state, since
+        // it is the one that ends it.
+        if self.spec.is_none()
+            && !matches!(cmd.cmd, SessionCommand::Core(CoreCommand::Create { .. }))
+        {
+            return self.refuse_until_told(cmd.cmd);
+        }
         match cmd.cmd {
             SessionCommand::Lifecycle(c) => RuntimeLifecycle::handle(self, state, c, ctx).await,
             SessionCommand::Turn(c) => Turns::handle(self, state, c, ctx).await,
@@ -1197,11 +1249,13 @@ impl EventSourcedActor for SessionActor {
         self.services = resolve(&self.projects, &self.account).await;
 
         // The journal is the truth about this session, and a session with
-        // nothing in it has not been created yet: the `RecordSpec` that brought
-        // this actor into being is next in this mailbox, and adopting it is
-        // what starts the agents below. Writing it from here instead would race
-        // that command, and a rename arriving first would have nothing to
-        // rename.
+        // nothing in it has not been created yet: the `Create` that brought this
+        // actor into being carries the spec, and adopting it is what starts the
+        // agents below. Writing it from here instead would race that command,
+        // and a rename arriving first would have nothing to rename.
+        //
+        // Leaving `spec` as `None` is safe rather than merely tolerated —
+        // `handle_command` answers everything but `Create` while it is.
         let Some(spec) = state.spec.clone() else {
             return;
         };
