@@ -1111,6 +1111,7 @@ mod tests {
         let base: Arc<dyn Toolbox> = Arc::new(horsie_agentcore::EmptyToolbox);
 
         let mut settings = AgentSettings {
+            source: crate::sessions::spec::AgentSource::AdHoc,
             model: "m".into(),
             allowed_tools: None,
             use_plugins: None,

@@ -30,4 +30,18 @@ export interface AgentPresetInput {
    * excludes them: authority is granted by asking for it, never by omission.
    */
   allowedTools?: string[];
+  /**
+   * Let a tuning agent rewrite this preset from its own runs; absent → no.
+   */
+  tunable?: boolean;
+  /**
+   * Refuse this write unless the preset is still at this revision.
+   *
+   * Absent writes unconditionally. Supply it whenever you read, decide, and
+   * write back: a full replace between a read and a write silently reverts
+   * whatever someone else changed in between, and there is no merge that
+   * would be right — the two writers disagree about what the preset should
+   * say, not about how to combine two halves of it.
+   */
+  expectedRevision?: number;
 }

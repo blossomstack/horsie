@@ -214,14 +214,25 @@ mod tests {
         assert!(names.contains(&"horsie_environments"), "{names:?}");
 
         let agents = specs.iter().find(|s| s.name == "horsie_agents").unwrap();
+        // Counted from the table rather than written down: the point is that
+        // *every* action reaches the tool, and a hardcoded number turns adding
+        // one into a failing test rather than a passing one.
+        let declared = crate::control::operations()
+            .iter()
+            .filter(|o| o.resource == "agents" && o.expose != crate::control::Expose::Api)
+            .count();
         let actions = agents.input_schema["properties"]["action"]["enum"]
             .as_array()
             .unwrap();
-        assert_eq!(actions.len(), 6);
+        assert_eq!(
+            actions.len(),
+            declared,
+            "every action is offered: {actions:?}"
+        );
         assert_eq!(agents.input_schema["required"][0], "action");
 
         let branches = agents.input_schema["oneOf"].as_array().unwrap();
-        assert_eq!(branches.len(), 6);
+        assert_eq!(branches.len(), declared);
         assert!(
             branches
                 .iter()

@@ -9,8 +9,8 @@
 use crate::config::ConfigStore;
 use crate::environments::{EnvironmentError, EnvironmentService};
 use crate::sessions::spec::{
-    AgentSettings, EnvVarSpec, ProvisionStepSpec, SessionKind, SessionOrigin, SessionSpec,
-    WorkspaceDef,
+    AgentSettings, AgentSource, EnvVarSpec, ProvisionStepSpec, SessionKind, SessionOrigin,
+    SessionSpec, WorkspaceDef,
 };
 use horsie_models::environments::EnvironmentSpec;
 use horsie_models::session::AgentSettings as WireAgentSettings;
@@ -34,9 +34,45 @@ impl std::fmt::Display for SpecError {
 
 impl std::error::Error for SpecError {}
 
+/// What agent a session runs, and where its configuration came from.
+///
+/// One argument rather than two because it is one fact told in two halves, and
+/// the wire type cannot carry the second: a request body says what the settings
+/// *are*, but only the server knows which preset — if any — it resolved them
+/// from, and a caller-supplied provenance would be a claim anyone could make.
+pub struct AgentChoice {
+    pub settings: WireAgentSettings,
+    pub source: AgentSource,
+}
+
+impl AgentChoice {
+    /// Settings supplied inline, naming no preset.
+    #[must_use]
+    pub fn ad_hoc(settings: WireAgentSettings) -> Self {
+        Self {
+            settings,
+            source: AgentSource::AdHoc,
+        }
+    }
+
+    /// Settings flattened from the preset called `name`.
+    #[must_use]
+    pub fn from_preset(settings: WireAgentSettings, name: String) -> Self {
+        Self {
+            settings,
+            source: AgentSource::Preset { name },
+        }
+    }
+}
+
 /// Storage `AgentSettings` from the wire request, applying defaults.
-fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
+fn settings_from_wire(choice: AgentChoice) -> AgentSettings {
+    let AgentChoice {
+        settings: w,
+        source,
+    } = choice;
     AgentSettings {
+        source,
         model: w.model,
         allowed_tools: w.allowed_tools,
         use_plugins: w.use_plugins,
@@ -151,7 +187,7 @@ pub async fn build_session_spec(
     config: &Arc<dyn ConfigStore>,
     environments: &EnvironmentService,
     name: Option<String>,
-    agent: WireAgentSettings,
+    agent: AgentChoice,
     environment: EnvironmentSpec,
     plugins: Option<Vec<String>>,
     origin: SessionOrigin,
@@ -206,7 +242,9 @@ pub async fn build_session_spec(
         }
     }
     Ok(SessionSpec {
-        kind: SessionKind::Agent { settings: agent },
+        kind: SessionKind::Agent {
+            settings: Box::new(agent),
+        },
         workspaces: common.workspaces,
         provision: common.provision,
         vendor: common.vendor,
@@ -342,7 +380,7 @@ mod tests {
             config,
             envs,
             None,
-            wire_settings(),
+            AgentChoice::ad_hoc(wire_settings()),
             environment,
             None,
             SessionOrigin::User,

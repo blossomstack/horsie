@@ -168,6 +168,11 @@ impl RuntimeLifecycle {
                     .runtimes
                     .delete(&actor.id.to_string(), &actor.spec().vendor)
                     .await;
+                // Here, with the rest of the teardown, rather than at the
+                // supervisor: an index entry outliving its transcript is worse
+                // than no entry, because every search that hits it costs the
+                // reader a call to discover the session is gone.
+                actor.forget_agent_runs().await;
                 let _ = reply.send(());
                 CommandEffect::stop()
             }

@@ -144,6 +144,8 @@ mod tests {
             updated_at: "1".into(),
             auto_compact: None,
             allowed_tools: None,
+            tunable: None,
+            revision: None,
         }
     }
 

@@ -45,6 +45,20 @@ struct AgentView {
     /// are chosen by their own fields, so a narrowed selection never silently
     /// removes what one of those turned on.
     allowed_tools: Option<Vec<String>>,
+    /// Whether this preset opts in to being tuned from its own past runs: a
+    /// scheduled agent may read what sessions on this preset did, work out what
+    /// would make it better, and write the preset back.
+    ///
+    /// Absent → no. The opposite default to `auto_compact`, and deliberately:
+    /// compaction not happening costs a session its context, while tuning
+    /// happening unasked lets one agent rewrite another's instructions. Opting
+    /// in has to be an act.
+    tunable: Option<bool>,
+    /// Which version of this preset this is. Pass it back as
+    /// `expected_revision` on a write and the write is refused if anything
+    /// changed in between. Absent on a preset that predates versioning and has
+    /// not been written since.
+    revision: Option<u64>,
     /// Unix epoch seconds.
     created_at: String,
     updated_at: String,
@@ -75,6 +89,32 @@ struct AgentPresetInput {
     /// this account owns, without confirming first. That is why the default set
     /// excludes them: authority is granted by asking for it, never by omission.
     allowed_tools: Option<Vec<String>>,
+    /// Let a tuning agent rewrite this preset from its own runs; absent → no.
+    tunable: Option<bool>,
+    /// Refuse this write unless the preset is still at this revision.
+    ///
+    /// Absent writes unconditionally. Supply it whenever you read, decide, and
+    /// write back: a full replace between a read and a write silently reverts
+    /// whatever someone else changed in between, and there is no merge that
+    /// would be right — the two writers disagree about what the preset should
+    /// say, not about how to combine two halves of it.
+    expected_revision: Option<u64>,
+}
+
+/// One past version of a preset or a memory.
+struct RevisionView {
+    revision: u64,
+    /// The entity's whole wire shape at this revision, as JSON.
+    payload: String,
+    /// This revision recorded a deletion; `payload` is what was deleted.
+    deleted: bool,
+    /// Unix epoch seconds.
+    created_at: String,
+}
+
+/// A thing's past versions, newest first.
+struct RevisionsPage {
+    revisions: Vec<RevisionView>,
 }
 
 /// Invoke a preset: create a session from it and queue a first message.
@@ -89,4 +129,35 @@ struct AgentInvokeRequest {
 
 struct AgentInvokeResponse {
     session: SessionSummary,
+}
+
+/// One agent run, as the index holds it: where to find it, and enough to
+/// triage it by.
+///
+/// An address plus an outcome, deliberately. Everything else about a run —
+/// what it was asked, what it did, what it cost — is on `sessions.get` and
+/// `sessions.read` once you hold these two ids, and answering it here would
+/// make a listing of a hundred runs cost what reading one does.
+struct AgentRunView {
+    /// The session hosting this agent. Pass it to `sessions.get` or
+    /// `sessions.read`.
+    session_id: String,
+    /// "main", or the agent's uuid. The `aid` that `sessions.read` takes.
+    agent_id: String,
+    /// The saved preset this agent ran under; absent when its settings were
+    /// supplied inline.
+    preset: Option<String>,
+    /// "provisioning" | "running" | "idle" | "awaiting_input" | "completed" |
+    /// "failed" | "cancelled". The roster's vocabulary.
+    status: String,
+    /// Unix epoch ms. Zero for a session's main agent, which nothing spawned.
+    started_at_ms: u64,
+    /// Unix epoch ms, absent while the run is still going — and absent for
+    /// good on a main agent, which is a session and never ends.
+    ended_at_ms: Option<u64>,
+}
+
+/// Matching agent runs, newest first.
+struct AgentRunsPage {
+    runs: Vec<AgentRunView>,
 }

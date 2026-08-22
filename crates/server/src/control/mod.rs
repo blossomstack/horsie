@@ -15,12 +15,14 @@ use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 
+pub mod agent_runs;
 pub mod agents;
 mod authored;
 pub mod environments;
 pub mod http;
 pub mod marketplaces;
 pub mod mcp;
+pub mod memories;
 pub mod memory_spaces;
 pub mod models;
 pub mod plugins;
@@ -47,6 +49,7 @@ pub trait Resource: Send + Sync {
 pub fn resources() -> Vec<Box<dyn Resource>> {
     vec![
         Box::new(agents::Agents),
+        Box::new(agent_runs::AgentRuns),
         Box::new(routines::Routines),
         Box::new(environments::Environments),
         Box::new(workflows::Workflows),
@@ -58,6 +61,7 @@ pub fn resources() -> Vec<Box<dyn Resource>> {
         Box::new(models::Models),
         Box::new(runtime_vendors::RuntimeVendors),
         Box::new(memory_spaces::MemorySpaces),
+        Box::new(memories::Memories),
     ]
 }
 
@@ -362,11 +366,36 @@ macro_rules! from_service_error {
 }
 
 from_service_error!(
-    crate::agents::AgentError => "duplicate",
     crate::workflows::WorkflowError => "conflict",
     crate::routines::RoutineError => "conflict",
     crate::environments::EnvironmentError => "duplicate",
 );
+
+/// Agents are out of the macro above because they are the one resource with
+/// compare-and-set, and its refusal is a *different* 409 from a duplicate name.
+///
+/// Both are conflicts, and the code is what tells them apart: `duplicate` means
+/// pick another name, `stale_revision` means read it again and decide against
+/// what it says now. An agent handed one code for both would retry the wrong
+/// way — and retrying a stale write by renaming would create a second preset.
+impl From<crate::agents::AgentError> for ControlError {
+    fn from(e: crate::agents::AgentError) -> Self {
+        use crate::agents::AgentError as E;
+        match e {
+            E::NotFound(m) => Self::NotFound(m),
+            E::Conflict(message) => Self::Conflict {
+                code: "duplicate".to_string(),
+                message,
+            },
+            E::Stale(message) => Self::Conflict {
+                code: "stale_revision".to_string(),
+                message,
+            },
+            E::Invalid(m) => Self::Invalid(m),
+            E::Internal(m) => Self::Internal(m),
+        }
+    }
+}
 
 /// A spec that could not be assembled: the caller's fault is invalid, ours is
 /// internal. Mirrors the `Api` conversion at `http/error.rs`.
@@ -407,6 +436,49 @@ pub(crate) mod tests {
                     param
                 );
             }
+        }
+    }
+
+    /// Everything a tuning agent needs is reachable, and reachable *as a
+    /// tool* — not merely as a route.
+    ///
+    /// A drift test, and coarse on purpose: the failure it exists for is
+    /// somebody building the tuning routine, finding one of these is
+    /// `Expose::Api`, and quietly working around it. Each name here is a step
+    /// of the loop — find the presets that opted in, find their runs, read one,
+    /// then write the preset back with a way to undo it — and none of them has
+    /// a second route to the same answer.
+    #[test]
+    fn the_whole_tuning_loop_is_reachable_from_tools() {
+        let reachable: std::collections::BTreeSet<(&str, &str)> = operations()
+            .iter()
+            .filter(|o| o.expose != Expose::Api)
+            .map(|o| (o.resource, o.action))
+            .collect();
+        for step in [
+            // Which agents opted in, and what they are configured with.
+            ("agents", "list"),
+            ("agents", "get"),
+            // What those agents actually did.
+            ("agent-runs", "list"),
+            ("sessions", "read"),
+            ("sessions", "search"),
+            ("sessions", "get"),
+            // What to change, safely, and how to undo it.
+            ("agents", "replace"),
+            ("agents", "revisions"),
+            ("agents", "restore"),
+            // The other two places a preset's behaviour lives.
+            ("memories", "update"),
+            ("memory-spaces", "list"),
+        ] {
+            assert!(
+                reachable.contains(&step),
+                "{}.{} is not reachable as a tool, so a tuning agent cannot do \
+                 it — check its `Expose`",
+                step.0,
+                step.1
+            );
         }
     }
 

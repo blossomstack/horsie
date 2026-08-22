@@ -481,17 +481,27 @@ mod tests {
         );
         assert_eq!(state.next_seq, 3);
 
-        let tail = crate::agent_loop::agent_log::page_before(&state.log, None, 2);
+        let tail = crate::agent_loop::agent_log::page(
+            &state.log,
+            crate::agent_loop::Anchor::Tail,
+            2,
+            &crate::agent_loop::LogFilter::everything(),
+        );
         assert_eq!(
             tail.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![1, 2]
         );
 
         // The cursor resolves against a hook entry exactly like a message.
-        let forward = crate::agent_loop::agent_log::page_after(&state.log, 1);
+        let forward = crate::agent_loop::agent_log::since(&state.log, 1);
         assert_eq!(forward.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2]);
 
-        let back = crate::agent_loop::agent_log::page_before(&state.log, Some(1), 10);
+        let back = crate::agent_loop::agent_log::page(
+            &state.log,
+            crate::agent_loop::Anchor::Before(1),
+            10,
+            &crate::agent_loop::LogFilter::everything(),
+        );
         assert_eq!(
             back.entries.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![0]

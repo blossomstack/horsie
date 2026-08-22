@@ -73,6 +73,7 @@ mod tests {
             name: name.into(),
             description: description.into(),
             content: "body".into(),
+            revision: None,
             created_at: "1".into(),
             updated_at: "1".into(),
         }

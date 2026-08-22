@@ -55,6 +55,24 @@ export interface AgentView {
    */
   allowedTools?: string[];
   /**
+   * Whether this preset opts in to being tuned from its own past runs: a
+   * scheduled agent may read what sessions on this preset did, work out what
+   * would make it better, and write the preset back.
+   *
+   * Absent → no. The opposite default to `auto_compact`, and deliberately:
+   * compaction not happening costs a session its context, while tuning
+   * happening unasked lets one agent rewrite another's instructions. Opting
+   * in has to be an act.
+   */
+  tunable?: boolean;
+  /**
+   * Which version of this preset this is. Pass it back as
+   * `expected_revision` on a write and the write is refused if anything
+   * changed in between. Absent on a preset that predates versioning and has
+   * not been written since.
+   */
+  revision?: number;
+  /**
    * Unix epoch seconds.
    */
   createdAt: string;

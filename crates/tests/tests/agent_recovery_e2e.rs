@@ -546,8 +546,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
             let (reply, rx) = tokio::sync::oneshot::channel();
             agent
                 .tell(AgentCommand::Read(AgentReadCommand::PageLog {
-                    before: None,
+                    anchor: horsie_server::agent_loop::Anchor::Tail,
                     max: 100,
+                    filter: horsie_server::agent_loop::LogFilter::everything(),
                     reply: ReplyTo::from_sender(reply),
                 }))
                 .await
@@ -600,8 +601,9 @@ async fn recovery_journals_the_repair_for_a_tool_call_the_crash_interrupted() {
     let (reply, rx) = tokio::sync::oneshot::channel();
     agent2
         .tell(AgentCommand::Read(AgentReadCommand::PageLog {
-            before: None,
+            anchor: horsie_server::agent_loop::Anchor::Tail,
             max: 100,
+            filter: horsie_server::agent_loop::LogFilter::everything(),
             reply: ReplyTo::from_sender(reply),
         }))
         .await

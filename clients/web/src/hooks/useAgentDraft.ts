@@ -4,6 +4,12 @@ import { useSettings } from "./useSettings";
 import type { ConfigDraft } from "./useSessionDraft";
 
 export interface AgentDraft extends ConfigDraft {
+  /** Whether a tuning agent may rewrite this preset from its own runs.
+   *
+   * Here rather than on `ConfigDraft`: that interface is shared with the
+   * new-session bar, and a session is not a thing anything tunes. */
+  tunable: boolean;
+  setTunable: (on: boolean) => void;
   /** Assemble the save payload. `name`/`description` come from the form's
    * text inputs, not the picker state. */
   buildAgentInput: (
@@ -46,6 +52,10 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
   // turned back on by anyone who opened the form and pressed Save. So it is
   // carried through untouched rather than dropped.
   const carriedAutoCompact = initial?.autoCompact;
+  // Absent means no. Kept as a plain boolean here rather than tri-state,
+  // because unlike `allowedTools` there is no third answer for the server to
+  // resolve — a preset either lets a tuning agent rewrite it or it does not.
+  const [tunable, setTunable] = useState(initial?.tunable ?? false);
   // The effort menu belongs to the model, so a preset can name an effort the
   // currently-selected model no longer offers. Treat that as "use the model's
   // default" rather than saving a value the server would reject with a 422.
@@ -76,8 +86,21 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
         // resolves its default set at run time. `[]` is sent as itself — a
         // preset that may call no built-in tool is a thing someone can mean.
         allowedTools: tools === null ? undefined : [...tools],
+        // Sent only when on: `undefined` and `false` mean the same thing to the
+        // server, and sending the negative would write a row for every preset
+        // that simply never opted in.
+        tunable: tunable || undefined,
       }),
-    [model, skills, mcp, memorySpaces, effectiveThinkingEffort, carriedAutoCompact, tools],
+    [
+      model,
+      skills,
+      mcp,
+      memorySpaces,
+      effectiveThinkingEffort,
+      carriedAutoCompact,
+      tools,
+      tunable,
+    ],
   );
 
   return {
@@ -95,6 +118,8 @@ export function useAgentDraft(initial?: AgentView): AgentDraft {
     modelDefaultThinkingEffort: selectedModel?.thinkingEffort ?? "",
     tools: tools === null ? null : new Set(tools),
     setTools: (t) => setTools(t === null ? null : new Set(t)),
+    tunable,
+    setTunable,
     buildAgentInput,
   };
 }

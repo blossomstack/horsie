@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod agent_runs;
 pub mod agents;
 pub mod auth;
 pub mod boot;
@@ -16,6 +17,7 @@ pub mod mcp;
 pub mod memory;
 pub mod plugins;
 pub mod projects;
+pub mod revisions;
 pub mod routines;
 pub mod runtime_manager;
 mod runtime_reconciler;

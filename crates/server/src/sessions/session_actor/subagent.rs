@@ -369,6 +369,124 @@ mod tests {
         );
     }
 
+    /// The index gains a row when an agent appears, and that row is written
+    /// once — not on every turn the agent takes.
+    ///
+    /// The write-count half is the point. The whole design of the table is
+    /// "two writes per agent run, ever"; a version that re-upserted the roster
+    /// on every persisted batch would pass every other assertion here while
+    /// writing once per turn per agent forever, and nothing else would notice.
+    #[tokio::test]
+    async fn an_agent_run_is_indexed_once_when_it_appears() {
+        let gate = BlockingProvider::new();
+        let (f, session, id, journal) = spawn_session_with_provider(gate.clone()).await;
+        let runs = f.node.services().await.agent_runs.clone();
+        let listing = || {
+            let runs = runs.clone();
+            async move {
+                let mut rows = runs
+                    .list(&crate::agent_runs::AgentRunFilter {
+                        limit: 100,
+                        ..Default::default()
+                    })
+                    .await
+                    .unwrap();
+                rows.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+                rows
+            }
+        };
+
+        let sub = spawn_sub(&session, "worker", "dig").await;
+        wait_for_state(&journal, id, "the subagent to be running", |s| {
+            s.forest.interrupted_subs().contains(&sub)
+        })
+        .await;
+
+        let rows = listing().await;
+        assert_eq!(
+            rows.len(),
+            2,
+            "the session's main agent and its subagent are both runs: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.session_id == id.to_string()),
+            "every row addresses the session that hosts it"
+        );
+        let sub_row = rows
+            .iter()
+            .find(|r| r.agent_id == sub.to_string())
+            .expect("the subagent has a row");
+        assert_eq!(sub_row.status, "running");
+        assert_eq!(sub_row.ended_at, None, "a running agent has no end");
+
+        // Nothing about these agents has changed, so nothing may be written
+        // again — however many batches the session persists in the meantime.
+        let before = listing().await;
+        for _ in 0..3 {
+            let _ = current_main_agent(&session).await;
+        }
+        assert_eq!(
+            before,
+            listing().await,
+            "an unchanged roster writes nothing"
+        );
+    }
+
+    /// A row lost to a crash comes back the next time the session is loaded,
+    /// even when that load persists nothing.
+    ///
+    /// This session has only a main agent, so it queues no repair: nothing is
+    /// journaled at load, `on_events_persisted` never fires, and the
+    /// incremental writer never runs. Reconcile is the only thing that can put
+    /// the row back — which is the whole reason it exists, and why this test
+    /// deliberately does *not* use a session with an interrupted subagent.
+    #[tokio::test]
+    async fn loading_a_quiet_session_puts_back_a_row_the_index_lost() {
+        let gate = BlockingProvider::new();
+        let (f, session, id, _journal) = spawn_session_with_provider(gate.clone()).await;
+        let runs = f.node.services().await.agent_runs.clone();
+        let listing = || {
+            let runs = runs.clone();
+            async move {
+                runs.list(&crate::agent_runs::AgentRunFilter {
+                    limit: 100,
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+            }
+        };
+        // Settle the main agent's row before taking it away.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while listing().await.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session never indexed its main agent"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        drop(session);
+
+        // What a crash between the persist and the table write leaves behind.
+        runs.forget_session(&id.to_string()).await.unwrap();
+        assert!(listing().await.is_empty());
+
+        f.node.restart().await;
+        let _revived = f.start(id, actor_spec_fixture()).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let rows = listing().await;
+            if rows.iter().any(|r| r.agent_id == "main") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "loading a session must put its runs back, got {rows:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     #[test]
     fn subagent_events_fold_into_the_tree() {
         let parent = Uuid::new_v4();
@@ -762,8 +880,9 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::Read(ReadCommand::PageLog {
                     agent_id: Some(p.to_string()),
-                    before: None,
+                    anchor: crate::agent_loop::Anchor::Tail,
                     max: 20,
+                    filter: crate::agent_loop::LogFilter::everything(),
                     reply,
                 })
             })
@@ -813,8 +932,9 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::Read(ReadCommand::PageLog {
                     agent_id: Some(sub.to_string()),
-                    before: None,
+                    anchor: crate::agent_loop::Anchor::Tail,
                     max: 10,
+                    filter: crate::agent_loop::LogFilter::everything(),
                     reply,
                 })
             })

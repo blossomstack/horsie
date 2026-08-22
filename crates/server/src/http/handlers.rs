@@ -4,7 +4,7 @@
 use crate::http::error::Api;
 use crate::http::{Scope, Scoped};
 use crate::sessions::UserMessageError;
-use crate::sessions::builder::build_session_spec;
+use crate::sessions::builder::{AgentChoice, build_session_spec};
 use crate::sessions::session_actor::{AgentEntry, AskAnswer};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
@@ -114,7 +114,9 @@ pub async fn create_session(
         &state.config_store,
         &state.environments,
         req.name,
-        req.agent,
+        // The sessions API takes settings inline; nothing named a preset, so
+        // claiming one would be an invention.
+        AgentChoice::ad_hoc(req.agent),
         req.environment,
         req.plugins,
         SessionOrigin::User,
@@ -264,6 +266,7 @@ fn to_wire_agent(agent: &AgentEntry) -> SubAgentView {
         label: agent.label.clone(),
         depth: agent.depth,
         agent_type: agent.agent_type.clone(),
+        preset: agent.preset.clone(),
         status: agent.status.as_wire().to_string(),
         error: agent.error.clone(),
         spawned_at_ms: agent.started_at_ms,
@@ -435,6 +438,7 @@ mod tests {
             label: Some("research".into()),
             depth: 2,
             agent_type: Some("auditor".into()),
+            preset: Some("reviewer".into()),
             status: AgentStatus::Failed,
             error: Some("boom".into()),
             started_at_ms: 100,
@@ -444,6 +448,10 @@ mod tests {
         assert_eq!(view.parent, Some(parent.to_string()));
         assert_eq!(view.label.as_deref(), Some("research"));
         assert_eq!(view.agent_type.as_deref(), Some("auditor"));
+        // The two are different questions and are carried separately: a typed
+        // subagent has an `agent_type` from a plugin and a `preset` it
+        // inherited, and collapsing them would file it under the wrong one.
+        assert_eq!(view.preset.as_deref(), Some("reviewer"));
         assert_eq!(view.depth, 2);
         assert_eq!(view.status, "failed");
         assert_eq!(view.error.as_deref(), Some("boom"));

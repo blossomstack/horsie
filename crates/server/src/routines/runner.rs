@@ -12,7 +12,7 @@ use crate::routines::service::{RoutineError, RoutineService};
 use crate::routines::store::RunOutcome;
 use crate::runtime_vendor::RuntimeVendorRegistry;
 use crate::sessions::addressing::SupervisorRef;
-use crate::sessions::builder::{SpecError, build_session_spec};
+use crate::sessions::builder::{AgentChoice, SpecError, build_session_spec};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::SessionSupervisorCommand;
 use crate::sessions::{CreateSessionError, UserMessageError};
@@ -120,7 +120,10 @@ impl RoutineRunner {
             // Named for the routine so a run is recognisable before the agent
             // titles it; the agent may retitle it from what it actually did.
             Some(routine.name.clone()),
-            wire,
+            // A routine *is* a scheduled invoke of a preset, so its runs are
+            // findable under that preset alongside the interactive ones — which
+            // is exactly the history a tuning routine reads.
+            AgentChoice::from_preset(wire, agent.name.clone()),
             routine.environment.clone(),
             Some(agent.plugins.clone()),
             SessionOrigin::Routine {
@@ -292,8 +295,9 @@ pub(crate) mod tests {
                 .ask(|reply| SessionSupervisorCommand::PageLog {
                     id: id.to_string(),
                     agent_id: None,
-                    before: None,
+                    anchor: crate::agent_loop::Anchor::Tail,
                     max: 50,
+                    filter: crate::agent_loop::LogFilter::everything(),
                     reply,
                 })
                 .await

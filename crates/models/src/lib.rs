@@ -1210,9 +1210,12 @@ mod agents_tests {
             updated_at: "2".into(),
             auto_compact: None,
             allowed_tools: None,
+            tunable: Some(true),
+            revision: Some(3),
         };
         let json = serde_json::to_string(&view).unwrap();
         assert!(json.contains("\"mcpServers\""), "{json}");
+        assert!(json.contains("\"tunable\":true"), "{json}");
         assert!(json.contains("\"thinkingEffort\":\"high\""), "{json}");
         let back: AgentView = serde_json::from_str(&json).unwrap();
         assert_eq!(back, view);

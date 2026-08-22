@@ -5,6 +5,7 @@
 
 use crate::agents::store::{AgentRow, AgentStore};
 use crate::config::ConfigStore;
+use crate::revisions::{CasError, EntityKind, Revision, RevisionStore};
 use horsie_models::agents::{AgentPresetInput, AgentView};
 use std::sync::Arc;
 
@@ -21,14 +22,23 @@ pub enum AgentError {
     Conflict(String),
     Invalid(String),
     Internal(String),
+    /// The caller wrote against a version that is no longer current.
+    ///
+    /// Its own variant rather than a `Conflict`: both are 409s, but a duplicate
+    /// name is fixed by choosing another and this is fixed by reading again,
+    /// and the envelope code is what tells an agent which. See
+    /// [`crate::revisions::CasError`].
+    Stale(String),
 }
 
 impl std::fmt::Display for AgentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::Conflict(m) | Self::Invalid(m) | Self::Internal(m) => {
-                write!(f, "{m}")
-            }
+            Self::NotFound(m)
+            | Self::Conflict(m)
+            | Self::Invalid(m)
+            | Self::Internal(m)
+            | Self::Stale(m) => write!(f, "{m}"),
         }
     }
 }
@@ -83,7 +93,7 @@ impl AgentService {
         let now = now_secs();
         let row = row_from_input(input, now.clone(), now);
         self.store
-            .insert(&row)
+            .insert(&row, &snapshot(&row)?)
             .await
             .map_err(AgentError::Internal)?;
         self.get(&row.name).await
@@ -107,25 +117,90 @@ impl AgentService {
             .await
             .map_err(AgentError::Internal)?
             .ok_or_else(|| AgentError::NotFound(format!("unknown agent '{name}'")))?;
+        // Before validation and before the write: a stale caller's input is
+        // not worth checking, and reporting it as invalid would send them off
+        // fixing a field when the real answer is "read this again".
+        RevisionStore::check(existing.revision, expected_revision(&input))
+            .map_err(|e: CasError| AgentError::Stale(e.to_string()))?;
         self.validate(&input).await?;
         let row = row_from_input(input, existing.created_at, now_secs());
         self.store
-            .replace(&row)
+            .replace(&row, &snapshot(&row)?)
             .await
             .map_err(AgentError::Internal)?;
         self.get(name).await
     }
 
     pub async fn delete(&self, name: &str) -> Result<(), AgentError> {
+        let existing = self
+            .store
+            .get(name)
+            .await
+            .map_err(AgentError::Internal)?
+            .ok_or_else(|| AgentError::NotFound(format!("unknown agent '{name}'")))?;
+        let payload = snapshot(&existing)?;
         if self
             .store
-            .delete(name)
+            .delete(name, &payload, &now_secs())
             .await
             .map_err(AgentError::Internal)?
         {
             Ok(())
         } else {
             Err(AgentError::NotFound(format!("unknown agent '{name}'")))
+        }
+    }
+
+    /// Every past version of a preset, newest first — including the one that
+    /// recorded its deletion.
+    pub async fn revisions(&self, name: &str) -> Result<Vec<Revision>, AgentError> {
+        self.store
+            .revisions()
+            .list(EntityKind::Agent, name)
+            .await
+            .map_err(AgentError::Internal)
+    }
+
+    /// Put a preset back to one of its past versions.
+    ///
+    /// A new revision rather than a rewind: history is the point, and a restore
+    /// that erased the version it replaced would destroy the record of the
+    /// change someone is undoing. Goes through `replace`, so a restore is
+    /// validated exactly like any other write — a revision naming a model that
+    /// has since been deleted is refused rather than half-applied.
+    pub async fn restore(&self, name: &str, revision: i64) -> Result<AgentView, AgentError> {
+        let past = self
+            .store
+            .revisions()
+            .get(EntityKind::Agent, name, revision)
+            .await
+            .map_err(AgentError::Internal)?
+            .ok_or_else(|| {
+                AgentError::NotFound(format!("agent '{name}' has no revision {revision}"))
+            })?;
+        let view: AgentView = serde_json::from_str(&past.payload)
+            .map_err(|e| AgentError::Internal(format!("revision {revision} is unreadable: {e}")))?;
+        let input = AgentPresetInput {
+            name: view.name,
+            description: Some(view.description),
+            instructions: view.instructions,
+            model: view.model,
+            plugins: Some(view.plugins),
+            mcp_servers: Some(view.mcp_servers),
+            memory_spaces: Some(view.memory_spaces),
+            thinking_effort: view.thinking_effort,
+            auto_compact: view.auto_compact,
+            allowed_tools: view.allowed_tools,
+            tunable: view.tunable,
+            // Unconditional: the caller named the revision it wants restored,
+            // which is a statement about the past, not about the present.
+            expected_revision: None,
+        };
+        // A deleted preset is restored by re-creating it, which is also what
+        // keeps its revision numbering continuous — see `RevisionStore::next`.
+        match self.store.get(name).await.map_err(AgentError::Internal)? {
+            Some(_) => self.replace(name, input).await,
+            None => self.create(input).await,
         }
     }
 
@@ -178,6 +253,10 @@ fn row_from_input(input: AgentPresetInput, created_at: String, updated_at: Strin
         thinking_effort: input.thinking_effort,
         auto_compact: input.auto_compact,
         allowed_tools: input.allowed_tools,
+        tunable: input.tunable,
+        // The store assigns this; whatever the caller thought the current one
+        // was has already been checked by then.
+        revision: None,
         created_at,
         updated_at,
     }
@@ -195,9 +274,29 @@ fn agent_view(row: &AgentRow) -> AgentView {
         thinking_effort: row.thinking_effort.clone(),
         auto_compact: row.auto_compact,
         allowed_tools: row.allowed_tools.clone(),
+        tunable: row.tunable,
+        revision: row.revision.map(|r| u64::try_from(r).unwrap_or(0)),
         created_at: row.created_at.clone(),
         updated_at: row.updated_at.clone(),
     }
+}
+
+/// What the caller believes the current revision is, as an `i64`.
+fn expected_revision(input: &AgentPresetInput) -> Option<i64> {
+    input
+        .expected_revision
+        .map(|r| i64::try_from(r).unwrap_or(i64::MAX))
+}
+
+/// The JSON history keeps for a preset: its wire shape.
+///
+/// The wire shape rather than the row, because a restore has to reconstruct an
+/// input a caller could have sent — and because the row is a storage type free
+/// to change at the speed of migrations, which would leave old revisions
+/// unreadable.
+fn snapshot(row: &AgentRow) -> Result<String, AgentError> {
+    serde_json::to_string(&agent_view(row))
+        .map_err(|e| AgentError::Internal(format!("could not snapshot the preset: {e}")))
 }
 
 fn now_secs() -> String {
@@ -293,6 +392,8 @@ mod tests {
             thinking_effort: None,
             auto_compact: None,
             allowed_tools: None,
+            tunable: None,
+            expected_revision: None,
         }
     }
 

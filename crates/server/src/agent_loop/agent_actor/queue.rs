@@ -689,8 +689,9 @@ mod tests {
             let page = agent
                 .ask(|reply| {
                     AgentCommand::Read(ReadCommand::PageLog {
-                        before: None,
+                        anchor: crate::agent_loop::Anchor::Tail,
                         max: 50,
+                        filter: crate::agent_loop::LogFilter::everything(),
                         reply,
                     })
                 })
@@ -906,8 +907,9 @@ mod queue_tests {
         let page = agent
             .ask(|reply| {
                 AgentCommand::Read(ReadCommand::PageLog {
-                    before: None,
+                    anchor: crate::agent_loop::Anchor::Tail,
                     max: 100,
+                    filter: crate::agent_loop::LogFilter::everything(),
                     reply,
                 })
             })
