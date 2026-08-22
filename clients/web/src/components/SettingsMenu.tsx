@@ -5,7 +5,7 @@ import { cn } from "../lib/cn";
 
 /** Display switches for this browser — what the panel shows, not what the
  * session does. Kept separate from Settings for exactly that reason. */
-export function SettingsMenu() {
+export function SettingsMenu({ disabled }: { disabled?: boolean } = {}) {
   const { values, toggle } = useUiSettings();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -30,6 +30,7 @@ export function SettingsMenu() {
     <div className="relative" ref={ref}>
       <button
         className="key-icon"
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         title="What this panel shows"
         aria-label="Display options"

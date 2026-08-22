@@ -745,23 +745,17 @@ export function SessionView() {
             )}
             {/* Every key here acts on the transcript — its tokens, its plan,
                 its display, its session — and none of them means anything
-                while a structural view holds the pane. Hidden rather than
-                removed: `visibility` keeps the cluster's width, so switching
-                view does not shunt the view switch sideways under the pointer
-                that just used it. `inert` is what stops a hidden key still
-                being reachable by keyboard. */}
-            <div
-              className={cn(
-                "flex shrink-0 items-center gap-0.5",
-                overlayOpen && "invisible",
-              )}
-              inert={overlayOpen || undefined}
-              aria-hidden={overlayOpen || undefined}
-              data-testid="session-keys"
-            >
+                while a structural view holds the pane.
+                Disabled, not hidden. Hiding them kept the row from reflowing
+                but left a hole where four keys had been, which reads as a
+                rendering fault rather than as controls that do not apply.
+                Greyed and unpressable says the same thing and looks like it
+                meant to. */}
+            <div className="flex shrink-0 items-center gap-0.5" data-testid="session-keys">
               <ContextGauge
                 agent={mainAgent}
                 sessionTotal={detail?.usageTotal}
+                disabled={overlayOpen}
               />
               {/* The plan is always reachable, so a session with no list
                   still has somewhere for one to appear. That there IS a plan
@@ -780,6 +774,7 @@ export function SessionView() {
                     "!text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
                   tasksOpen && "bg-raised !text-legend",
                 )}
+                disabled={overlayOpen}
                 onClick={() => setTasksOpen(!tasksOpen)}
                 aria-pressed={tasksOpen}
                 title={
@@ -797,7 +792,7 @@ export function SessionView() {
               >
                 <ListTodo size={15} aria-hidden />
               </button>
-              <SettingsMenu />
+              <SettingsMenu disabled={overlayOpen} />
               {/* The session, or whichever run this page is. A workflow step
                   is the one thing with no key: the run is the unit, and its
                   page carries the control. */}
@@ -805,7 +800,7 @@ export function SessionView() {
                 <button
                   className="key-icon hover:!bg-red-quiet hover:!text-red-ink"
                   onClick={handleDelete}
-                  disabled={del.isPending || delAgent.isPending}
+                  disabled={overlayOpen || del.isPending || delAgent.isPending}
                   title={
                     !agentId
                       ? "Delete session"

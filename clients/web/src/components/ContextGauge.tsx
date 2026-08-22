@@ -82,6 +82,7 @@ const CIRC = 2 * Math.PI * R;
 export function ContextGauge({
   agent,
   sessionTotal,
+  disabled,
 }: {
   /** The main agent's own document — context size is per-agent and is never
    * summed across agents. Every figure here comes from the server, so a
@@ -90,6 +91,9 @@ export function ContextGauge({
   agent: AgentDocument | undefined;
   /** The session's usage summed across every agent it hosts. */
   sessionTotal: UsageView | undefined;
+  /** Greyed and unpressable. The structural views have their own per-agent
+   *  numbers in the panel, and this dial is the *transcript's*. */
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -130,7 +134,8 @@ export function ContextGauge({
   return (
     <div className="relative" ref={ref}>
       <button
-        className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] transition-colors hover:bg-raised"
+        className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-control)] transition-colors hover:bg-raised disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+        disabled={disabled}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-label={

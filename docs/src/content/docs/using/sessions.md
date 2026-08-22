@@ -241,10 +241,10 @@ talk to from the first message. The agent hears nothing back from it.
 Nothing ever removes a sub session or a subagent's run on its own. Delete
 either with the bin key on its own page, or from the panel the
 [graph](#see-what-it-spawned) opens; deleting a session removes everything it
-hosts. Removing a subagent's run takes the work it delegated with it — the
-subagents below it, and any workflow it invoked — but leaves any sub session
-branched from it standing, because that is a session somebody is having rather
-than work it was doing.
+hosts. Removing a subagent's run takes the work it delegated with it — the subagents
+below it, and any workflow it invoked. Removing a sub session leaves any sub
+session branched from *it* standing: that is a session somebody is having
+rather than work it was doing.
 
 ## Stop, or delete
 

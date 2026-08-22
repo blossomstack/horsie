@@ -24,8 +24,7 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand,
-    TurnCommand,
+    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};

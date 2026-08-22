@@ -501,7 +501,8 @@ impl SessionActor {
         // parents. Those strand once every node is terminal — no further
         // subagent outcome will arrive to trigger the flush — so the next thing
         // the user does has to be what delivers them.
-        self.persist_and_advance(state, titled.into_iter().collect(), ctx).await
+        self.persist_and_advance(state, titled.into_iter().collect(), ctx)
+            .await
     }
 }
 

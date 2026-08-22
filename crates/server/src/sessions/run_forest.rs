@@ -913,10 +913,16 @@ impl RunForest {
     /// behind left entries parented on an id nothing resolves, and
     /// `depth_of_entry` stops at a chain it cannot follow, so every orphan came
     /// back reporting depth 0 and drew hanging off the main agent as though the
-    /// session had spawned it. A sub session below it is not its work: it is a
-    /// session somebody is having, it owes nobody a result, and it is nobody's
-    /// to close but its own reader's. So the walk stops there and leaves it
-    /// standing, exactly as removing its parent sub session already did.
+    /// session had spawned it.
+    ///
+    /// A sub session below it is not work: it is a session somebody is having,
+    /// it owes nobody a result, and it is nobody's to close but its own
+    /// reader's. So the walk stops there and leaves it standing. That case is
+    /// reachable only when *this* entry is itself a sub session — `branchable`
+    /// refuses any parent that is not the main agent or another sub session, so
+    /// a subagent never has one below it — and it is the rule
+    /// `deleting_a_parent_sub_session_leaves_its_child_and_bounds_the_depth_walk`
+    /// already pins.
     pub fn apply_agent_deleted(&mut self, id: Uuid) {
         if !matches!(
             self.entries.get(&RunId(id)).map(|e| &e.state),
@@ -1584,33 +1590,6 @@ mod tests {
         assert!(f.sub(helper).is_none(), "so is the work it delegated");
         assert!(f.sub(deeper).is_none(), "at any depth");
         assert!(!f.is_known_agent(helper), "and none of it still resolves");
-    }
-
-    /// The other half of the same rule: a sub session below a deleted subagent
-    /// is a session somebody is having, not that subagent's work, so it stays.
-    #[test]
-    fn deleting_a_subagent_leaves_a_sub_session_branched_from_it() {
-        let (mut f, session) = session_forest();
-        let lead = uid(3);
-        let branched = uid(4);
-        f.apply_sub_spawned(lead, session, "lead".into(), "t".into(), None, 1_000);
-        f.apply_sub_session_created(
-            branched,
-            lead,
-            0,
-            SeedMode::Fresh,
-            "go".into(),
-            "a branch".into(),
-            1_100,
-        );
-
-        f.apply_agent_deleted(lead);
-
-        assert!(f.sub(lead).is_none());
-        assert!(
-            f.sub_session(branched).is_some(),
-            "a sub session is nobody's to close but its own reader's"
-        );
     }
 
     #[test]
