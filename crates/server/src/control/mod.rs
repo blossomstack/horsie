@@ -115,7 +115,7 @@ pub(crate) fn create_failed(e: crate::sessions::CreateSessionError) -> ControlEr
             message: reason,
         },
         E::Message(M::Rejected(why)) => ControlError::Conflict {
-            code: "not-a-conversation".to_string(),
+            code: "not-a-session".to_string(),
             message: why,
         },
     }
@@ -282,8 +282,8 @@ pub struct NameRef {
 }
 
 /// The shared failure vocabulary. Each surface renders it its own way: HTTP as
-/// a status plus an `ApiError` body, a tool as a `ToolCallError` the model reads
-/// and retries against.
+/// a status plus an `ApiError` body, a tool as a `ToolCallError` the model
+/// reads and retries against.
 #[derive(Debug)]
 pub enum ControlError {
     NotFound(String),

@@ -40,7 +40,7 @@ const TIMELINE: Timeline = {
     },
     {
       agentId: "f1",
-      kind: "fork",
+      kind: "subSession",
       label: "try postgres",
       status: "idle",
       depth: 0,
@@ -138,9 +138,9 @@ describe("SessionTimeline", () => {
     expect(screen.getByTestId("timeline-lane-s1").getAttribute("data-expanded")).toBe("true");
   });
 
-  it("separates forks from subagents", () => {
+  it("separates subSessions from subagents", () => {
     view(TIMELINE);
-    expect(screen.getByText("forked conversations")).toBeTruthy();
+    expect(screen.getByText("subSessioned sessions")).toBeTruthy();
   });
 
   it("says what a collapsed gap swallowed", () => {

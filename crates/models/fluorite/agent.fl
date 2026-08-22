@@ -174,7 +174,7 @@ union LifecycleEvent {
     TurnEnded(TurnEndedLifecycle),
     AskRecorded(AskLifecycle),
     SubAgent(SubAgentLifecycle),
-    Forked(ForkLifecycle),
+    SubSession(SubSessionLifecycle),
     Step(StepLifecycle),
     TaskList(TaskListLifecycle),
     SessionFailed(SessionFailedLifecycle),
@@ -231,18 +231,20 @@ struct AskLifecycle { tool_call_id: Option<String>, question: String }
 /// *parent*, because the parent is what a viewer is reading when it matters.
 struct SubAgentLifecycle { id: String, label: String, status: String }
 
-/// A conversation branched from this one. Recorded on the agent that was
-/// forked, because that is what a viewer is reading when it matters — the same
-/// rule `SubAgentLifecycle` follows — and it marks the branch point, sitting
-/// between the two messages the fork was taken between.
+/// A sub session branched from this session. Recorded on the agent it was
+/// branched *from*, because that is what a viewer is reading when it matters —
+/// the same rule `SubAgentLifecycle` follows — and it marks the branch point,
+/// sitting between the two messages it was taken between.
 ///
 /// Never reaches the model: `prompt_messages` drops every lifecycle body. That
-/// is deliberate. A fork is for the person reading, and telling the source
-/// about one would disturb its prompt cache for nothing.
+/// is deliberate. A sub session is for the person reading, and telling the
+/// source about one would disturb its prompt cache for nothing.
 ///
-/// `title` is what the fork has named itself, which is nothing at the moment it
-/// is created — a client reads the current one from the session list.
-struct ForkLifecycle { id: String, title: Option<String>, mode: String }
+/// `title` is what the sub session has named itself, which is nothing at the
+/// moment it is created — a client reads the current one from the session list.
+///
+/// `seed` is how its history was seeded: `copy`, `summary` or `fresh`.
+struct SubSessionLifecycle { id: String, title: Option<String>, seed: String }
 
 /// One workflow step's progress, recorded on that step's own agent. Carries the
 /// step's `name` as well as its index: the index identifies the execution, but

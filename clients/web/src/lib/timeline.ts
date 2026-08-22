@@ -9,14 +9,14 @@
  * The consequence, and the reason this hands back a `toX` function rather than
  * a multiplier: the drawn axis is monotone but NOT linear in time, so no caller
  * can turn a timestamp into a pixel by arithmetic. Every off-lane moment — a
- * subagent's spawn, a fork's branch point — goes through `toX`.
+ * subagent's spawn, a sub session's branch point — goes through `toX`.
  */
 
 import { MAIN_AGENT } from "../api/client";
-import type { ForkView, SubAgentView } from "../api/types";
+import type { SubSessionView, SubAgentView } from "../api/types";
 import type { RenderedMessage, TranscriptItem } from "../hooks/useSessionStream";
 import { isAskCall } from "./askUser";
-import { forkTree } from "./forkTree";
+import { subSessionTree } from "./subSessionTree";
 
 /** A gap longer than this is dead air, not part of the work. */
 export const GAP_THRESHOLD_MS = 60_000;
@@ -137,7 +137,7 @@ export function buildScale(spans: Span[]): Scale {
 // Lanes
 
 export type BarKind = "user" | "assistant" | "thinking" | "tool" | "ask" | "compaction";
-export type LaneKind = "main" | "subagent" | "fork";
+export type LaneKind = "main" | "subagent" | "subSession";
 
 export interface Bar {
   key: string;
@@ -318,7 +318,7 @@ function entriesOf(m: RenderedMessage, nowMs: number): Entry[] {
 export function buildTimeline(
   items: TranscriptItem[],
   agents: SubAgentView[],
-  forks: ForkView[],
+  subSessions: SubSessionView[],
   nowMs: number,
   /** Histories already fetched for expanded lanes, keyed by agent id. Their
    * bars are laid out on the *session's* scale, not one of their own, so a
@@ -337,12 +337,12 @@ export function buildTimeline(
         entryId: String(item.value.seq),
         startMs: item.value.atMs,
         endMs: item.value.atMs,
-        title: "Conversation compacted",
+        title: "Session compacted",
         live: false,
         turnStart: false,
       });
     }
-    // A `fork` item is not drawn here: the fork has a lane of its own and the
+    // A `sub session` item is not drawn here: the sub session has a lane of its own and the
     // branch anchor says where it came from. A `notice` is a hook record, which
     // is not work the session spent time on.
   }
@@ -372,8 +372,8 @@ export function buildTimeline(
   /** Bars for an expanded lane, on the session's own scale.
    *
    * `fromMs` is where the agent began, and everything before it is dropped: a
-   * fork's log *starts as a copy of its parent's*, carrying the parent's
-   * original timestamps, so drawn unfiltered a fork claimed to have been
+   * sub session's log *starts as a copy of its parent's*, carrying the parent's
+   * original timestamps, so drawn unfiltered a sub session claimed to have been
    * working through turns that happened before it existed. A subagent's log is
    * its own, so for one the filter is a no-op — but the rule is the same one:
    * a lane shows what that agent did. */
@@ -426,14 +426,14 @@ export function buildTimeline(
       depth: 0,
       bars,
       placed: true,
-      hasChildren: agents.length > 1 || forks.length > 0,
+      hasChildren: agents.length > 1 || subSessions.length > 0,
       detail: main?.status ?? "idle",
     },
   ];
 
   /** A span, or nothing when there is no stamp to place the agent by.
    *
-   * `open` is decided by the status, not by a missing end stamp: a fork always
+   * `open` is decided by the status, not by a missing end stamp: a sub session always
    * has a last-activity time, so "it has no end" and "it is still going" are
    * two different questions and only the status answers the second. */
   const spanOf = (startMs: number, endMs: number, status: string) => {
@@ -445,7 +445,7 @@ export function buildTimeline(
 
   // Render order is a walk of the tree, not the roster's own order: the roster
   // is keyed by uuid, so a subagent's child could sort above it and the two
-  // read as siblings. The same two rules `forkTree` learned — an orphan roots
+  // read as siblings. The same two rules `subSessionTree` learned — an orphan roots
   // at the top level, anything the walk cannot reach is appended flat — because
   // this reads the same journal-derived data.
   const held = new Set(agents.map((a) => a.id));
@@ -499,20 +499,20 @@ export function buildTimeline(
     });
   }
 
-  // `forkTree` already turns a flat, parent-linked list into render order with
+  // `subSessionTree` already turns a flat, parent-linked list into render order with
   // a depth per row, roots an orphan at the top level and refuses to drop a
   // cycle. All of that is the same problem here.
-  for (const placed of forkTree(forks)) {
-    const f = placed.fork;
-    // A fork is drawn exactly like a subagent: from when it branched to when it
-    // last did anything. It has no *end* — nothing closes a conversation — but
+  for (const placed of subSessionTree(subSessions)) {
+    const f = placed.subSession;
+    // A sub session is drawn exactly like a subagent: from when it branched to when it
+    // last did anything. It has no *end* — nothing closes a session — but
     // "still running, forever" was a worse lie than "this is how far it got",
-    // and it made every fork a bar running off the edge of the pane.
+    // and it made every sub session a bar running off the edge of the pane.
     const span = spanOf(f.createdAtMs, f.lastActivityMs, f.status);
     lanes.push({
       agentId: f.id,
-      kind: "fork",
-      label: f.title ?? "untitled fork",
+      kind: "subSession",
+      label: f.title ?? "untitled subSession",
       status: f.status,
       bars: barsFor(f.id, f.createdAtMs),
       depth: placed.depth,
@@ -521,7 +521,7 @@ export function buildTimeline(
         ? { x: span.x, parentAgentId: placed.depth > 0 && f.parent ? f.parent : mainId }
         : undefined,
       placed: span !== undefined,
-      hasChildren: forks.some((o) => o.parent === f.id),
+      hasChildren: subSessions.some((o) => o.parent === f.id),
       detail: describe(f.status, f.createdAtMs, f.lastActivityMs),
     });
   }

@@ -18,7 +18,7 @@ import { cn } from "../lib/cn";
 const LANE_H = 30;
 const BAR_H = 20;
 const SIDEBAR_W = 170;
-/** The "forked conversations" rule, which is a row of its own in the stack. */
+/** The "branched sessions" rule, which is a row of its own in the stack. */
 const DIVIDER_H = 26;
 
 /** Solid, square and borderless: a bar is a block of colour, nothing else.
@@ -96,9 +96,9 @@ export function SessionTimeline({
 
   const placed = visible.filter((l) => l.placed);
   const unplaced = visible.filter((l) => !l.placed);
-  // Subagents are work inside a turn; forks are other conversations. The same
+  // Subagents are work inside a turn; sub sessions are other sessions. The same
   // distinction `SubAgentCard` and `ForkMarker` already draw, carried here.
-  const firstForkAt = placed.findIndex((l) => l.kind === "fork");
+  const firstSubSessionAt = placed.findIndex((l) => l.kind === "subSession");
 
   // Every lane's top, so a connector can be drawn from a lane all the way back
   // up to the one it branched from. Computed here rather than in the model
@@ -106,7 +106,7 @@ export function SessionTimeline({
   const tops = new Map<string, number>();
   let y = 0;
   placed.forEach((lane, i) => {
-    if (i === firstForkAt && firstForkAt > 0) y += DIVIDER_H;
+    if (i === firstSubSessionAt && firstSubSessionAt > 0) y += DIVIDER_H;
     tops.set(lane.agentId, y);
     y += LANE_H;
   });
@@ -149,12 +149,12 @@ export function SessionTimeline({
 
         {placed.map((lane, i) => (
           <div key={lane.agentId}>
-            {i === firstForkAt && firstForkAt > 0 && (
+            {i === firstSubSessionAt && firstSubSessionAt > 0 && (
               <div
                 className="flex items-center gap-3 pr-6 pl-3"
                 style={{ height: DIVIDER_H }}
               >
-                <span className="legend whitespace-nowrap">forked conversations</span>
+                <span className="legend whitespace-nowrap">subSessioned sessions</span>
                 <span className="h-px flex-1 bg-[var(--rule)]" />
               </div>
             )}
@@ -233,7 +233,7 @@ function LaneRow({
         style={{ width: SIDEBAR_W, paddingLeft: 8 + lane.depth * 10 }}
       >
         {/* The chevron discloses the lanes *hanging off* this one — the
-            subagents it spawned, the forks taken from it. Its own work is the
+            subagents it spawned, the subSessions taken from it. Its own work is the
             span out on the timeline, which is where you already are looking. */}
         {lane.hasChildren ? (
           <button

@@ -3,7 +3,7 @@
 //! An [`AgentActor`] runs one agent: it calls the provider, executes tools
 //! through a [`Toolbox`](horsie_agentcore::Toolbox), and reports a terminal
 //! [`AgentOutcome`] to whoever spawned it. It is event-sourced, so a restarted
-//! process recovers an in-flight conversation from the journal.
+//! process recovers an in-flight session from the journal.
 //!
 //! Sequencing several agents — an interactive session's main agent and its
 //! subagents, or a workflow run's steps — belongs to the owner that spawns
@@ -24,8 +24,8 @@ mod workspace;
 
 pub use agent_actor::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentObserver, AgentParams, AgentState,
-    AgentStateView, AgentUsageSnapshot, CoreCommand, ForkCommand, LogCommand, QueueCommand,
-    ReadCommand, ReadOutcome, ReplayWindow, RunCommand, TaskListCommand, TimerCommand, UsageTotal,
+    AgentStateView, AgentUsageSnapshot, CoreCommand, LogCommand, QueueCommand, ReadCommand,
+    ReadOutcome, ReplayWindow, RunCommand, SeedCommand, TaskListCommand, TimerCommand, UsageTotal,
     hook_entry, hook_entry_id,
 };
 pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};

@@ -249,7 +249,7 @@ export function TextField({
   placeholder?: string;
   type?: string;
   /** What the field wants, under it. A rule discovered only as a broken
-   * conversation half an hour later is a rule the field should have stated. */
+   * session half an hour later is a rule the field should have stated. */
   hint?: ReactNode;
   /** Why this value cannot be saved. Replaces the hint while it holds. */
   invalid?: string | null;

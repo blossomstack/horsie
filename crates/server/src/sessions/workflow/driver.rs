@@ -523,7 +523,7 @@ mod tests {
 
     /// The driver is installed only on a run, so a state that has folded no
     /// step yet means the run is about to begin — not that it is a
-    /// conversation.
+    /// session.
     #[test]
     fn a_state_with_no_run_folded_yet_starts_the_first_step() {
         let (d, _) = driver();

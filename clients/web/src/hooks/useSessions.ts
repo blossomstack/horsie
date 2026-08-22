@@ -53,7 +53,7 @@ export function useAgent(id: string | undefined, agentId: string) {
 /**
  * Take the session list a frame carries as the current truth.
  *
- * Replaces three per-field patchers — status, title, forks — which existed
+ * Replaces three per-field patchers — status, title, sub sessions — which existed
  * because a frame used to describe one changed field. A frame is now the whole
  * list, so there is nothing to reconcile: a reader that missed a frame is
  * corrected by the next one rather than left holding a half-applied delta.
@@ -128,8 +128,8 @@ export function useRenameSession() {
   });
 }
 
-/** Cancel one agent's turn. The agent is named, never implied: on a fork's page
- * the unscoped stop cancelled the main agent's turn instead — or, once a fork
+/** Cancel one agent's turn. The agent is named, never implied: on a sub session's page
+ * the unscoped stop cancelled the main agent's turn instead — or, once a sub session
  * was what was running, nothing at all. */
 export function useStopAgent() {
   const client = useQueryClient();
@@ -197,20 +197,20 @@ export function useSendMessage() {
     // that produced it. Without this the global notice reported it a second
     // time, in a corner, in the same words.
     meta: { inlineError: true },
-    // Only the session's own first message names it. A message to a fork is
-    // that fork's business, and titling the session from it would rename the
-    // conversation somebody branched *away* from.
+    // Only the session's own first message names it. A message to a sub session is
+    // that sub session's business, and titling the session from it would rename the
+    // session somebody branched *away* from.
     onMutate: ({ id, text, agentId }) =>
       agentId ? undefined : applyOptimisticTitle(client, id, text),
   });
 }
 
-/** Remove one fork. Nothing removes one on its own, so this is the only way. */
-export function useDeleteFork() {
+/** Remove one sub session. Nothing removes one on its own, so this is the only way. */
+export function useDeleteSubSession() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, forkId }: { id: string; forkId: string }) =>
-      api.sessions.deleteFork(id, forkId),
+    mutationFn: ({ id, subSessionId }: { id: string; subSessionId: string }) =>
+      api.sessions.deleteSubSession(id, subSessionId),
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["sessions"] });
     },

@@ -19,7 +19,7 @@ import { useRetryStep, useWorkflowRun } from "../../hooks/useWorkflows";
 /**
  * A run's page.
  *
- * The graph *is* the transcript here: a run has no single conversation, so the
+ * The graph *is* the transcript here: a run has no single session, so the
  * header carries what a run has (status, tokens, the controls) and the body
  * carries where it got to. Opening a node goes to that step's own page, which
  * is where its messages are.
@@ -112,7 +112,7 @@ interface Props {
 
 export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
   // A run's status is its session's — one vocabulary for every session, run or
-  // conversation — so the graph says where it got to and the session says what
+  // session — so the graph says where it got to and the session says what
   // state it is in.
   const { data: detail } = useSession(sessionId);
   const status = detail?.status;

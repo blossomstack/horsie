@@ -8,10 +8,11 @@
 //! trait method with one implementor is ceremony; both are cheap to add the day
 //! a second one appears.
 //!
-//! The discipline is the one [`EventSourcedActor`](horsie_actor::EventSourcedActor)
-//! imposes on the actor as a whole, applied one level down: `handle` decides and
-//! returns events, the actor persists them, and `apply` folds them. Nothing
-//! happened unless it was journaled, so a crash mid-command is safe.
+//! The discipline is the one
+//! [`EventSourcedActor`](horsie_actor::EventSourcedActor) imposes on the actor
+//! as a whole, applied one level down: `handle` decides and returns events,
+//! the actor persists them, and `apply` folds them. Nothing happened unless it
+//! was journaled, so a crash mid-command is safe.
 //!
 //! A module may **read** any part of the state and **write** only through its
 //! own events. One thing it cannot own is a field: `AgentState.log` is a shared
@@ -36,7 +37,7 @@ pub(super) trait Component {
     ///
     /// Must be pure — no I/O, no clock, no randomness. Anything it reads comes
     /// from the event or from state. Takes the event by value because an
-    /// agent's events carry whole conversations and messages, and a fold that
+    /// agent's events carry whole sessions and messages, and a fold that
     /// had to clone them would pay for the whole transcript on every replay.
     fn apply(_state: &mut AgentState, _event: AgentDomainEvent) {}
 

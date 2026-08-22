@@ -80,7 +80,7 @@ const Markdown = memo(function Markdown({
           ),
           // A wide table used to push the whole transcript column sideways, so
           // recovering one cell meant dragging every other message with it.
-          // The scroll belongs to the table, not to the conversation.
+          // The scroll belongs to the table, not to the session.
           table: (props) => (
             <div className="prose-scroll">
               <table {...props} />

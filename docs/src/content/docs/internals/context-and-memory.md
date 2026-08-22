@@ -57,12 +57,12 @@ A manual compaction cuts by the same recent-history budget the automatic one
 does, so `/compact` is how you compact *early* — any time above that budget,
 rather than waiting for the 80% trigger. Below it there is nothing to fold, and
 the command says so in the transcript rather than folding anyway: summarising a
-conversation that already fits would trade real messages for a summary to buy
+session that already fits would trade real messages for a summary to buy
 room that was never scarce.
 
 `/summary-n-fork` is the other way out of a full context, and it does the
-opposite thing with the summary: rather than rewriting this conversation, it
-starts a [second one](/using/sessions/#branch-a-conversation) with the summary
+opposite thing with the summary: rather than rewriting this session, it
+starts a [second one](/using/sessions/#branch-a-session) with the summary
 as its whole history, and leaves this one exactly as it was.
 
 Separately and confusingly similarly named, the *journal* is periodically

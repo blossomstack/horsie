@@ -113,7 +113,7 @@ Pressing run does not disturb the schedule: the next firing stays where it was.
 
 A routine's sessions are listed on **its own page**, newest first — never in
 the session rail. A routine on a fifteen-minute timer would otherwise bury the
-conversations you are actually having.
+sessions you are actually having.
 
 Each run is an ordinary session underneath, so opening one shows the full
 transcript, tool calls and all.

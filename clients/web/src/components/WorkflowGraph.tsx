@@ -86,7 +86,7 @@ export function WorkflowGraph({
   const byStep = new Map(nodes.map((n) => [n.step, n]));
   const placed = new Map(layout.nodes.map((n) => [n.step, n]));
 
-  // Centre each rank on the cross axis, so a branch reads as a fork rather
+  // Centre each rank on the cross axis, so a branch reads as a sub session rather
   // than as a row that starts at the top.
   const breadth = Math.max(layout.breadth, 1);
   const centreY = (rank: number) => {

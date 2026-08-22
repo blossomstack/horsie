@@ -18,7 +18,7 @@ export function CompactionNotice({ value }: { value: RenderedCompactionSkip }) {
   const explanation =
     value.retainTokens === null
       ? "This model declares no context window, so there is no budget to compact against."
-      : `This conversation is about ${compactNumber(value.contextTokens)} tokens and a compaction keeps the most recent ${compactNumber(value.retainTokens)} verbatim — so there is nothing before that to fold. Compacting anyway would trade real messages for a summary to buy room that is not scarce.`;
+      : `This session is about ${compactNumber(value.contextTokens)} tokens and a compaction keeps the most recent ${compactNumber(value.retainTokens)} verbatim — so there is nothing before that to fold. Compacting anyway would trade real messages for a summary to buy room that is not scarce.`;
 
   return (
     <div data-testid="compaction-notice" className="py-1">

@@ -1,10 +1,10 @@
-//! The conversation: what a person sends, and what a turn's ending means.
+//! The session: what a person sends, and what a turn's ending means.
 //!
-//! The session does not hold the message and does not decide the turn. A message
-//! is addressed to an *agent* — once it can name a subagent or a workflow step, a
-//! session-level queue has nowhere to put it — so this component resolves the
-//! agent, forwards the message, and lets the agent's own durable write be what
-//! the caller waits on.
+//! The session does not hold the message and does not decide the turn. A
+//! message is addressed to an *agent* — once it can name a subagent or a
+//! workflow step, a session-level queue has nowhere to put it — so this
+//! component resolves the agent, forwards the message, and lets the agent's
+//! own durable write be what the caller waits on.
 //!
 //! What is left here is the session's own half: an unnamed session takes its
 //! title from its first message, a terminal session refuses one, and the status
@@ -18,22 +18,23 @@
 use super::component::Component;
 use super::{AgentAction, LifecycleCommand, TurnEnd};
 use super::{
-    AgentKey, AgentStatus, AnswerError, AskAnswer, CommandEffect, ForkCommand, MessageAccepted,
-    ProvisioningState, SessionActor, SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
+    AgentKey, AgentStatus, AnswerError, AskAnswer, CommandEffect, MessageAccepted,
+    ProvisioningState, SessionActor, SessionCommand, SessionDomainEvent, SessionState,
+    SubSessionCommand, TurnCommand,
 };
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::UserMessageError;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::run_forest::{ForkMode, SubAgentStatus, TurnPhase};
+use crate::sessions::run_forest::{SeedMode, SubAgentStatus, TurnPhase};
 use horsie_agentcore::{EmptyOutcome, TurnOutcome};
 
-/// A recognised fork command: which of the two it was, and what the new
-/// conversation is for.
+/// A recognised sub session command: which of the two it was, and what the new
+/// session is for.
 ///
 /// A struct rather than two parameters because they are one decision, made in
 /// one place and acted on in another.
-struct ForkRequest {
-    mode: ForkMode,
+struct SubSessionRequest {
+    seed: SeedMode,
     message: String,
 }
 use crate::agent_loop::QueueCommand as AgentQueueCommand;
@@ -82,11 +83,12 @@ impl SessionActor {
     /// Cancel one agent's turn, and journal the boundary its kind uses.
     ///
     /// Two questions, deliberately separate. *Which agent* is pure resolution
-    /// from state — and unlike [`resolve_agent`](super::SessionActor::resolve_agent)
-    /// it never spawns one, because waking a cold agent in order to stop it is
-    /// work to achieve nothing. *Whether it is doing anything* is
-    /// [`Self::stop_boundary`], which answers with the event to journal, so the
-    /// gate and the record cannot disagree about what was stopped.
+    /// from state — and unlike
+    /// [`resolve_agent`](super::SessionActor::resolve_agent) it never spawns
+    /// one, because waking a cold agent in order to stop it is work to achieve
+    /// nothing. *Whether it is doing anything* is [`Self::stop_boundary`],
+    /// which answers with the event to journal, so the gate and the record
+    /// cannot disagree about what was stopped.
     pub(super) async fn on_stop(
         &mut self,
         state: &SessionState,
@@ -108,11 +110,11 @@ impl SessionActor {
         let _ = reply.send(Ok(()));
         // Stopping delegated work ends the delegation: everything running
         // under a stopped subagent or step goes with it. A main agent's or a
-        // fork's stop cancels only the *turn* — its subagents and invoked
-        // runs are independent work that still delivers.
+        // sub session's stop cancels only the *turn* — its subagents and
+        // invoked runs are independent work that still delivers.
         let mut events = match key {
             AgentKey::Sub(id) | AgentKey::Step(id) => self.cancel_descendants(state, id).await,
-            AgentKey::Main | AgentKey::Fork(_) => Vec::new(),
+            AgentKey::Main | AgentKey::SubSession(_) => Vec::new(),
         };
         events.push(stopped);
         self.persist_and_advance(state, events, ctx).await
@@ -137,8 +139,8 @@ impl SessionActor {
     /// What to journal for stopping `key`, or `None` if it is not working.
     ///
     /// Every kind ends its turn in its own vocabulary — the main entry's turn
-    /// phase, a step's log entry, a fork's status, a subagent's node — so
-    /// there is no one event that means "stopped" for all of them, and the
+    /// phase, a step's log entry, a sub session's status, a subagent's node —
+    /// so there is no one event that means "stopped" for all of them, and the
     /// mapping lives here rather than four times over.
     ///
     /// The gate is `Running` and not also `AwaitingInput`, except for a step.
@@ -159,9 +161,9 @@ impl SessionActor {
             }
             // Cancelling the agent is not enough on a run: without this the
             // step's log entry stays `Running` for ever, so `current()` never
-            // clears and the driver starts nothing again — the run wedged while
-            // its page read "Running". `StepCancelled` suspends it, which is the
-            // state a retry can move.
+            // clears and the driver starts nothing again — the run wedged
+            // while its page read "Running". `StepCancelled` suspends it,
+            // which is the state a retry can move.
             AgentKey::Step(id) => {
                 let (run, index) = state.forest.step_of_agent(id)?;
                 (state.forest.workflow(run)?.run.current() == Some(index)).then_some(
@@ -172,8 +174,9 @@ impl SessionActor {
                     },
                 )
             }
-            AgentKey::Fork(id) => (state.forest.fork(id)?.status == AgentStatus::Running)
-                .then_some(SessionDomainEvent::ForkTurnEnded {
+            AgentKey::SubSession(id) => (state.forest.sub_session(id)?.status
+                == AgentStatus::Running)
+                .then_some(SessionDomainEvent::SubSessionTurnEnded {
                     at_ms,
                     id,
                     outcome: TurnOutcome::Stopped(EmptyOutcome {}),
@@ -225,14 +228,15 @@ impl SessionActor {
 
     /// What the main agent's turn ending means for the session.
     ///
-    /// Lives here rather than in the actor's routing because "the turn is over"
-    /// is this component's fact — the same outcome means something else entirely
-    /// to a step or a subagent.
+    /// Lives here rather than in the actor's routing because "the turn is
+    /// over" is this component's fact — the same outcome means something else
+    /// entirely to a step or a subagent.
     ///
-    /// No turn starts here: whether another follows is the agent's own decision,
-    /// taken against its own queue. The boundary still flushes, because a result
-    /// owed to a *subagent* parent strands the moment no further subagent
-    /// outcome can arrive, and delivering those is still the session's job.
+    /// No turn starts here: whether another follows is the agent's own
+    /// decision, taken against its own queue. The boundary still flushes,
+    /// because a result owed to a *subagent* parent strands the moment no
+    /// further subagent outcome can arrive, and delivering those is still the
+    /// session's job.
     pub(super) async fn on_main_outcome(
         &mut self,
         state: &SessionState,
@@ -253,7 +257,7 @@ impl SessionActor {
                     agent,
                 }]
             }
-            // Only from a conversation that still believes the turn is running.
+            // Only from a session that still believes the turn is running.
             // The agent reports what its *own* journal left open, and a turn
             // that failed before the loop began — abandoned by a start hook, or
             // a context that would not build — never banked a boundary there,
@@ -304,49 +308,49 @@ impl SessionActor {
         self.persist_and_advance(state, events, ctx).await
     }
 
-    /// What a fork command asked for, if the text is one.
+    /// What a sub session command asked for, if the text is one.
     ///
     /// Pure and separate from acting on it, so `on_user_message` can classify
     /// before it gives up ownership of the reply — and so the table of what
-    /// counts as a fork command is testable with no actor in sight.
-    fn fork_request(text: &str) -> Option<ForkRequest> {
+    /// counts as a sub session command is testable with no actor in sight.
+    fn sub_session_request(text: &str) -> Option<SubSessionRequest> {
         let (builtin, args) = horsie_support::plugin::commands::parse_invocation(text, '/')
             .and_then(|(name, args)| {
                 horsie_support::plugin::builtins::builtin(name).map(|b| (b, args))
             })?;
-        let mode = match builtin.name {
-            "fork" => ForkMode::Copy,
-            "summary-n-fork" => ForkMode::Summary,
+        let seed = match builtin.name {
+            "fork" => SeedMode::Copy,
+            "summary-n-fork" => SeedMode::Summary,
             _ => return None,
         };
-        Some(ForkRequest {
-            mode,
+        Some(SubSessionRequest {
+            seed,
             message: args.trim().to_string(),
         })
     }
 
-    /// Hand a fork command to the component that owns forks.
+    /// Hand a sub session command to the component that owns sub sessions.
     ///
     /// Recognising one is this component's job — it is where every built-in is
     /// caught, before the text can be treated as a prompt. *Creating* one is
-    /// not: `state.forks` belongs to `ForkedAgents`, and a component writes only
-    /// its own slice. So this decides what was typed and forwards a command,
-    /// the same shape `/compact` has, where `Turns` compacts nothing and hands
-    /// an `Incoming::Compact` to the agent.
-    fn start_fork(
+    /// not: `state.sub_sessions` belongs to `SubSessions`, and a component
+    /// writes only its own slice. So this decides what was typed and forwards
+    /// a command, the same shape `/compact` has, where `Turns` compacts
+    /// nothing and hands an `Incoming::Compact` to the agent.
+    fn start_sub_session(
         &mut self,
         key: AgentKey,
-        req: ForkRequest,
+        req: SubSessionRequest,
         reply: ReplyTo<Result<MessageAccepted, UserMessageError>>,
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
-        let ForkRequest { mode, message } = req;
-        // Which agent typed it, as an id `Create` can validate. Everything else
-        // a fork needs to be true — a message, a conversation rather than a run
-        // — is checked there, where a fork is written.
+        let SubSessionRequest { seed, message } = req;
+        // Which agent typed it, as an id `Create` can validate. Everything
+        // else a sub session needs to be true — a message, a session rather
+        // than a run — is checked there, where a sub session is written.
         let parent = match key {
             AgentKey::Main => self.id,
-            AgentKey::Fork(id) => id,
+            AgentKey::SubSession(id) => id,
             AgentKey::Sub(id) | AgentKey::Step(id) => id,
         };
         // Off the mailbox: `Create` reads the source agent's log head and then
@@ -356,9 +360,9 @@ impl SessionActor {
         tokio::spawn(async move {
             let created = self_ref
                 .ask(|r| {
-                    SessionCommand::Fork(ForkCommand::Create {
+                    SessionCommand::SubSession(SubSessionCommand::Create {
                         parent,
-                        mode,
+                        seed,
                         message,
                         reply: r,
                     })
@@ -367,10 +371,10 @@ impl SessionActor {
             let answer = match created {
                 Ok(Ok(id)) => Ok(MessageAccepted {
                     message_id: id.to_string(),
-                    forked_agent: Some(id.to_string()),
+                    sub_session: Some(id.to_string()),
                 }),
                 Ok(Err(why)) => Err(UserMessageError::Rejected(why)),
-                Err(e) => Err(UserMessageError::Rejected(format!("fork: {e}"))),
+                Err(e) => Err(UserMessageError::Rejected(format!("sub session: {e}"))),
             };
             let _ = reply.send(answer);
         });
@@ -410,15 +414,15 @@ impl SessionActor {
             let _ = reply.send(Err(UserMessageError::NotFound));
             return CommandEffect::none();
         };
-        // Resolved before the session is titled, because a fork command is not
-        // a thing to name a session after: it says what the *new* conversation
-        // should do.
-        if let Some(req) = Self::fork_request(text.trim()) {
-            return self.start_fork(key, req, reply, ctx);
+        // Resolved before the session is titled, because a sub session command
+        // is not a thing to name a session after: it says what the *new*
+        // session should do.
+        if let Some(req) = Self::sub_session_request(text.trim()) {
+            return self.start_sub_session(key, req, reply, ctx);
         }
-        // An unnamed session is titled from its first message, once. The rule is
-        // `SessionCore`'s — a session's name is its own bookkeeping, not the
-        // turn's — so this only says when to apply it.
+        // An unnamed session is titled from its first message, once. The rule
+        // is `SessionCore`'s — a session's name is its own bookkeeping, not
+        // the turn's — so this only says when to apply it.
         self.title_from_first_message(&text).await;
 
         let id = Uuid::new_v4().to_string();
@@ -494,7 +498,7 @@ impl SessionActor {
 }
 
 impl Component for Turns {
-    /// Nothing. A conversation's turns are the agent's own decision now, taken
+    /// Nothing. A session's turns are the agent's own decision now, taken
     /// against the queue it holds — the session has neither the message nor the
     /// gate any more.
     fn actions(_state: &SessionState) -> Vec<AgentAction> {
@@ -506,25 +510,26 @@ impl Component for Turns {
     /// `AgentOutcome::Interrupted`.
     ///
     /// This used to self-send a reconcile command that asked "is the session
-    /// `Running`?" — a question the session cannot answer about a *turn*, since
-    /// a self-send queues behind everything the supervisor sent while the actor
-    /// was loading. A message, an answer or a flushed subagent result handled
-    /// first could start a real turn, and the reconcile then recorded *that* one
-    /// as interrupted: the client dropped the text it was streaming, the run
-    /// carried on generating with nothing able to stop it, and the session
-    /// called itself idle while it did. Asking the agent removes the question.
+    /// `Running`?" — a question the session cannot answer about a *turn*,
+    /// since a self-send queues behind everything the supervisor sent while
+    /// the actor was loading. A message, an answer or a flushed subagent
+    /// result handled first could start a real turn, and the reconcile then
+    /// recorded *that* one as interrupted: the client dropped the text it was
+    /// streaming, the run carried on generating with nothing able to stop it,
+    /// and the session called itself idle while it did. Asking the agent
+    /// removes the question.
     fn on_load(_state: &SessionState) -> Option<SessionCommand> {
         None
     }
 
-    /// The main conversation's turn in flight. A step in flight is
+    /// The main session's turn in flight. A step in flight is
     /// `WorkflowRuns`' answer; each component reports only its own slice now
     /// that the phases are separate facts.
     fn busy(state: &SessionState) -> bool {
         state.forest.main_turn() == Some(&TurnPhase::Running)
     }
 
-    /// Everything a conversation records, which is now only the root entry's
+    /// Everything a session records, which is now only the root entry's
     /// turn phase: a turn beginning, ending, failing or being interrupted is
     /// that entry's own state, and what the turn actually carried belongs to
     /// the agent that ran it.
@@ -532,17 +537,18 @@ impl Component for Turns {
     /// Pure, and an associated function rather than a method: replay runs with
     /// no instance in scope, which is what makes a recovered session and a live
     /// one follow the same path.
-    // The fallthrough is unreachable by construction: `SessionActor::apply_event`
-    // matches every variant explicitly and routes each to exactly one component,
-    // so a newly added event fails to compile *there* — which is where it should
-    // be classified — rather than silently reaching the wrong fold here.
+    // The fallthrough is unreachable by construction:
+    // `SessionActor::apply_event` matches every variant explicitly and routes
+    // each to exactly one component, so a newly added event fails to compile
+    // *there* — which is where it should be classified — rather than silently
+    // reaching the wrong fold here.
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
             SessionDomainEvent::TurnBegan { agent, .. } => {
                 state.forest.apply_turn_began(agent);
             }
-            // Routed by the owning entry: the main conversation parks its turn,
+            // Routed by the owning entry: the main session parks its turn,
             // a workflow step's ask parks its run.
             SessionDomainEvent::AskRecorded { agent, .. } => {
                 state.forest.apply_asked(agent);
@@ -571,7 +577,7 @@ impl Component for Turns {
     clippy::wildcard_enum_match_arm
 )]
 mod tests {
-    //! The session's half of a conversation: what its status does as turns
+    //! The session's half of a session: what its status does as turns
     //! begin and end, what it refuses, and what a person acting releases.
     //!
     //! The queue's own rules — what merges, what waits out a park, what an
@@ -604,7 +610,8 @@ mod tests {
     }
 
     /// The session learns a turn began because the agent tells it, and that is
-    /// the whole of what it records: `Running`, and last turn's failure cleared.
+    /// the whole of what it records: `Running`, and last turn's failure
+    /// cleared.
     #[test]
     fn a_turn_beginning_clears_the_previous_failure() {
         let session = Uuid::new_v4();
@@ -791,9 +798,9 @@ mod tests {
         .await;
     }
 
-    /// A turn that failed before its loop began banks no boundary in the agent's
-    /// journal, so the agent still calls it open and reports it at the next
-    /// load. The session was told directly and has already recorded
+    /// A turn that failed before its loop began banks no boundary in the
+    /// agent's journal, so the agent still calls it open and reports it at the
+    /// next load. The session was told directly and has already recorded
     /// `TurnFailed`, so it owns the answer: a report about anything but a live
     /// turn is history that is already written.
     ///

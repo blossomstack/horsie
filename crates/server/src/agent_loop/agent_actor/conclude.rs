@@ -37,9 +37,10 @@ pub(super) enum Conclusion {
 
 impl AgentActor {
     /// Interpret what ended the run — a tool that stopped it, or a plain-text
-    /// completion — and deliver the outcome to the parent. The conversation events were already persisted
-    /// incrementally via [`AgentCommand::PersistProgress`], so this only records the
-    /// terminal transition and decides the actor's lifecycle.
+    /// completion — and deliver the outcome to the parent. The session events
+    /// were already persisted incrementally via
+    /// [`AgentCommand::PersistProgress`], so this only records the terminal
+    /// transition and decides the actor's lifecycle.
     pub(super) async fn handle_finished(
         &mut self,
         report: RunReport,
@@ -60,25 +61,29 @@ impl AgentActor {
         }
         self.running = None;
         // Answered before any parent delivery below: a canceller is likely
-        // blocking its own mailbox waiting on this, and those deliveries `tell`
-        // into that same mailbox — replying first keeps the two from deadlocking.
-        // The run task has already finished (this message is its last act), so
-        // "it will write nothing more" is true now.
+        // blocking its own mailbox waiting on this, and those deliveries
+        // `tell` into that same mailbox — replying first keeps the two from
+        // deadlocking. The run task has already finished (this message is its
+        // last act), so "it will write nothing more" is true now.
         for ack in self.cancel_acks.drain(..) {
             let _ = ack.send(());
         }
         let agent = self.ctx.journal_id;
         let parent = self.ctx.parent.clone();
 
-        // Before the turn's own outcome, and unconditionally: the forks waiting
-        // on this are a different conversation's business, and whether this turn
-        // then went on to succeed, fail or be cancelled says nothing about
-        // whether their summary was taken.
-        if let Some(ForkSummary { forks, result }) = report.fork_summary {
+        // Before the turn's own outcome, and unconditionally: the sub sessions
+        // waiting on this are a different session's business, and whether this
+        // turn then went on to succeed, fail or be cancelled says nothing
+        // about whether their summary was taken.
+        if let Some(SeedSummary {
+            sub_sessions,
+            result,
+        }) = report.seed_summary
+        {
             parent
-                .deliver(AgentOutcome::ForkSummary {
+                .deliver(AgentOutcome::SeedSummary {
                     agent,
-                    forks,
+                    sub_sessions,
                     result,
                 })
                 .await;
@@ -178,11 +183,11 @@ impl AgentActor {
                                 asks: asks.clone(),
                             })
                             .await;
-                        // Recorded before the drain is decided, and the drain is
-                        // asked against the folded result: an ask is a turn
-                        // boundary, but a parked agent only drains for a person
-                        // changing their mind — a report queued behind the
-                        // question waits for it to be answered.
+                        // Recorded before the drain is decided, and the drain
+                        // is asked against the folded result: an ask is a turn
+                        // boundary, but a parked agent only drains for a
+                        // person changing their mind — a report queued behind
+                        // the question waits for it to be answered.
                         let recorded = AgentDomainEvent::AskRecorded {
                             asks,
                             at_ms: now_ms(),
@@ -191,8 +196,9 @@ impl AgentActor {
                         let mut events = vec![recorded];
                         events.extend(self.try_drain(&folded, ctx).await);
                         // Snapshot to compact the incrementally-persisted log.
-                        // Unconditional now that no cursor is a journal position:
-                        // history and streams read state, so compaction is invisible.
+                        // Unconditional now that no cursor is a journal
+                        // position: history and streams read state, so
+                        // compaction is invisible.
                         self.events_since_snapshot = 0;
                         CommandEffect::persist(events).and_snapshot()
                     }
@@ -219,21 +225,22 @@ impl AgentActor {
                     })
                     .await;
                 // A cancelled tool call has no result and never will get one.
-                // Journal the synthetic result now, where it belongs — directly
-                // after the assistant message that made the call — rather than
-                // recomputing it on a clone at the top of every later turn. The
-                // journal is then a faithful record of what the model was shown,
-                // and a mid-history dangle can no longer accumulate.
+                // Journal the synthetic result now, where it belongs —
+                // directly after the assistant message that made the call —
+                // rather than recomputing it on a clone at the top of every
+                // later turn. The journal is then a faithful record of what
+                // the model was shown, and a mid-history dangle can no longer
+                // accumulate.
                 let mut events: Vec<AgentDomainEvent> =
                     missing_tool_results(&state.prompt_messages(), &parked_call_ids(state))
                         .into_iter()
                         .map(|message| AgentDomainEvent::InputMessage { message })
                         .collect();
-                // Whatever the model had already written is the only copy there
-                // is: deltas are unjournaled by design, and the boundary entry
-                // the stop is about to append clears them. Twenty-two minutes of
-                // generation used to end here, with the transcript showing no
-                // sign a turn had run at all.
+                // Whatever the model had already written is the only copy
+                // there is: deltas are unjournaled by design, and the boundary
+                // entry the stop is about to append clears them. Twenty-two
+                // minutes of generation used to end here, with the transcript
+                // showing no sign a turn had run at all.
                 //
                 // After the synthetic results, not before: a cancelled call's
                 // result belongs directly under the message that made it, and
@@ -242,7 +249,8 @@ impl AgentActor {
                     events.push(AgentDomainEvent::MessageAborted { message: salvaged });
                 }
                 events.push(AgentDomainEvent::RunCancelled { at_ms: now_ms() });
-                // Snapshot to compact the incrementally-persisted log on cancel.
+                // Snapshot to compact the incrementally-persisted log on
+                // cancel.
                 self.events_since_snapshot = 0;
                 // A stop cancels the turn, not the promise: anything queued
                 // while the cancelled turn ran starts the next one.
@@ -270,15 +278,17 @@ impl AgentActor {
                         terminal: false,
                     })
                     .await;
-                // The partial conversation was already journaled incrementally, so the
-                // failed session stays inspectable. The agent stays alive: a failed
-                // turn is not a dead agent, and the next message reuses it.
+                // The partial session was already journaled incrementally, so
+                // the failed session stays inspectable. The agent stays alive:
+                // a failed turn is not a dead agent, and the next message
+                // reuses it.
                 CommandEffect::none()
             }
             RunOutcome::AlreadyReported => {
-                // Context preparation failed before the loop began; the failure was
-                // already delivered to the parent. Stay alive so the next message
-                // can retry against the same in-memory transcript.
+                // Context preparation failed before the loop began; the
+                // failure was already delivered to the parent. Stay alive so
+                // the next message can retry against the same in-memory
+                // transcript.
                 CommandEffect::none()
             }
         }
@@ -293,8 +303,8 @@ impl AgentActor {
         if calls.is_empty() {
             return Conclusion::Output(Value::Null);
         }
-        // Several questions in one turn is ordinary: they are asked together and
-        // answered together.
+        // Several questions in one turn is ordinary: they are asked together
+        // and answered together.
         if calls.iter().all(|c| c.tool == ASK_USER_TOOL) {
             return Conclusion::Ask(
                 calls
@@ -327,13 +337,13 @@ impl AgentActor {
     /// That is legitimate exactly when something will wake this agent again: a
     /// queued message, an armed timer, or a subagent that still owes it a
     /// report. Otherwise nothing would ever start another turn and the step
-    /// would sit "running" for ever, so the model is nudged — first with a plain
-    /// message, then with `submit_result` forced, and only then is the step
-    /// failed.
+    /// would sit "running" for ever, so the model is nudged — first with a
+    /// plain message, then with `submit_result` forced, and only then is the
+    /// step failed.
     ///
-    /// All three facts are this actor's own: the queue and the timers are in its
-    /// state, and its log carries every subagent lifecycle record the session
-    /// wrote onto it. Nothing here asks the session anything.
+    /// All three facts are this actor's own: the queue and the timers are in
+    /// its state, and its log carries every subagent lifecycle record the
+    /// session wrote onto it. Nothing here asks the session anything.
     pub(super) async fn ended_without_result(
         &mut self,
         state: &AgentState,
@@ -399,11 +409,11 @@ impl AgentActor {
         CommandEffect::persist(events)
     }
 
-    /// The model called two turn-enders at once. Tell each call why, and run the
-    /// turn again.
+    /// The model called two turn-enders at once. Tell each call why, and run
+    /// the turn again.
     ///
     /// Error results rather than silence: every `tool_use` needs a
-    /// `tool_result` for the conversation to stay valid, and a call left
+    /// `tool_result` for the session to stay valid, and a call left
     /// dangling is indistinguishable later from a question still waiting on the
     /// user.
     pub(super) async fn correct_contradiction(
@@ -571,10 +581,10 @@ mod fence_tests {
         }
     }
 
-    /// A run that was superseded can still be unwinding, and its report must not
-    /// be mistaken for the live run's. Taking its word for it would clear the
-    /// live run's handle — leaving a turn nobody can stop and a parent told that
-    /// a turn it never saw is over.
+    /// A run that was superseded can still be unwinding, and its report must
+    /// not be mistaken for the live run's. Taking its word for it would clear
+    /// the live run's handle — leaving a turn nobody can stop and a parent
+    /// told that a turn it never saw is over.
     #[tokio::test]
     async fn a_report_from_a_superseded_run_is_ignored() {
         let (tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel();
@@ -619,7 +629,7 @@ mod fence_tests {
                     outcome: RunOutcome::Completed {
                         text: "from a run that is over".into(),
                     },
-                    fork_summary: None,
+                    seed_summary: None,
                 },
             ))))
             .await

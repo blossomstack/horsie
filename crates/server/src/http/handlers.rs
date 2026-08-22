@@ -86,10 +86,10 @@ pub(crate) fn summary(id: &str, rec: &SessionRecord) -> SessionSummary {
         last_error: status_reason(&rec.status),
         workflow: rec.spec.workflow_name().map(str::to_string),
         annotations: wire_annotations(&rec.annotations),
-        forks: rec
-            .forks
+        sub_sessions: rec
+            .sub_sessions
             .iter()
-            .map(crate::sessions::supervisor::ForkRow::to_view)
+            .map(crate::sessions::supervisor::SubSessionRow::to_view)
             .collect(),
     }
 }
@@ -139,7 +139,7 @@ pub async fn create_session(
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Provisioning,
-        forks: Vec::new(),
+        sub_sessions: Vec::new(),
     };
     Ok((
         StatusCode::CREATED,
@@ -202,10 +202,10 @@ pub(crate) fn detail(
         // loaded, so this costs no extra read — and reading them from `rec`
         // rather than the snapshot is what makes them available on a session
         // that is not resident.
-        forks: rec
-            .forks
+        sub_sessions: rec
+            .sub_sessions
             .iter()
-            .map(crate::sessions::supervisor::ForkRow::to_view)
+            .map(crate::sessions::supervisor::SubSessionRow::to_view)
             .collect(),
         workflow: rec.spec.workflow_name().map(str::to_string),
     }
@@ -363,30 +363,32 @@ pub async fn send_message(
             StatusCode::ACCEPTED,
             Json(SessionAck {
                 message_id: accepted.message_id,
-                forked_agent: accepted.forked_agent,
+                sub_session: accepted.sub_session,
             }),
         )),
         Err(UserMessageError::NotFound) => Err(Api::not_found("no such session")),
         Err(UserMessageError::Unrecoverable(reason)) => Err(Api::conflict("unrecoverable", reason)),
-        Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-conversation", why)),
+        Err(UserMessageError::Rejected(why)) => Err(Api::conflict("not-a-session", why)),
     }
 }
 
-/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one fork.
+/// `DELETE /api/sessions/:id/agents/:agent_id` — remove one sub session.
 ///
-/// Only a fork. A subagent and a workflow step are part of what their session
-/// did, and deleting one would leave a transcript referring to work with no
-/// record. A fork is a conversation somebody started and can be done with.
-pub async fn delete_fork(
+/// Only a sub session. A subagent and a workflow step are part of what their
+/// session did, and deleting one would leave a transcript referring to work
+/// with no record. A sub session is a session somebody started and can be done
+/// with.
+pub async fn delete_sub_session(
     Scope(state): Scope,
     // Two of this route's own, so the project is written out: `Path`
     // deserializes a flat sequence and `Scoped` only drops one segment.
     Path((_project, id, agent_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, Api> {
-    let fork = uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such fork"))?;
-    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteFork {
+    let sub_session =
+        uuid::Uuid::parse_str(&agent_id).map_err(|_| Api::not_found("no such sub_session"))?;
+    let result = ask(&state, |reply| SessionSupervisorCommand::DeleteSubSession {
         id,
-        fork,
+        sub_session,
         reply,
     })
     .await?;
@@ -408,15 +410,15 @@ mod tests {
     use crate::sessions::session_actor::AgentStatus;
     use uuid::Uuid;
 
-    /// A registry row for a session that has never been forked. The two
+    /// A registry row for a session that has never been branched. The two
     /// documents below are projections of this and nothing else.
-    fn record_with_no_forks() -> SessionRecord {
+    fn record_with_no_sub_sessions() -> SessionRecord {
         SessionRecord {
             spec: crate::sessions::spec::SessionSpec::for_vendor("mock"),
             created_at: 1_699_000_000_000,
             annotations: BTreeMap::new(),
             status: SessionStatus::Idle,
-            forks: Vec::new(),
+            sub_sessions: Vec::new(),
         }
     }
 
@@ -448,17 +450,18 @@ mod tests {
         assert_eq!((view.spawned_at_ms, view.ended_at_ms), (100, 400));
     }
 
-    /// A session's forks belong on its own document, not only on the list row.
+    /// A session's sub sessions belong on its own document, not only on the
+    /// list row.
     ///
     /// A client reading one session — a deep link straight to it, which is the
     /// normal case — otherwise has to fetch the entire session list to find out
     /// what branched off the thing it is already looking at.
     #[test]
-    fn a_sessions_forks_are_on_its_detail_document() {
-        let fork = Uuid::new_v4();
-        let mut rec = record_with_no_forks();
-        rec.forks = vec![crate::sessions::supervisor::ForkRow {
-            id: fork,
+    fn a_sessions_sub_sessions_are_on_its_detail_document() {
+        let sub_session = Uuid::new_v4();
+        let mut rec = record_with_no_sub_sessions();
+        rec.sub_sessions = vec![crate::sessions::supervisor::SubSessionRow {
+            id: sub_session,
             parent: None,
             title: Some("Other migration".into()),
             status: AgentStatus::Idle,
@@ -468,24 +471,27 @@ mod tests {
 
         let view = detail("s1", &rec, None);
 
-        assert_eq!(view.forks.len(), 1);
-        assert_eq!(view.forks[0].id, fork.to_string());
-        assert_eq!(view.forks[0].title.as_deref(), Some("Other migration"));
-        assert_eq!(view.forks[0].status, "idle");
-        assert_eq!(view.forks[0].created_at_ms, 1_700_000_000_000);
+        assert_eq!(view.sub_sessions.len(), 1);
+        assert_eq!(view.sub_sessions[0].id, sub_session.to_string());
+        assert_eq!(
+            view.sub_sessions[0].title.as_deref(),
+            Some("Other migration")
+        );
+        assert_eq!(view.sub_sessions[0].status, "idle");
+        assert_eq!(view.sub_sessions[0].created_at_ms, 1_700_000_000_000);
     }
 
-    /// The two documents that carry a session's forks must not drift: a list
-    /// row and a detail read are the same fact, and a client that sees one
-    /// nesting in the sidebar and another on the page has no way to tell which
-    /// is wrong.
+    /// The two documents that carry a session's sub sessions must not drift: a
+    /// list row and a detail read are the same fact, and a client that sees
+    /// one nesting in the sidebar and another on the page has no way to tell
+    /// which is wrong.
     #[test]
-    fn the_list_row_and_the_detail_agree_about_forks() {
+    fn the_list_row_and_the_detail_agree_about_sub_sessions() {
         let child = Uuid::new_v4();
         let parent = Uuid::new_v4();
-        let mut rec = record_with_no_forks();
-        rec.forks = vec![
-            crate::sessions::supervisor::ForkRow {
+        let mut rec = record_with_no_sub_sessions();
+        rec.sub_sessions = vec![
+            crate::sessions::supervisor::SubSessionRow {
                 id: parent,
                 parent: None,
                 title: None,
@@ -493,7 +499,7 @@ mod tests {
                 created_at_ms: 10,
                 last_activity_ms: 10,
             },
-            crate::sessions::supervisor::ForkRow {
+            crate::sessions::supervisor::SubSessionRow {
                 id: child,
                 parent: Some(parent),
                 title: Some("deeper".into()),
@@ -503,7 +509,10 @@ mod tests {
             },
         ];
 
-        assert_eq!(detail("s1", &rec, None).forks, summary("s1", &rec).forks);
+        assert_eq!(
+            detail("s1", &rec, None).sub_sessions,
+            summary("s1", &rec).sub_sessions
+        );
     }
 
     /// The session document makes no session-wide model claim any more: the
@@ -512,7 +521,7 @@ mod tests {
     /// which is the contract a client reads.
     #[test]
     fn the_detail_document_carries_no_session_wide_agent_configuration() {
-        let view = detail("s1", &record_with_no_forks(), None);
+        let view = detail("s1", &record_with_no_sub_sessions(), None);
         let json = serde_json::to_value(&view).unwrap();
         for key in [
             "model",

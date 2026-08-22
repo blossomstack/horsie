@@ -77,15 +77,15 @@ fn set_session_title_spec() -> ToolSpec {
     }
 }
 
-/// Which conversation a `set_session_title` call renames.
+/// Which session a `set_session_title` call renames.
 ///
 /// A target rather than a second toolbox type: the tool's name, schema and
 /// description are identical either way, and the model should not have to know
-/// what kind of conversation it is in to name the one it is having.
+/// what kind of session it is in to name the one it is having.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TitleTarget {
     Session,
-    Fork(uuid::Uuid),
+    SubSession(uuid::Uuid),
 }
 
 /// Wraps the session toolbox, adding the server-owned title tool.
@@ -104,12 +104,13 @@ impl SessionTitleToolbox {
         }
     }
 
-    /// The same tool, renaming one fork instead of the session it lives in.
-    pub fn for_fork(inner: Arc<dyn Toolbox>, session: SessionRef, id: uuid::Uuid) -> Self {
+    /// The same tool, renaming one sub session instead of the session it lives
+    /// in.
+    pub fn for_sub_session(inner: Arc<dyn Toolbox>, session: SessionRef, id: uuid::Uuid) -> Self {
         Self {
             inner,
             session,
-            target: TitleTarget::Fork(id),
+            target: TitleTarget::SubSession(id),
         }
     }
 }
@@ -142,13 +143,13 @@ impl Toolbox for SessionTitleToolbox {
                     title: title.to_string(),
                     reply,
                 }),
-                TitleTarget::Fork(id) => {
-                    SessionCommand::Fork(crate::sessions::session_actor::ForkCommand::SetTitle {
+                TitleTarget::SubSession(id) => SessionCommand::SubSession(
+                    crate::sessions::session_actor::SubSessionCommand::SetTitle {
                         id,
                         title: title.to_string(),
                         reply,
-                    })
-                }
+                    },
+                ),
             })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?

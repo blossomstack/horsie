@@ -42,7 +42,7 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
         json!({
             "type": "string",
             "description": "The complete, self-contained task for the subagent. It \
-                inherits your model and tools but not your conversation — include \
+                inherits your model and tools but not your session — include \
                 everything it needs to know."
         }),
     );

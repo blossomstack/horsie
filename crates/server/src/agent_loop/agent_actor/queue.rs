@@ -44,8 +44,9 @@ impl AgentActor {
         }
     }
 
-    /// Perform one turn decision: record what it consumes and answers, tell the
-    /// owner the turn began, then run its pre-start hooks before the run itself.
+    /// Perform one turn decision: record what it consumes and answers, tell
+    /// the owner the turn began, then run its pre-start hooks before the run
+    /// itself.
     ///
     /// `TurnBegan` is journaled here, at the decision, rather than after the
     /// hooks: a crash in the hook window replays with the queue still owed,
@@ -283,8 +284,9 @@ impl Queue {
             }
             QueueCommand::Drain => CommandEffect::persist(actor.try_drain(state, ctx).await),
             QueueCommand::Answer { answers, reply } => {
-                // A run in flight means the questions are already gone — a turn
-                // beginning is what clears them — so there is nothing to answer.
+                // A run in flight means the questions are already gone — a
+                // turn beginning is what clears them — so there is nothing to
+                // answer.
                 if actor.busy() {
                     let _ = reply.send(Err(crate::agent_loop::AnswerError::NothingPending));
                     return CommandEffect::none();
@@ -340,9 +342,9 @@ impl Component for Queue {
                 at_ms,
             } => {
                 // The entry names only what a client is tracking — the queued
-                // messages it is showing as unread. Reports and wakes were never
-                // shown as queued, so crossing them off would name ids nothing
-                // holds.
+                // messages it is showing as unread. Reports and wakes were
+                // never shown as queued, so crossing them off would name ids
+                // nothing holds.
                 let visible = state
                     .inbox
                     .iter()
@@ -429,8 +431,8 @@ mod tests {
         };
         use std::sync::Mutex;
 
-        /// A provider that answers `start_hooks` from a script and records every
-        /// `StartTurn` it was asked about.
+        /// A provider that answers `start_hooks` from a script and records
+        /// every `StartTurn` it was asked about.
         struct HookingContext {
             llm: Arc<MockProvider>,
             records: Vec<HookRecord>,
@@ -547,7 +549,7 @@ mod tests {
                 match rx.recv().await.expect("the turn must report an outcome") {
                     AgentOutcome::Started { .. }
                     | AgentOutcome::UsageRecorded { .. }
-                    | AgentOutcome::ForkSummary { .. } => continue,
+                    | AgentOutcome::SeedSummary { .. } => continue,
                     outcome => return outcome,
                 }
             }
@@ -811,8 +813,9 @@ mod queue_tests {
     //! The queue as the agent actually runs it: what a not-ready agent does
     //! with a message, what a boundary drains, and what an answer resumes.
     //!
-    //! The *rule* is pure and tested in [`crate::agent_loop::inbox`]. These are about the
-    //! actor around it — the gates it holds, and the events it journals.
+    //! The *rule* is pure and tested in [`crate::agent_loop::inbox`]. These
+    //! are about the actor around it — the gates it holds, and the events it
+    //! journals.
     use super::*;
     use crate::agent_loop::AgentRunDef;
     use crate::agent_loop::agent_actor::testing::*;

@@ -1,11 +1,11 @@
 //! The global session-list feed (`/api/events`).
 //!
-//! **Nothing is pushed at a reader**, which is the same shape
-//! `GET /api/sessions/:id/messages` already had and for the same reason. The
-//! supervisor moves a revision when a session's status, title or forks change;
-//! each connection asks it to say when that number last moved, then reads the
-//! list. The counter keeps only its latest value, so a slow reader cannot fall
-//! behind it — it simply sees a larger jump when it next looks.
+//! **Nothing is pushed at a reader**, which is the same shape `GET
+//! /api/sessions/:id/messages` already had and for the same reason. The
+//! supervisor moves a revision when a session's status, title or sub sessions
+//! change; each connection asks it to say when that number last moved, then
+//! reads the list. The counter keeps only its latest value, so a slow reader
+//! cannot fall behind it — it simply sees a larger jump when it next looks.
 //!
 //! What that replaces is a per-account `broadcast::Sender` this module used to
 //! subscribe to, and it fixes two things at once:
@@ -56,9 +56,9 @@ pub async fn global_events(
                 .ask(|reply| SessionSupervisorCommand::AwaitListRevision { after: seen, reply })
                 .await
             else {
-                // The supervisor is unreachable — this node may have stood down.
-                // End the stream; the client reconnects, and may land on a node
-                // that can serve it.
+                // The supervisor is unreachable — this node may have stood
+                // down. End the stream; the client reconnects, and may land on
+                // a node that can serve it.
                 return;
             };
             if seen == Some(revision) {

@@ -23,8 +23,8 @@ import {
 import { usePersistentState } from "../hooks/usePersistentState";
 import { useSessionList } from "../hooks/useSessions";
 import { sessionTitle } from "../lib/format";
-import { ForkRow } from "./ForkRow";
-import { forkTree } from "../lib/forkTree";
+import { SubSessionRow } from "./SubSessionRow";
+import { subSessionTree } from "../lib/subSessionTree";
 import { SessionRow } from "./SessionRow";
 import { TagFilterPanel } from "./TagFilterPanel";
 import { ThemeToggle } from "./ThemeToggle";
@@ -318,14 +318,14 @@ export function Sidebar() {
           shown.map((s) => (
             <div key={s.id}>
               <SessionRow s={s} tags={tags} />
-              {/* Forks nest under the conversation they branched from. Built
+              {/* Sub sessions nest under the session they branched from. Built
                   from the flat, parent-linked list the registry holds, so
                   listing sessions still loads none of them. */}
-              {forkTree(s.forks).map(({ fork, depth, rails, last }) => (
-                <ForkRow
-                  key={fork.id}
+              {subSessionTree(s.subSessions).map(({ subSession, depth, rails, last }) => (
+                <SubSessionRow
+                  key={subSession.id}
                   sessionId={s.id}
-                  fork={fork}
+                  subSession={subSession}
                   depth={depth}
                   rails={rails}
                   last={last}

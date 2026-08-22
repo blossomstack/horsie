@@ -101,7 +101,7 @@ export function statusMeta(status: SessionStatusKind): StatusMeta {
 
 /** An agent's status, in the session vocabulary the panel lamps speak.
  *
- * A fork is a conversation, so it moves through the same states a session does
+ * A sub session is a session, so it moves through the same states a session does
  * and reads on the same lamps — but it is an *agent*, so the server sends it in
  * the agent vocabulary. This is the one translation, in one place.
  *

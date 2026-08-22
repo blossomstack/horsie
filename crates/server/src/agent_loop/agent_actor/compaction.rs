@@ -8,8 +8,8 @@
 //!
 //! The one subtlety lives in [`AgentState::resolve_boundary`]: the run that
 //! produced the boundary was holding a `Vec<Message>` in *prompt* order, which
-//! is not log order. Resolving the two is the fold's job because the fold is the
-//! only thing holding the log.
+//! is not log order. Resolving the two is the fold's job because the fold is
+//! the only thing holding the log.
 
 use super::*;
 use horsie_agentcore::{AgentLogBody, CompactionEntry, ContentPart, Message, Role};
@@ -27,7 +27,7 @@ use horsie_agentcore::{AgentLogBody, CompactionEntry, ContentPart, Message, Role
 #[must_use]
 pub fn boundary_message(entry: &CompactionEntry, at_ms: u64) -> Message {
     let text = format!(
-        "This conversation was compacted: earlier history is summarised below \
+        "This session was compacted: earlier history is summarised below \
          rather than shown in full. The messages after this one are verbatim.\n\n\
          ## Summary of earlier work\n{}\n\n## Current state\n{}",
         entry.summary.trim(),
@@ -64,11 +64,12 @@ impl AgentState {
     /// What the model sees: the transcript, with every hook entry translated
     /// into the message it injects — most translate to nothing.
     ///
-    /// The only way to obtain a `Vec<Message>` from state. `self.history` cannot
-    /// be handed to a provider because the element types differ, so every kind of
-    /// entry must state what, if anything, it shows the model;
-    /// [`crate::agent_loop::hook_translation::translate`] is where that is decided, in one
-    /// exhaustive match, and any future non-model entry inherits the obligation.
+    /// The only way to obtain a `Vec<Message>` from state. `self.history`
+    /// cannot be handed to a provider because the element types differ, so
+    /// every kind of entry must state what, if anything, it shows the model;
+    /// [`crate::agent_loop::hook_translation::translate`] is where that is
+    /// decided, in one exhaustive match, and any future non-model entry
+    /// inherits the obligation.
     pub fn prompt_messages(&self) -> Vec<Message> {
         // Where the prompt starts. Everything below the newest boundary is
         // represented by that boundary's own message and nothing else — which
@@ -86,10 +87,10 @@ impl AgentState {
                     .filter_map(|e| match &e.body {
                         AgentLogBody::Llm(m) => Some(m.clone()),
                         AgentLogBody::Hook(h) => crate::agent_loop::hook_translation::translate(h),
-                        // Every lifecycle variant, present and future. This arm is the
-                        // reason `Lifecycle` is one union rather than nine flattened
-                        // ones: provider isolation cannot be forgotten for a variant
-                        // added later.
+                        // Every lifecycle variant, present and future. This
+                        // arm is the reason `Lifecycle` is one union rather
+                        // than nine flattened ones: provider isolation cannot
+                        // be forgotten for a variant added later.
                         AgentLogBody::Lifecycle(_) => None,
                         // A boundary reached here is never the newest one — the
                         // newest was lifted out above — so it is history. Its
@@ -159,9 +160,9 @@ impl AgentState {
 
     /// The seq of every compaction boundary, oldest first.
     ///
-    /// These are the conversation ids: conversation N is the span
+    /// These are the session ids: session N is the span
     /// `(previous boundary, this boundary]`, so the boundary that closes a
-    /// conversation is what names it. A client seeking across compactions pages
+    /// session is what names it. A client seeking across compactions pages
     /// on these.
     #[must_use]
     pub fn boundary_seqs(&self) -> Vec<u64> {
@@ -494,14 +495,14 @@ mod tests {
     }
 
     #[test]
-    fn boundary_seqs_name_every_conversation() {
+    fn boundary_seqs_name_every_session() {
         let mut state = state_with_messages(2);
         state = AgentActor::apply_event(state, compacted(Some("m1"), "first"));
         state = AgentActor::apply_event(state, compacted(Some("m1"), "second"));
         assert_eq!(
             state.boundary_seqs(),
             vec![2, 3],
-            "a conversation's id is the seq of the boundary that closes it"
+            "a session's id is the seq of the boundary that closes it"
         );
     }
 }

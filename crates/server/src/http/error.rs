@@ -71,7 +71,7 @@ impl From<crate::sessions::UserMessageError> for Api {
         match e {
             E::NotFound => Self::not_found("no such session"),
             E::Unrecoverable(reason) => Self::conflict("unrecoverable", reason),
-            E::Rejected(why) => Self::conflict("not-a-conversation", why),
+            E::Rejected(why) => Self::conflict("not-a-session", why),
         }
     }
 }

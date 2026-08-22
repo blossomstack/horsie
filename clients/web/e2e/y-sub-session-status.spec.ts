@@ -1,23 +1,23 @@
 import { expect, test } from "./fixtures";
 import { createSession, expectStatus, sendMessage } from "./helpers";
 
-/** A fork's status, as a reader sees it.
+/** A sub session's status, as a reader sees it.
  *
- * The reported bug was entirely a reading: the fork answered, spent nothing
+ * The reported bug was entirely a reading: the sub session answered, spent nothing
  * more, and went on saying `RUNNING` — through reloads and through a server
  * restart, because a page's status is folded from that agent's own log and the
  * turn's end was never written there. So the assertion that matters is the
- * badge on the fork's own page after it has visibly answered, and the reload is
+ * badge on the sub session's own page after it has visibly answered, and the reload is
  * part of the test rather than a flourish: a live subscription could paper over
  * a log that never got the boundary. */
-test("Y1: a fork that has answered reads Idle, and still does after a reload", async ({
+test("Y1: a sub session that has answered reads Idle, and still does after a reload", async ({
   page,
   appBase,
   mock,
 }) => {
   await mock.reset();
   await mock.queueText("the original answer");
-  await mock.queueText("the fork's answer");
+  await mock.queueText("the sub session's answer");
 
   await createSession(page, appBase);
   await sendMessage(page, "start the migration");
@@ -26,40 +26,40 @@ test("Y1: a fork that has answered reads Idle, and still does after a reload", a
   );
   await expectStatus(page, "Idle");
 
-  // `/fork` redirects to the new conversation, so what follows is read on the
-  // fork's own page and not on the one it branched from.
+  // `/fork` redirects to the new session, so what follows is read on the
+  // sub session's own page and not on the one it branched from.
   await sendMessage(page, "/fork try the other way");
   await page.waitForURL(/\/agents\/[0-9a-f-]+$/);
   await expect(page.getByTestId("transcript-scroll")).toContainText(
-    "the fork's answer",
+    "the sub session's answer",
   );
 
   await expectStatus(page, "Idle");
   await page.reload();
   await expect(page.getByTestId("transcript-scroll")).toContainText(
-    "the fork's answer",
+    "the sub session's answer",
   );
   await expectStatus(page, "Idle");
 });
 
-/** The session the fork came from is not the thing that was working.
+/** The session the sub session came from is not the thing that was working.
  *
- * The two statuses are read off different things — the fork's log and the
- * session's own state — and a client shows them side by side, so a fork's turn
+ * The two statuses are read off different things — the sub session's log and the
+ * session's own state — and a client shows them side by side, so a sub session's turn
  * must move exactly one of them.
  *
  * Note what this is and is not: it passed before Y1's bug was fixed, because a
- * fork moved *neither* status then. It is here to hold the fix down rather than
- * to have caught the fault — closing a fork's turn through the session's own
+ * sub session moved *neither* status then. It is here to hold the fix down rather than
+ * to have caught the fault — closing a sub session's turn through the session's own
  * `TurnEnded` would have fixed Y1 and broken this. */
-test("Y2: a fork's turn leaves the conversation it branched from idle", async ({
+test("Y2: a sub session's turn leaves the session it branched from idle", async ({
   page,
   appBase,
   mock,
 }) => {
   await mock.reset();
   await mock.queueText("the original answer");
-  await mock.queueText("the fork's answer");
+  await mock.queueText("the sub session's answer");
 
   await createSession(page, appBase);
   const session = await sendMessage(page, "start the migration");
@@ -68,7 +68,7 @@ test("Y2: a fork's turn leaves the conversation it branched from idle", async ({
   await sendMessage(page, "/fork try the other way");
   await page.waitForURL(/\/agents\/[0-9a-f-]+$/);
   await expect(page.getByTestId("transcript-scroll")).toContainText(
-    "the fork's answer",
+    "the sub session's answer",
   );
 
   await page.goto(`${appBase}/sessions/${session}`);
@@ -78,14 +78,14 @@ test("Y2: a fork's turn leaves the conversation it branched from idle", async ({
   await expectStatus(page, "Idle");
 });
 
-/** Stop, pressed on a fork's page.
+/** Stop, pressed on a sub session's page.
  *
  * There was no way to do this at all: the stop call named no agent, so it could
- * only ever mean the main agent. On a fork's page the button cancelled a turn
- * the reader was not looking at — and once the fork was the thing running, the
+ * only ever mean the main agent. On a sub session's page the button cancelled a turn
+ * the reader was not looking at — and once the sub session was the thing running, the
  * gate read the session's status, found it idle, and returned success having
  * done nothing. */
-test("Y3: stopping a fork stops the fork, and leaves the conversation it came from alone", async ({
+test("Y3: stopping a sub session stops it, and leaves the session it came from alone", async ({
   page,
   appBase,
   mock,
@@ -109,7 +109,7 @@ test("Y3: stopping a fork stops the fork, and leaves the conversation it came fr
   await page.getByTestId("composer-stop").click();
   await expectStatus(page, "Idle");
 
-  // And the conversation it branched from was never touched.
+  // And the session it branched from was never touched.
   await page.goto(`${appBase}/sessions/${session}`);
   await expect(page.getByTestId("transcript-scroll")).toContainText(
     "the original answer",

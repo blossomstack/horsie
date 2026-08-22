@@ -24,7 +24,7 @@ vi.mock("../api/client", () => ({
       list: vi.fn(),
       setAnnotations: vi.fn(),
       remove: vi.fn(),
-      deleteFork: vi.fn(),
+      deleteSubSession: vi.fn(),
     },
     // The rail's switcher reads both of these. A project is what the rail
     // below belongs to, so a Sidebar rendered without one is not a Sidebar.
@@ -54,7 +54,7 @@ function session(id: string, tags: string[] = []): SessionSummary {
     status: SessionStatusKind.Idle,
     createdAt: 1,
     annotations: tags.map((t) => ({ key: `tag.${t}`, value: "" })),
-    forks: [],
+    subSessions: [],
   };
 }
 
@@ -271,60 +271,60 @@ describe("Sidebar sessions", () => {
   });
 });
 
-describe("forks in the rail", () => {
-  function fork(id: string, parent?: string, status = "idle", title?: string) {
+describe("subSessions in the rail", () => {
+  function subSession(id: string, parent?: string, status = "idle", title?: string) {
     return { id, parent, title, status, createdAtMs: 1, lastActivityMs: 1 };
   }
 
-  it("nests a fork of a fork under the fork it came from", async () => {
+  it("nests a subSession of a subSession under the subSession it came from", async () => {
     const s = session("s1");
-    s.forks = [
-      fork("a", undefined, "idle", "first"),
-      fork("b", "a", "idle", "second"),
+    s.subSessions = [
+      subSession("a", undefined, "idle", "first"),
+      subSession("b", "a", "idle", "second"),
     ];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar();
 
-    const rows = await screen.findAllByTestId("fork-row");
-    expect(rows.map((r) => r.getAttribute("data-fork-id"))).toEqual(["a", "b"]);
+    const rows = await screen.findAllByTestId("subSession-row");
+    expect(rows.map((r) => r.getAttribute("data-subSession-id"))).toEqual(["a", "b"]);
     expect(rows.map((r) => r.getAttribute("data-depth"))).toEqual(["0", "1"]);
   });
 
-  /* The session row is the main agent, each fork row is itself. A rollup would
+  /* The session row is the main agent, each sub session row is itself. A rollup would
      be a derived status that can disagree with the durable one. */
   it("badges each row with its own status, never a rollup", async () => {
     const s = session("s1");
     s.status = SessionStatusKind.Idle;
-    s.forks = [fork("a", undefined, "running", "busy one")];
+    s.subSessions = [subSession("a", undefined, "running", "busy one")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar();
 
-    const forkRow = await screen.findByTestId("fork-row");
-    expect(forkRow.getAttribute("title")).toMatch(/running|working/i);
+    const subSessionRow = await screen.findByTestId("subSession-row");
+    expect(subSessionRow.getAttribute("title")).toMatch(/running|working/i);
     const sessionRow = screen.getByTestId("session-row");
     expect(sessionRow.getAttribute("title")).not.toMatch(/running|working/i);
   });
 
-  it("names an unnamed fork rather than showing its id", async () => {
+  it("names an unnamed subSession rather than showing its id", async () => {
     const s = session("s1");
-    s.forks = [fork("a")];
+    s.subSessions = [subSession("a")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar();
 
-    expect(await screen.findByText("Untitled fork")).toBeTruthy();
+    expect(await screen.findByText("Untitled subSession")).toBeTruthy();
   });
 
-  /* A fork's route is a descendant of its session's, and a `NavLink` counts a
-     descendant as active. So opening a fork lit both rows and the rail claimed
-     two conversations were on screen at once. */
-  it("marks only the fork as open when a fork is the page", async () => {
+  /* A sub session's route is a descendant of its session's, and a `NavLink` counts a
+     descendant as active. So opening a subSession lit both rows and the rail claimed
+     two sessions were on screen at once. */
+  it("marks only the subSession as open when a subSession is the page", async () => {
     const s = session("s1");
-    s.forks = [fork("a", undefined, "idle", "branch")];
+    s.subSessions = [subSession("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar("/sessions/s1/agents/a");
 
-    const forkRow = await screen.findByTestId("fork-row");
-    expect(forkRow.getAttribute("aria-current")).toBe("page");
+    const subSessionRow = await screen.findByTestId("subSession-row");
+    expect(subSessionRow.getAttribute("aria-current")).toBe("page");
     expect(
       screen.getByTestId("session-row").getAttribute("aria-current"),
     ).toBeNull();
@@ -332,24 +332,24 @@ describe("forks in the rail", () => {
 
   it("marks the session as open when the session itself is the page", async () => {
     const s = session("s1");
-    s.forks = [fork("a", undefined, "idle", "branch")];
+    s.subSessions = [subSession("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar("/sessions/s1");
 
     const sessionRow = await screen.findByTestId("session-row");
     expect(sessionRow.getAttribute("aria-current")).toBe("page");
     expect(
-      screen.getByTestId("fork-row").getAttribute("aria-current"),
+      screen.getByTestId("subSession-row").getAttribute("aria-current"),
     ).toBeNull();
   });
 
-  it("links a fork to its own agent page", async () => {
+  it("links a subSession to its own agent page", async () => {
     const s = session("s1");
-    s.forks = [fork("a", undefined, "idle", "branch")];
+    s.subSessions = [subSession("a", undefined, "idle", "branch")];
     vi.mocked(api.sessions.list).mockResolvedValue({ sessions: [s] });
     renderSidebar();
 
-    const row = await screen.findByTestId("fork-row");
+    const row = await screen.findByTestId("subSession-row");
     expect(row.getAttribute("href")).toBe("/sessions/s1/agents/a");
   });
 });

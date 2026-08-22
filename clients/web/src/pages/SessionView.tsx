@@ -10,7 +10,7 @@ import {
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiRequestError, MAIN_AGENT, api } from "../api/client";
-import { forkReadyToOpen } from "../lib/forkTree";
+import { subSessionReadyToOpen } from "../lib/subSessionTree";
 import { SessionStatusKind, TaskStatus } from "../api/types";
 import { AskAnswerProvider } from "../components/AskUserCard";
 import { Composer } from "../components/Composer";
@@ -241,7 +241,7 @@ export function SessionView() {
   // state: a view of a session is a thing you send someone, and it should
   // survive a reload.
   const [searchParams, setSearchParams] = useSearchParams();
-  // Only on the session's own page. Scoped to one agent — a subagent, a fork, a
+  // Only on the session's own page. Scoped to one agent — a subagent, a sub session, a
   // workflow step — the transcript below is that agent's, while the roster is
   // still the whole session's: the map would label the open agent "main agent"
   // and draw its siblings hanging off it. A run already has its graph, which is
@@ -339,16 +339,16 @@ export function SessionView() {
   // before the prepend so we can restore the viewport position after it lands.
   const loadAnchor = useRef<number | null>(null);
 
-  // A fork this conversation just branched, not yet opened. Held rather than
-  // navigated to at once, because a fork is `provisioning` until its history
+  // A sub session this session just branched, not yet opened. Held rather than
+  // navigated to at once, because a sub session is `provisioning` until its history
   // has been handed over.
-  const [pendingFork, setPendingFork] = useState<string | null>(null);
+  const [pendingSubSession, setPendingSubSession] = useState<string | null>(null);
   useEffect(() => {
-    if (!pendingFork || !id) return;
-    if (!forkReadyToOpen(detail?.forks, pendingFork)) return;
-    setPendingFork(null);
-    navigate(`/sessions/${id}/agents/${pendingFork}`);
-  }, [pendingFork, detail?.forks, id, navigate]);
+    if (!pendingSubSession || !id) return;
+    if (!subSessionReadyToOpen(detail?.subSessions, pendingSubSession)) return;
+    setPendingSubSession(null);
+    navigate(`/sessions/${id}/agents/${pendingSubSession}`);
+  }, [pendingSubSession, detail?.subSessions, id, navigate]);
 
   const handleSend = async (sessionId: string, text: string) => {
     setSendError(null);
@@ -362,18 +362,18 @@ export function SessionView() {
       // From here the server owns the message: the echo is handed its
       // server-side id so the queue can take it over without duplicating it.
       ackOptimisticUser(optimisticId, ack.messageId);
-      // `/fork` and `/summary-n-fork` create a conversation and answer with it.
-      // The message belongs to that conversation, not this one, so the echo
+      // `/fork` and `/summary-n-fork` create a session and answer with it.
+      // The message belongs to that session, not this one, so the echo
       // goes with it — leaving it here would show the command as something
-      // said in the conversation it branched away from.
-      // Not navigated yet: a `/summary-n-fork` is a turn on *this* conversation,
-      // and the fork has no history until that turn produces the summary.
+      // said in the session it branched away from.
+      // Not navigated yet: a `/summary-n-fork` is a turn on *this* session,
+      // and the sub session has no history until that turn produces the summary.
       // Landing there now would open a blank transcript for as long as a
       // provider call takes. The effect below moves us when it is ready — for a
       // `/fork`, whose seed is a local copy, that is the very next frame.
-      if (ack.forkedAgent) {
+      if (ack.subSession) {
         removeOptimisticUser(optimisticId);
-        setPendingFork(ack.forkedAgent);
+        setPendingSubSession(ack.subSession);
       }
     } catch (e) {
       removeOptimisticUser(optimisticId);
@@ -457,11 +457,11 @@ export function SessionView() {
       buildTimeline(
         stream.items,
         detail?.agents ?? [],
-        detail?.forks ?? [],
+        detail?.subSessions ?? [],
         Date.now(),
         histories,
       ),
-    [stream.items, detail?.agents, detail?.forks, histories],
+    [stream.items, detail?.agents, detail?.subSessions, histories],
   );
 
   // The same `collapsed` list the timeline reads: folding an agent is a
@@ -557,8 +557,8 @@ export function SessionView() {
   if (isError) return <SessionUnavailable id={id} error={error} />;
 
   // The agent this page is showing, which is the one whose turn the button
-  // interrupts. Unscoped, it always meant the main agent: on a fork's page it
-  // cancelled a turn the reader was not looking at, or — once the fork was what
+  // interrupts. Unscoped, it always meant the main agent: on a sub session's page it
+  // cancelled a turn the reader was not looking at, or — once the sub session was what
   // was running — did nothing at all and said `200`.
   const handleStop = async () => {
     try {
@@ -583,7 +583,7 @@ export function SessionView() {
   // "for stopping a turn you have scrolled away from", which was never a real
   // case: the composer is pinned to the bottom of the pane and never scrolls.
 
-  // A run has no single conversation, so the graph is its page. Opening one of
+  // A run has no single session, so the graph is its page. Opening one of
   // its steps routes back here with an agent id, and falls through to the
   // transcript below — the same view, scoped to that agent.
   if (id && detail?.workflow && !agentId) {

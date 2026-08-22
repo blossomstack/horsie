@@ -1,7 +1,7 @@
-//! End-to-end tests for the session server: real axum HTTP + real event-sourced
-//! actors + a real `SqlJournal`, driven over HTTP with reqwest. Only the sandbox
-//! runtime (a FakeRuntimeVendor over a real WebSocket) and the LLM
-//! (MockLlmServer) are doubled.
+//! End-to-end tests for the session server: real axum HTTP + real
+//! event-sourced actors + a real `SqlJournal`, driven over HTTP with reqwest.
+//! Only the sandbox runtime (a FakeRuntimeVendor over a real WebSocket) and
+//! the LLM (MockLlmServer) are doubled.
 
 #![allow(
     clippy::unwrap_used,
@@ -26,7 +26,7 @@ use std::time::Duration;
 ///
 /// A page is a list of log *entries*, each carrying a tagged body — a hook
 /// record and a session lifecycle event are entries too, and neither is a
-/// message. Tests that reason about the conversation go through here so a new
+/// message. Tests that reason about the session go through here so a new
 /// body kind cannot silently change what they count.
 fn page_messages(page: &serde_json::Value) -> Vec<serde_json::Value> {
     page["entries"]
@@ -73,7 +73,8 @@ struct Server {
 }
 
 impl Server {
-    /// Cleanly stop: drain the supervisor's live sessions, then abort the HTTP task.
+    /// Cleanly stop: drain the supervisor's live sessions, then abort the HTTP
+    /// task.
     async fn shutdown(self) {
         let _ = self
             .supervisor
@@ -82,12 +83,14 @@ impl Server {
         self.task.abort();
     }
 
-    /// Poll until this server has published `name` as a vendor, or let go of it.
+    /// Poll until this server has published `name` as a vendor, or let go of
+    /// it.
     ///
     /// A dial finishes on the agent's side before the server has finished
-    /// registering it, and a `disconnect` returns before the server has noticed —
-    /// so a session created in the gap resolves the wrong thing, or nothing.
-    /// This is the registration itself, not an estimate of how long one takes.
+    /// registering it, and a `disconnect` returns before the server has
+    /// noticed — so a session created in the gap resolves the wrong thing, or
+    /// nothing. This is the registration itself, not an estimate of how long
+    /// one takes.
     async fn await_vendor(&self, name: &str, connected: bool) {
         let deadline = Duration::from_secs(10);
         let start = std::time::Instant::now();
@@ -196,10 +199,10 @@ async fn start_server_on(
 /// Create a session and wait until its runtime actually exists.
 ///
 /// A session now says `Provisioning` until its vendor confirms the runtime, so
-/// leaving that status is itself the answer — but these tests take vendors away
-/// and restart servers, and the vendor's own signal is the shortest statement of
-/// "the create happened". Every test here means "a session that is up", so this
-/// is where that is established, once.
+/// leaving that status is itself the answer — but these tests take vendors
+/// away and restart servers, and the vendor's own signal is the shortest
+/// statement of "the create happened". Every test here means "a session that
+/// is up", so this is where that is established, once.
 async fn create_session(
     client: &reqwest::Client,
     api: &Api,
@@ -461,11 +464,11 @@ async fn wait_turns(client: &reqwest::Client, api: &Api, id: &str, want: usize) 
 
 /// Poll `probe` until it yields a value, or give up after 10s.
 ///
-/// For the one-off waits that used to be written inline as a bounded `for` loop
-/// with a bare `break` — those said how many times to look rather than what they
-/// were looking for, and a few reported nothing at all when they gave up. The
-/// named waits above keep their own bodies on purpose: each reports the last
-/// thing it saw, which is what makes a CI failure readable.
+/// For the one-off waits that used to be written inline as a bounded `for`
+/// loop with a bare `break` — those said how many times to look rather than
+/// what they were looking for, and a few reported nothing at all when they
+/// gave up. The named waits above keep their own bodies on purpose: each
+/// reports the last thing it saw, which is what makes a CI failure readable.
 async fn wait_until<T>(what: &str, mut probe: impl AsyncFnMut() -> Option<T>) -> T {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -514,7 +517,8 @@ async fn get_status(client: &reqwest::Client, api: &Api, id: &str) -> Option<Str
     )
 }
 
-/// Poll the session detail until its status equals `want` or the deadline passes.
+/// Poll the session detail until its status equals `want` or the deadline
+/// passes.
 async fn wait_status(client: &reqwest::Client, api: &Api, id: &str, want: &str) {
     let deadline = Duration::from_secs(10);
     let start = std::time::Instant::now();
@@ -577,10 +581,11 @@ async fn collect_sse(
 ///
 /// `subscribed` fires once the response headers are in, which is the point the
 /// server has registered this reader: the handler takes its watch *before* it
-/// returns a response, so headers are proof of subscription rather than a guess
-/// about one. A test that spawns a collector and then causes the events it means
-/// to collect has to wait for this, or it is racing its own subscription — and a
-/// sleep long enough to usually win that race is not the same as winning it.
+/// returns a response, so headers are proof of subscription rather than a
+/// guess about one. A test that spawns a collector and then causes the events
+/// it means to collect has to wait for this, or it is racing its own
+/// subscription — and a sleep long enough to usually win that race is not the
+/// same as winning it.
 async fn collect_sse_from(
     client: &reqwest::Client,
     url: &str,
@@ -793,7 +798,8 @@ async fn create_message_sse_roundtrip() {
         "the turn's end is an entry in the log, in order with the messages it \
          followed rather than on a stream of its own: {lifecycle:?}"
     );
-    // The assistant's text made it through the stream (in a durable Message event).
+    // The assistant's text made it through the stream (in a durable Message
+    // event).
     let joined = events
         .iter()
         .map(|e| e.data.to_string())
@@ -954,8 +960,8 @@ async fn prep_progressions_stream_during_a_turn() {
     let client = reqwest::Client::new();
 
     // The session's own first turn is not the one under test: progression
-    // frames are live-only, so this test needs a turn it can subscribe *before*,
-    // and only a second message gives it one.
+    // frames are live-only, so this test needs a turn it can subscribe
+    // *before*, and only a second message gives it one.
     let id = create_session(&client, &server.api, &agent, "warm up").await;
     wait_turns(&client, &server.api, &id, 1).await;
 
@@ -1301,8 +1307,8 @@ async fn a_compacted_session_recovers_its_whole_transcript_after_a_restart() {
     );
 
     // Restart on the same database. Recovery must come from the snapshot plus
-    // whatever events survived compaction — a full replay is no longer possible,
-    // because those events are gone.
+    // whatever events survived compaction — a full replay is no longer
+    // possible, because those events are gone.
     server.shutdown().await;
     let server2 = start_server(tmp.path(), agent.link(), &mock.url()).await;
     let after = history(server2.api.clone()).await;
@@ -1363,14 +1369,14 @@ async fn stop_cancels_the_turn_and_a_later_message_runs_again() {
     server.shutdown().await;
 }
 
-/// Stop, addressed to a fork, over the route a client actually calls.
+/// Stop, addressed to a sub session, over the route a client actually calls.
 ///
 /// The whole reason `stop` is agent-scoped: a session hosts several
-/// conversations at once, each with a turn of its own. The old session-wide
-/// route could only ever mean the main agent, so a fork could not be
+/// sessions at once, each with a turn of its own. The old session-wide
+/// route could only ever mean the main agent, so a sub session could not be
 /// interrupted at all — and an unknown id had no way to be refused.
 #[tokio::test]
-async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
+async fn stop_is_addressed_to_one_agent_and_a_sub_session_can_be_stopped() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("first");
     let tmp = tempfile::tempdir().unwrap();
@@ -1405,9 +1411,9 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
         "an id naming no agent in this session is refused"
     );
 
-    // The fork's own first turn is held open, so there is genuinely something
-    // to interrupt when the stop lands.
-    let block = mock.blocking_response("the fork's turn");
+    // The sub session's own first turn is held open, so there is genuinely
+    // something to interrupt when the stop lands.
+    let block = mock.blocking_response("the sub_session's turn");
     let res = client
         .post(format!("{}/sessions/{id}/messages", server.api))
         .json(&serde_json::json!({ "text": "/fork try the other way" }))
@@ -1416,21 +1422,21 @@ async fn stop_is_addressed_to_one_agent_and_a_fork_can_be_stopped() {
         .unwrap();
     assert_eq!(res.status().as_u16(), 202);
     let ack: serde_json::Value = res.json().await.unwrap();
-    let fork = ack["forkedAgent"]
+    let sub_session = ack["subSession"]
         .as_str()
-        .expect("a fork command answers with a fork")
+        .expect("a sub session command answers with a sub session")
         .to_string();
     block.wait_until_received().await;
 
-    assert_eq!(stop(fork.clone()).await, 200);
+    assert_eq!(stop(sub_session.clone()).await, 200);
     block.release();
 
-    // The fork's own log carries the boundary; the main agent's turn count is
-    // untouched, because the main agent was not what was stopped.
-    wait_until("the fork's turn ends as stopped", async || {
+    // The sub session's own log carries the boundary; the main agent's turn
+    // count is untouched, because the main agent was not what was stopped.
+    wait_until("the sub_session's turn ends as stopped", async || {
         let page: serde_json::Value = client
             .get(format!(
-                "{}/sessions/{id}/messages?aid={fork}&max=100",
+                "{}/sessions/{id}/messages?aid={sub_session}&max=100",
                 server.api
             ))
             .send()
@@ -1662,8 +1668,9 @@ async fn a_named_environment_is_resolved_and_recorded_on_the_session() {
         .as_str()
         .unwrap()
         .to_string();
-    // The provisioning `Idle` is the one this wants, and no turn is waited for:
-    // what follows reads the session's resolved environment, not its transcript.
+    // The provisioning `Idle` is the one this wants, and no turn is waited
+    // for: what follows reads the session's resolved environment, not its
+    // transcript.
     wait_status(&client, &server.api, &id, "Idle").await;
 
     let detail = |id: String| {
@@ -1943,8 +1950,8 @@ async fn a_dead_agent_link_fails_the_next_turn_visibly_instead_of_hanging() {
 /// On cancel, `Agent::run` drops the in-flight tool futures
 /// (`agentcore/src/agent.rs:574-578`), which abandons them locally only.
 /// `RuntimeClient::cancel(call_id)` exists, the transport declares it, and the
-/// executor WS protocol implements `CancelToolCall` — but a repo-wide grep finds
-/// no caller outside the executor's own inbound handler. Stopping a turn
+/// executor WS protocol implements `CancelToolCall` — but a repo-wide grep
+/// finds no caller outside the executor's own inbound handler. Stopping a turn
 /// mid-`bash` leaves the command running to completion inside the sandbox,
 /// holding resources, with its output discarded.
 ///
@@ -1976,13 +1983,14 @@ async fn stopping_a_turn_cancels_the_in_flight_tool_call() {
         let id = create_session(&client, &server.api, &agent, "run something slow").await;
         wait_status(&client, &server.api, &id, "Running").await;
 
-        // `Running` is reported at turn *start* — before the provider answers and
-        // before any tool call reaches the runtime. Stopping there cancels an empty
-        // in-flight set and writes nothing to the wire, so the assertion below would
-        // be measuring a race rather than the behaviour. Wait for the call to
-        // genuinely arrive: the fake records it before blocking on its gate, and
-        // `RuntimeClient` tracks a call before sending it, so an arrival here means
-        // `cancel_in_flight` has something to find.
+        // `Running` is reported at turn *start* — before the provider answers
+        // and before any tool call reaches the runtime. Stopping there cancels
+        // an empty in-flight set and writes nothing to the wire, so the
+        // assertion below would be measuring a race rather than the behaviour.
+        // Wait for the call to genuinely arrive: the fake records it before
+        // blocking on its gate, and `RuntimeClient` tracks a call before
+        // sending it, so an arrival here means `cancel_in_flight` has
+        // something to find.
         wait_until(
             "the tool call to reach the runtime, so there is something to cancel",
             async || (!agent.tool_agent_ids().is_empty()).then_some(()),
@@ -2232,8 +2240,8 @@ async fn a_crash_keeps_the_inbox_and_starts_nothing_on_its_own() {
     // for the user to come back rather than being answered behind their back.
     //
     // A real pause, and the only one left in this file: proving that something
-    // does *not* happen means giving it a window in which to happen. Every other
-    // wait here is for an event, and none of them can stand in for this.
+    // does *not* happen means giving it a window in which to happen. Every
+    // other wait here is for an event, and none of them can stand in for this.
     tokio::time::sleep(Duration::from_millis(200)).await;
     wait_inbox(&client, &server2.api, &id, &["still owed an answer"]).await;
     wait_turns(&client, &server2.api, &id, 1).await;
@@ -2676,10 +2684,10 @@ async fn the_request_prefix_only_grows_across_tool_calls() {
     server.shutdown().await;
 }
 
-/// The Responses wire, which is where the ChatGPT plan runs. Reasoning replay is
-/// the part unique to it: the model only sees its own prior chain of thought if
-/// horsie hands the encrypted item back, and an item that fails to come back
-/// identical moves the prefix for every turn after it.
+/// The Responses wire, which is where the ChatGPT plan runs. Reasoning replay
+/// is the part unique to it: the model only sees its own prior chain of
+/// thought if horsie hands the encrypted item back, and an item that fails to
+/// come back identical moves the prefix for every turn after it.
 #[tokio::test]
 async fn the_responses_prefix_only_grows_with_reasoning_replayed() {
     let mock = MockLlmServer::builder().build().await;
@@ -2808,8 +2816,8 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
         .collect();
     assert_eq!(visited, vec!["triage", "fix"], "graph: {graph}");
 
-    // Every node of the definition is present, reached or not, so a client draws
-    // the whole graph and lights up what happened.
+    // Every node of the definition is present, reached or not, so a client
+    // draws the whole graph and lights up what happened.
     assert_eq!(graph["nodes"].as_array().unwrap().len(), 2);
     assert_eq!(graph["edges"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -2819,7 +2827,8 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
     );
 
     // Per-step tokens. These were hardcoded to zero, so "which step is
-    // expensive?" — most of why the breakdown is on the page — was unanswerable.
+    // expensive?" — most of why the breakdown is on the page — was
+    // unanswerable.
     let spent: u64 = graph["nodes"]
         .as_array()
         .unwrap()
@@ -2885,9 +2894,9 @@ async fn a_workflow_run_is_created_driven_and_retried_over_http() {
 /// `e2e-flow` definition.
 ///
 /// A run resolves each step's preset and checks its model is still configured,
-/// so all of it has to exist over the wire rather than be injected. Pointing the
-/// provider at the mock is what `provider_at` already does, so swapping the live
-/// registry changes nothing but the route.
+/// so all of it has to exist over the wire rather than be injected. Pointing
+/// the provider at the mock is what `provider_at` already does, so swapping
+/// the live registry changes nothing but the route.
 async fn define_e2e_workflow(client: &reqwest::Client, api: &Api, mock_url: &str) {
     let res = client
         .put(format!("{api}/config/model-providers/p"))
@@ -2988,7 +2997,8 @@ async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
         "create the branching definition"
     );
 
-    // Each run: triage submits an outcome, then the branch step submits its own.
+    // Each run: triage submits an outcome, then the branch step submits its
+    // own.
     for (outcome, expected) in [("p0", "fix"), ("p2", "file")] {
         mock.queue_tool_call(
             "submit_result",
@@ -3055,9 +3065,9 @@ async fn a_runs_branch_is_chosen_by_the_outcome_its_step_submits() {
 #[tokio::test]
 async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     let mock = MockLlmServer::builder().build().await;
-    // The queue is shared and answered in order: the ordinary conversation
+    // The queue is shared and answered in order: the ordinary session
     // below speaks first, and only then do the run's steps. A step submits its
-    // result; a conversation just replies.
+    // result; a session just replies.
     mock.queue_response("hello yourself");
     for _ in 0..4 {
         mock.queue_tool_call(
@@ -3082,10 +3092,10 @@ async fn a_cold_run_reports_finished_in_the_filtered_session_list() {
     let api = server.api.clone();
     define_e2e_workflow(&client, &api, &mock.url()).await;
 
-    // An ordinary conversation, so the filter has something to leave out.
+    // An ordinary session, so the filter has something to leave out.
     let plain = create_session(&client, &server.api, &agent, "hello").await;
     // Waited out before the run starts, because the mock answers one shared
-    // queue in order and the two want different answers: a conversation wants
+    // queue in order and the two want different answers: a session wants
     // prose, a step wants a `submit_result` call. `create_session` returns as
     // soon as the runtime exists, so without this the run's first step and this
     // turn race for whichever response is at the head.
@@ -3262,7 +3272,7 @@ fn page_compaction_skips(page: &serde_json::Value) -> Vec<serde_json::Value> {
 async fn a_compacted_session_keeps_every_message_readable() {
     let mock = MockLlmServer::builder().build().await;
     mock.queue_response("an answer to the first thing");
-    mock.queue_response("a summary of the earlier conversation");
+    mock.queue_response("a summary of the earlier session");
     mock.queue_response("an answer to the second thing");
     let tmp = tempfile::tempdir().unwrap();
     let agent = FakeRuntimeVendor::builder("mock")
@@ -3476,14 +3486,14 @@ async fn a_typed_compact_command_with_nothing_to_fold_says_so() {
     assert_eq!(
         notices[0]["retainTokens"],
         serde_json::json!(200_000),
-        "and say what the conversation was measured against: {:?}",
+        "and say what the session was measured against: {:?}",
         notices[0]
     );
 
     let page = messages_page(&client, &server.api, &id, "main").await;
     assert!(
         page_boundaries(&page).is_empty(),
-        "nothing was folded: the conversation already fits, and summarising it \
+        "nothing was folded: the session already fits, and summarising it \
          would trade real messages for room that was never scarce"
     );
     // The queue held exactly two answers. A third provider call — a summariser

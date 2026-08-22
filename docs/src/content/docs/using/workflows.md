@@ -174,13 +174,13 @@ it, you want a session.
 
 ## Invoking a workflow from an agent
 
-Every agent — a session's main agent, a subagent, a workflow step, a fork —
+Every agent — a session's main agent, a subagent, a workflow step, a sub session —
 carries an `invoke_workflow` tool whenever the server has workflows saved. The
 tool lists them by name and description, which is how the model knows what
 exists and when one fits; with none saved the tool is not offered at all.
 Calling it starts a run of a saved workflow **inside the same session**,
 sharing its workspace, and returns immediately with the run's id. When the run ends, its final result (or failure) is
-delivered back into the invoking agent's conversation, exactly the way a
+delivered back into the invoking agent's session, exactly the way a
 subagent's report is. The agent does not wait: it continues with other work,
 or rests until the report wakes it.
 
@@ -201,7 +201,7 @@ The rules that bound the tree:
   one run the graph's order holds, as always.
 - **An invoked run never moves the session's status.** Its phase is its own;
   its invoker hears the result as a message and decides what it means. Only
-  the session's *root* — the conversation, or the run the session was created
+  the session's *root* — the session, or the run the session was created
   as — is what the session list shows.
 - **Stopping an agent stops its delegation.** Stop a subagent or retry a step
   and everything running under it — subagents, invoked runs, their steps —

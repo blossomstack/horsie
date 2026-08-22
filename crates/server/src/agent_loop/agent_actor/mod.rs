@@ -1,8 +1,8 @@
-//! One agent: its conversation, the turn it is running, and the log both leave
+//! One agent: its session, the turn it is running, and the log both leave
 //! behind.
 //!
 //! An agent is event-sourced, so a restarted process recovers an in-flight
-//! conversation from the journal and continues. Everything durable about it is
+//! session from the journal and continues. Everything durable about it is
 //! [`AgentState`], everything it can be told is [`AgentCommand`], and every
 //! change is an [`AgentDomainEvent`] that was journaled before it was believed.
 //!
@@ -12,10 +12,10 @@
 //! [`queue`] the promises it has accepted, [`run`] the turn in flight,
 //! [`conclude`] what ended it, [`compaction`] where the prompt starts,
 //! [`timers`] and [`task_list`] the side registers, [`log`] what others write
-//! into its transcript, [`fork`] branching, [`reads`] the questions that wake
-//! nothing, [`repair`] what a crash left dangling, and [`sink`] the path an
-//! event takes to the journal — over the vocabulary in [`types`] and the state
-//! in [`state`], to the shape in [`component`].
+//! into its transcript, [`seed`] branching, [`reads`] the questions
+//! that wake nothing, [`repair`] what a crash left dangling, and [`sink`] the
+//! path an event takes to the journal — over the vocabulary in [`types`] and
+//! the state in [`state`], to the shape in [`component`].
 //!
 //! Two things deliberately do not happen on this mailbox. No provider call and
 //! no toolbox build: those run on a spawned task, so a thirty-second MCP
@@ -25,12 +25,12 @@
 mod compaction;
 mod component;
 mod conclude;
-mod fork;
 mod log;
 mod queue;
 mod reads;
 mod repair;
 mod run;
+mod seed;
 mod sink;
 mod state;
 mod task_list;
@@ -45,7 +45,6 @@ pub use types::*;
 
 use compaction::{COMPACT_AT_PERCENT, COMPACT_RETAIN_PERCENT, Compaction};
 use component::Component;
-use fork::Forks;
 use log::LogWrites;
 use queue::Queue;
 use reads::Reads;
@@ -53,7 +52,8 @@ use repair::{
     missing_tool_results, parked_call_ids, repair_unanswered_tool_calls,
     repair_unanswered_tool_calls_except,
 };
-use run::{ForkSummary, Run, RunHandle, RunOutcome, RunReport};
+use run::{Run, RunHandle, RunOutcome, RunReport, SeedSummary};
+use seed::Seeding;
 use sink::{CapturingSink, PersistSink, coarse_appends_an_entry, coarse_event};
 use state::new_message_id;
 use task_list::{TaskListToolbox, TaskLists};
@@ -76,19 +76,20 @@ const SNAPSHOT_EVERY_EVENTS: u64 = 200;
 /// journaled and folded into state.
 ///
 /// This is how a live stream learns what happened without reading the journal:
-/// the actor is the only thing that touches its own log, and this is the seam it
-/// publishes through. Implementations must not block — they run on the actor's
-/// mailbox — and must treat delivery as best-effort.
+/// the actor is the only thing that touches its own log, and this is the seam
+/// it publishes through. Implementations must not block — they run on the
+/// actor's mailbox — and must treat delivery as best-effort.
 pub trait AgentObserver: Send + Sync {
-    /// `state` is the state *after* `event` was folded, so an observer that needs
-    /// the resulting message can read `state.messages.last()` rather than
-    /// re-deriving it from the event.
+    /// `state` is the state *after* `event` was folded, so an observer that
+    /// needs the resulting message can read `state.messages.last()` rather
+    /// than re-deriving it from the event.
     fn publish(&self, event: &AgentDomainEvent, state: &AgentState);
 }
 
-/// An agent run, modelled as an event-sourced actor. Each `Run`/`InjectToolResult`
-/// drives a background `horsie_agentcore::Agent` loop; coarse events are journaled
-/// incrementally so a crashed session recovers its conversation and continues.
+/// An agent run, modelled as an event-sourced actor. Each
+/// `Run`/`InjectToolResult` drives a background `horsie_agentcore::Agent`
+/// loop; coarse events are journaled incrementally so a crashed session
+/// recovers its session and continues.
 pub struct AgentActor {
     ctx: AgentRuntimeContext,
     params: AgentParams,
@@ -96,10 +97,10 @@ pub struct AgentActor {
     /// Where durable history is published, when anyone is listening. `None` for
     /// workflow agents, which have no live stream.
     observer: Option<Arc<dyn AgentObserver>>,
-    /// Events journaled since a snapshot was last *requested*. Counting requests
-    /// rather than confirmed writes means a failed snapshot simply waits another
-    /// interval, which is the right instinct for an optimization: retrying hard
-    /// against a failing journal helps nobody.
+    /// Events journaled since a snapshot was last *requested*. Counting
+    /// requests rather than confirmed writes means a failed snapshot simply
+    /// waits another interval, which is the right instinct for an
+    /// optimization: retrying hard against a failing journal helps nobody.
     events_since_snapshot: u64,
     /// Id of the next run to start. Monotonic for this actor's loaded lifetime,
     /// which is all the fence needs — a report can only be stale within it.
@@ -113,14 +114,14 @@ pub struct AgentActor {
     /// that was true at the time.
     ready: bool,
     /// What the next run should tell the provider about tool use. Taken when a
-    /// run starts, so it applies to exactly one turn. Set only when re-running a
-    /// turn that ended without the result it owed — see the nudge in
+    /// run starts, so it applies to exactly one turn. Set only when re-running
+    /// a turn that ended without the result it owed — see the nudge in
     /// `handle_finished`. In-memory: a process that died mid-nudge starts the
     /// turn again from the queue, and a fresh attempt is the right default.
     pending_tool_choice: Option<horsie_agentcore::ToolChoice>,
-    /// A prepare step is in flight. Gates a second `Resume` exactly as `running`
-    /// does: between `Resume` and `StartPrepared` no run exists yet, so
-    /// `running` alone would let two turns through and land two runs on one
+    /// A prepare step is in flight. Gates a second `Resume` exactly as
+    /// `running` does: between `Resume` and `StartPrepared` no run exists yet,
+    /// so `running` alone would let two turns through and land two runs on one
     /// journal.
     preparing: bool,
     /// Whether this agent load has fired its start hook. Deliberately **not**
@@ -182,8 +183,8 @@ impl AgentActor {
         self.revision.send_modify(|r| *r += 1);
     }
 
-    /// Same actor, publishing its durable history to `observer` — what a session
-    /// agent needs and a workflow agent does not.
+    /// Same actor, publishing its durable history to `observer` — what a
+    /// session agent needs and a workflow agent does not.
     pub fn with_observer(
         ctx: AgentRuntimeContext,
         params: AgentParams,
@@ -225,21 +226,22 @@ impl AgentActor {
     }
 
     /// The journal identity of an agent: kind `"agent"`, id = the agent's own
-    /// [`AgentRuntimeContext::journal_id`]. Centralizes the kind so the workflow
-    /// (e.g. fork) and the actor agree.
+    /// [`AgentRuntimeContext::journal_id`]. Centralizes the kind so the
+    /// workflow (e.g. sub session) and the actor agree.
     pub fn persistence_id_for(journal_id: uuid::Uuid) -> PersistenceId {
         PersistenceId::new("agent", journal_id.to_string())
     }
 
-    /// Refuse to begin a turn while one is already in flight — running, or still
-    /// in its prepare step.
+    /// Refuse to begin a turn while one is already in flight — running, or
+    /// still in its prepare step.
     ///
-    /// `start_run` overwrites `self.running` with a fresh token, so a second start
-    /// orphans the first run's cancel token and leaves two background loops
-    /// persisting interleaved events into one journal — including two
-    /// `tool_result`s for the same `tool_call_id`, which makes the provider 400 on
-    /// every later turn (#61 item 3). Callers gate on session status, but that is a
-    /// different actor's state; this is the invariant enforced where it lives.
+    /// `start_run` overwrites `self.running` with a fresh token, so a second
+    /// start orphans the first run's cancel token and leaves two background
+    /// loops persisting interleaved events into one journal — including two
+    /// `tool_result`s for the same `tool_call_id`, which makes the provider
+    /// 400 on every later turn (#61 item 3). Callers gate on session status,
+    /// but that is a different actor's state; this is the invariant enforced
+    /// where it lives.
     ///
     /// `preparing` is part of it because a turn between the drain decision and
     /// `StartPrepared` has no run yet: gating on `running` alone would let a
@@ -270,7 +272,7 @@ impl EventSourcedActor for AgentActor {
     /// silently reaching the wrong fold.
     fn apply_event(mut state: AgentState, event: AgentDomainEvent) -> AgentState {
         match event {
-            e @ AgentDomainEvent::Seeded { .. } => Forks::apply(&mut state, e),
+            e @ AgentDomainEvent::Seeded { .. } => Seeding::apply(&mut state, e),
             e @ (AgentDomainEvent::InputMessage { .. }
             | AgentDomainEvent::Received { .. }
             | AgentDomainEvent::TurnBegan { .. }
@@ -308,7 +310,7 @@ impl EventSourcedActor for AgentActor {
             AgentCommand::TaskList(c) => TaskLists::handle(self, state, c, ctx).await,
             AgentCommand::Read(c) => Reads::handle(self, state, c, ctx).await,
             AgentCommand::Log(c) => LogWrites::handle(self, state, c, ctx).await,
-            AgentCommand::Fork(c) => Forks::handle(self, state, c, ctx).await,
+            AgentCommand::Seed(c) => Seeding::handle(self, state, c, ctx).await,
             // Inlined rather than given a module of its own: stopping is the
             // actor's whole answer, and there is no state, no event and no
             // second command to keep it company.
@@ -316,9 +318,10 @@ impl EventSourcedActor for AgentActor {
         }
     }
 
-    /// Publish what just became durable. This is the whole reason a live stream
-    /// no longer reads the journal: by the time this runs the events are written
-    /// and folded, so `state` already contains the messages they appended.
+    /// Publish what just became durable. This is the whole reason a live
+    /// stream no longer reads the journal: by the time this runs the events
+    /// are written and folded, so `state` already contains the messages they
+    /// appended.
     async fn on_events_persisted(&mut self, events: &[AgentDomainEvent], state: &AgentState) {
         self.events_since_snapshot = self
             .events_since_snapshot
@@ -435,8 +438,8 @@ mod tests {
             async fn deliver(&self, _: AgentOutcome) {}
         }
 
-        /// Records `(event, message-count-at-publish)` so the test can prove the
-        /// fold already happened when the observer ran.
+        /// Records `(event, message-count-at-publish)` so the test can prove
+        /// the fold already happened when the observer ran.
         #[derive(Default)]
         struct Recorder {
             seen: std::sync::Mutex<Vec<(String, usize)>>,

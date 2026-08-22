@@ -3,7 +3,7 @@ export * from './sessionStatusKind';
 export * from './annotationEntry';
 export * from './agentSettings';
 export * from './sessionSummary';
-export * from './forkView';
+export * from './subSessionView';
 export * from './answerAsksRequest';
 export * from './askAnswerInput';
 export * from './sessionDetail';

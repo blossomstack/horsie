@@ -28,7 +28,7 @@ const tagged: SessionSummary = {
   status: SessionStatusKind.Idle,
   createdAt: 1,
   annotations: [{ key: "tag.web", value: "" }],
-  forks: [],
+  subSessions: [],
 };
 
 function row(s: SessionSummary, tags: string[]) {

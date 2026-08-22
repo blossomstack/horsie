@@ -225,7 +225,7 @@ async fn a_fork_continues_numbering_from_the_copied_snapshot() {
     assert_eq!(
         drain(&j, "dst", 2).await,
         vec![(3, vec![3])],
-        "the fork's first event follows the snapshot it was seeded with"
+        "the sub_session's first event follows the snapshot it was seeded with"
     );
     // And the source is untouched by the copy.
     assert_eq!(drain(&j, "src", 0).await.len(), 2);
@@ -389,10 +389,10 @@ async fn recovery_reads_the_snapshot_and_only_the_events_after_it() {
 ///
 /// `SqlJournal` holds nothing but a pool, so two of them over one database are
 /// not two namespaces — they are two views of the same row, and what orders
-/// their writes is that row's own `last_seq`. Conformance asks this of a single
-/// handle; asking it of two is what shows the state lives in the database rather
-/// than in the type, which is why one node can hand the same journal to every
-/// actor it hosts.
+/// their writes is that row's own `last_seq`. Conformance asks this of a
+/// single handle; asking it of two is what shows the state lives in the
+/// database rather than in the type, which is why one node can hand the same
+/// journal to every actor it hosts.
 #[tokio::test]
 async fn two_handles_on_one_database_are_the_same_log() {
     let db = testing::db().await;
@@ -453,7 +453,8 @@ async fn a_stale_writers_append_is_rejected() {
         "a stale write was accepted: {err:?}"
     );
 
-    // And it left nothing behind — the rejection rolled the append back with it.
+    // And it left nothing behind — the rejection rolled the append back with
+    // it.
     let mut events: Vec<Vec<u8>> = Vec::new();
     let mut s = j.replay(&pid, 0).await;
     while let Some(item) = s.next().await {

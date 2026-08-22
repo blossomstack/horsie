@@ -37,10 +37,10 @@ pub(super) fn runtime_readiness(event: &LifecycleEvent) -> Option<bool> {
         | LifecycleEvent::TurnEnded(_)
         | LifecycleEvent::AskRecorded(_)
         | LifecycleEvent::SubAgent(_)
-        // A fork branching off says nothing about *this* agent's runtime:
-        // they share the session's, and it was already up for the fork to
-        // have been taken at all.
-        | LifecycleEvent::Forked(_)
+        // A sub session branching off says nothing about *this* agent's
+        // runtime: they share the session's, and it was already up for the sub
+        // session to have been taken at all.
+        | LifecycleEvent::SubSession(_)
         // A compaction declining to fold anything is an answer to a typed
         // command. It touches neither the runtime nor the history.
         | LifecycleEvent::CompactionSkipped(_)

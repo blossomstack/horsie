@@ -4,7 +4,7 @@ import type { RenderedCompaction } from "../hooks/useSessionStream";
 import { compactNumber } from "../lib/format";
 import { Prose } from "./Prose";
 
-/** Where one conversation ended and the next began.
+/** Where one session ended and the next began.
  *
  * A rule with a label, not a bubble: nobody said this. What it marks is the
  * point past which the model stopped being shown the messages above — which
@@ -39,7 +39,7 @@ export function CompactionDivider({ value }: { value: RenderedCompaction }) {
             {/* Entries, not messages: a tool result is an entry too, and
                 counting only what the reader would call a message would
                 undercount what the boundary actually covers. Omitted entirely
-                when the conversation before this one has not been paged in —
+                when the session before this one has not been paged in —
                 no count beats a wrong one. */}
             {value.covered !== null && <> · {value.covered} entries</>}
             {saved > 0 && <> · {compactNumber(saved)} tokens freed</>}

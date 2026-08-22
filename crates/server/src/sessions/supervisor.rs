@@ -24,13 +24,14 @@ use crate::sessions::session_actor::{
     AnswerError, AskAnswer, MessageAccepted, SessionCommand, SessionSnapshot, SessionUsageStats,
 };
 use crate::sessions::session_actor::{
-    CoreCommand, FirstMessage, ForkCommand, LifecycleCommand, ReadCommand, RunCommand, TurnCommand,
+    CoreCommand, FirstMessage, LifecycleCommand, ReadCommand, RunCommand, SubSessionCommand,
+    TurnCommand,
 };
 use crate::sessions::spec::{SessionId, SessionSpec, SessionStatus};
 use crate::sessions::{CreateSessionError, CreatedSession, SessionRevisions, UserMessageError};
 use async_trait::async_trait;
 use horsie_actor::{ActorContext, CommandEffect, EventSourcedActor, PersistenceId, ReplyTo};
-use horsie_models::session::ForkView;
+use horsie_models::session::SubSessionView;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Weak};
@@ -103,7 +104,7 @@ pub enum SessionSupervisorCommand {
         created_at: u64,
         /// What to say to the new session's main agent. `None` only for a
         /// workflow run, which works from its definition and has no
-        /// conversation to open.
+        /// session to open.
         message: Option<String>,
         /// Answered once the session is durably recorded *and* its first
         /// message is durably queued, so a caller holding an id holds one the
@@ -128,9 +129,9 @@ pub enum SessionSupervisorCommand {
         id: SessionId,
         reply: ReplyTo<Option<(SessionRecord, Option<SessionSnapshot>)>>,
     },
-    /// Route a user message to one of the session's agents, loading the session
-    /// if necessary. `agent_id` absent or `"main"` for the primary agent, else a
-    /// subagent or workflow-step agent id.
+    /// Route a user message to one of the session's agents, loading the
+    /// session if necessary. `agent_id` absent or `"main"` for the primary
+    /// agent, else a subagent or workflow-step agent id.
     ///
     /// The reply lands once the *agent's* write is durable, so a caller holding
     /// an `Ok` holds a message that survives a crash.
@@ -146,11 +147,11 @@ pub enum SessionSupervisorCommand {
         agent_id: String,
         reply: ReplyTo<Result<(), String>>,
     },
-    /// Delete one fork of a session. Never automatic — nothing prunes a fork,
-    /// so this is the only way one goes.
-    DeleteFork {
+    /// Delete one sub session of a session. Never automatic — nothing prunes a
+    /// sub session, so this is the only way one goes.
+    DeleteSubSession {
         id: SessionId,
-        fork: Uuid,
+        sub_session: Uuid,
         reply: ReplyTo<Result<(), String>>,
     },
     /// Delete a session; the vendor decides its runtime's fate.
@@ -263,13 +264,16 @@ pub enum SessionSupervisorCommand {
         name: String,
         reply: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Internal: a session actor reports what forks it now holds.
+    /// Internal: a session actor reports what sub sessions it now holds.
     ///
     /// The whole roster rather than a delta, for the same reason
     /// [`Self::SessionStatusChanged`] sends the whole status: the session's own
     /// journal is the truth, this is a projection of it, and a projection built
     /// from deltas can drift where one built from the current value cannot.
-    ForksChanged { id: SessionId, forks: Vec<ForkRow> },
+    SubSessionsChanged {
+        id: SessionId,
+        sub_sessions: Vec<SubSessionRow>,
+    },
     /// Internal: publish an already-journaled title to the global live feed.
     PublishSessionTitle { id: SessionId, name: String },
     /// Rename a session on someone's behalf rather than the agent's.
@@ -318,12 +322,13 @@ pub enum SessionSupervisorEvent {
         id: SessionId,
         status: SessionStatus,
     },
-    /// A session's forks, as the list now holds them.
-    SessionForksChanged {
+    /// A session's sub sessions, as the list now holds them.
+    SessionSubSessionsChanged {
         id: SessionId,
-        forks: Vec<ForkRow>,
+        sub_sessions: Vec<SubSessionRow>,
     },
-    /// Merge-update of one session's annotations: `set` upserts, `remove` drops.
+    /// Merge-update of one session's annotations: `set` upserts, `remove`
+    /// drops.
     SessionAnnotationsSet {
         id: SessionId,
         set: BTreeMap<String, String>,
@@ -348,38 +353,38 @@ impl std::fmt::Display for RenameSessionError {
     }
 }
 
-/// One fork under a session, as the session list holds it.
+/// One sub session under a session, as the session list holds it.
 ///
 /// A projection of the session's own `ForkRecord`, not a second source of
 /// truth — the same relationship `SessionRecord.status` has to the session's
 /// journal, and durable for the same reason: `List` loads nothing, so what it
 /// cannot read from the registry it cannot show at all.
 ///
-/// `parent: None` means the session's main agent. Flattening `ForkParent` to an
-/// `Option` here is what lets a client nest forks without learning the server's
-/// own vocabulary.
+/// `parent: None` means the session's main agent. Flattening `ForkParent` to
+/// an `Option` here is what lets a client nest sub sessions without learning
+/// the server's own vocabulary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ForkRow {
+pub struct SubSessionRow {
     pub id: Uuid,
     pub parent: Option<Uuid>,
     pub title: Option<String>,
     pub status: crate::sessions::session_actor::AgentStatus,
     pub created_at_ms: u64,
-    /// The moment of this fork's last status change — the end of its last turn
-    /// once it is idle again. Zero before it has moved at all.
+    /// The moment of this sub session's last status change — the end of its
+    /// last turn once it is idle again. Zero before it has moved at all.
     #[serde(default)]
     pub last_activity_ms: u64,
 }
 
-impl ForkRow {
+impl SubSessionRow {
     /// This row as a client reads it.
     ///
     /// On the row rather than in the HTTP layer because the global feed
     /// publishes the same shape, and the list and the stream that updates it
-    /// must not be able to describe a fork differently.
+    /// must not be able to describe a sub session differently.
     #[must_use]
-    pub fn to_view(&self) -> ForkView {
-        ForkView {
+    pub fn to_view(&self) -> SubSessionView {
+        SubSessionView {
             id: self.id.to_string(),
             parent: self.parent.map(|p| p.to_string()),
             title: self.title.clone(),
@@ -408,10 +413,11 @@ pub struct SessionRecord {
     /// is never less accurate than the truth it projects.
     #[serde(default)]
     pub status: SessionStatus,
-    /// This session's forks, so the sidebar can nest them without loading the
-    /// session. `#[serde(default)]` so pre-fork journal rows load with none.
+    /// This session's sub sessions, so the sidebar can nest them without
+    /// loading the session. `#[serde(default)]` so pre-sub session journal
+    /// rows load with none.
     #[serde(default)]
-    pub forks: Vec<ForkRow>,
+    pub sub_sessions: Vec<SubSessionRow>,
 }
 
 /// Persisted supervisor state — which sessions exist, nothing more.
@@ -522,11 +528,11 @@ impl SessionSupervisor {
     /// The session `id` only if this supervisor believes it is loaded, and
     /// *without* counting as having spoken to it.
     ///
-    /// For everything that must reach a live session but must never wake a cold
-    /// one — a rename, a shutdown, an idle sweep. A reference cannot tell the
-    /// difference by itself, because reaching through one is exactly what brings
-    /// the actor back; `last_activity` is the only record of which sessions this
-    /// supervisor has loaded.
+    /// For everything that must reach a live session but must never wake a
+    /// cold one — a rename, a shutdown, an idle sweep. A reference cannot tell
+    /// the difference by itself, because reaching through one is exactly what
+    /// brings the actor back; `last_activity` is the only record of which
+    /// sessions this supervisor has loaded.
     fn resident(&self, ctx: &ActorContext<SupervisorInbox>, id: &SessionId) -> Option<SessionRef> {
         let session = self
             .last_activity
@@ -604,7 +610,8 @@ impl SessionSupervisor {
                     tracing::debug!(session = %id, "session idle; unloaded");
                     self.forget(&id);
                 }
-                // Refused: a run started while we were deciding. Restart its clock.
+                // Refused: a run started while we were deciding. Restart its
+                // clock.
                 Ok(false) => {
                     self.last_activity.insert(id, now);
                 }
@@ -654,7 +661,7 @@ impl EventSourcedActor for SessionSupervisor {
                         // can run anything, and creating one is the first thing
                         // it is asked to do.
                         status: SessionStatus::Provisioning,
-                        forks: Vec::new(),
+                        sub_sessions: Vec::new(),
                     },
                 );
             }
@@ -666,9 +673,9 @@ impl EventSourcedActor for SessionSupervisor {
                     rec.spec.name = Some(name);
                 }
             }
-            SessionSupervisorEvent::SessionForksChanged { id, forks } => {
+            SessionSupervisorEvent::SessionSubSessionsChanged { id, sub_sessions } => {
                 if let Some(rec) = state.sessions.get_mut(&id) {
-                    rec.forks = forks;
+                    rec.sub_sessions = sub_sessions;
                 }
             }
             SessionSupervisorEvent::SessionStatusChanged { id, status } => {
@@ -864,17 +871,22 @@ impl EventSourcedActor for SessionSupervisor {
                 }
                 CommandEffect::none()
             }
-            SessionSupervisorCommand::DeleteFork { id, fork, reply } => {
+            SessionSupervisorCommand::DeleteSubSession {
+                id,
+                sub_session,
+                reply,
+            } => {
                 match self.session(ctx, state, &id) {
                     None => {
                         let _ = reply.send(Err(format!("no such session: {id}")));
                     }
-                    // Routed, not decided: which forks exist is the session's
-                    // own state, and the supervisor's copy is a projection.
+                    // Routed, not decided: which sub sessions exist is the
+                    // session's own state, and the supervisor's copy is a
+                    // projection.
                     Some(session) => {
                         let _ = session
-                            .tell(SessionCommand::Fork(ForkCommand::Delete {
-                                id: fork,
+                            .tell(SessionCommand::SubSession(SubSessionCommand::Delete {
+                                id: sub_session,
                                 reply,
                             }))
                             .await;
@@ -1188,10 +1200,11 @@ impl EventSourcedActor for SessionSupervisor {
             }
             SessionSupervisorCommand::SessionStatusChanged { id, status } => {
                 self.list_changed();
-                // Idempotent on purpose: a session reports after every persisted
-                // batch and once more at load, so only a real transition is
-                // worth a write. Without this a busy session would journal a row
-                // here per batch, and every page-open would journal one more.
+                // Idempotent on purpose: a session reports after every
+                // persisted batch and once more at load, so only a real
+                // transition is worth a write. Without this a busy session
+                // would journal a row here per batch, and every page-open
+                // would journal one more.
                 match state.sessions.get(&id) {
                     Some(rec) if rec.status != status => {
                         CommandEffect::persist(vec![SessionSupervisorEvent::SessionStatusChanged {
@@ -1202,18 +1215,18 @@ impl EventSourcedActor for SessionSupervisor {
                     _ => CommandEffect::none(),
                 }
             }
-            SessionSupervisorCommand::ForksChanged { id, forks } => {
+            SessionSupervisorCommand::SubSessionsChanged { id, sub_sessions } => {
                 // Idempotent, exactly as `SessionStatusChanged` is: a session
-                // reports after every persisted batch and once more at load, so
-                // only a real change is worth a write. Without this, a busy
-                // session with one fork would journal a row here per batch.
+                // reports after every persisted batch and once more at load,
+                // so only a real change is worth a write. Without this, a busy
+                // session with one sub session would journal a row here per
+                // batch.
                 match state.sessions.get(&id) {
-                    Some(rec) if rec.forks != forks => {
+                    Some(rec) if rec.sub_sessions != sub_sessions => {
                         self.list_changed();
-                        CommandEffect::persist(vec![SessionSupervisorEvent::SessionForksChanged {
-                            id,
-                            forks,
-                        }])
+                        CommandEffect::persist(vec![
+                            SessionSupervisorEvent::SessionSubSessionsChanged { id, sub_sessions },
+                        ])
                     }
                     _ => CommandEffect::none(),
                 }
@@ -1575,7 +1588,7 @@ mod tests {
         create_saying(sup, None).await
     }
 
-    /// A create with a first message, which is what every conversation is.
+    /// A create with a first message, which is what every session is.
     async fn create_saying(sup: &SupervisorRef, message: Option<&str>) -> SessionId {
         sup.ask(|reply| SessionSupervisorCommand::Create {
             spec: spec_fixture(),
@@ -1889,8 +1902,8 @@ mod tests {
         );
     }
 
-    /// Poll the list until the session shows at least one fork.
-    async fn wait_for_forks(sup: &SupervisorRef, id: &SessionId) {
+    /// Poll the list until the session shows at least one sub session.
+    async fn wait_for_sub_sessions(sup: &SupervisorRef, id: &SessionId) {
         for _ in 0..200 {
             let rows = sup
                 .ask(|reply| SessionSupervisorCommand::List { reply })
@@ -1898,29 +1911,30 @@ mod tests {
                 .unwrap();
             if rows
                 .iter()
-                .any(|(row_id, rec)| row_id == id && !rec.forks.is_empty())
+                .any(|(row_id, rec)| row_id == id && !rec.sub_sessions.is_empty())
             {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("session {id} never listed a fork");
+        panic!("session {id} never listed a sub session");
     }
 
     /// The sidebar is built from the durable registry — `List` is documented
-    /// "Loads nothing". Deriving fork rows from session state instead would
-    /// wake every session that has ever been forked, every time the app opens.
+    /// "Loads nothing". Deriving sub session rows from session state instead
+    /// would wake every session that has ever been branched, every time the
+    /// app opens.
     #[tokio::test]
-    async fn forks_are_listed_without_loading_the_session() {
+    async fn sub_sessions_are_listed_without_loading_the_session() {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        let fork = Uuid::from_bytes([7; 16]);
+        let sub_session = Uuid::from_bytes([7; 16]);
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: vec![ForkRow {
-                id: fork,
+            sub_sessions: vec![SubSessionRow {
+                id: sub_session,
                 parent: None,
                 title: Some("Other migration".into()),
                 status: crate::sessions::session_actor::AgentStatus::Idle,
@@ -1930,7 +1944,7 @@ mod tests {
         })
         .await
         .unwrap();
-        wait_for_forks(&sup, &id).await;
+        wait_for_sub_sessions(&sup, &id).await;
 
         // A second supervisor over the same journal, which has loaded nothing.
         let cold = f.supervisor().await;
@@ -1939,31 +1953,34 @@ mod tests {
             .await
             .unwrap();
         let (_, rec) = listed.iter().find(|(s, _)| *s == id).expect("the session");
-        assert_eq!(rec.forks.len(), 1);
-        assert_eq!(rec.forks[0].id, fork);
-        assert_eq!(rec.forks[0].title.as_deref(), Some("Other migration"));
+        assert_eq!(rec.sub_sessions.len(), 1);
+        assert_eq!(rec.sub_sessions[0].id, sub_session);
+        assert_eq!(
+            rec.sub_sessions[0].title.as_deref(),
+            Some("Other migration")
+        );
     }
 
     /// Durable is not the same as live.
     ///
-    /// The registry held fork rows correctly and `List` answered them, but
-    /// nothing was broadcast — so a fork reached the sidebar only when
-    /// something *else* forced a refetch of the session list. Status and title
-    /// publish beside their own write; forks did not, and the omission is
-    /// invisible from the durable side, which is why the test asserts on the
-    /// stream rather than on `List`.
+    /// The registry held sub session rows correctly and `List` answered them,
+    /// but nothing was broadcast — so a sub session reached the sidebar only
+    /// when something *else* forced a refetch of the session list. Status and
+    /// title publish beside their own write; sub sessions did not, and the
+    /// omission is invisible from the durable side, which is why the test
+    /// asserts on the stream rather than on `List`.
     #[tokio::test]
-    async fn a_fork_change_reaches_the_session_list() {
+    async fn a_sub_session_change_reaches_the_session_list() {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
         let before = list_revision(&sup).await;
-        let fork = Uuid::from_bytes([9; 16]);
+        let sub_session = Uuid::from_bytes([9; 16]);
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: vec![ForkRow {
-                id: fork,
+            sub_sessions: vec![SubSessionRow {
+                id: sub_session,
                 parent: None,
                 title: Some("The other direction".into()),
                 status: crate::sessions::session_actor::AgentStatus::Provisioning,
@@ -1973,36 +1990,44 @@ mod tests {
         })
         .await
         .unwrap();
-        wait_for_forks(&sup, &id).await;
+        wait_for_sub_sessions(&sup, &id).await;
 
         assert_ne!(
             list_revision(&sup).await,
             before,
-            "a fork must move the list, or the sidebar only learns of it on some \
+            "a sub_session must move the list, or the sidebar only learns of it on some \
              unrelated refetch"
         );
-        // And what a woken reader then reads is the fork itself. Asserting both
-        // halves is the point: the counter waking a reader is worthless if the
-        // list it reads has not caught up.
+        // And what a woken reader then reads is the sub session itself.
+        // Asserting both halves is the point: the counter waking a reader is
+        // worthless if the list it reads has not caught up.
         let listed = sup
             .ask(|reply| SessionSupervisorCommand::List { reply })
             .await
             .unwrap();
-        let forks = &listed.iter().find(|(sid, ..)| *sid == id).unwrap().1.forks;
-        assert_eq!(forks.len(), 1);
-        assert_eq!(forks[0].id, fork);
-        assert_eq!(forks[0].title.as_deref(), Some("The other direction"));
+        let sub_sessions = &listed
+            .iter()
+            .find(|(sid, ..)| *sid == id)
+            .unwrap()
+            .1
+            .sub_sessions;
+        assert_eq!(sub_sessions.len(), 1);
+        assert_eq!(sub_sessions[0].id, sub_session);
+        assert_eq!(
+            sub_sessions[0].title.as_deref(),
+            Some("The other direction")
+        );
     }
 
     /// The publish rides the same idempotence guard as the write: a session
-    /// reports its whole roster after every persisted batch, so a fork that has
-    /// not changed must not wake every open sidebar.
+    /// reports its whole roster after every persisted batch, so a sub session
+    /// that has not changed must not wake every open sidebar.
     #[tokio::test]
-    async fn re_reporting_the_same_forks_moves_nothing() {
+    async fn re_reporting_the_same_sub_sessions_moves_nothing() {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        let rows = vec![ForkRow {
+        let rows = vec![SubSessionRow {
             id: Uuid::from_bytes([9; 16]),
             parent: None,
             title: None,
@@ -2011,18 +2036,18 @@ mod tests {
             last_activity_ms: 5,
         }];
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: rows.clone(),
+            sub_sessions: rows.clone(),
         })
         .await
         .unwrap();
-        wait_for_forks(&sup, &id).await;
+        wait_for_sub_sessions(&sup, &id).await;
         let settled = list_revision(&sup).await;
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: rows,
+            sub_sessions: rows,
         })
         .await
         .unwrap();
@@ -2042,12 +2067,12 @@ mod tests {
     /// A session reports its whole roster after every persisted batch. Writing
     /// a row for each would journal one per batch for the life of the session.
     #[tokio::test]
-    async fn re_reporting_the_same_forks_journals_nothing() {
+    async fn re_reporting_the_same_sub_sessions_journals_nothing() {
         let f = fixture().await;
         let journal = f.journal();
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        let rows = vec![ForkRow {
+        let rows = vec![SubSessionRow {
             id: Uuid::from_bytes([7; 16]),
             parent: None,
             title: None,
@@ -2056,19 +2081,19 @@ mod tests {
             last_activity_ms: 5,
         }];
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: rows.clone(),
+            sub_sessions: rows.clone(),
         })
         .await
         .unwrap();
-        wait_for_forks(&sup, &id).await;
+        wait_for_sub_sessions(&sup, &id).await;
         let pid = PersistenceId::new(SUPERVISOR_KIND, sup.project().as_str());
         let after_first = journal.last_seq(&pid).await.unwrap();
 
-        sup.tell(SessionSupervisorCommand::ForksChanged {
+        sup.tell(SessionSupervisorCommand::SubSessionsChanged {
             id: id.clone(),
-            forks: rows,
+            sub_sessions: rows,
         })
         .await
         .unwrap();
@@ -2086,17 +2111,18 @@ mod tests {
 
     #[tokio::test]
     async fn an_unloaded_session_reports_the_status_in_its_journal() {
-        // The supervisor's status map is a cache. Reading a session must ask the
-        // actor, which recovers the truth from its journal — otherwise a session
-        // that parked on a question and then went cold reports nothing, and the
-        // UI has no way to know the question is still answerable.
+        // The supervisor's status map is a cache. Reading a session must ask
+        // the actor, which recovers the truth from its journal — otherwise a
+        // session that parked on a question and then went cold reports
+        // nothing, and the UI has no way to know the question is still
+        // answerable.
         let f = fixture().await;
         let journal = f.journal();
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        // Creating a session loads it — it has a runtime to build — so unload it
-        // first. Seeding the journal behind a live actor would prove nothing
-        // about where a *reload* reads its status from.
+        // Creating a session loads it — it has a runtime to build — so unload
+        // it first. Seeding the journal behind a live actor would prove
+        // nothing about where a *reload* reads its status from.
         assert!(
             await_signal(&f.agent, &format!("create:{id}")).await,
             "the create has to finish before the session can go idle"
@@ -2107,12 +2133,11 @@ mod tests {
             "the session must actually unload for this test to mean anything"
         );
 
-        // The session asked a question in an earlier incarnation. `Create` left
-        // a status in the cache, so a cache read would answer with the wrong
-        // thing.
-        // Appended where the log actually ends: this session has already run, so
-        // its log is not empty and a writer claiming otherwise is exactly what
-        // the fence rejects.
+        // The session asked a question in an earlier incarnation. `Create`
+        // left a status in the cache, so a cache read would answer with the
+        // wrong thing. Appended where the log actually ends: this session has
+        // already run, so its log is not empty and a writer claiming otherwise
+        // is exactly what the fence rejects.
         let pid = SessionActor::persistence_id_for(Uuid::parse_str(&id).unwrap());
         let at = journal.last_seq(&pid).await.unwrap();
         journal

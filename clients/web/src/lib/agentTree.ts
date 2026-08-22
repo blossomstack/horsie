@@ -4,7 +4,7 @@ import type { SubAgentView } from "../api/types";
 /**
  * Placing a session's agents as a tree.
  *
- * The roster arrives flat and parent-linked — the same shape `forkTree` reads,
+ * The roster arrives flat and parent-linked — the same shape `subSessionTree` reads,
  * for the same reason: the nesting is the client's to derive, which keeps an
  * arbitrarily deep chain off the wire. What is different here is that the
  * picture has drawn edges, so this produces coordinates rather than indents:
@@ -76,7 +76,7 @@ const LIVE_STATUS = new Set(["running", "provisioning", "awaiting_input"]);
  * timeline beside this reads the same list, so folding an agent in one view
  * folds it in the other.
  *
- * The two cases `forkTree` learned are the same here, because this reads the
+ * The two cases `subSessionTree` learned are the same here, because this reads the
  * same journal-derived data: an agent whose parent nobody holds roots at the
  * top level rather than vanishing, and anything a descent cannot reach is
  * appended flat rather than silently dropped.

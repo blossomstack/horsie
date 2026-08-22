@@ -28,17 +28,17 @@ pub struct AgentParams {
     /// Canonical thinking effort for this agent's runs, already resolved from
     /// the session's choice and the model's default. `None` sends no control.
     pub thinking_effort: Option<horsie_agentcore::ThinkingEffort>,
-    /// Interactive (session) mode: recovery never injects a synthetic continue —
-    /// the next user message is the continuation — and the event log is never
-    /// snapshot-compacted (SSE cursors are journal sequence numbers and must
-    /// stay stable). Workflow agents keep the default `false`.
+    /// Interactive (session) mode: recovery never injects a synthetic continue
+    /// — the next user message is the continuation — and the event log is
+    /// never snapshot-compacted (SSE cursors are journal sequence numbers and
+    /// must stay stable). Workflow agents keep the default `false`.
     pub interactive: bool,
     /// Whether a turn ending with text is allowed to *conclude* while this
     /// agent still has delegated work in flight — subagents it spawned,
     /// workflows it invoked, timers it armed. True for a subagent: its
     /// conclusion is a report its parent consumes once, so an agent that is
     /// still waiting parks instead, and reports when its whole subtree is
-    /// done. A step has the stronger `requires_result` gate; a conversation's
+    /// done. A step has the stronger `requires_result` gate; a session's
     /// final text is an answer to a person, not a report, and stays a turn
     /// boundary.
     pub park_on_outstanding_work: bool,
@@ -46,8 +46,9 @@ pub struct AgentParams {
     /// set, not "everything" — see [`crate::tools::resolve`].
     ///
     /// Carried down to the agent rather than applied by whoever built the
-    /// toolbox, because the toolbox is only whole here: the actor is what stacks
-    /// the timer and `task_list` layers on top of whatever it was handed.
+    /// toolbox, because the toolbox is only whole here: the actor is what
+    /// stacks the timer and `task_list` layers on top of whatever it was
+    /// handed.
     pub tools: Option<Vec<String>>,
 }
 
@@ -68,9 +69,11 @@ impl AgentParams {
 
 /// Commands accepted by an [`AgentActor`].
 ///
-/// Grouped the way [`SessionCommand`](crate::sessions::session_actor::SessionCommand) is, and for
-/// the same reason: the outer variant names the module that owns the command, so
-/// dispatch is one line per module rather than one arm per command.
+/// Grouped the way
+/// [`SessionCommand`](crate::sessions::session_actor::SessionCommand) is, and
+/// for the same reason: the outer variant names the module that owns the
+/// command, so dispatch is one line per module rather than one arm per
+/// command.
 pub enum AgentCommand {
     /// What this agent has been asked to answer, and the decision to answer it.
     Queue(QueueCommand),
@@ -84,8 +87,8 @@ pub enum AgentCommand {
     Read(ReadCommand),
     /// Things written into this agent's log by somebody else.
     Log(LogCommand),
-    /// Reading this conversation as a fork's starting point, and being one.
-    Fork(ForkCommand),
+    /// Reading this session as a sub session's starting point, and being one.
+    Seed(SeedCommand),
     /// The actor's own lifetime.
     Core(CoreCommand),
 }
@@ -123,22 +126,23 @@ pub enum QueueCommand {
 
 /// The turn in flight: stopping it, and what it writes and reports.
 pub enum RunCommand {
-    /// Cancel an in-flight run. `ack`, if given, fires once the run has actually
-    /// terminated — immediately when none is in flight — so a caller that must
-    /// know this incarnation will write nothing more (e.g. a session about to
-    /// spawn a replacement agent on the same journal) can wait for it rather
-    /// than racing it.
+    /// Cancel an in-flight run. `ack`, if given, fires once the run has
+    /// actually terminated — immediately when none is in flight — so a caller
+    /// that must know this incarnation will write nothing more (e.g. a session
+    /// about to spawn a replacement agent on the same journal) can wait for it
+    /// rather than racing it.
     Cancel { ack: Option<ReplyTo<()>> },
-    /// Internal: coarse events captured mid-run. `ack` lets the emitting loop await
-    /// the durable write before continuing, so persistence applies backpressure on
-    /// the agent loop, and reports the write outcome so a journal failure aborts the
-    /// run instead of proceeding on an unrecorded history. Persistence still flows
-    /// through this one mailbox.
+    /// Internal: coarse events captured mid-run. `ack` lets the emitting loop
+    /// await the durable write before continuing, so persistence applies
+    /// backpressure on the agent loop, and reports the write outcome so a
+    /// journal failure aborts the run instead of proceeding on an unrecorded
+    /// history. Persistence still flows through this one mailbox.
     PersistProgress {
         events: Vec<AgentDomainEvent>,
         ack: ReplyTo<Result<(), horsie_actor::JournalError>>,
     },
-    /// Internal: a background run finished. Boxed to keep the command enum small.
+    /// Internal: a background run finished. Boxed to keep the command enum
+    /// small.
     RunFinished(Box<RunReport>),
 }
 
@@ -198,9 +202,10 @@ pub enum ReadCommand {
         max: usize,
         reply: ReplyTo<crate::agent_loop::agent_log::LogPage>,
     },
-    /// Where this agent's log stands. A fork's branch point, read before
-    /// anything is written so the number names the moment the fork was asked
-    /// for rather than the moment its seed happened to be built.
+    /// Where this agent's log stands. A sub session's branch point, read
+    /// before anything is written so the number names the moment the sub
+    /// session was asked for rather than the moment its seed happened to be
+    /// built.
     LogHead { reply: ReplyTo<u64> },
     /// Read this agent's own usage + context-size snapshot — no messages or
     /// tasks, cheaper than `GetHistory` when only the numbers are needed.
@@ -236,35 +241,35 @@ pub enum LogCommand {
     /// ordering is the only reason this is a command at all — nothing here is
     /// journaled.
     RecordDelta { text: String },
-    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with no
-    /// ack: nothing waits on an audit trail, and recording what a hook did must
-    /// never be able to slow the call it describes.
+    /// Plugin hooks ran against one of this agent's tool calls. A `tell` with
+    /// no ack: nothing waits on an audit trail, and recording what a hook did
+    /// must never be able to slow the call it describes.
     HooksRan {
         records: Vec<horsie_models::hooks::HookRecord>,
     },
 }
 
-/// Reading this conversation as a fork's starting point, and being one.
-pub enum ForkCommand {
-    /// This agent's state as a fork's starting point, cut at `at_seq` — see
-    /// [`AgentState::scrub_for_fork`]. Read-only: forking changes nothing about
-    /// the conversation being forked.
-    ForkSeed {
+/// Reading this session as a sub session's starting point, and being one.
+pub enum SeedCommand {
+    /// This agent's state as a sub session's starting point, cut at `at_seq` —
+    /// see [`AgentState::scrub_for_sub_session`]. Read-only: branching changes
+    /// nothing about the session being branched.
+    Snapshot {
         at_seq: u64,
         reply: ReplyTo<Box<AgentState>>,
     },
     /// Adopt `state` as this agent's whole history, append `seed` after it, and
     /// queue `message` — all in one write.
     ///
-    /// Sent once, to a fork, before it has run anything, which is what makes
-    /// replacing state wholesale safe. Journaled as one batch rather than a
-    /// snapshot written behind the actor's back, so the fork's own log explains
-    /// where its history came from.
+    /// Sent once, to a sub session, before it has run anything, which is what
+    /// makes replacing state wholesale safe. Journaled as one batch rather
+    /// than a snapshot written behind the actor's back, so the sub session's
+    /// own log explains where its history came from.
     ///
     /// The message rides along rather than being enqueued separately for two
-    /// reasons, both learned the hard way: enqueued first, the fork drains and
-    /// answers it *before* it has a history; enqueued after, a crash in between
-    /// leaves a seeded fork with nothing to do.
+    /// reasons, both learned the hard way: enqueued first, the sub session
+    /// drains and answers it *before* it has a history; enqueued after, a
+    /// crash in between leaves a seeded sub session with nothing to do.
     SeedFrom {
         state: Box<AgentState>,
         seed: Box<Message>,
@@ -283,9 +288,9 @@ pub enum CoreCommand {
 
 /// A turn whose pre-start hooks have run, on its way back to the actor.
 ///
-/// Carries the drained turn untouched apart from a rewritten prompt: the prepare
-/// step decides nothing about what the turn consumes, it only learns what the
-/// hooks said.
+/// Carries the drained turn untouched apart from a rewritten prompt: the
+/// prepare step decides nothing about what the turn consumes, it only learns
+/// what the hooks said.
 pub struct PreparedStart {
     pub turn: crate::agent_loop::Turn,
     /// Records to journal before the turn snapshots its history — which is the
@@ -309,15 +314,15 @@ pub enum AbandonedStart {
 /// (text/tool-input deltas) are emitted to the event sink but never journaled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentDomainEvent {
-    /// This agent was seeded from another conversation: `state` is the history
+    /// This agent was seeded from another session: `state` is the history
     /// it adopts, `seed` the synthetic message appended after it.
     ///
     /// One event rather than a snapshot written behind the actor's back, so a
-    /// fork's own journal explains where its history came from. Only ever the
-    /// *first* event an agent has — replacing state wholesale is safe precisely
-    /// because nothing has run.
+    /// sub session's own journal explains where its history came from. Only
+    /// ever the *first* event an agent has — replacing state wholesale is safe
+    /// precisely because nothing has run.
     ///
-    /// Boxed: a whole conversation is far larger than any other variant here,
+    /// Boxed: a whole session is far larger than any other variant here,
     /// and an enum is as big as its widest arm.
     Seeded {
         state: Box<AgentState>,
@@ -373,9 +378,9 @@ pub enum AgentDomainEvent {
     /// A run that ended badly, and what it had spent by then.
     ///
     /// The accounting half of `RunComplete` without the turn half: no turn
-    /// completed, so there is no `last_turn_usage` to set and no iteration count
-    /// worth recording. Exactly one of the two ends a run, so folding both into
-    /// `usage_total` cannot double-count.
+    /// completed, so there is no `last_turn_usage` to set and no iteration
+    /// count worth recording. Exactly one of the two ends a run, so folding
+    /// both into `usage_total` cannot double-count.
     RunAborted {
         usage: Usage,
         context_tokens: u32,
@@ -394,8 +399,9 @@ pub enum AgentDomainEvent {
         ids: Vec<crate::agent_loop::timers::TimerId>,
         at_ms: u64,
     },
-    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time for a
-    /// recurring timer (so the fold stays pure); `None` removes a one-shot.
+    /// A timer fired. `next_fire_at_unix_ms` carries the re-armed fire time
+    /// for a recurring timer (so the fold stays pure); `None` removes a
+    /// one-shot.
     TimerFired {
         id: crate::agent_loop::timers::TimerId,
         next_fire_at_unix_ms: Option<u64>,
@@ -438,9 +444,9 @@ pub enum AgentDomainEvent {
     /// the boundary the live one did.
     ///
     /// Carries the *message id* the retained window starts at, not a seq. The
-    /// run that produced it was holding a `Vec<Message>` in prompt order, which
-    /// is not log order; resolving the two is the fold's job because the fold is
-    /// the only thing holding the log.
+    /// run that produced it was holding a `Vec<Message>` in prompt order,
+    /// which is not log order; resolving the two is the fold's job because the
+    /// fold is the only thing holding the log.
     Compacted {
         summary: String,
         carried_state: String,
@@ -460,9 +466,9 @@ pub enum AgentDomainEvent {
         item: crate::agent_loop::Incoming,
         at_ms: u64,
     },
-    /// A turn began, consuming these queue items — and, if the agent was parked,
-    /// answering these questions. One event so a crash anywhere in the window
-    /// replays to the same place.
+    /// A turn began, consuming these queue items — and, if the agent was
+    /// parked, answering these questions. One event so a crash anywhere in the
+    /// window replays to the same place.
     TurnBegan {
         consumed: Vec<String>,
         /// Every question this turn *answered*. Empty when the turn abandoned

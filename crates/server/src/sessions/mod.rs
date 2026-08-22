@@ -1,4 +1,5 @@
-//! Interactive sessions: event-sourced actors on the shared `horsie-actor` core.
+//! Interactive sessions: event-sourced actors on the shared `horsie-actor`
+//! core.
 //!
 //! `SessionSupervisor` (journal `session-supervisor/<account>`) owns the
 //! registry of which sessions exist; a `SessionActor` (journal `session/<id>`)
@@ -14,7 +15,6 @@ pub mod addressing;
 pub mod ask_tool;
 pub mod builder;
 pub mod clock;
-pub mod conversation_tool;
 pub mod events;
 pub mod invoke_workflow_tool;
 pub mod lifecycle_routing;
@@ -23,6 +23,7 @@ pub mod run_forest;
 pub mod session_actor;
 pub mod spawn_tool;
 pub mod spec;
+pub mod sub_session_tool;
 pub mod supervisor;
 pub mod title_tool;
 pub mod workflow;
@@ -30,11 +31,12 @@ pub mod workflow;
 /// How many times an agent has moved. Opaque: a reader compares it with the
 /// last one it saw and re-reads when they differ, and that is all it means.
 ///
-/// A counter rather than the `(tail_seq, delta_count)` pair this used to carry.
-/// A reader now compares two values instead of holding a channel, and that pair
-/// does not survive the comparison: an agent's first entry lands at sequence
-/// zero with no deltas, which is bit-for-bit the value a reader starts from, so
-/// the one thing a stream must never miss would have looked like no news at all.
+/// A counter rather than the `(tail_seq, delta_count)` pair this used to
+/// carry. A reader now compares two values instead of holding a channel, and
+/// that pair does not survive the comparison: an agent's first entry lands at
+/// sequence zero with no deltas, which is bit-for-bit the value a reader
+/// starts from, so the one thing a stream must never miss would have looked
+/// like no news at all.
 pub type Revision = u64;
 
 /// One agent's channel. `Arc` because the account's registry and the agent both
@@ -283,12 +285,13 @@ impl Revisions {
     /// Whether a reader is still interested, so the supervisor can drop the
     /// registry of a session nobody is watching.
     ///
-    /// Recency, not a live receiver count. A reader holds a receiver only while
-    /// its poll is waiting, and lets go for the moment it spends reading the log
-    /// — so counting receivers would let an offload landing in that moment throw
-    /// the registry away. The counter would restart at zero, the reader would
-    /// see a change that did not happen, and its read would load the session
-    /// again: the reload loop this registry exists to prevent, on a timer.
+    /// Recency, not a live receiver count. A reader holds a receiver only
+    /// while its poll is waiting, and lets go for the moment it spends reading
+    /// the log — so counting receivers would let an offload landing in that
+    /// moment throw the registry away. The counter would restart at zero, the
+    /// reader would see a change that did not happen, and its read would load
+    /// the session again: the reload loop this registry exists to prevent, on
+    /// a timer.
     ///
     /// A receiver count would also no longer mean what it says: the relay
     /// [`Self::publishing`] starts holds one for as long as the registry
@@ -334,9 +337,9 @@ pub struct SessionRevisions {
     feed: Option<(String, std::sync::Arc<dyn crate::bus::Bus>)>,
     sessions: std::sync::Mutex<std::collections::HashMap<String, Revisions>>,
     /// How many times this account's session list has changed — a status, a
-    /// title, or a fork set. One counter for the whole list rather than one per
-    /// session: a reader of the list re-reads the list, so knowing *that* it
-    /// moved is all the counter has to carry.
+    /// title, or a sub session set. One counter for the whole list rather than
+    /// one per session: a reader of the list re-reads the list, so knowing
+    /// *that* it moved is all the counter has to carry.
     list: RevisionSender,
 }
 

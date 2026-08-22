@@ -12,8 +12,9 @@
 use crate::sessions::run_forest::{RunId, RunState};
 use crate::sessions::session_actor::{AgentKey, SessionDomainEvent, SessionState};
 use horsie_agentcore::{
-    EmptyOutcome, FailedOutcome, ForkLifecycle, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
-    SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, TurnEndedLifecycle, TurnOutcome,
+    EmptyOutcome, FailedOutcome, LifecycleEvent, RuntimeLifecycle, RuntimeStatus,
+    SessionFailedLifecycle, StepLifecycle, SubAgentLifecycle, SubSessionLifecycle,
+    TurnEndedLifecycle, TurnOutcome,
 };
 
 /// One entry: whose log it belongs in, and what it says there.
@@ -23,19 +24,20 @@ type Entry = (AgentKey, LifecycleEvent);
 ///
 /// A list rather than one destination, because a fact can matter to more than
 /// one reader: a subagent's result is both its own last word and news to the
-/// parent that is waiting on it. Bookkeeping returns an empty list, which is how
-/// "nothing a viewer would render" is said — a usage total is a number, and
-/// `SubAgentRunning`/`SubAgentNotified` are the session reconciling its own tree.
+/// parent that is waiting on it. Bookkeeping returns an empty list, which is
+/// how "nothing a viewer would render" is said — a usage total is a number,
+/// and `SubAgentRunning`/`SubAgentNotified` are the session reconciling its
+/// own tree.
 ///
 /// Takes the state as it stands *after* the event, because two of the routings
-/// are not in the event: a step execution knows only its index, and a subagent's
-/// terminal result knows only its own id. Both find their agent in the run log
-/// and the forest respectively.
+/// are not in the event: a step execution knows only its index, and a
+/// subagent's terminal result knows only its own id. Both find their agent in
+/// the run log and the forest respectively.
 #[must_use]
 pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
     use SessionDomainEvent as E;
     // A session-wide fact belongs in the log a person reads when they open the
-    // session. That is the main agent for a conversation; a run has none, so it
+    // session. That is the main agent for a session; a run has none, so it
     // goes to the step in flight, whose log is the only one there is.
     let session_wide = |state: &SessionState| -> Option<AgentKey> {
         match state.forest.root_is_workflow() {
@@ -137,14 +139,14 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
             })
             .into_iter()
             .collect(),
-        // On the parent too, and for the same reason the spawn is: the parent is
-        // what a person has open while it waits. It used to reach only the
+        // On the parent too, and for the same reason the spawn is: the parent
+        // is what a person has open while it waits. It used to reach only the
         // child, whose own log already ends with the report.
         E::SubAgentCompleted { id, .. } => terminal_subagent(*id, None, state),
         E::SubAgentFailed { id, error, .. } => terminal_subagent(*id, Some(error), state),
-        // A step's own log, which for a run is the only one there is. These used
-        // to route to `Main`, which a run does not have, so every one of them was
-        // dropped with a warning.
+        // A step's own log, which for a run is the only one there is. These
+        // used to route to `Main`, which a run does not have, so every one of
+        // them was dropped with a warning.
         E::StepStarted {
             index, step, agent, ..
         } => vec![(
@@ -204,43 +206,45 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         | E::SubAgentNotified { .. }
         | E::SpecRecorded { .. }
         | E::Renamed { .. } => Vec::new(),
-        // On the conversation that was forked, not in the session-wide log: a
-        // fork of a fork belongs in *that* fork's transcript, where the branch
-        // actually happened. The same rule `SubAgentLifecycle` follows.
+        // On the session that was branched, not in the session-wide log: a sub
+        // session of a sub session belongs in *that* sub session's transcript,
+        // where the branch actually happened. The same rule
+        // `SubAgentLifecycle` follows.
         //
         // It never reaches the model — `prompt_messages` drops every lifecycle
-        // body — which is deliberate: a fork is for the person reading, and
-        // telling the source about it would disturb its prompt cache for
+        // body — which is deliberate: a sub session is for the person reading,
+        // and telling the source about it would disturb its prompt cache for
         // nothing.
-        E::ForkCreated {
-            id, parent, mode, ..
+        E::SubSessionCreated {
+            id, parent, seed, ..
         } => parent_key(*parent, state)
             .map(|key| {
                 (
                     key,
-                    LifecycleEvent::Forked(ForkLifecycle {
+                    LifecycleEvent::SubSession(SubSessionLifecycle {
                         id: id.to_string(),
                         title: None,
-                        mode: mode.as_str().to_string(),
+                        seed: seed.as_str().to_string(),
                     }),
                 )
             })
             .into_iter()
             .collect(),
-        // Nothing in the source's transcript changes when a fork is seeded,
-        // renames itself, moves or goes. Those belong in the fork's own log,
-        // and the session list is where a reader watches them.
-        E::ForkSeeded { .. }
-        | E::ForkTitled { .. }
-        | E::ForkStatusChanged { .. }
-        | E::ForkDeleted { .. } => Vec::new(),
-        // On the fork itself, not on the conversation it branched from: this is
-        // the boundary of the fork's *own* turn, and a page folds a `TurnBegan`
-        // as `Running` until it sees the matching end. Left out, a fork read
-        // `RUNNING` for ever — through reloads and restarts, because the status
-        // is derived from the journal.
-        E::ForkTurnEnded { id, outcome, .. } => vec![(
-            AgentKey::Fork(*id),
+        // Nothing in the source's transcript changes when a sub session is
+        // seeded, renames itself, moves or goes. Those belong in the sub
+        // session's own log, and the session list is where a reader watches
+        // them.
+        E::SubSessionSeeded { .. }
+        | E::SubSessionTitled { .. }
+        | E::SubSessionStatusChanged { .. }
+        | E::SubSessionDeleted { .. } => Vec::new(),
+        // On the sub session itself, not on the session it branched from: this
+        // is the boundary of the sub session's *own* turn, and a page folds a
+        // `TurnBegan` as `Running` until it sees the matching end. Left out, a
+        // sub session read `RUNNING` for ever — through reloads and restarts,
+        // because the status is derived from the journal.
+        E::SubSessionTurnEnded { id, outcome, .. } => vec![(
+            AgentKey::SubSession(*id),
             LifecycleEvent::TurnEnded(TurnEndedLifecycle {
                 outcome: outcome.clone(),
             }),
@@ -264,10 +268,17 @@ fn every_agent(state: &SessionState, ev: LifecycleEvent) -> Vec<Entry> {
     session_wide
         .into_iter()
         .chain(state.forest.sub_ids().into_iter().map(AgentKey::Sub))
-        // Forks too. `runtime_readiness` is what reads a `SessionFailed` off an
-        // agent's log and stops it starting another turn; a fork that never
-        // heard would go on believing it may run, on a runtime that is gone.
-        .chain(state.forest.fork_ids().into_iter().map(AgentKey::Fork))
+        // Sub sessions too. `runtime_readiness` is what reads a
+        // `SessionFailed` off an agent's log and stops it starting another
+        // turn; a sub session that never heard would go on believing it may
+        // run, on a runtime that is gone.
+        .chain(
+            state
+                .forest
+                .sub_session_ids()
+                .into_iter()
+                .map(AgentKey::SubSession),
+        )
         .map(|key| (key, ev.clone()))
         .collect()
 }
@@ -282,7 +293,7 @@ fn every_agent(state: &SessionState, ev: LifecycleEvent) -> Vec<Entry> {
 /// `TurnBegan` as `Running` until the matching end. The child's log used to get
 /// nothing, so a finished subagent read `RUNNING` for ever there while the
 /// forest beside it said `completed` — the same defect a step had before its
-/// `Step` entries were folded, and a fork had before `ForkTurnEnded`.
+/// `Step` entries were folded, and a sub session had before `ForkTurnEnded`.
 fn terminal_subagent(id: uuid::Uuid, error: Option<&String>, state: &SessionState) -> Vec<Entry> {
     let Some(record) = state.forest.sub(id) else {
         return Vec::new();
@@ -384,7 +395,7 @@ fn parent_key(parent: uuid::Uuid, state: &SessionState) -> Option<AgentKey> {
         RunState::Main(_) => AgentKey::Main,
         RunState::Sub(_) => AgentKey::Sub(parent),
         RunState::Workflow(_) => AgentKey::Step(parent),
-        RunState::Fork(_) => AgentKey::Fork(parent),
+        RunState::SubSession(_) => AgentKey::SubSession(parent),
     })
 }
 
@@ -392,7 +403,7 @@ fn parent_key(parent: uuid::Uuid, state: &SessionState) -> Option<AgentKey> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::run_forest::ForkMode;
+    use crate::sessions::run_forest::SeedMode;
     use crate::sessions::session_actor::SessionActor;
     use horsie_actor::EventSourcedActor;
     use std::sync::Arc;
@@ -406,10 +417,10 @@ mod tests {
             .fold(SessionState::default(), SessionActor::apply_event)
     }
 
-    /// The event that roots a conversation: every routing that resolves an
+    /// The event that roots a session: every routing that resolves an
     /// agent resolves it through the forest now, and the forest is rooted by
     /// the spec.
-    fn conversation_root(session: Uuid) -> SessionDomainEvent {
+    fn session_root(session: Uuid) -> SessionDomainEvent {
         SessionDomainEvent::SpecRecorded {
             at_ms: 0,
             session,
@@ -568,7 +579,7 @@ mod tests {
     }
 
     /// Whether this event is part of a workflow run, and so has to be routed
-    /// against a run's state rather than a conversation's.
+    /// against a run's state rather than a session's.
     fn is_run_event(event: &SessionDomainEvent) -> bool {
         use SessionDomainEvent as E;
         matches!(
@@ -591,15 +602,15 @@ mod tests {
     ///
     /// Each event is asked against the state it would really occur in — a run's
     /// step events against a run mid-step, everything else against a
-    /// conversation — because several of the routings resolve their agent from
+    /// session — because several of the routings resolve their agent from
     /// state rather than from the event.
     #[test]
     fn every_viewer_facing_event_has_a_destination() {
         let session = Uuid::new_v4();
         let sub = Uuid::new_v4();
         let step_agent = Uuid::new_v4();
-        let conversation = fold(vec![
-            conversation_root(session),
+        let plain = fold(vec![
+            session_root(session),
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 1,
                 id: sub,
@@ -625,7 +636,7 @@ mod tests {
             );
             let state = match is_run_event(&event) {
                 true => &run,
-                false => &conversation,
+                false => &plain,
             };
             let entries = route(&event, state);
             match bookkeeping {
@@ -640,7 +651,7 @@ mod tests {
     /// machine is resuming" is the answer to what a person is waiting for.
     #[test]
     fn a_vendors_words_reach_the_log_while_the_runtime_comes_up() {
-        let state = fold(vec![conversation_root(Uuid::new_v4())]);
+        let state = fold(vec![session_root(Uuid::new_v4())]);
         let entries = route(
             &SessionDomainEvent::ProvisioningProgress {
                 at_ms: 1,
@@ -658,11 +669,12 @@ mod tests {
     }
 
     /// The two ends of a provisioning wait carry no detail, and that is not an
-    /// oversight: "acquiring" is the start of a wait nothing is known about yet,
-    /// and "ready" is the end of one, where the only news is that it is over.
+    /// oversight: "acquiring" is the start of a wait nothing is known about
+    /// yet, and "ready" is the end of one, where the only news is that it is
+    /// over.
     #[test]
     fn the_ends_of_a_provisioning_wait_have_nothing_to_say() {
-        let state = fold(vec![conversation_root(Uuid::new_v4())]);
+        let state = fold(vec![session_root(Uuid::new_v4())]);
         for event in [
             SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
             SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
@@ -685,7 +697,7 @@ mod tests {
                 error: "no capacity in region".into(),
                 terminal: false,
             },
-            &fold(vec![conversation_root(Uuid::new_v4())]),
+            &fold(vec![session_root(Uuid::new_v4())]),
         );
         let Some((_, LifecycleEvent::Runtime(payload))) = entries.first() else {
             panic!("expected a Runtime entry");
@@ -694,9 +706,9 @@ mod tests {
     }
 
     /// A run that has not started its first step has no log at all yet, so a
-    /// session-wide fact in that window is dropped rather than misfiled. This is
-    /// the one case with genuinely nowhere to go: step agents are spawned per
-    /// step, and a run has no main agent to fall back on.
+    /// session-wide fact in that window is dropped rather than misfiled. This
+    /// is the one case with genuinely nowhere to go: step agents are spawned
+    /// per step, and a run has no main agent to fall back on.
     #[test]
     fn a_run_with_no_step_yet_has_nowhere_to_record() {
         let state = fold(vec![workflow_root(Uuid::new_v4())]);
@@ -731,7 +743,7 @@ mod tests {
             output: "done".into(),
         };
         let state = fold(vec![
-            conversation_root(session),
+            session_root(session),
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 0,
                 id: parent,
@@ -825,7 +837,7 @@ mod tests {
             output: serde_json::Value::Null,
         };
         let state = fold(vec![
-            conversation_root(session),
+            session_root(session),
             created.clone(),
             finished.clone(),
         ]);
@@ -865,11 +877,11 @@ mod tests {
         assert_eq!(entries[0].0, AgentKey::Step(agent));
     }
 
-    /// The same fact in a conversation goes to the main agent.
+    /// The same fact in a session goes to the main agent.
     #[test]
-    fn a_session_wide_fact_in_a_conversation_lands_on_main() {
+    fn a_session_wide_fact_in_a_session_lands_on_main() {
         let session = Uuid::new_v4();
-        let state = fold(vec![conversation_root(session)]);
+        let state = fold(vec![session_root(session)]);
         let entries = route(
             &SessionDomainEvent::TurnEnded {
                 at_ms: 3,
@@ -912,7 +924,7 @@ mod tests {
     #[test]
     fn every_way_a_turn_can_end_becomes_one_entry_kind() {
         let session = Uuid::new_v4();
-        let state = fold(vec![conversation_root(session)]);
+        let state = fold(vec![session_root(session)]);
         let outcomes: Vec<TurnOutcome> = [
             SessionDomainEvent::TurnEnded {
                 at_ms: 1,
@@ -946,44 +958,44 @@ mod tests {
         assert!(matches!(outcomes[3], TurnOutcome::Interrupted(_)));
     }
 
-    /// A fork's boundary belongs to the fork, never to the conversation it
-    /// branched from: routed session-wide it would close the *main* agent's
-    /// turn and leave the fork reading `RUNNING`.
+    /// A sub session's boundary belongs to the sub session, never to the
+    /// session it branched from: routed session-wide it would close the *main*
+    /// agent's turn and leave the sub session reading `RUNNING`.
     #[test]
-    fn a_forks_turn_boundary_lands_on_that_fork() {
+    fn a_sub_sessions_turn_boundary_lands_on_that_sub_session() {
         let session = Uuid::new_v4();
-        let fork = Uuid::new_v4();
+        let sub_session = Uuid::new_v4();
         let state = fold(vec![
-            conversation_root(session),
-            fork_context_for(session, fork),
+            session_root(session),
+            sub_session_context_for(session, sub_session),
         ]);
         let entries = route(
-            &SessionDomainEvent::ForkTurnEnded {
+            &SessionDomainEvent::SubSessionTurnEnded {
                 at_ms: 2,
-                id: fork,
+                id: sub_session,
                 outcome: TurnOutcome::Ended(EmptyOutcome {}),
             },
             &state,
         );
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, AgentKey::Fork(fork));
+        assert_eq!(entries[0].0, AgentKey::SubSession(sub_session));
         assert!(matches!(entries[0].1, LifecycleEvent::TurnEnded(_)));
     }
 
-    /// A fork's turn can fail, and the reason has to survive the trip: its own
-    /// page is the only place a reader will look for it.
+    /// A sub session's turn can fail, and the reason has to survive the trip:
+    /// its own page is the only place a reader will look for it.
     #[test]
-    fn a_forks_failed_turn_carries_its_error() {
+    fn a_sub_sessions_failed_turn_carries_its_error() {
         let session = Uuid::new_v4();
-        let fork = Uuid::new_v4();
+        let sub_session = Uuid::new_v4();
         let state = fold(vec![
-            conversation_root(session),
-            fork_context_for(session, fork),
+            session_root(session),
+            sub_session_context_for(session, sub_session),
         ]);
         let entries = route(
-            &SessionDomainEvent::ForkTurnEnded {
+            &SessionDomainEvent::SubSessionTurnEnded {
                 at_ms: 2,
-                id: fork,
+                id: sub_session,
                 outcome: TurnOutcome::Failed(FailedOutcome {
                     error: "the provider said no".into(),
                 }),
@@ -999,16 +1011,16 @@ mod tests {
         assert_eq!(failed.error, "the provider said no");
     }
 
-    /// A terminal runtime failure takes every conversation in the session with
-    /// it. A fork that never heard would go on believing it may start a turn,
-    /// on a runtime that is gone for good.
+    /// A terminal runtime failure takes every session in the session with it.
+    /// A sub session that never heard would go on believing it may start a
+    /// turn, on a runtime that is gone for good.
     #[test]
-    fn a_session_failure_reaches_the_forks_too() {
+    fn a_session_failure_reaches_the_sub_sessions_too() {
         let session = Uuid::new_v4();
-        let fork = Uuid::new_v4();
+        let sub_session = Uuid::new_v4();
         let state = fold(vec![
-            conversation_root(session),
-            fork_context_for(session, fork),
+            session_root(session),
+            sub_session_context_for(session, sub_session),
         ]);
         let keys: Vec<AgentKey> = route(
             &SessionDomainEvent::SessionFailed {
@@ -1021,7 +1033,10 @@ mod tests {
         .map(|(key, _)| key)
         .collect();
         assert!(keys.contains(&AgentKey::Main), "{keys:?}");
-        assert!(keys.contains(&AgentKey::Fork(fork)), "{keys:?}");
+        assert!(
+            keys.contains(&AgentKey::SubSession(sub_session)),
+            "{keys:?}"
+        );
     }
 
     /// A finished subagent is news in two places: the parent that is waiting on
@@ -1031,7 +1046,7 @@ mod tests {
         let session = Uuid::new_v4();
         let child = Uuid::new_v4();
         let state = fold(vec![
-            conversation_root(session),
+            session_root(session),
             SessionDomainEvent::SubAgentSpawned {
                 at_ms: 1,
                 id: child,
@@ -1061,13 +1076,13 @@ mod tests {
         assert!(matches!(entries[1].1, LifecycleEvent::TurnEnded(_)));
     }
 
-    fn fork_context_for(session: Uuid, fork: Uuid) -> SessionDomainEvent {
-        SessionDomainEvent::ForkCreated {
+    fn sub_session_context_for(session: Uuid, sub_session: Uuid) -> SessionDomainEvent {
+        SessionDomainEvent::SubSessionCreated {
             at_ms: 1,
-            id: fork,
+            id: sub_session,
             parent: session,
             source_seq: 0,
-            mode: ForkMode::Copy,
+            seed: SeedMode::Copy,
             message: "go".into(),
         }
     }

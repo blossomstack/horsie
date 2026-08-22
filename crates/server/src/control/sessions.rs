@@ -57,15 +57,15 @@ pub struct RenameSession {
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct StopAgent {
     pub id: String,
-    /// Which agent's turn to cancel: "main", or a subagent or fork id. A
-    /// session hosts several conversations and each has a turn of its own.
+    /// Which agent's turn to cancel: "main", or a subagent or sub session id. A
+    /// session hosts several sessions and each has a turn of its own.
     pub agent_id: String,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSession {
     pub id: String,
-    /// Whose log: "main" (the default), or a subagent, step or fork id.
+    /// Whose log: "main" (the default), or a subagent, step or sub session id.
     pub aid: Option<String>,
     /// Return the entries immediately before this sequence number. Absent
     /// means the latest ones. This is how you page backwards through a long

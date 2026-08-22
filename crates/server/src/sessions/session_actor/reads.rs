@@ -16,7 +16,7 @@ use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::agent_loop::ReadCommand as AgentReadCommand;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::run_forest::{ForkRun, RunForest, SubAgentRun, SubAgentStatus};
+use crate::sessions::run_forest::{RunForest, SubAgentRun, SubAgentStatus, SubSessionRun};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::{StepRun, StepStatus};
 use horsie_actor::ActorContext;
@@ -96,7 +96,7 @@ impl Reads {
     }
 }
 
-/// A conversation's primary agent. It has no lifecycle of its own — it is the
+/// A session's primary agent. It has no lifecycle of its own — it is the
 /// session, so the session's status *is* its status.
 fn main_entry(status: &SessionStatus) -> AgentEntry {
     AgentEntry {
@@ -150,30 +150,30 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
     }
 }
 
-/// One fork of a conversation.
+/// One sub session of a session.
 ///
 /// Its status is read straight off the record rather than mapped from
-/// anything: a fork *is* a conversation, so `AgentStatus` is already the
+/// anything: a sub session *is* a session, so `AgentStatus` is already the
 /// vocabulary its record is kept in. `label` carries the title it gave itself,
 /// which is `None` until it does — a client shows what it was branched from
 /// instead.
-fn fork_entry(id: Uuid, forest: &RunForest, rec: &ForkRun) -> AgentEntry {
+fn sub_session_entry(id: Uuid, forest: &RunForest, rec: &SubSessionRun) -> AgentEntry {
     let (created_at_ms, parent) = forest
         .owner_of_agent(id)
         .map(|(_, e)| (e.created_at_ms, e.parent))
         .unwrap_or((0, None));
     AgentEntry {
         id: id.to_string(),
-        // Rooted on the session's main agent, which is not a fork, so only a
-        // fork parent is reported.
-        parent: parent.filter(|pid| forest.fork(*pid).is_some()),
+        // Rooted on the session's main agent, which is not a sub session, so
+        // only a sub session parent is reported.
+        parent: parent.filter(|pid| forest.sub_session(*pid).is_some()),
         label: rec.title.clone(),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: None,
         status: rec.status,
         error: None,
         started_at_ms: created_at_ms,
-        // A conversation is never *done*, so it has no end.
+        // A session is never *done*, so it has no end.
         ended_at_ms: 0,
     }
 }
@@ -183,7 +183,8 @@ fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
     AgentEntry {
         id: id.to_string(),
         // Reported only when the parent is itself a subagent: a node rooted
-        // directly on main, a step or a fork is a top-level one to a reader.
+        // directly on main, a step or a sub session is a top-level one to a
+        // reader.
         parent: forest
             .owner_of_agent(id)
             .and_then(|(_, e)| e.parent)
@@ -209,7 +210,7 @@ impl SessionActor {
     /// Every agent this session hosts, addressable at `/agents/:agent_id`.
     ///
     /// Only this actor can answer it, which is the whole reason it is here: a
-    /// conversation's main agent takes its state from `state.status`, a run's
+    /// session's main agent takes its state from `state.status`, a run's
     /// step agents from `state.run`, and every subagent from `state.subagents`.
     /// Three pieces of state nothing above this actor holds together.
     ///
@@ -226,7 +227,8 @@ impl SessionActor {
             false => vec![main_entry(&state.status())],
         };
         // Every run's executions — the session's own and any invoked one's —
-        // then every subagent. Forks are read through `read_agent`, as before.
+        // then every subagent. Sub sessions are read through `read_agent`, as
+        // before.
         agents.extend(
             state
                 .forest
@@ -262,17 +264,19 @@ impl SessionActor {
                 .forest
                 .step_of_agent(id)
                 .and_then(|(run, index)| state.forest.workflow(run).and_then(|w| w.run.get(index))),
-            AgentKey::Main | AgentKey::Sub(_) | AgentKey::Fork(_) => None,
+            AgentKey::Main | AgentKey::Sub(_) | AgentKey::SubSession(_) => None,
         };
         let node = match key {
             AgentKey::Sub(id) => state.forest.sub(id),
-            AgentKey::Main | AgentKey::Step(_) | AgentKey::Fork(_) => None,
+            AgentKey::Main | AgentKey::Step(_) | AgentKey::SubSession(_) => None,
         };
         let entry = match key {
             AgentKey::Main => main_entry(&state.status()),
             AgentKey::Step(_) => step_entry(execution?),
             AgentKey::Sub(id) => sub_entry(id, &state.forest, node?),
-            AgentKey::Fork(id) => fork_entry(id, &state.forest, state.forest.fork(id)?),
+            AgentKey::SubSession(id) => {
+                sub_session_entry(id, &state.forest, state.forest.sub_session(id)?)
+            }
         };
         Some(AgentDetail {
             entry,
@@ -365,7 +369,7 @@ mod tests {
         assert_eq!(s.agent_usage.get(MAIN_AGENT_ID).unwrap().input_tokens, 10);
     }
 
-    /// A conversation's main agent has no lifecycle of its own, so every one of
+    /// A session's main agent has no lifecycle of its own, so every one of
     /// its session's states has to project onto one of an agent's — with no
     /// catch-all arm. A `_ =>` here is what let a session whose runtime never
     /// built report a `failed` status beside an `idle` agent, and it is why
@@ -407,10 +411,10 @@ mod tests {
         }
     }
 
-    /// A conversation lists the agent nothing spawned, so that every agent is
+    /// A session lists the agent nothing spawned, so that every agent is
     /// reachable at one shape.
     #[tokio::test]
-    async fn a_conversation_lists_its_main_agent_and_its_subagents() {
+    async fn a_session_lists_its_main_agent_and_its_subagents() {
         let (_f, session, id, journal) = spawn_session_with_provider(Arc::new(EchoProvider)).await;
         let sub = spawn_sub(&session, "research", "dig").await;
         wait_for_tree(&journal, id, |f| f.sub(sub).is_some()).await;

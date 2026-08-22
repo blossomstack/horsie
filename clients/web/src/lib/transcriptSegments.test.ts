@@ -118,7 +118,7 @@ describe("buildSegments work spans", () => {
   });
 });
 
-/** A step asks with `ask_user`, exactly as a conversation does. It used to ask
+/** A step asks with `ask_user`, exactly as a session does. It used to ask
  * through its finishing tool, which is why breaking a question out of a work
  * group once needed the payload rather than the name. */
 function stepAsk(id: string, question: string): RenderedToolCall {

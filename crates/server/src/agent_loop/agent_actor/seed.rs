@@ -1,15 +1,15 @@
-//! Being a fork, and being forked from.
+//! Being a sub session, and being branched from.
 //!
-//! Forking changes nothing about the conversation being forked: the branch
+//! Branching changes nothing about the session being branched: the branch
 //! point is a read, taken before anything is written so the number names the
-//! moment the fork was *asked for* rather than the moment its seed happened to
-//! be built.
+//! moment the sub session was *asked for* rather than the moment its seed
+//! happened to be built.
 //!
-//! Adopting a history is the other half, and it is one write. The message rides
-//! along with the state rather than being enqueued separately for two reasons,
-//! both learned the hard way: enqueued first, the fork drains and answers it
-//! before it has a history; enqueued after, a crash in between leaves a seeded
-//! fork with nothing to do.
+//! Adopting a history is the other half, and it is one write. The message
+//! rides along with the state rather than being enqueued separately for two
+//! reasons, both learned the hard way: enqueued first, the sub session drains
+//! and answers it before it has a history; enqueued after, a crash in between
+//! leaves a seeded sub session with nothing to do.
 
 use super::*;
 use horsie_actor::{ActorContext, CommandEffect, ReplyTo};
@@ -21,26 +21,27 @@ impl AgentState {
     ///
     /// The single place a `seq` is handed out, so the fold cannot produce a gap
     /// or a duplicate by accident.
-    /// This conversation as a fork's starting point.
+    /// This session as a sub session's starting point.
     ///
-    /// Everything that is *about the conversation* carries; everything that is
-    /// in flight, or is a bill, does not. A fork that inherited an ask would
-    /// park on a question nobody put to it; one that inherited `turn_in_flight`
-    /// would be reported interrupted before it had ever run; one that inherited
-    /// `usage_total` would make the session's aggregate count the same tokens
-    /// twice, once under each conversation.
+    /// Everything that is *about the session* carries; everything that is in
+    /// flight, or is a bill, does not. A sub session that inherited an ask
+    /// would park on a question nobody put to it; one that inherited
+    /// `turn_in_flight` would be reported interrupted before it had ever run;
+    /// one that inherited `usage_total` would make the session's aggregate
+    /// count the same tokens twice, once under each session.
     ///
-    /// Cut at `at_seq` — the branch point, read when the fork was asked for.
-    /// Not at the log's current end: journaling the fork writes a `Forked`
-    /// entry onto this very log, and a source that is mid-turn goes on
-    /// appending while the seed is being built. Copying to the end handed the
-    /// fork its own creation marker and whatever else had landed since.
+    /// Cut at `at_seq` — the branch point, read when the sub session was asked
+    /// for. Not at the log's current end: journaling the sub session writes a
+    /// `Branched` entry onto this very log, and a source that is mid-turn goes
+    /// on appending while the seed is being built. Copying to the end handed
+    /// the sub session its own creation marker and whatever else had landed
+    /// since.
     ///
-    /// `next_seq` becomes `at_seq` for the same reason: the fork's own entries
-    /// number on from where the copied ones stop, so every cursor into the
-    /// copied log still resolves and nothing collides.
+    /// `next_seq` becomes `at_seq` for the same reason: the sub session's own
+    /// entries number on from where the copied ones stop, so every cursor into
+    /// the copied log still resolves and nothing collides.
     #[must_use]
-    pub fn scrub_for_fork(&self, at_seq: u64) -> Self {
+    pub fn snapshot_at(&self, at_seq: u64) -> Self {
         Self {
             log: self
                 .log
@@ -63,31 +64,32 @@ impl AgentState {
     }
 }
 
-/// Being a fork, and being forked from.
-pub(super) struct Forks;
+/// Being a sub session, and being branched from.
+pub(super) struct Seeding;
 
-impl Forks {
+impl Seeding {
     pub(super) async fn handle(
         _actor: &mut AgentActor,
         state: &AgentState,
-        cmd: ForkCommand,
+        cmd: SeedCommand,
         ctx: &mut ActorContext<AgentCommand>,
     ) -> CommandEffect<AgentDomainEvent> {
         match cmd {
-            ForkCommand::ForkSeed { at_seq, reply } => {
-                let _ = reply.send(Box::new(state.scrub_for_fork(at_seq)));
+            SeedCommand::Snapshot { at_seq, reply } => {
+                let _ = reply.send(Box::new(state.snapshot_at(at_seq)));
                 CommandEffect::none()
             }
-            ForkCommand::SeedFrom {
+            SeedCommand::SeedFrom {
                 state: seeded,
                 seed,
                 message,
                 reply,
             } => {
                 // Already seeded. Not an error: a process that died between
-                // this write and the session journaling `ForkSeeded` comes back
-                // and re-seeds, and the honest answer is that the work is done.
-                // Saying otherwise would fail a fork that is perfectly fine.
+                // this write and the session journaling `ForkSeeded` comes
+                // back and re-seeds, and the honest answer is that the work is
+                // done. Saying otherwise would fail a sub session that is
+                // perfectly fine.
                 if !state.log.is_empty() {
                     let _ = reply.send(Ok(()));
                     let _ = ctx
@@ -100,8 +102,8 @@ impl Forks {
                 tokio::spawn(async move {
                     let answer = match rx.await {
                         Ok(Ok(())) => Ok(()),
-                        Ok(Err(e)) => Err(format!("persist the fork's history: {e}")),
-                        Err(_) => Err("the fork's history was never written".to_string()),
+                        Ok(Err(e)) => Err(format!("persist the sub session's history: {e}")),
+                        Err(_) => Err("the sub session's history was never written".to_string()),
                     };
                     let _ = reply.send(answer);
                 });
@@ -122,7 +124,7 @@ impl Forks {
                     },
                 ])
                 .and_ack(ReplyTo::from_sender(tx))
-                // A whole conversation in one event is exactly the case a
+                // A whole session in one event is exactly the case a
                 // snapshot exists for: without one, every later recovery
                 // replays it.
                 .and_snapshot()
@@ -131,7 +133,7 @@ impl Forks {
     }
 }
 
-impl Component for Forks {
+impl Component for Seeding {
     /// The history this agent adopted, and the seed appended after it.
     // `if let` rather than a `match`, because this module owns exactly one
     // variant. Which one is decided in `AgentActor::apply_event`, so an event

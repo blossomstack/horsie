@@ -1,8 +1,8 @@
 
 import { AnnotationEntry } from './annotationEntry';
-import { ForkView } from './forkView';
 import { SessionStatusKind } from './sessionStatusKind';
 import { SubAgentView } from './subAgentView';
+import { SubSessionView } from './subSessionView';
 import { UsageView } from './usageView';
 export interface SessionDetail {
   id: string;
@@ -37,26 +37,26 @@ export interface SessionDetail {
   usageTotal: UsageView;
   /**
    * Every agent this session hosts, each addressable at
-   * `/sessions/:id/agents/:agent_id`. A conversation lists its main agent
+   * `/sessions/:id/agents/:agent_id`. A session lists its main agent
    * first, then its subagent tree. A workflow run has no main agent — it
    * *is* its steps — so it lists one entry per execution in its run log,
    * labelled with the step that ran.
    */
   agents: SubAgentView[];
   /**
-   * The conversations forked out of this session, so one read tells a client
-   * everything the session hosts.
+   * The sub sessions branched out of this session, so one read tells a
+   * client everything the session hosts.
    *
-   * Its own field rather than more entries in `agents`, because a fork is
-   * not a delegated task: it owes nobody a result and it never ends, so it
-   * has no end stamp for a `SubAgentView` to carry and no honest way to
-   * share the shape. The server keeps the two apart for the same reason —
-   * `ForkRoster` is deliberately not a `SubAgentTree`.
+   * Its own field rather than more entries in `agents`, because a sub
+   * session is not a delegated task: it owes nobody a result and it never
+   * ends, so it has no end stamp for a `SubAgentView` to carry and no honest
+   * way to share the shape. The server keeps the two apart for the same
+   * reason — a sub session is deliberately not a `SubAgentTree` node.
    */
-  forks: ForkView[];
+  subSessions: SubSessionView[];
   /**
    * The workflow this session is a run of, if it is one. Decides which view
-   * the page renders: a run has a graph rather than a conversation.
+   * the page renders: a run has a graph rather than a transcript.
    */
   workflow?: string;
 }

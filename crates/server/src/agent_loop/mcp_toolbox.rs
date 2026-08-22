@@ -1,9 +1,10 @@
 //! Server-side MCP tools as a [`Toolbox`].
 //!
-//! [`McpToolbox`] adapts a remote MCP server ([`horsie_support::mcp::McpClient`])
-//! to the agent's [`Toolbox`] trait; [`CompositeToolbox`] fans several toolboxes
-//! into one. Composed into the agent's toolbox next to the runtime tools, MCP
-//! calls execute in the server process and never reach the sandbox.
+//! [`McpToolbox`] adapts a remote MCP server
+//! ([`horsie_support::mcp::McpClient`]) to the agent's [`Toolbox`] trait;
+//! [`CompositeToolbox`] fans several toolboxes into one. Composed into the
+//! agent's toolbox next to the runtime tools, MCP calls execute in the server
+//! process and never reach the sandbox.
 
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
@@ -81,7 +82,7 @@ pub struct CompositeToolbox {
     /// Servers this turn asked for and did not get. Advertised to nobody — a
     /// tool that is not there cannot be offered — but consulted when a call
     /// arrives for one anyway, which is exactly what happens when a server goes
-    /// down mid-conversation and the model calls a tool it saw earlier.
+    /// down mid-session and the model calls a tool it saw earlier.
     unavailable: Vec<McpUnavailable>,
 }
 
@@ -143,11 +144,11 @@ impl Toolbox for CompositeToolbox {
 /// Plugin-declared MCP tools, called through the runtime.
 ///
 /// The counterpart to [`McpToolbox`], and the difference is *where the client
-/// lives*: an admin-configured server is reached from the server process, while
-/// a plugin's is reached from the sandbox — because a plugin's `npx …` server is
-/// a process that belongs next to the workspace. The tool names are namespaced
-/// identically, so an agent, an `allowed_tools` allowlist and a hook matcher all
-/// see one vocabulary whichever path a tool came from.
+/// lives*: an admin-configured server is reached from the server process,
+/// while a plugin's is reached from the sandbox — because a plugin's `npx …`
+/// server is a process that belongs next to the workspace. The tool names are
+/// namespaced identically, so an agent, an `allowed_tools` allowlist and a
+/// hook matcher all see one vocabulary whichever path a tool came from.
 pub struct PluginMcpToolbox {
     client: horsie_runtime_host::RuntimeClient,
     tools: Vec<horsie_models::runtime::PluginMcpTool>,

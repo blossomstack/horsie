@@ -1,15 +1,16 @@
 //! The shared harness every component's tests are built on.
 //!
-//! Split out because the tests do not partition the way the code does. They are
-//! organised around *scenario setup* — does this test need a live session, a
-//! journal, a prompt recorder, a run mid-step — rather than around the unit
+//! Split out because the tests do not partition the way the code does. They
+//! are organised around *scenario setup* — does this test need a live session,
+//! a journal, a prompt recorder, a run mid-step — rather than around the unit
 //! under test, so the stop-hook tests and the plugin-agent tests share
-//! `agent_harness`, and the expansion tests build on `spawn_session_with_provider`.
+//! `agent_harness`, and the expansion tests build on
+//! `spawn_session_with_provider`.
 //!
 //! Keeping the harness here is what lets a test live beside the component it
 //! covers instead of beside the fixture it happens to reuse. Anything used by
-//! more than one test belongs in this file; anything used by exactly one belongs
-//! next to it.
+//! more than one test belongs in this file; anything used by exactly one
+//! belongs next to it.
 
 #![allow(dead_code)]
 
@@ -569,7 +570,7 @@ pub(super) fn concludes(output: serde_json::Value) -> horsie_agentcore::Completi
 
 /// A scripted `ask_user` call.
 ///
-/// A step asks with the same tool a conversation does, and parks the same way:
+/// A step asks with the same tool a session does, and parks the same way:
 /// the call ends the run and stays dangling until an answer arrives against it.
 pub(super) fn asks(question: &str) -> horsie_agentcore::CompletionResponse {
     horsie_agentcore::CompletionResponse {
@@ -1450,7 +1451,7 @@ pub(super) async fn main_history(session: &SessionRef) -> crate::agent_loop::Log
         .expect("main agent log")
 }
 
-/// Fails any completion whose conversation contains `needle`; answers
+/// Fails any completion whose session contains `needle`; answers
 /// everything else with plain text. Distinguishes the subagent's run from
 /// the main agent's when both share one provider.
 pub(super) struct FailOnNeedleProvider {
@@ -1496,7 +1497,7 @@ impl LlmProvider for FailOnNeedleProvider {
 ///
 /// A step must stay in flight for the length of these tests: it is the tree a
 /// spawn belongs in, and a concluded step takes its tree out of play. Told
-/// apart by the step's own prompt, which no subagent conversation carries.
+/// apart by the step's own prompt, which no subagent session carries.
 pub(super) struct StepStallsProvider;
 
 #[async_trait]
@@ -1572,9 +1573,9 @@ impl horsie_runtime_host::RuntimeTransport for StubHandle {
         //
         // Not politeness. Provisioning is the one preparation step that fails
         // the turn rather than degrading it — an agent whose plugins did not
-        // install would otherwise run with a silently reduced skill set. A stub
-        // that refused it would fail every turn before the thing under test ran,
-        // which is a property of the double rather than of the code.
+        // install would otherwise run with a silently reduced skill set. A
+        // stub that refused it would fail every turn before the thing under
+        // test ran, which is a property of the double rather than of the code.
         if let horsie_models::runtime::RuntimeInboundMessage::ProvisionAgent(req) = message {
             return Ok(
                 horsie_models::runtime::RuntimeOutboundMessage::AgentProvisioned(
