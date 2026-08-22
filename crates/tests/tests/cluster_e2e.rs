@@ -123,40 +123,76 @@ impl Node {
     /// which for a bug whose signature is "nothing ever arrives" is the one
     /// mistake that turns the assertion into noise.
     async fn subscribe(&self, path: &str) -> Frames {
-        let start = Instant::now();
-        let res = loop {
-            let res = self.get(path).await;
-            if res.status() != 503 || start.elapsed() > FORMATION {
-                break res;
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        };
-        assert_eq!(res.status(), 200, "{path} should have started streaming");
+        let client = self.client.clone();
+        let url = self.api(path);
+        let opened = Self::open_stream(&client, &url).await;
+        assert!(
+            opened.is_some(),
+            "{path} should have started streaming within {FORMATION:?}"
+        );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             use futures_util::StreamExt;
-            let mut body = res.bytes_stream();
-            let mut buffer = String::new();
-            while let Some(Ok(chunk)) = body.next().await {
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                // A blank line ends a frame; `data:` is the only line any
-                // assertion here cares about.
-                while let Some(end) = buffer.find("\n\n") {
-                    let frame: String = buffer.drain(..end + 2).collect();
-                    for data in frame.lines().filter_map(|l| l.strip_prefix("data:")) {
-                        let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim())
-                        else {
-                            continue;
-                        };
-                        if tx.send(value).is_err() {
-                            return; // the test stopped reading
+            let deadline = Instant::now() + FORMATION;
+            let mut res = opened;
+            // Reconnecting, not one connection read to its end. `/events` ends
+            // the stream on purpose whenever its supervisor ask fails — a node
+            // that has momentarily stood down — and says so in as many words:
+            // the client reconnects and may land on a node that can serve it.
+            // A reader that treats the close as final is asserting something no
+            // real client would, which is the same reason the requests above
+            // retry a 503. On reconnect the handler replays the current list as
+            // its first frame, so nothing is missed by re-opening.
+            while let Some(stream) = res.take() {
+                let mut body = stream.bytes_stream();
+                let mut buffer = String::new();
+                while let Some(Ok(chunk)) = body.next().await {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+                    // A blank line ends a frame; `data:` is the only line any
+                    // assertion here cares about.
+                    while let Some(end) = buffer.find("\n\n") {
+                        let frame: String = buffer.drain(..end + 2).collect();
+                        for data in frame.lines().filter_map(|l| l.strip_prefix("data:")) {
+                            let Ok(value) = serde_json::from_str::<serde_json::Value>(data.trim())
+                            else {
+                                continue;
+                            };
+                            if tx.send(value).is_err() {
+                                return; // the test stopped reading
+                            }
                         }
                     }
                 }
+                if Instant::now() >= deadline {
+                    return;
+                }
+                res = Self::open_stream(&client, &url).await;
             }
         });
         Frames(rx)
+    }
+
+    /// Open one SSE connection, retrying while the node says it is not serving.
+    ///
+    /// `None` once [`FORMATION`] has passed without a 200, which is the caller's
+    /// signal that this is a failure rather than a node still standing up.
+    async fn open_stream(client: &reqwest::Client, url: &str) -> Option<reqwest::Response> {
+        let start = Instant::now();
+        loop {
+            if let Ok(res) = client.get(url).send().await {
+                if res.status() == 200 {
+                    return Some(res);
+                }
+                if res.status() != 503 {
+                    return None;
+                }
+            }
+            if start.elapsed() > FORMATION {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     /// Every entry of one agent's transcript, read rather than streamed.
@@ -335,6 +371,11 @@ fn free_port() -> u16 {
 }
 
 async fn create_database(base: &str, name: &str) {
+    // This suite makes a database per test and cannot drop it at the end — the
+    // nodes outlive the test body. Collected on the way in instead, and only
+    // ones nothing is connected to, so a binary running beside this one keeps
+    // its own.
+    horsie_server::db::testing::sweep_abandoned_test_databases(base).await;
     sqlx::any::install_default_drivers();
     let admin = sqlx::any::AnyPoolOptions::new()
         .max_connections(1)

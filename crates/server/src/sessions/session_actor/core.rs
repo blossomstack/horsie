@@ -5,9 +5,11 @@
 //! agent-owning components record into `agent_usage` and the total belongs to
 //! none of them.
 
-use super::CoreCommand;
 use super::component::Component;
-use super::{AgentKey, CommandEffect, SessionActor, SessionDomainEvent, SessionState};
+use super::{
+    AgentKey, CommandEffect, CoreCommand, FirstMessage, LifecycleCommand, SessionActor,
+    SessionCommand, SessionDomainEvent, SessionState, TurnCommand,
+};
 use crate::agent_loop::AgentCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::supervisor::SessionSupervisorCommand;
@@ -62,30 +64,68 @@ impl SessionCore {
                 actor.spec_mut().name = Some(name.clone());
                 CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
             }
-            CoreCommand::RecordSpec { spec } => {
-                // Idempotent, because a log that already says what this session
-                // is has said it: a later one would overwrite a name the
+            CoreCommand::Create { spec, message } => {
+                // Whether *this* command is what brings the session into being,
+                // and the answer to it is what makes the whole command
+                // idempotent. A log that already says what this session is has
+                // said it: writing a later spec would overwrite a name the
                 // session has since been given, and recovery has already
-                // adopted what was there.
-                if state.spec.is_some() {
-                    return CommandEffect::none();
+                // adopted what was there. A redelivery, and a reload of a
+                // session with a history, must also provision nothing —
+                // loading a session starts nothing.
+                let creating = state.spec.is_none();
+
+                // The rest of the create, as self-sends, and queued *before*
+                // adopting. The supervisor used to address these through the
+                // shard itself, once each, and that is what let them land on a
+                // node that had never heard of this session. Sent from here
+                // they are ordinary mailbox entries, so nothing can arrive
+                // without the spec.
+                //
+                // Ahead of `adopt` because `adopt` self-sends each component's
+                // repairs, and those used to queue *behind* the supervisor's
+                // `Provision` and first message rather than in front of them. A
+                // workflow run repaired before it has a runtime does not start.
+                let me = actor.me(ctx);
+                if creating {
+                    let _ = me
+                        .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+                        .await;
                 }
-                let event = SessionDomainEvent::SpecRecorded {
-                    at_ms: now_ms(),
-                    session: actor.id,
-                    spec,
-                };
-                // The other half of how a session learns what it is. Recovery
-                // covers a session with a history; this covers the one case it
-                // cannot — a session created a moment ago, whose log is empty
-                // and whose agents nothing else would ever start. Adopted
-                // against the folded state, because this event is what roots
-                // the forest and the repairs read the root.
-                let next = SessionActor::apply_event(state.clone(), event.clone());
-                if let Some(spec) = next.spec.clone() {
-                    actor.adopt(spec, &next, ctx).await;
+                // Answered either way: a create that carried a message owes one,
+                // and a caller left waiting on a redelivery is the failure this
+                // whole command exists to remove.
+                if let Some(FirstMessage { text, reply }) = message {
+                    let _ = me
+                        .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                            agent_id: None,
+                            text,
+                            reply,
+                        }))
+                        .await;
                 }
-                CommandEffect::persist(vec![event])
+
+                if !creating {
+                    CommandEffect::none()
+                } else {
+                    let event = SessionDomainEvent::SpecRecorded {
+                        at_ms: now_ms(),
+                        session: actor.id,
+                        spec,
+                    };
+                    // The other half of how a session learns what it is.
+                    // Recovery covers a session with a history; this covers the
+                    // one case it cannot — a session created a moment ago,
+                    // whose log is empty and whose agents nothing else would
+                    // ever start. Adopted against the folded state, because
+                    // this event is what roots the forest and the repairs read
+                    // the root.
+                    let next = SessionActor::apply_event(state.clone(), event.clone());
+                    if let Some(spec) = next.spec.clone() {
+                        actor.adopt(spec, &next, ctx).await;
+                    }
+                    CommandEffect::persist(vec![event])
+                }
             }
             CoreCommand::Progress { key, stage, detail } => {
                 actor
@@ -342,6 +382,82 @@ mod tests {
             spec.name.as_deref(),
             Some("named"),
             "a rename is durable in the session's own log, not only the supervisor's"
+        );
+    }
+
+    /// A session reached before it has been told what it is answers, rather
+    /// than dying under the caller.
+    ///
+    /// The cluster failure this exists for. Addressing a session is what
+    /// materialises its actor, so a command can arrive at one whose log is
+    /// empty and whose spec is therefore unset. Reading that spec used to
+    /// panic: the actor died, the reply channel closed, and the create still in
+    /// flight for that session reported a 500, a 404 or a 409 from
+    /// `POST /sessions` depending on which half lost the race. "No such
+    /// session" is both survivable and true.
+    #[tokio::test]
+    async fn a_message_before_the_spec_is_answered_rather_than_fatal() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        // Deliberately not `f.start`: nothing has told this session what it is.
+        let session = f.node.session(id);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = session
+            .tell(SessionCommand::Turn(TurnCommand::UserMessage {
+                agent_id: None,
+                text: "hi".into(),
+                reply: horsie_actor::ReplyTo::from_sender(tx),
+            }))
+            .await;
+
+        let answered = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+        assert!(
+            matches!(
+                answered,
+                Ok(Ok(Err(crate::sessions::UserMessageError::NotFound)))
+            ),
+            "a session with no spec must answer, not take the actor down with it; \
+             got {answered:?}"
+        );
+    }
+
+    /// One command creates a session: what it is, its runtime and the first
+    /// thing said to it.
+    ///
+    /// The property the fix turns on, asserted where it can be seen — the
+    /// supervisor used to send these as three separately-addressed commands,
+    /// and it is the *separation* that let them come apart across a placement
+    /// move. Here the create carries a message and nothing else is ever sent.
+    #[tokio::test]
+    async fn one_command_records_the_spec_and_queues_the_first_message() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal = f.journal();
+        let session = f.node.session(id);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = session
+            .tell(SessionCommand::Core(CoreCommand::Create {
+                spec: Box::new(actor_spec_fixture()),
+                message: Some(FirstMessage {
+                    text: "hi".into(),
+                    reply: horsie_actor::ReplyTo::from_sender(tx),
+                }),
+            }))
+            .await;
+
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("the first message is answered")
+            .expect("the session answered it");
+        assert!(
+            accepted.is_ok(),
+            "the message carried by the create must be accepted: {accepted:?}"
+        );
+        assert!(
+            journaled_spec(&journal, id).await.is_some(),
+            "the same command must have recorded what this session is"
         );
     }
 
