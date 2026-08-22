@@ -112,9 +112,8 @@ export function SessionTimeline({
   });
 
   return (
-    // `bg-chassis`, which is what the body is painted and therefore what the
-    // transcript pane shows through. Painted `panel` this pane was a different
-    // colour from the transcript it replaces and from the composer beneath it.
+    // The ground comes from `SessionPane`, shared with the transcript and
+    // the graph.
     <div className="h-full overflow-auto" data-testid="session-timeline">
       <div className="relative w-max min-w-full pb-6">
         {/* Collapsed idle stretches, behind everything else. */}
@@ -229,7 +228,7 @@ function LaneRow({
       {/* The sidebar. Sticky rather than a separate column so it cannot drift
           out of vertical step with the lanes it names. */}
       <div
-        className="sticky left-0 z-20 flex h-full shrink-0 items-center gap-1 bg-chassis pr-2"
+        className="sticky left-0 z-20 flex h-full shrink-0 items-center gap-1 bg-panel pr-2"
         style={{ width: SIDEBAR_W, paddingLeft: 8 + lane.depth * 10 }}
       >
         {/* The chevron discloses the lanes *hanging off* this one — the

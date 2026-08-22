@@ -488,13 +488,25 @@ export function SessionView() {
   };
 
   const [scrolledUnder, setScrolledUnder] = useState(false);
+  const [contentBelow, setContentBelow] = useState(false);
+
+  /* Both edges of the transcript, from one measurement.
+   *
+   * The header takes a shadow when something has scrolled up under it; the
+   * composer takes one when there is still transcript below the fold, hidden
+   * behind it. Each only flips its own boolean, so a long transcript does not
+   * re-render per frame while it scrolls. */
+  const readEdges = (el: HTMLElement) => {
+    const under = el.scrollTop > 2;
+    setScrolledUnder((prev) => (prev === under ? prev : under));
+    const below = el.scrollHeight - el.scrollTop - el.clientHeight > 2;
+    setContentBelow((prev) => (prev === below ? prev : below));
+  };
 
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
-    // Only on the flip, so a long transcript does not re-render per frame.
-    const under = el.scrollTop > 2;
-    setScrolledUnder((prev) => (prev === under ? prev : under));
+    readEdges(el);
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
     if (el.scrollTop < 80 && stream.hasMoreBefore && !stream.loadingMore) {
       loadAnchor.current = el.scrollHeight;
@@ -526,6 +538,11 @@ export function SessionView() {
     seek(pendingSeek);
     setPendingSeek(null);
   }, [overlayOpen, pendingSeek]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el && !overlayOpen) readEdges(el);
+  });
 
   // Reset scroll intent when switching sessions.
   useEffect(() => {
@@ -921,6 +938,10 @@ export function SessionView() {
           {/* The channels this session runs on, in the same place the draft
               row occupied before it existed. Read-only — each key opens its
               value rather than a picker. */}
+          <div
+            className="bar-scroll-up shrink-0"
+            data-scrolled={!overlayOpen && contentBelow ? "true" : undefined}
+          >
           {!overlayOpen && detail && mainAgent && (
             <SessionConfigBar mode="locked" detail={detail} agent={mainAgent} />
           )}
@@ -955,6 +976,7 @@ export function SessionView() {
               onStop={handleStop}
             />
           )}
+          </div>
         </div>
 
         {tasksOpen && (

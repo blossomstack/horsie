@@ -144,7 +144,7 @@ export function Sidebar() {
         <Link
           to="/"
           data-testid="home-link"
-          className="-mx-1 flex min-w-0 items-center gap-2.5 rounded-[var(--radius-control)] px-1 py-0.5 transition-colors hover:bg-raised"
+          className="-mx-1 flex min-w-0 items-center gap-2.5 px-1 py-0.5"
         >
           <span
             aria-hidden

@@ -129,6 +129,7 @@
   --accent-ink: oklch(0.195 0.045 42);
   --accent-quiet: oklch(0.372 0.092 42);
   --selection: oklch(0.81 0.23 42 / 0.12);
+  --selection-solid: oklch(0.263 0.039 56);
 
   --live: oklch(0.828 0.132 82);
   --live-ink: oklch(0.828 0.132 82);
@@ -154,6 +155,7 @@
   --float: 0 1px 2px oklch(0.06 0.01 62 / 0.5), 0 8px 28px oklch(0.06 0.01 62 / 0.45);
   /* A bar with content scrolled under it. Absent at rest. */
   --bar-lift: 0 6px 14px -6px oklch(0 0 0 / 0.7);
+  --bar-lift-up: 0 -6px 14px -6px oklch(0 0 0 / 0.7);
   color-scheme: dark;
 }
 
@@ -184,6 +186,7 @@
   --accent-ink: oklch(0.992 0.01 58);
   --accent-quiet: oklch(0.858 0.075 40);
   --selection: oklch(0.21 0.23 34 / 0.32);
+  --selection-solid: oklch(0.766 0.037 26);
 
   --live: oklch(0.482 0.11 62);
   --live-ink: oklch(0.482 0.11 62);
@@ -204,6 +207,7 @@
   --focus-ring: oklch(0.518 0.172 34 / 0.95);
   --float: 0 1px 2px oklch(0.55 0.02 82 / 0.12), 0 8px 28px oklch(0.55 0.02 82 / 0.16);
   --bar-lift: 0 6px 14px -6px oklch(0.5 0.02 82 / 0.28);
+  --bar-lift-up: 0 -6px 14px -6px oklch(0.5 0.02 82 / 0.28);
   color-scheme: light;
 }
 
@@ -301,6 +305,25 @@
     background: var(--selection);
   }
 
+  /* In prose, the SAME colour but opaque.
+   *
+   * A translucent wash composites with whatever it lands on, so an inline
+   * code chip inside a selected sentence came out a different shade from the
+   * words either side of it — the highlight looked notched around every
+   * identifier. `--selection-solid` is that wash already composited over the
+   * panel, so a run of selected text is one flat colour whatever is under it.
+   *
+   * Code blocks opt back into the wash below, because that is the one place
+   * the thing underneath is worth seeing: syntax colours. */
+  .prose ::selection,
+  .prose::selection {
+    background: var(--selection-solid);
+  }
+  .prose pre ::selection,
+  .prose pre::selection {
+    background: var(--selection);
+  }
+
   /* Every focusable thing gets the same accent ring — the one line in the
    * build that is allowed to appear from nowhere, because being able to see
    * where your hands are is not decoration. */
@@ -363,6 +386,20 @@
   transition: box-shadow 180ms ease;
   &[data-scrolled="true"] {
     box-shadow: var(--bar-lift);
+  }
+}
+
+/* The same thing for a bar UNDER the scroll region — the composer. Its
+ * shadow points up, and it shows while there is still transcript below the
+ * fold, which is exactly when you need telling that the conversation does
+ * not end where the input starts. At the bottom of the scroll it goes away,
+ * because then there is nothing under it to separate from. */
+@utility bar-scroll-up {
+  position: relative;
+  z-index: 1;
+  transition: box-shadow 180ms ease;
+  &[data-scrolled="true"] {
+    box-shadow: var(--bar-lift-up);
   }
 }
 
