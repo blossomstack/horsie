@@ -17,7 +17,7 @@ export function SettingsNav({
   const { confirmLeave } = useSettingsDirty();
   return (
     <nav
-      className="flex shrink-0 flex-col bg-chassis max-md:bar-edge-b md:h-full md:w-48 md:column-edge-r"
+      className="flex shrink-0 flex-col bg-chassis max-md:bar-scroll md:h-full md:w-48 md:column-edge-r"
       data-testid="settings-nav"
       aria-label={title}
     >

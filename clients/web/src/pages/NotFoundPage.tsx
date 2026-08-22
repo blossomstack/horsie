@@ -17,7 +17,7 @@ export function NotFoundPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="not-found-page">
-      <div className="bar-edge-b flex items-center gap-2 bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
+      <div className="bar-scroll flex items-center gap-2 bg-panel px-4 py-3.5 sm:gap-3 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">
           <h1 className="page-title">Not found</h1>

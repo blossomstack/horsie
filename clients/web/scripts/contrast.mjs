@@ -100,14 +100,14 @@ const pick = (...selectors) => {
   return null;
 };
 
-/** Graphite's light block patches its dark base, so it is resolved by merge;
- * every alternate world's block is complete on its own. */
+/** Paper's light block patches its dark base, so it is resolved by merge;
+ * the alternate world's block is complete on its own. */
 const dark = pick(':root, [data-theme="dark"]');
 const light = { ...dark, ...pick('[data-theme="light"]') };
 
 const PALETTES = [
-  ["graphite", "dark", dark],
-  ["graphite", "light", light],
+  ["paper", "dark", dark],
+  ["paper", "light", light],
 ];
 
 const SKIN_IDS = [

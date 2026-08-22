@@ -11,6 +11,7 @@ import {
 import { Outlet } from "react-router-dom";
 import { SettingsNav, type NavItem } from "../../components/SettingsNav";
 import { SettingsDirtyProvider } from "./dirty";
+import { SettingsScrollProvider } from "./scrollShadow";
 
 const ITEMS: NavItem[] = [
   { to: "projects", label: "Projects", icon: FolderTree },
@@ -26,12 +27,14 @@ const ITEMS: NavItem[] = [
 export function SettingsLayout() {
   return (
     <SettingsDirtyProvider>
+      <SettingsScrollProvider>
       <div className="flex h-full flex-col overflow-hidden md:flex-row">
         <SettingsNav title="Settings" items={ITEMS} />
         <div className="min-w-0 flex-1">
           <Outlet />
         </div>
       </div>
+      </SettingsScrollProvider>
     </SettingsDirtyProvider>
   );
 }

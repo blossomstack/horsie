@@ -1,3 +1,4 @@
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
 import { RailToggle } from "../../components/rail";
 import { RosterRow } from "../../components/RosterRow";
@@ -6,13 +7,15 @@ import { useNavigate } from "react-router-dom";
 import { useAgents, useDeleteAgent } from "../../hooks/useAgents";
 
 export function AgentsPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: agents, isLoading, isError } = useAgents();
   const del = useDeleteAgent();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="agents-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">Agents</h1>
         <button
@@ -24,8 +27,7 @@ export function AgentsPage() {
           New agent
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div className="mx-auto max-w-3xl">
+      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6" onScroll={onScroll}>
           {isLoading && (
             <div className="flex items-center gap-2">
               <span className="lamp lamp-live text-live-ink" aria-hidden />
@@ -89,7 +91,6 @@ export function AgentsPage() {
               />
             ))}
           </div>
-        </div>
       </div>
     </div>
   );

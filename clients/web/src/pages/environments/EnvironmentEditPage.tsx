@@ -127,7 +127,7 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
 
   return (
     <div className="flex h-full flex-col" data-testid="environment-edit-page">
-      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:px-6">
+      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${initial.name}` : "New environment"}

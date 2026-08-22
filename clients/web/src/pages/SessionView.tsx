@@ -21,7 +21,7 @@ import { SessionConfigBar } from "../components/SessionConfigBar";
 import { AgentGraph } from "../components/AgentGraph";
 import { SessionTimeline } from "../components/SessionTimeline";
 import { SettingsMenu } from "../components/SettingsMenu";
-import { StatusIcon } from "../components/StatusBadge";
+import { StatusPill } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
 import { TranscriptSpine } from "../components/TranscriptSpine";
@@ -229,7 +229,7 @@ function SessionUnavailable({ id, error }: { id: string; error: unknown }) {
   const gone = error instanceof ApiRequestError && error.status === 404;
   return (
     <div className="flex h-full flex-col" data-testid="session-unavailable">
-      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <header className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
           {gone ? "No such session" : "Could not load this session"}
@@ -562,9 +562,14 @@ export function SessionView() {
     el.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const [scrolledUnder, setScrolledUnder] = useState(false);
+
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    // Only on the flip, so a long transcript does not re-render per frame.
+    const under = el.scrollTop > 2;
+    setScrolledUnder((prev) => (prev === under ? prev : under));
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
     if (el.scrollTop < 80 && stream.hasMoreBefore && !stream.loadingMore) {
       loadAnchor.current = el.scrollHeight;
@@ -688,9 +693,12 @@ export function SessionView() {
               so the three columns read as one instrument face. Only live state
               earns a place here: what this is, what it is doing, and how full
               its context is. Settled facts sit behind the info key. */}
-          <header className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+          <header
+            data-scrolled={scrolledUnder ? "true" : undefined}
+            className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6"
+          >
             <RailToggle />
-            {status && <StatusIcon status={status} />}
+            {status && <StatusPill status={status} />}
             {openSubSession ? (
               <SubSessionTitle
                 sessionId={id}
@@ -993,7 +1001,7 @@ export function SessionView() {
           {/* A workflow step takes no messages — the definition drives it — so
               it gets the stop control without the send one. */}
           {overlayOpen ? null : agentId && detail?.workflow ? (
-            <div className="bar-edge-t flex items-center gap-3 px-4 py-2">
+            <div className="bar-scroll flex items-center gap-3 px-4 py-2">
               <span className="text-xs text-faint">
                 This is a workflow step. It works from its definition, not from
                 messages.

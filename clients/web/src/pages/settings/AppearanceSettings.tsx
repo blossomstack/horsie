@@ -30,7 +30,7 @@ const MODES: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
 function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
   return (
     <div
-      data-skin={skin === "graphite" ? undefined : skin}
+      data-skin={skin === "paper" ? undefined : skin}
       data-theme={mode}
       className="pointer-events-none flex h-[4.25rem] w-full flex-col gap-1.5 overflow-hidden rounded-[var(--radius-control)] p-2"
       style={{ background: "var(--chassis)" }}

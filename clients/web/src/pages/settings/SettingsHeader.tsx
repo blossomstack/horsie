@@ -1,6 +1,7 @@
 import { RotateCcw, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { RailToggle } from "../../components/rail";
+import { useSettingsScroll } from "./scrollShadow";
 
 /**
  * The header bar every settings/admin page renders.
@@ -34,6 +35,7 @@ export function SettingsHeader({
   // "Saved" is an event, not a state. The mutation's `isSuccess` stays true
   // until the next call, so read straight it would latch the lamp on forever
   // after the first write.
+  const { barProps } = useSettingsScroll();
   const [showSaved, setShowSaved] = useState(false);
   useEffect(() => {
     if (!saved) return;
@@ -46,7 +48,7 @@ export function SettingsHeader({
     // The bar spans the pane; its contents share the content column's left
     // edge, so the title sits directly above the first panel rather than
     // floating 100px to its left.
-    <header className="bar-edge-b bg-panel">
+    <header className="bar-scroll bg-chassis" {...barProps}>
       <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5 sm:px-6">
         <RailToggle />
         <div className="min-w-0 flex-1">

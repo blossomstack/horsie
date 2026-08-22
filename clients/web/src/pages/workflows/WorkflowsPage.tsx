@@ -1,3 +1,4 @@
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
 import { RosterRow } from "../../components/RosterRow";
 import { useNavigate } from "react-router-dom";
@@ -7,13 +8,15 @@ import { RailToggle } from "../../components/rail";
 import { useDeleteWorkflow, useWorkflows } from "../../hooks/useWorkflows";
 
 export function WorkflowsPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: workflows, isLoading, isError } = useWorkflows();
   const del = useDeleteWorkflow();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="workflows-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Workflows</h1>
         <button
@@ -25,7 +28,7 @@ export function WorkflowsPage() {
           New workflow
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
+      <div className="flex-1 overflow-y-auto px-6 py-4" onScroll={onScroll}>
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && <p className="text-sm text-red-ink">Can’t reach the server.</p>}
         {workflows && workflows.length === 0 && (

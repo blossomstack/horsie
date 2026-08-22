@@ -1,3 +1,4 @@
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
 import { RosterRow } from "../../components/RosterRow";
 import { useNavigate } from "react-router-dom";
@@ -17,13 +18,15 @@ function scheduleLine(r: RoutineView): string {
 }
 
 export function RoutinesPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: routines, isLoading, isError } = useRoutines();
   const del = useDeleteRoutine();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button
@@ -35,7 +38,7 @@ export function RoutinesPage() {
           New routine
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
+      <div className="flex-1 overflow-y-auto px-6 py-4" onScroll={onScroll}>
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && (
           <p className="text-sm text-red-ink">Can’t reach the server.</p>

@@ -140,7 +140,7 @@ export function Sidebar() {
       {/* Nameplate. The lamp reports the rail's own link to the server, so a
           dead feed is visible before you click anything. Height is shared with
           the session and task-panel headers so the three columns line up. */}
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2.5 px-3">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2.5 px-3">
         <Link
           to="/"
           data-testid="home-link"
@@ -316,7 +316,7 @@ export function Sidebar() {
           destinations, on one strip. The switcher used to sit under the
           nameplate with the word "Project" over it — two rows of rail height
           for one string that is also in the URL. */}
-      <div className="bar-edge-t flex items-center gap-0.5 px-1.5 py-1.5">
+      <div className="bar-scroll flex items-center gap-0.5 px-1.5 py-1.5">
         <ProjectSwitcher />
         <FooterLink
           to="/settings"

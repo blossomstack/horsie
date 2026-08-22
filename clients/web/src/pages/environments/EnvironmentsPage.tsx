@@ -1,3 +1,4 @@
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
 import { Plus } from "lucide-react";
 import { RailToggle } from "../../components/rail";
 import { RosterRow } from "../../components/RosterRow";
@@ -6,13 +7,15 @@ import { useNavigate } from "react-router-dom";
 import { useEnvironments, useDeleteEnvironment } from "../../hooks/useEnvironments";
 
 export function EnvironmentsPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: environments, isLoading, isError } = useEnvironments();
   const del = useDeleteEnvironment();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="environments-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">Environments</h1>
         <button
@@ -24,8 +27,7 @@ export function EnvironmentsPage() {
           New environment
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-        <div className="mx-auto max-w-3xl">
+      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6" onScroll={onScroll}>
           {isLoading && (
             <div className="flex items-center gap-2">
               <span className="lamp lamp-live text-live-ink" aria-hidden />
@@ -81,7 +83,6 @@ export function EnvironmentsPage() {
               />
             ))}
           </div>
-        </div>
       </div>
     </div>
   );

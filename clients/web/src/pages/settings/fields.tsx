@@ -1,5 +1,6 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useId, type ReactNode } from "react";
+import { useSettingsScroll } from "./scrollShadow";
 import { cn } from "../../lib/cn";
 
 /**
@@ -11,9 +12,10 @@ import { cn } from "../../lib/cn";
  * next page cannot get it wrong.
  */
 export function SettingsPane({ children }: { children: ReactNode }) {
+  const { onScroll } = useSettingsScroll();
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl space-y-7 px-4 py-5 sm:px-6">
+    <div className="min-h-0 flex-1 overflow-y-auto bg-chassis" onScroll={onScroll}>
+      <div className="mx-auto max-w-3xl space-y-4 px-4 py-5 sm:px-6">
         {children}
       </div>
     </div>
@@ -171,13 +173,13 @@ export function ListRow({
   return (
     <div
       className={cn(
-        "rounded-[var(--radius-control)] transition-colors hover:bg-raised",
+        "-mx-1.5 px-1.5 transition-colors hover:bg-raised",
         active && "bg-accent-quiet",
       )}
       data-testid={testId}
       data-active={active ? "true" : undefined}
     >
-      <div className="flex items-center gap-2 px-2.5 py-1.5">
+      <div className="flex items-center gap-2 px-1 py-1.5">
         {onActivate ? (
           <button
             type="button"
@@ -192,7 +194,7 @@ export function ListRow({
         )}
         {actions && <span className="flex shrink-0 items-center gap-0.5">{actions}</span>}
       </div>
-      {children && <div className="px-2.5 pb-2.5">{children}</div>}
+      {children && <div className="px-1 pb-2.5">{children}</div>}
     </div>
   );
 }
