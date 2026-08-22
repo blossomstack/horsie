@@ -147,6 +147,16 @@ pub struct ProjectServices {
     pub authored: Arc<crate::plugins::authored::AuthoredService>,
     pub memory: Arc<crate::memory::MemoryService>,
     pub agents: Arc<crate::agents::AgentService>,
+    /// The agent-run index. A store rather than a service: the session actor
+    /// writes rows it derived from its own state, and the control plane reads
+    /// them straight back.
+    pub agent_runs: Arc<crate::agent_runs::AgentRunStore>,
+    /// Version history and compare-and-set for presets and memories.
+    ///
+    /// `entity_revisions`, not `revisions`: the field of that name beside it is
+    /// the live counter an SSE reader watches, which is a different thing that
+    /// happens to share a word.
+    pub entity_revisions: Arc<crate::revisions::RevisionStore>,
     pub routines: Arc<crate::routines::RoutineService>,
     pub routine_runner: Arc<crate::routines::RoutineRunner>,
     pub environments: Arc<crate::environments::EnvironmentService>,
@@ -235,6 +245,14 @@ async fn build_project(
     let agents = Arc::new(crate::agents::AgentService::new(
         crate::agents::AgentStore::new(shared.db.clone(), project.clone()),
         opened.store.clone(),
+    ));
+    let entity_revisions = Arc::new(crate::revisions::RevisionStore::new(
+        shared.db.clone(),
+        project.clone(),
+    ));
+    let agent_runs = Arc::new(crate::agent_runs::AgentRunStore::new(
+        shared.db.clone(),
+        project.clone(),
     ));
     let routines = Arc::new(crate::routines::RoutineService::new(
         crate::routines::RoutineStore::new(shared.db.clone(), project.clone()),
@@ -355,6 +373,8 @@ async fn build_project(
         plugins,
         memory,
         agents,
+        agent_runs,
+        entity_revisions,
         routines,
         routine_runner,
         environments,

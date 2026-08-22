@@ -211,6 +211,21 @@ pub struct SessionActor {
     /// — which costs nothing, because a session with no sub sessions reports
     /// none either way.
     last_reported_sub_sessions: Vec<SubSessionRow>,
+    /// The agent-run rows this actor last wrote to the index, so a batch that
+    /// changed nothing writes nothing.
+    ///
+    /// The whole point of holding it: an agent's log grows on every turn but
+    /// its *row* — who it is, what preset, whether it is over — changes twice
+    /// in its life. Comparing against this is what turns "write the roster on
+    /// every persisted batch" into those two writes.
+    last_indexed_runs: Vec<crate::agent_runs::AgentRunRow>,
+    /// The last index write this actor spawned, so the next one can queue
+    /// behind it.
+    ///
+    /// A chain rather than a channel: there is at most one of these in flight
+    /// at a time and two per agent run in total, so a consumer task with a
+    /// mailbox would be machinery for a queue that is almost always empty.
+    indexing: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SessionActor {
@@ -229,6 +244,8 @@ impl SessionActor {
             agents: SessionAgents::new(entity.session),
             last_reported: None,
             last_reported_sub_sessions: Vec::new(),
+            last_indexed_runs: Vec::new(),
+            indexing: None,
         }
     }
 
@@ -442,6 +459,131 @@ impl SessionActor {
                 sub_sessions,
             })
             .await;
+    }
+
+    /// This session's rows for the agent-run index, derived from the roster.
+    ///
+    /// Pure, so the diffing below and the load-time reconcile agree by
+    /// construction rather than by two people keeping them in step.
+    fn agent_run_rows(&self, state: &SessionState) -> Vec<crate::agent_runs::AgentRunRow> {
+        self.agent_roster(state)
+            .into_iter()
+            .map(|entry| crate::agent_runs::AgentRunRow {
+                session_id: self.id.to_string(),
+                agent_id: entry.id,
+                preset: entry.preset,
+                status: entry.status.as_wire().to_string(),
+                started_at: i64::try_from(entry.started_at_ms).unwrap_or(i64::MAX),
+                // Zero means "no end", which is what a `SubAgentView` carries
+                // for a run still going *and* for a main agent that will never
+                // have one. NULL is the honest column value for both.
+                ended_at: (entry.ended_at_ms != 0)
+                    .then(|| i64::try_from(entry.ended_at_ms).unwrap_or(i64::MAX)),
+            })
+            .collect()
+    }
+
+    /// Run an index write off this actor's task, behind whatever it last
+    /// spawned.
+    ///
+    /// Off the mailbox because the index is a read model and the session is
+    /// not: making a turn wait for a row to land trades the thing that matters
+    /// for the thing that does not. Chained rather than free-running because
+    /// the rows describe a moving state — "this run ended" arriving before
+    /// "this run started" would leave the index claiming the opposite of what
+    /// happened.
+    fn spawn_index_write<F>(&mut self, write: F)
+    where
+        F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let previous = self.indexing.take();
+        let session = self.id;
+        self.indexing = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            if let Err(e) = write.await {
+                // Not fatal, and deliberately not retried here. A lost write
+                // costs a reader one run's visibility until this session is
+                // next loaded, where the reconcile puts it back.
+                tracing::warn!(error = %e, %session, "agent-run index write failed");
+            }
+        }));
+    }
+
+    /// Write what changed about this session's agent runs into the index.
+    ///
+    /// Only the difference, which is what keeps this to two writes per run: an
+    /// agent's row is written when it first appears and again when it reaches a
+    /// terminal state, and a session that runs for an hour without gaining or
+    /// finishing one writes nothing at all.
+    ///
+    /// Removals are not handled here — an agent leaving a roster is not an
+    /// event this can see the far side of, and inferring a deletion from a
+    /// shorter list would delete every row whenever a reload started the
+    /// comparison from empty. `reconcile_agent_runs` at load is what makes the
+    /// index agree again.
+    fn index_agent_runs(&mut self, state: &SessionState) {
+        let rows = self.agent_run_rows(state);
+        if rows == self.last_indexed_runs {
+            return;
+        }
+        let changed: Vec<crate::agent_runs::AgentRunRow> = rows
+            .iter()
+            .filter(|row| !self.last_indexed_runs.contains(row))
+            .cloned()
+            .collect();
+        // Updated here rather than after the write lands: this is what *this
+        // actor has decided to write*, and the spawned chain preserves that
+        // order. Waiting for the write would mean holding the mailbox, which
+        // is the whole thing being avoided.
+        self.last_indexed_runs = rows;
+        if changed.is_empty() {
+            return;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        self.spawn_index_write(async move { services.agent_runs.record(&changed).await });
+    }
+
+    /// Make the index agree with this session's own state, wholesale.
+    ///
+    /// Runs once at load. Covers both directions the incremental write cannot:
+    /// a row lost to a crash between the persist and the write, and a row for
+    /// an agent this session no longer hosts.
+    fn reconcile_agent_runs(&mut self, state: &SessionState) {
+        let rows = self.agent_run_rows(state);
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        self.last_indexed_runs = rows.clone();
+        let id = self.id.to_string();
+        self.spawn_index_write(async move { services.agent_runs.reconcile(&id, &rows).await });
+    }
+
+    /// Drop this session's rows from the index, because the session is going.
+    ///
+    /// The one index write that *is* awaited. The actor stops immediately
+    /// after, so a spawned task would be racing its own session's disappearance
+    /// — and an entry outliving its transcript is the failure this prevents.
+    async fn forget_agent_runs(&mut self) {
+        self.last_indexed_runs.clear();
+        // Drain what is queued first, or a `record` still in flight lands after
+        // the delete and resurrects the rows it was about to remove.
+        if let Some(previous) = self.indexing.take() {
+            let _ = previous.await;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Err(e) = services
+            .agent_runs
+            .forget_session(&self.id.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, session = %self.id, "failed to drop agent runs");
+        }
     }
 
     async fn report_status(&mut self, state: &SessionState) {
@@ -1225,6 +1367,7 @@ impl EventSourcedActor for SessionActor {
         self.record_lifecycle(events, state).await;
         self.report_sub_sessions(state).await;
         self.report_status(state).await;
+        self.index_agent_runs(state);
     }
 
     /// Every command arrives addressed to a session, and this is the one place
@@ -1295,6 +1438,10 @@ impl EventSourcedActor for SessionActor {
             return;
         };
         self.adopt(spec, state, ctx).await;
+        // After `adopt`, which is what puts the spec on this actor — and so
+        // what lets `agent_roster` resolve a preset at all. Reconciling before
+        // it would file every agent this session hosts as ad-hoc.
+        self.reconcile_agent_runs(state);
     }
 }
 

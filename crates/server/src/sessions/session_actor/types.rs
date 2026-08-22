@@ -305,12 +305,27 @@ pub enum ReadCommand {
         after: Option<crate::agent_loop::Cursor>,
         reply: ReplyTo<Option<crate::agent_loop::ReadOutcome>>,
     },
-    /// Read a window *backwards* from a cursor — scroll-back.
+    /// Read a bounded, filtered window of one agent's log.
     PageLog {
         agent_id: Option<String>,
-        before: Option<u64>,
+        anchor: crate::agent_loop::Anchor,
         max: usize,
+        filter: crate::agent_loop::LogFilter,
         reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
+    },
+    /// Find where in one agent's log something was said.
+    SearchLog {
+        agent_id: Option<String>,
+        needle: String,
+        max: usize,
+        filter: crate::agent_loop::LogFilter,
+        reply: ReplyTo<Option<Vec<horsie_models::session_api::LogSearchHit>>>,
+    },
+    /// Resolve an entry id to its seq within one agent's log.
+    SeqOfId {
+        agent_id: Option<String>,
+        entry_id: String,
+        reply: ReplyTo<Option<Option<u64>>>,
     },
     /// Read one agent's document: what it is, what became of it, and its live
     /// values. `agent_id` absent or `"main"` for the primary agent — which, on
@@ -1018,6 +1033,14 @@ pub struct AgentEntry {
     pub depth: u32,
     /// The plugin-declared agent type a typed subagent runs as.
     pub agent_type: Option<String>,
+    /// The saved preset this agent's settings were flattened from, when they
+    /// were. Absent for an agent configured inline.
+    ///
+    /// Stamped by [`SessionActor::agent_roster`] rather than by the per-kind
+    /// entry builders: only the actor can resolve settings for an arbitrary
+    /// agent key, and doing it in one place is what stops main, step, subagent
+    /// and sub session from each answering this differently.
+    pub preset: Option<String>,
     pub status: AgentStatus,
     pub error: Option<String>,
     /// When this agent started and when it reached its result. Zero for a main

@@ -164,6 +164,30 @@ function AgentForm({ initial }: { initial?: AgentView }) {
                   gets, and a separate bit beside the list could disagree with
                   it. Picking the tools is the grant. */}
             </div>
+
+            {/* Its own block below the configuration, not a field inside it:
+                everything above says how this agent runs, and this says who
+                else may change that. */}
+            <div className="pt-4">
+              <h2 className="section-title">Tuning</h2>
+              <label className="mt-2 flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={draft.tunable}
+                  onChange={(e) => draft.setTunable(e.target.checked)}
+                  data-testid="agent-tunable"
+                />
+                <span>
+                  Let a tuning agent improve this preset
+                  <span className="mt-1 block max-w-prose text-xs leading-relaxed text-faint">
+                    A scheduled agent may read what sessions from this preset
+                    did and rewrite it — its instructions, skills, tools and
+                    memory. Off unless you turn it on.
+                  </span>
+                </span>
+              </label>
+            </div>
           </section>
 
           {error && (

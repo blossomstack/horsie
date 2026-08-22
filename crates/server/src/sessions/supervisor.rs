@@ -169,13 +169,31 @@ pub enum SessionSupervisorCommand {
         after: Option<crate::agent_loop::Cursor>,
         reply: ReplyTo<Option<crate::agent_loop::ReadOutcome>>,
     },
-    /// Read a window backwards from a cursor — scroll-back.
+    /// Read a bounded, filtered window of one agent's log.
     PageLog {
         id: SessionId,
         agent_id: Option<String>,
-        before: Option<u64>,
+        anchor: crate::agent_loop::Anchor,
         max: usize,
+        filter: crate::agent_loop::LogFilter,
         reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
+    },
+    /// Find where in one agent's log something was said.
+    SearchLog {
+        id: SessionId,
+        agent_id: Option<String>,
+        needle: String,
+        max: usize,
+        filter: crate::agent_loop::LogFilter,
+        reply: ReplyTo<Option<Vec<horsie_models::session_api::LogSearchHit>>>,
+    },
+    /// Resolve an entry id to its seq within one agent's log, so a caller
+    /// holding an id can anchor a page on it.
+    SeqOfId {
+        id: SessionId,
+        agent_id: Option<String>,
+        entry_id: String,
+        reply: ReplyTo<Option<Option<u64>>>,
     },
     /// Read a session's aggregated usage.
     UsageStats {
@@ -981,8 +999,9 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorCommand::PageLog {
                 id,
                 agent_id,
-                before,
+                anchor,
                 max,
+                filter,
                 reply,
             } => {
                 match self.session(ctx, state, &id) {
@@ -991,8 +1010,65 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = session
                             .tell(SessionCommand::Read(ReadCommand::PageLog {
                                 agent_id,
-                                before,
+                                anchor,
                                 max,
+                                filter,
+                                reply: ReplyTo::from_sender(tx),
+                            }))
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SearchLog {
+                id,
+                agent_id,
+                needle,
+                max,
+                filter,
+                reply,
+            } => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = session
+                            .tell(SessionCommand::Read(ReadCommand::SearchLog {
+                                agent_id,
+                                needle,
+                                max,
+                                filter,
+                                reply: ReplyTo::from_sender(tx),
+                            }))
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SeqOfId {
+                id,
+                agent_id,
+                entry_id,
+                reply,
+            } => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = session
+                            .tell(SessionCommand::Read(ReadCommand::SeqOfId {
+                                agent_id,
+                                entry_id,
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
@@ -1354,7 +1430,8 @@ mod tests {
         SessionSpec {
             name: Some("test".into()),
             kind: crate::sessions::spec::SessionKind::Agent {
-                settings: AgentSettings {
+                settings: Box::new(AgentSettings {
+                    source: crate::sessions::spec::AgentSource::AdHoc,
                     instructions: None,
                     model: "mock".into(),
                     allowed_tools: None,
@@ -1367,7 +1444,7 @@ mod tests {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     plugins: Vec::new(),
-                },
+                }),
             },
             workspaces: vec![],
             provision: vec![],

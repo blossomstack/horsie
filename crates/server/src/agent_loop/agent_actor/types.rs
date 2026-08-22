@@ -194,13 +194,36 @@ pub enum ReadCommand {
         after: Option<crate::agent_loop::agent_log::Cursor>,
         reply: ReplyTo<ReadOutcome>,
     },
-    /// Read a window *backwards* from a cursor — scroll-back. Separate from
-    /// [`Self::ReadLog`] because it answers a different question and never
-    /// carries deltas: nothing is being typed in the past.
+    /// Read a bounded window at an anchor — scroll-back, or step forward
+    /// through a run one page at a time. Separate from [`Self::ReadLog`]
+    /// because it answers a different question and never carries deltas:
+    /// nothing is being typed in the past.
+    ///
+    /// The filter is applied *here*, inside the actor that owns the log, so a
+    /// caller asking for twenty user messages gets twenty rather than whatever
+    /// survives out of the last twenty mixed entries. Filtering above this
+    /// point cannot express that, whatever it does with the result.
     PageLog {
-        before: Option<u64>,
+        anchor: crate::agent_loop::agent_log::Anchor,
         max: usize,
+        filter: crate::agent_loop::agent_log::LogFilter,
         reply: ReplyTo<crate::agent_loop::agent_log::LogPage>,
+    },
+    /// Find where in this log something was said. Answers positions and
+    /// snippets, never entries — a caller reads what it found with
+    /// [`Self::PageLog`].
+    SearchLog {
+        needle: String,
+        max: usize,
+        filter: crate::agent_loop::agent_log::LogFilter,
+        reply: ReplyTo<Vec<horsie_models::session_api::LogSearchHit>>,
+    },
+    /// The seq of the entry carrying this id, so a caller holding an id it saw
+    /// quoted in some text can anchor a page on it. `None` when this log has no
+    /// such entry.
+    SeqOfId {
+        id: String,
+        reply: ReplyTo<Option<u64>>,
     },
     /// Where this agent's log stands. A sub session's branch point, read
     /// before anything is written so the number names the moment the sub

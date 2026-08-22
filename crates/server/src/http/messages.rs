@@ -104,23 +104,26 @@ pub async fn read_messages(
 /// One page of an agent's log, as data.
 ///
 /// Shared with the control plane's `sessions.read`, which is why it takes an
-/// already-resolved `max` and returns a page rather than a response: the two
-/// surfaces clamp differently (a model's context is not a browser's) and only
-/// one of them has a `Response` to build.
+/// already-resolved `anchor`, `max` and `filter` and returns a page rather than
+/// a response: the two surfaces want different windows out of one read — a
+/// browser renders a whole transcript backwards, a model asks for the four user
+/// messages it has not seen — and only one of them has a `Response` to build.
 pub(crate) async fn read_page(
     services: &crate::projects::ProjectServices,
     id: String,
     agent_id: String,
-    before: Option<u64>,
+    anchor: crate::agent_loop::Anchor,
     max: usize,
+    filter: crate::agent_loop::LogFilter,
 ) -> Result<MessagesPage, crate::control::ControlError> {
     let page = services
         .supervisor
         .ask(|reply| SessionSupervisorCommand::PageLog {
             id: id.clone(),
             agent_id: Some(agent_id),
-            before,
+            anchor,
             max,
+            filter,
             reply,
         })
         .await?
@@ -143,9 +146,23 @@ async fn page(
     max: Option<usize>,
 ) -> Result<Response, Api> {
     let max = max.unwrap_or(PAGE_DEFAULT).clamp(1, PAGE_MAX);
-    let page = read_page(state, id, agent_id, before, max)
-        .await
-        .map_err(Api::from)?;
+    // The browser reads a transcript to render it, so it asks for all of it,
+    // backwards. The filter exists for the control plane's reader, which pays
+    // for every entry out of the context it still needs to do its work.
+    let anchor = before.map_or(
+        crate::agent_loop::Anchor::Tail,
+        crate::agent_loop::Anchor::Before,
+    );
+    let page = read_page(
+        state,
+        id,
+        agent_id,
+        anchor,
+        max,
+        crate::agent_loop::LogFilter::everything(),
+    )
+    .await
+    .map_err(Api::from)?;
     Ok(Json(page).into_response())
 }
 
@@ -268,7 +285,7 @@ async fn stream(
             }
             // Only advance on something actually received. An empty log would
             // otherwise leave the cursor claiming entry 0 — a position it does
-            // not hold — and `page_after(log, 0)` skips seq 0, so the session's
+            // not hold — and `since(log, 0)` skips seq 0, so the session's
             // very first entry would never be sent.
             if advanced {
                 cursor = Some(out.cursor);

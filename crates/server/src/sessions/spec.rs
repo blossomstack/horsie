@@ -54,10 +54,48 @@ pub type RuntimeVendorMap =
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.
 pub type SessionId = String;
 
+/// Where an agent's settings came from.
+///
+/// The settings themselves are present either way — a preset is flattened at
+/// creation, and that snapshotting is what stops an edit from reshaping a run
+/// already under way. This records only *which* preset that flattening came
+/// from, which is what lets a run be found again afterwards.
+///
+/// Deliberately **not** `#[serde(default)]` on the field that holds it.
+/// Defaulting to `AdHoc` would relabel every agent that predates this as
+/// having been configured inline — the one untruth this type exists to
+/// prevent, and one that would outlive every session carrying it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentSource {
+    /// Supplied inline at creation: a session started without naming a preset.
+    AdHoc,
+    /// Resolved from a saved preset.
+    Preset { name: String },
+}
+
+impl AgentSource {
+    /// The preset this ran under, if it ran under one.
+    #[must_use]
+    pub fn preset(&self) -> Option<&str> {
+        match self {
+            Self::AdHoc => None,
+            Self::Preset { name } => Some(name),
+        }
+    }
+}
+
 /// Agent settings supplied at session creation. Storage copy of the wire
 /// `horsie_models::session::AgentSettings`, with defaults applied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSettings {
+    /// Which preset these settings were flattened from, or that they were not.
+    ///
+    /// Every agent kind carries one, because `SessionActor::effective_settings`
+    /// resolves this same struct for a main agent, a workflow step, a subagent
+    /// and a sub session alike. Today a subagent inherits its parent's, which
+    /// is honest — it really does run under that preset — and leaves room for a
+    /// subagent to name its own later without anything else changing.
+    pub source: AgentSource,
     pub model: String,
     pub allowed_tools: Option<Vec<String>>,
     pub use_plugins: Option<bool>,
@@ -164,7 +202,13 @@ pub enum SessionOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionKind {
     /// A session: one main agent under these settings, and its sub sessions.
-    Agent { settings: AgentSettings },
+    ///
+    /// Boxed because an enum is as big as its widest arm and the other arm
+    /// holds an `Arc`: unboxed, every `SessionKind` anywhere — including the
+    /// workflow runs that carry none of this — would be the size of a whole
+    /// `AgentSettings`. Same reason `SessionDomainEvent::SpecRecorded` boxes
+    /// its spec.
+    Agent { settings: Box<AgentSettings> },
     /// A run of a workflow. No main agent — the definition decides who runs —
     /// and each step carries its own settings in the snapshot.
     Workflow {
@@ -213,7 +257,8 @@ impl SessionSpec {
         Self {
             name: None,
             kind: SessionKind::Agent {
-                settings: AgentSettings {
+                settings: Box::new(AgentSettings {
+                    source: AgentSource::AdHoc,
                     instructions: None,
                     model: "m".into(),
                     allowed_tools: None,
@@ -226,7 +271,7 @@ impl SessionSpec {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     plugins: Vec::new(),
-                },
+                }),
             },
             workspaces: vec![],
             provision: vec![],
@@ -402,6 +447,7 @@ mod tests {
 
     pub(super) fn agent_settings() -> AgentSettings {
         AgentSettings {
+            source: AgentSource::AdHoc,
             instructions: None,
             model: "m".into(),
             allowed_tools: None,
@@ -421,7 +467,7 @@ mod tests {
         SessionSpec {
             name: None,
             kind: SessionKind::Agent {
-                settings: agent_settings(),
+                settings: Box::new(agent_settings()),
             },
             workspaces: vec![],
             provision: vec![],
@@ -492,7 +538,11 @@ mod tests {
         // The row still carries `control_plane`, dropped in 0039. Left in on
         // purpose: an unknown key must stay ignorable, or every session
         // journaled before the tool selection would fail to load.
+        //
+        // `source` is present because it is required — the one field here that
+        // is. See `settings_without_a_source_are_refused_rather_than_assumed_ad_hoc`.
         let row = r#"{"name":null,"kind":{"Agent":{"settings":{"model":"m",
+            "source":"AdHoc",
             "allowed_tools":null,"use_plugins":null,"max_iterations":null,
             "max_retries":0,"mcp_servers":[],"memory_spaces":[],
             "thinking_effort":null,"max_concurrent_subagents":null,
@@ -554,9 +604,10 @@ mod tests {
 
     #[test]
     fn agent_settings_default_max_subagents_and_read_old_rows() {
-        // Pre-subagent journal rows carry no field; they must still load and
-        // resolve to the built-in default.
-        let old = r#"{"model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
+        // Pre-subagent journal rows carry no `max_concurrent_subagents`; they
+        // must still load and resolve to the built-in default. `source` is
+        // present because it is required — see the test below.
+        let old = r#"{"source":"AdHoc","model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
         let s: AgentSettings = serde_json::from_str(old).unwrap();
         assert_eq!(s.max_concurrent_subagents, None);
         assert_eq!(
@@ -565,10 +616,48 @@ mod tests {
         );
 
         let s = AgentSettings {
+            source: AgentSource::AdHoc,
             max_concurrent_subagents: Some(3),
             ..serde_json::from_str::<AgentSettings>(old).unwrap()
         };
         assert_eq!(s.max_subagents(), 3);
+    }
+
+    /// `source` is the one field here without `#[serde(default)]`, and that is
+    /// the decision this pins.
+    ///
+    /// Every other field defaults so an old journal row loads. This one must
+    /// not: `AdHoc` would be a claim about how those agents were configured,
+    /// asserted on rows that never said, and it would stay wrong for as long as
+    /// the session lives — including in the index a tuning agent reads. A row
+    /// written before this field is instead refused, and the journal is reset
+    /// as part of shipping it.
+    ///
+    /// If this test ever starts failing because someone added a default,
+    /// that is the bug, not the test.
+    #[test]
+    fn settings_without_a_source_are_refused_rather_than_assumed_ad_hoc() {
+        let no_source = r#"{"model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
+        assert!(
+            serde_json::from_str::<AgentSettings>(no_source).is_err(),
+            "a row that never named a source must not load as AdHoc"
+        );
+    }
+
+    #[test]
+    fn a_source_round_trips_and_names_its_preset() {
+        let preset = AgentSource::Preset {
+            name: "reviewer".into(),
+        };
+        assert_eq!(preset.preset(), Some("reviewer"));
+        assert_eq!(AgentSource::AdHoc.preset(), None);
+
+        let json = serde_json::to_string(&preset).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSource>(&json).unwrap(),
+            preset,
+            "the journal reads back what it wrote"
+        );
     }
 
     #[test]

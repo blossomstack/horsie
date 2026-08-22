@@ -125,6 +125,46 @@ Two consequences:
 - **Runs are not prevented from overlapping.** A routine on a five-minute timer
   whose runs take ten minutes will have two in flight. Give the interval room.
 
+## Let a routine improve an agent
+
+A routine can read what an agent has been doing and edit the agent. Nothing
+does this out of the box — you write the routine — but everything it needs is
+there.
+
+Tick **Let a tuning agent improve this preset** on any agent you want tuned.
+Nothing happens until you point a routine at it, and an agent that has not been
+ticked is invisible to one that looks: opting in is an act, because the thing
+being granted is one agent rewriting another's instructions with nobody
+watching.
+
+Then give the tuning routine's own preset the horsie tool group, and it can:
+
+- **Find the agents that opted in** — `horsie_agents` lists them, `tunable` and
+  all.
+- **Find their runs** — `horsie_agent-runs` answers every run of a named
+  preset, across sessions, workflow steps and subagents alike. Filter by
+  `status` for the ones that failed, or by `since_ms` for what has happened
+  since it last looked.
+- **Read one** — `horsie_sessions` takes the `sessionId` and `agentId` a run
+  reports. Narrow the read or it will not fit: `kinds` picks which entries come
+  back, `withoutThinking` drops the model's reasoning, and `search` finds where
+  something was said without reading the transcript to get there.
+- **Write the agent back** — `horsie_agents` replaces the preset,
+  `horsie_memories` curates what it has remembered, and the authoring tools
+  edit the skills it loads.
+
+### Undoing a bad tune
+
+Presets and memories keep every version. `horsie_agents` answers `revisions`
+and `restore`, and a restore is recorded as a new version rather than a rewind
+— so the change being undone stays in the history.
+
+Reads carry a `revision`. Pass it back as `expectedRevision` when you write and
+the write is refused if anything changed in between, which is what stops a
+routine that read an agent an hour ago from silently reverting an edit you made
+since. There is no merge for that case: the two writers disagree about what the
+agent should say, so the later one is told to read again.
+
 ## How the schedule behaves
 
 **Repeatedly** measures the next firing from the one that just happened, not

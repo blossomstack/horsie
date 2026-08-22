@@ -54,21 +54,73 @@ impl Reads {
             }
             ReadCommand::PageLog {
                 agent_id,
-                before,
+                anchor,
                 max,
+                filter,
                 reply,
             } => {
                 let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
                     Some((_, agent)) => agent
                         .ask(|reply| {
-                            AgentCommand::Read(AgentReadCommand::PageLog { before, max, reply })
+                            AgentCommand::Read(AgentReadCommand::PageLog {
+                                anchor,
+                                max,
+                                filter,
+                                reply,
+                            })
                         })
                         .await
                         .ok(),
                     None => None,
                 };
                 let _ = reply.send(page);
+                CommandEffect::none()
+            }
+            ReadCommand::SearchLog {
+                agent_id,
+                needle,
+                max,
+                filter,
+                reply,
+            } => {
+                let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
+                let hits = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| {
+                            AgentCommand::Read(AgentReadCommand::SearchLog {
+                                needle,
+                                max,
+                                filter,
+                                reply,
+                            })
+                        })
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let _ = reply.send(hits);
+                CommandEffect::none()
+            }
+            ReadCommand::SeqOfId {
+                agent_id,
+                entry_id,
+                reply,
+            } => {
+                let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
+                let seq = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| {
+                            AgentCommand::Read(AgentReadCommand::SeqOfId {
+                                id: entry_id,
+                                reply,
+                            })
+                        })
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let _ = reply.send(seq);
                 CommandEffect::none()
             }
             ReadCommand::Agent { agent_id, reply } => {
@@ -105,6 +157,7 @@ fn main_entry(status: &SessionStatus) -> AgentEntry {
         label: None,
         depth: 0,
         agent_type: None,
+        preset: None,
         status: match status {
             SessionStatus::Provisioning => AgentStatus::Provisioning,
             SessionStatus::Running => AgentStatus::Running,
@@ -138,6 +191,7 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
         label: Some(execution.step.clone()),
         depth: 0,
         agent_type: None,
+        preset: None,
         status: match execution.status {
             StepStatus::Running => AgentStatus::Running,
             StepStatus::Concluded => AgentStatus::Completed,
@@ -170,6 +224,7 @@ fn sub_session_entry(id: Uuid, forest: &RunForest, rec: &SubSessionRun) -> Agent
         label: rec.title.clone(),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: None,
+        preset: None,
         status: rec.status,
         error: None,
         started_at_ms: created_at_ms,
@@ -199,6 +254,7 @@ fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
         label: Some(rec.label.clone()),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
+        preset: None,
         status: match rec.status {
             SubAgentStatus::Running => AgentStatus::Running,
             SubAgentStatus::Completed => AgentStatus::Completed,
@@ -249,7 +305,33 @@ impl SessionActor {
                 .sub(id)
                 .map(|rec| sub_entry(id, &state.forest, rec))
         }));
+        // Stamped here, once, over whatever the per-kind builders produced.
+        // Those builders each see one slice of the forest; only the actor can
+        // resolve settings for an arbitrary key, and resolving it in four
+        // places is four chances for main, step, subagent and sub session to
+        // disagree about what they ran under.
+        for entry in &mut agents {
+            entry.preset = self.preset_of(state, &entry.id);
+        }
         agents
+    }
+
+    /// The saved preset an agent's settings came from, by the id the roster
+    /// speaks. `None` for an agent configured inline, and for an id this
+    /// session does not host.
+    ///
+    /// Read-only, unlike `resolve_agent`: this answers about an agent's
+    /// configuration and must not spawn a cold one to do it — the roster asks
+    /// for every agent at once, and a session with a finished run would then
+    /// wake every step it ever executed just to render a list.
+    pub(super) fn preset_of(&self, state: &SessionState, agent_id: &str) -> Option<String> {
+        let key = match agent_id {
+            MAIN_AGENT_ID => AgentKey::Main,
+            other => self.agent_key_of(state, Uuid::parse_str(other).ok()?)?,
+        };
+        self.effective_settings(state, key)
+            .and_then(|s| s.source.preset())
+            .map(str::to_string)
     }
 
     /// One agent's document. `None` when this session hosts no such agent.
@@ -277,7 +359,7 @@ impl SessionActor {
             AgentKey::Sub(id) => state.forest.sub(id),
             AgentKey::Main | AgentKey::Step(_) | AgentKey::SubSession(_) => None,
         };
-        let entry = match key {
+        let mut entry = match key {
             AgentKey::Main => main_entry(&state.status()),
             AgentKey::Step(_) => step_entry(execution?),
             AgentKey::Sub(id) => sub_entry(id, &state.forest, node?),
@@ -285,6 +367,13 @@ impl SessionActor {
                 sub_session_entry(id, &state.forest, state.forest.sub_session(id)?)
             }
         };
+        // From the settings just below, not from a second lookup: one agent
+        // read must not be able to say it runs under one preset and was
+        // configured by another.
+        entry.preset = self
+            .effective_settings(state, key)
+            .and_then(|s| s.source.preset())
+            .map(str::to_string);
         Some(AgentDetail {
             entry,
             // Resolved from the key, never from the session's own settings: a

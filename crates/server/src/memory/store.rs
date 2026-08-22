@@ -8,11 +8,12 @@
 
 use crate::db::Db;
 use crate::projects::ProjectId;
+use crate::revisions::{EntityKind, RevisionStore};
 use sqlx::Row;
 use sqlx::any::AnyRow;
 
 const SPACE_COLS: &str = "name, description, created_at, updated_at";
-const MEMORY_COLS: &str = "id, space, name, description, content, created_at, updated_at";
+const MEMORY_COLS: &str = "id, space, name, description, content, revision, created_at, updated_at";
 
 /// One row of the `memory_spaces` table.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +33,11 @@ pub struct MemoryRow {
     pub name: String,
     pub description: String,
     pub content: String,
+    /// Which version of this memory this row is. `None` on a row that predates
+    /// versioning and has not been written since — see the 0044 migration.
+    ///
+    /// Set by the store on every write, never by a caller.
+    pub revision: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -41,11 +47,25 @@ pub struct MemoryStore {
     /// Bound once, here, rather than passed per call: there is then no call
     /// site that *can* hand a method the wrong account.
     user: ProjectId,
+    /// Built here rather than injected, for the same reason `AgentStore` does:
+    /// every memory write below appends a revision in its own transaction, so a
+    /// store constructible without one would have a way to write history-free.
+    revisions: RevisionStore,
 }
 
 impl MemoryStore {
     pub fn new(db: Db, user: ProjectId) -> Self {
-        Self { db, user }
+        Self {
+            revisions: RevisionStore::new(db.clone(), user.clone()),
+            db,
+            user,
+        }
+    }
+
+    /// This store's history, for the read-only side.
+    #[must_use]
+    pub fn revisions(&self) -> &RevisionStore {
+        &self.revisions
     }
 
     // --- spaces ---
@@ -281,7 +301,7 @@ impl MemoryStore {
 
     /// Insert a memory, returning its assigned id. Verifies the space exists in
     /// the same transaction as the insert, since there is no FK to do it.
-    pub async fn create_memory(&self, row: &MemoryRow) -> Result<i64, String> {
+    pub async fn create_memory(&self, row: &MemoryRow, payload: &str) -> Result<i64, String> {
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let space = sqlx::query(
             &self
@@ -299,8 +319,8 @@ impl MemoryStore {
         // `RETURNING id` rather than a follow-up `last_insert_id`: sqlx's Any
         // driver reports that as NULL on SQLite regardless of the backend.
         let inserted = sqlx::query(&self.db.q(
-            "INSERT INTO memories (project_id, space, name, description, content, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+            "INSERT INTO memories (project_id, space, name, description, content, revision, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?) RETURNING id",
         ))
         .bind(self.user.as_str())
         .bind(&row.space)
@@ -315,36 +335,80 @@ impl MemoryStore {
         let id = inserted
             .try_get::<i64, _>("id")
             .map_err(|e| e.to_string())?;
+        // Revision 1 is written literally above rather than asked for, because
+        // the id this history is keyed by does not exist until the insert has
+        // run. A memory is created once, so there is nothing for it to collide
+        // with — and `append` below asserts that by numbering from the history.
+        let revision = self
+            .revisions
+            .append(
+                &mut tx,
+                EntityKind::Memory,
+                &id.to_string(),
+                payload,
+                false,
+                &row.updated_at,
+            )
+            .await?;
+        debug_assert_eq!(revision, 1, "a fresh id cannot have a history");
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(id)
     }
 
     /// Update the supplied fields only; `None` leaves a field untouched.
     /// Returns false when no memory has that id.
+    /// Update the supplied fields only, recording a revision. `None` when no
+    /// memory has that id.
+    ///
+    /// `payload` is the snapshot of what the memory will be *after* this write,
+    /// which the caller has already composed — it is the one that knows what
+    /// `COALESCE` will leave alone.
     pub async fn update_memory(
         &self,
         id: i64,
         description: Option<&str>,
         content: Option<&str>,
         updated_at: &str,
-    ) -> Result<bool, String> {
+        payload: &str,
+    ) -> Result<Option<i64>, String> {
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
+        let revision = self
+            .revisions
+            .append(
+                &mut tx,
+                EntityKind::Memory,
+                &id.to_string(),
+                payload,
+                false,
+                updated_at,
+            )
+            .await?;
         let res = sqlx::query(&self.db.q(
             "UPDATE memories SET description = COALESCE(?, description), \
-             content = COALESCE(?, content), updated_at = ? \
+             content = COALESCE(?, content), revision = ?, updated_at = ? \
              WHERE project_id = ? AND id = ?",
         ))
         .bind(description)
         .bind(content)
+        .bind(revision)
         .bind(updated_at)
         .bind(self.user.as_str())
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        Ok(res.rows_affected() > 0)
+        if res.rows_affected() == 0 {
+            // Nothing was updated, so nothing happened — including the revision
+            // this transaction was about to record.
+            return Ok(None);
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(Some(revision))
     }
 
-    pub async fn delete_memory(&self, id: i64) -> Result<bool, String> {
+    /// Delete, recording what was deleted as a revision of its own.
+    pub async fn delete_memory(&self, id: i64, payload: &str, at: &str) -> Result<bool, String> {
+        let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let res = sqlx::query(
             &self
                 .db
@@ -352,10 +416,24 @@ impl MemoryStore {
         )
         .bind(self.user.as_str())
         .bind(id)
-        .execute(self.db.pool())
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-        Ok(res.rows_affected() > 0)
+        if res.rows_affected() == 0 {
+            return Ok(false);
+        }
+        self.revisions
+            .append(
+                &mut tx,
+                EntityKind::Memory,
+                &id.to_string(),
+                payload,
+                true,
+                at,
+            )
+            .await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(true)
     }
 }
 
@@ -377,6 +455,7 @@ fn row_to_memory(row: &AnyRow) -> Result<MemoryRow, String> {
         name: get_s("name")?,
         description: get_s("description")?,
         content: get_s("content")?,
+        revision: row.try_get("revision").map_err(|e| e.to_string())?,
         created_at: get_s("created_at")?,
         updated_at: get_s("updated_at")?,
     })
@@ -400,6 +479,7 @@ mod tests {
             name: name.into(),
             description: "d".into(),
             content: "body".into(),
+            revision: None,
             created_at: "1".into(),
             updated_at: "1".into(),
         }
@@ -427,7 +507,10 @@ mod tests {
     #[tokio::test]
     async fn memory_crud_roundtrip() {
         let (s, _t) = store().await;
-        let id = s.create_memory(&mem("default", "alpha")).await.unwrap();
+        let id = s
+            .create_memory(&mem("default", "alpha"), "{}")
+            .await
+            .unwrap();
         let got = s.get_memory(id).await.unwrap().unwrap();
         assert_eq!(got.name, "alpha");
         assert_eq!(got.content, "body");
@@ -436,19 +519,20 @@ mod tests {
         assert_eq!(by_ref.unwrap().id, id);
 
         assert!(
-            s.update_memory(id, None, Some("new body"), "2")
+            s.update_memory(id, None, Some("new body"), "2", "{}")
                 .await
                 .unwrap()
+                .is_some()
         );
         let got = s.get_memory(id).await.unwrap().unwrap();
         assert_eq!(got.content, "new body");
         assert_eq!(got.description, "d", "None must leave the field untouched");
         assert_eq!(got.updated_at, "2");
 
-        assert!(s.delete_memory(id).await.unwrap());
+        assert!(s.delete_memory(id, "{}", "1").await.unwrap());
         assert!(s.get_memory(id).await.unwrap().is_none());
         assert!(
-            !s.delete_memory(id).await.unwrap(),
+            !s.delete_memory(id, "{}", "1").await.unwrap(),
             "second delete is a miss"
         );
     }
@@ -457,15 +541,24 @@ mod tests {
     async fn duplicate_name_in_same_space_is_rejected_but_allowed_across_spaces() {
         let (s, _t) = store().await;
         add_space(&s, "other").await;
-        s.create_memory(&mem("default", "alpha")).await.unwrap();
-        assert!(s.create_memory(&mem("default", "alpha")).await.is_err());
-        s.create_memory(&mem("other", "alpha")).await.unwrap();
+        s.create_memory(&mem("default", "alpha"), "{}")
+            .await
+            .unwrap();
+        assert!(
+            s.create_memory(&mem("default", "alpha"), "{}")
+                .await
+                .is_err()
+        );
+        s.create_memory(&mem("other", "alpha"), "{}").await.unwrap();
     }
 
     #[tokio::test]
     async fn create_memory_in_unknown_space_is_rejected() {
         let (s, _t) = store().await;
-        let err = s.create_memory(&mem("nope", "alpha")).await.unwrap_err();
+        let err = s
+            .create_memory(&mem("nope", "alpha"), "{}")
+            .await
+            .unwrap_err();
         assert!(err.contains("nope"), "error should name the space: {err}");
     }
 
@@ -473,8 +566,10 @@ mod tests {
     async fn deleting_a_space_deletes_its_memories_only() {
         let (s, _t) = store().await;
         add_space(&s, "other").await;
-        s.create_memory(&mem("default", "alpha")).await.unwrap();
-        s.create_memory(&mem("other", "beta")).await.unwrap();
+        s.create_memory(&mem("default", "alpha"), "{}")
+            .await
+            .unwrap();
+        s.create_memory(&mem("other", "beta"), "{}").await.unwrap();
 
         assert!(s.delete_space("default").await.unwrap());
         assert!(s.get_space("default").await.unwrap().is_none());
@@ -486,7 +581,9 @@ mod tests {
     #[tokio::test]
     async fn renaming_a_space_carries_its_memories_and_orphans_none() {
         let (s, _t) = store().await;
-        s.create_memory(&mem("default", "alpha")).await.unwrap();
+        s.create_memory(&mem("default", "alpha"), "{}")
+            .await
+            .unwrap();
         s.rename_space("default", "renamed", "2").await.unwrap();
 
         assert!(s.get_space("default").await.unwrap().is_none());
@@ -503,7 +600,9 @@ mod tests {
     async fn rename_onto_an_existing_space_is_rejected_and_changes_nothing() {
         let (s, _t) = store().await;
         add_space(&s, "other").await;
-        s.create_memory(&mem("default", "alpha")).await.unwrap();
+        s.create_memory(&mem("default", "alpha"), "{}")
+            .await
+            .unwrap();
         assert!(s.rename_space("default", "other", "2").await.is_err());
         assert!(s.get_space("default").await.unwrap().is_some());
         assert_eq!(s.list_memories(Some("default")).await.unwrap().len(), 1);
@@ -514,9 +613,9 @@ mod tests {
         let (s, _t) = store().await;
         add_space(&s, "other").await;
         add_space(&s, "third").await;
-        s.create_memory(&mem("other", "b")).await.unwrap();
-        s.create_memory(&mem("default", "a")).await.unwrap();
-        s.create_memory(&mem("third", "c")).await.unwrap();
+        s.create_memory(&mem("other", "b"), "{}").await.unwrap();
+        s.create_memory(&mem("default", "a"), "{}").await.unwrap();
+        s.create_memory(&mem("third", "c"), "{}").await.unwrap();
 
         let rows = s
             .memories_in(&["default".to_string(), "other".to_string()])

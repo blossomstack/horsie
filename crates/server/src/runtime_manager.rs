@@ -721,7 +721,8 @@ mod tests {
         SessionSpec {
             name: None,
             kind: crate::sessions::spec::SessionKind::Agent {
-                settings: AgentSettings {
+                settings: Box::new(AgentSettings {
+                    source: crate::sessions::spec::AgentSource::AdHoc,
                     model: "mock".into(),
                     instructions: None,
                     allowed_tools: None,
@@ -734,7 +735,7 @@ mod tests {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     plugins: Vec::new(),
-                },
+                }),
             },
             workspaces: vec![WorkspaceDef {
                 name: "main".into(),

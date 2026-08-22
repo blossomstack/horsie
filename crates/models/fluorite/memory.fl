@@ -34,6 +34,11 @@ struct MemoryView {
     description: String,
     /// Markdown body, loaded on demand.
     content: String,
+    /// Which version of this memory this is. Pass it back as
+    /// `expected_revision` on an update and the update is refused if anything
+    /// changed in between. Absent on a memory that predates versioning and has
+    /// not been written since.
+    revision: Option<u64>,
     /// Unix epoch seconds.
     created_at: String,
     updated_at: String,
@@ -50,4 +55,10 @@ struct MemoryCreateInput {
 struct MemoryUpdateInput {
     description: Option<String>,
     content: Option<String>,
+    /// Refuse this write unless the memory is still at this revision.
+    ///
+    /// Absent writes unconditionally. Supply it whenever you read, decide, and
+    /// write back — a curating agent and the session that owns the memory can
+    /// otherwise overwrite each other with no trace that either did.
+    expected_revision: Option<u64>,
 }

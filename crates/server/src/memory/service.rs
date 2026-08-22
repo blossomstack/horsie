@@ -5,6 +5,7 @@
 use crate::memory::{
     MAX_CONTENT_CHARS, MAX_DESCRIPTION_CHARS, MemoryRow, MemorySpaceRow, MemoryStore, validate_slug,
 };
+use crate::revisions::{CasError, EntityKind, Revision, RevisionStore};
 use horsie_models::memory::{
     MemoryCreateInput, MemorySpaceCreateInput, MemorySpaceUpdateInput, MemorySpaceView,
     MemoryUpdateInput, MemoryView,
@@ -131,18 +132,17 @@ impl MemoryService {
         check_description(&input.description)?;
         check_content(&input.content)?;
         let now = now_secs();
-        let id = self
-            .store
-            .create_memory(&MemoryRow {
-                id: 0,
-                space: input.space,
-                name: input.name,
-                description: input.description,
-                content: input.content,
-                created_at: now.clone(),
-                updated_at: now,
-            })
-            .await?;
+        let row = MemoryRow {
+            id: 0,
+            space: input.space,
+            name: input.name,
+            description: input.description,
+            content: input.content,
+            revision: Some(1),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        let id = self.store.create_memory(&row, &snapshot(&row)?).await?;
         self.get_memory(id).await
     }
 
@@ -151,6 +151,9 @@ impl MemoryService {
         id: i64,
         input: MemoryUpdateInput,
     ) -> Result<MemoryView, String> {
+        let expected = input
+            .expected_revision
+            .map(|r| i64::try_from(r).unwrap_or(i64::MAX));
         if let Some(d) = input.description.as_deref() {
             check_description(d)?;
         }
@@ -161,6 +164,21 @@ impl MemoryService {
         if let Some(c) = input.content.as_deref() {
             check_content(c)?;
         }
+        let existing = self
+            .store
+            .get_memory(id)
+            .await?
+            .ok_or_else(|| format!("no memory with id {id}"))?;
+        // Before the write and before anything is composed: a stale caller's
+        // input is not worth merging, and the answer is "read it again".
+        RevisionStore::check(existing.revision, expected).map_err(|e: CasError| e.to_string())?;
+        // What the memory *will* say, composed here because this is what knows
+        // which fields the update leaves alone.
+        let after = MemoryRow {
+            description: input.description.clone().unwrap_or(existing.description),
+            content: input.content.clone().unwrap_or(existing.content),
+            ..existing
+        };
         let changed = self
             .store
             .update_memory(
@@ -168,20 +186,71 @@ impl MemoryService {
                 input.description.as_deref(),
                 input.content.as_deref(),
                 &now_secs(),
+                &snapshot(&after)?,
             )
             .await?;
-        if !changed {
+        if changed.is_none() {
             return Err(format!("no memory with id {id}"));
         }
         self.get_memory(id).await
     }
 
     pub async fn delete_memory(&self, id: i64) -> Result<(), String> {
-        if self.store.delete_memory(id).await? {
+        let existing = self
+            .store
+            .get_memory(id)
+            .await?
+            .ok_or_else(|| format!("no memory with id {id}"))?;
+        let payload = snapshot(&existing)?;
+        if self.store.delete_memory(id, &payload, &now_secs()).await? {
             Ok(())
         } else {
             Err(format!("no memory with id {id}"))
         }
+    }
+
+    /// Every past version of a memory, newest first — including the one that
+    /// recorded its deletion.
+    pub async fn revisions(&self, id: i64) -> Result<Vec<Revision>, String> {
+        self.store
+            .revisions()
+            .list(EntityKind::Memory, &id.to_string())
+            .await
+    }
+
+    /// Put a memory back to one of its past versions.
+    ///
+    /// A new revision rather than a rewind, like a preset's restore. A deleted
+    /// memory cannot be restored in place — its id is gone and the column
+    /// generates ids — so this refuses rather than silently creating a
+    /// different memory under a new id that nothing else points at.
+    pub async fn restore_memory(&self, id: i64, revision: i64) -> Result<MemoryView, String> {
+        let past = self
+            .store
+            .revisions()
+            .get(EntityKind::Memory, &id.to_string(), revision)
+            .await?
+            .ok_or_else(|| format!("memory {id} has no revision {revision}"))?;
+        let view: MemoryView = serde_json::from_str(&past.payload)
+            .map_err(|e| format!("revision {revision} is unreadable: {e}"))?;
+        if self.store.get_memory(id).await?.is_none() {
+            return Err(format!(
+                "memory {id} was deleted; its history is readable but it cannot be \
+                 restored in place, because a new memory would get a new id. \
+                 Create one from revision {revision}'s payload instead."
+            ));
+        }
+        self.update_memory(
+            id,
+            MemoryUpdateInput {
+                description: Some(view.description),
+                content: Some(view.content),
+                // The caller named the revision it wants, which is a statement
+                // about the past rather than about the present.
+                expected_revision: None,
+            },
+        )
+        .await
     }
 
     // --- agent-facing reads ---
@@ -242,9 +311,18 @@ fn memory_view(row: &MemoryRow) -> MemoryView {
         name: row.name.clone(),
         description: row.description.clone(),
         content: row.content.clone(),
+        revision: row.revision.map(|r| u64::try_from(r).unwrap_or(0)),
         created_at: row.created_at.clone(),
         updated_at: row.updated_at.clone(),
     }
+}
+
+/// The JSON history keeps for a memory: its wire shape, for the same reason a
+/// preset's snapshot is its wire shape — a restore has to reconstruct an input
+/// a caller could have sent, and the row is free to change under it.
+fn snapshot(row: &MemoryRow) -> Result<String, String> {
+    serde_json::to_string(&memory_view(row))
+        .map_err(|e| format!("could not snapshot the memory: {e}"))
 }
 
 fn now_secs() -> String {
@@ -311,6 +389,7 @@ mod tests {
                 MemoryUpdateInput {
                     description: None,
                     content: Some("new body".into()),
+                    expected_revision: None,
                 },
             )
             .await
@@ -329,7 +408,8 @@ mod tests {
                 999,
                 MemoryUpdateInput {
                     description: None,
-                    content: Some("x".into())
+                    content: Some("x".into()),
+                    expected_revision: None,
                 }
             )
             .await
@@ -445,6 +525,7 @@ mod tests {
                 MemoryUpdateInput {
                     description: None,
                     content: Some(String::new()),
+                    expected_revision: None,
                 }
             )
             .await
@@ -456,6 +537,7 @@ mod tests {
                 MemoryUpdateInput {
                     description: None,
                     content: Some("x".repeat(crate::memory::MAX_CONTENT_CHARS + 1)),
+                    expected_revision: None,
                 }
             )
             .await

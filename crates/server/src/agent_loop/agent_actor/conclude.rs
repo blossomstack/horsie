@@ -652,8 +652,9 @@ mod fence_tests {
         let (reply, rx) = tokio::sync::oneshot::channel();
         agent
             .tell(AgentCommand::Read(ReadCommand::PageLog {
-                before: None,
+                anchor: crate::agent_loop::Anchor::Tail,
                 max: 50,
+                filter: crate::agent_loop::LogFilter::everything(),
                 reply: ReplyTo::from_sender(reply),
             }))
             .await
@@ -754,8 +755,9 @@ mod fence_tests {
         let (reply, rx) = tokio::sync::oneshot::channel();
         agent
             .tell(AgentCommand::Read(ReadCommand::PageLog {
-                before: None,
+                anchor: crate::agent_loop::Anchor::Tail,
                 max: 50,
+                filter: crate::agent_loop::LogFilter::everything(),
                 reply: ReplyTo::from_sender(reply),
             }))
             .await

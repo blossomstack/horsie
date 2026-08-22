@@ -260,6 +260,11 @@ impl MemoryToolbox {
                 MemoryUpdateInput {
                     description,
                     content,
+                    // The `memory_*` tools are a session curating its own
+                    // memory: there is one writer and no read-decide-write gap
+                    // for a revision to close. `horsie_memories` is where a
+                    // second writer appears, and where the check is offered.
+                    expected_revision: None,
                 },
             )
             .await

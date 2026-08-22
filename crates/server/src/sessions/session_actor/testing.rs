@@ -20,8 +20,8 @@ use super::{
     *,
 };
 use crate::agent_loop::{ContextProvider, StartTurn};
-use crate::sessions::spec::AgentSettings;
 use crate::sessions::spec::SessionSpec;
+use crate::sessions::spec::{AgentSettings, AgentSource};
 use crate::sessions::supervisor::SupervisorConfig;
 use horsie_agentcore::LlmProvider;
 use horsie_models::hooks::{HookAction, HookRecord, StopOutcome};
@@ -42,6 +42,7 @@ pub(super) fn decisions(actor: &SessionActor, state: &SessionState) -> Vec<Agent
 
 pub(super) fn agent_settings_fixture() -> AgentSettings {
     AgentSettings {
+        source: AgentSource::AdHoc,
         model: "mock".into(),
         instructions: None,
         allowed_tools: None,
@@ -62,7 +63,7 @@ pub(super) fn actor_spec_fixture() -> SessionSpec {
     SessionSpec {
         name: Some("test".into()),
         kind: SessionKind::Agent {
-            settings: agent_settings_fixture(),
+            settings: Box::new(agent_settings_fixture()),
         },
         workspaces: vec![WorkspaceDef {
             name: "main".into(),
@@ -1021,8 +1022,9 @@ pub(super) async fn agent_history(
         .ask(|reply| {
             SessionCommand::Read(ReadCommand::PageLog {
                 agent_id,
-                before: None,
+                anchor: crate::agent_loop::Anchor::Tail,
                 max: 50,
+                filter: crate::agent_loop::LogFilter::everything(),
                 reply,
             })
         })
@@ -1539,8 +1541,9 @@ pub(super) async fn main_history(session: &SessionRef) -> crate::agent_loop::Log
         .ask(|reply| {
             SessionCommand::Read(ReadCommand::PageLog {
                 agent_id: None,
-                before: None,
+                anchor: crate::agent_loop::Anchor::Tail,
                 max: 50,
+                filter: crate::agent_loop::LogFilter::everything(),
                 reply,
             })
         })

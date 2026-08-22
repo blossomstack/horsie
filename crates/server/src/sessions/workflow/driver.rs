@@ -162,7 +162,7 @@ pub fn next_transition(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::sessions::spec::AgentSettings;
+    use crate::sessions::spec::{AgentSettings, AgentSource};
     use crate::sessions::workflow::WorkflowRunStatus;
     use crate::sessions::workflow::spec::{TransitionSpec, WorkflowStepSpec};
     use horsie_models::workflow::OutcomeFilter;
@@ -170,6 +170,7 @@ mod tests {
 
     fn settings() -> AgentSettings {
         AgentSettings {
+            source: AgentSource::AdHoc,
             instructions: None,
             model: "sonnet".into(),
             allowed_tools: None,

@@ -5,10 +5,13 @@ use crate::control::{
 };
 use crate::http::handlers;
 use crate::projects::ProjectServices;
-use crate::sessions::builder::build_session_spec;
+use crate::sessions::builder::{AgentChoice, build_session_spec};
 use crate::sessions::spec::{SessionOrigin, SessionStatus};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
-use horsie_models::agents::{AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView};
+use horsie_models::agents::{
+    AgentInvokeRequest, AgentInvokeResponse, AgentPresetInput, AgentView, RevisionView,
+    RevisionsPage,
+};
 use horsie_models::now_ms;
 use horsie_models::session::AgentSettings as WireAgentSettings;
 use std::collections::BTreeMap;
@@ -23,6 +26,24 @@ pub struct InvokeAgent {
     pub name: String,
     #[serde(flatten)]
     pub request: AgentInvokeRequest,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RestoreAgent {
+    /// Slug of the preset.
+    pub name: String,
+    /// Which past version to put back, as `revisions` numbers them.
+    pub revision: u64,
+}
+
+/// One past version, on the wire.
+fn wire_revision(r: crate::revisions::Revision) -> RevisionView {
+    RevisionView {
+        revision: u64::try_from(r.revision).unwrap_or(0),
+        payload: r.payload,
+        deleted: r.deleted,
+        created_at: r.created_at,
+    }
 }
 
 /// Named agent presets, and invoking one into a session.
@@ -88,6 +109,42 @@ impl Resource for Agents {
                 |s: Arc<ProjectServices>, i: NameRef| async move { delete(&s, &i.name).await },
             )
             .no_content(),
+            op(
+                "revisions",
+                Method::Get,
+                "/agents/{name}/revisions",
+                "A preset's past versions, newest first — including the one that \
+                 recorded its deletion. Read one before restoring it: `payload` \
+                 is the whole preset as it was.",
+                Expose::ApiAndTool,
+                |s: Arc<ProjectServices>, i: NameRef| async move {
+                    Ok::<RevisionsPage, ControlError>(RevisionsPage {
+                        revisions: s
+                            .agents
+                            .revisions(&i.name)
+                            .await?
+                            .into_iter()
+                            .map(wire_revision)
+                            .collect(),
+                    })
+                },
+            ),
+            op(
+                "restore",
+                Method::Post,
+                "/agents/{name}/restore",
+                "Put a preset back to one of its past versions. Recorded as a new \
+                 revision rather than a rewind, so the change being undone stays \
+                 in the history. Re-creates the preset if it was deleted.",
+                Expose::ApiAndTool,
+                |s: Arc<ProjectServices>, i: RestoreAgent| async move {
+                    Ok::<AgentView, ControlError>(
+                        s.agents
+                            .restore(&i.name, i64::try_from(i.revision).unwrap_or(i64::MAX))
+                            .await?,
+                    )
+                },
+            ),
             op(
                 "invoke",
                 Method::Post,
@@ -163,7 +220,9 @@ async fn invoke(
         &services.config_store,
         &services.environments,
         request.name,
-        wire,
+        // The whole point of an invoke: this session's main agent is a run of
+        // `name`, and is findable as one afterwards.
+        AgentChoice::from_preset(wire, name),
         request.environment,
         Some(agent.plugins.clone()),
         SessionOrigin::User,
@@ -232,7 +291,16 @@ mod tests {
         actions.sort_unstable();
         assert_eq!(
             actions,
-            ["create", "delete", "get", "invoke", "list", "replace"]
+            [
+                "create",
+                "delete",
+                "get",
+                "invoke",
+                "list",
+                "replace",
+                "restore",
+                "revisions"
+            ]
         );
         assert_eq!(Agents.name(), "agents");
     }
@@ -336,6 +404,184 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ControlError::Invalid(_)));
+    }
+
+    /// The whole point of compare-and-set here: a tuning agent reads a preset,
+    /// thinks, and writes it back, and a person editing the same preset in
+    /// between must not be silently reverted.
+    ///
+    /// `replace` is a *full* replace, so the stale write would not merge badly
+    /// — it would win outright, and nothing anywhere would record that it had.
+    #[tokio::test]
+    async fn a_write_against_a_stale_revision_is_refused_and_changes_nothing() {
+        let (services, _dir) = account().await;
+        find("create")
+            .run(
+                services.clone(),
+                serde_json::json!({"name": "deploy", "model": "sonnet"}),
+            )
+            .await
+            .unwrap();
+        let created = find("get")
+            .run(services.clone(), serde_json::json!({"name": "deploy"}))
+            .await
+            .unwrap();
+        let revision = created["revision"]
+            .as_u64()
+            .expect("a created preset is versioned");
+
+        // Somebody else writes first.
+        find("replace")
+            .run(
+                services.clone(),
+                serde_json::json!({
+                    "name": "deploy", "model": "sonnet", "description": "theirs"
+                }),
+            )
+            .await
+            .unwrap();
+
+        // The tuner writes back what it read, naming the revision it read.
+        let err = find("replace")
+            .run(
+                services.clone(),
+                serde_json::json!({
+                    "name": "deploy", "model": "sonnet", "description": "mine",
+                    "expectedRevision": revision
+                }),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            ControlError::Conflict { code, .. } => assert_eq!(
+                code, "stale_revision",
+                "a stale write and a duplicate name are both 409s and are \
+                 retried differently — the code is what says which"
+            ),
+            other => panic!("expected a stale-revision conflict, got {other:?}"),
+        }
+
+        let now = find("get")
+            .run(services, serde_json::json!({"name": "deploy"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            now["description"], "theirs",
+            "the refused write must leave the other writer's change in place"
+        );
+    }
+
+    /// Absent means unconditional. Every existing caller — the web form, the
+    /// CLI — writes without one, and must keep working.
+    #[tokio::test]
+    async fn a_write_with_no_expectation_still_goes_through() {
+        let (services, _dir) = account().await;
+        find("create")
+            .run(
+                services.clone(),
+                serde_json::json!({"name": "deploy", "model": "sonnet"}),
+            )
+            .await
+            .unwrap();
+        find("replace")
+            .run(
+                services.clone(),
+                serde_json::json!({"name": "deploy", "model": "sonnet", "description": "v2"}),
+            )
+            .await
+            .unwrap();
+        let now = find("get")
+            .run(services, serde_json::json!({"name": "deploy"}))
+            .await
+            .unwrap();
+        assert_eq!(now["description"], "v2");
+        assert_eq!(now["revision"], 2);
+    }
+
+    /// A bad tune has to be undoable, which is the reason history exists at
+    /// all — a scheduled agent rewrites instructions with nobody watching.
+    #[tokio::test]
+    async fn a_preset_can_be_put_back_to_what_it_used_to_say() {
+        let (services, _dir) = account().await;
+        find("create")
+            .run(
+                services.clone(),
+                serde_json::json!({
+                    "name": "deploy", "model": "sonnet", "instructions": "be careful"
+                }),
+            )
+            .await
+            .unwrap();
+        find("replace")
+            .run(
+                services.clone(),
+                serde_json::json!({
+                    "name": "deploy", "model": "sonnet", "instructions": "YOLO"
+                }),
+            )
+            .await
+            .unwrap();
+
+        let history = find("revisions")
+            .run(services.clone(), serde_json::json!({"name": "deploy"}))
+            .await
+            .unwrap();
+        assert_eq!(history["revisions"][0]["revision"], 2);
+        assert_eq!(history["revisions"][1]["revision"], 1);
+
+        let restored = find("restore")
+            .run(
+                services.clone(),
+                serde_json::json!({"name": "deploy", "revision": 1}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored["instructions"], "be careful");
+        assert_eq!(
+            restored["revision"], 3,
+            "a restore is a new version, not a rewind — the change being undone \
+             stays in the history"
+        );
+    }
+
+    /// Deleting is a save too, so what was deleted stays readable and can be
+    /// brought back.
+    #[tokio::test]
+    async fn a_deleted_preset_can_be_restored() {
+        let (services, _dir) = account().await;
+        find("create")
+            .run(
+                services.clone(),
+                serde_json::json!({
+                    "name": "deploy", "model": "sonnet", "instructions": "keep me"
+                }),
+            )
+            .await
+            .unwrap();
+        find("delete")
+            .run(services.clone(), serde_json::json!({"name": "deploy"}))
+            .await
+            .unwrap();
+        assert!(
+            find("get")
+                .run(services.clone(), serde_json::json!({"name": "deploy"}))
+                .await
+                .is_err()
+        );
+
+        let restored = find("restore")
+            .run(
+                services.clone(),
+                serde_json::json!({"name": "deploy", "revision": 1}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored["instructions"], "keep me");
+        assert_eq!(
+            restored["revision"], 3,
+            "numbering continues past the deletion rather than restarting, or a \
+             restore addressed by number would resolve to two different things"
+        );
     }
 
     #[test]

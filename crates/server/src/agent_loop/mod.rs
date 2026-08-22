@@ -28,7 +28,10 @@ pub use agent_actor::{
     ReadOutcome, ReplayWindow, RunCommand, SeedCommand, TaskListCommand, TimerCommand, UsageTotal,
     hook_entry, hook_entry_id,
 };
-pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};
+pub use agent_log::{
+    Anchor, Cursor, LogFilter, LogPage, REPLAY_CAP, kind_of, page, replay_window, search,
+    seq_of_id, since,
+};
 pub use context::compaction_window;
 pub use context::{
     AgentOutcome, AgentOutcomeSink, AgentRunDef, AgentRuntimeContext, AskedQuestion, ContextError,

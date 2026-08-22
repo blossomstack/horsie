@@ -3504,6 +3504,47 @@ mod tests {
         assert_eq!(agent.agent.model, "mock");
         assert_eq!(agent.agent.memory_spaces, vec!["default".to_string()]);
 
+        // The session records which preset it is a run of. A preset is
+        // *flattened* into the session at invoke, so without this the link is
+        // gone the moment the session exists and no later read can recover it —
+        // the model and memory spaces above would be identical for a session
+        // created inline with the same values.
+        let listed = detail
+            .session
+            .agents
+            .iter()
+            .find(|a| a.id == "main")
+            .expect("the roster lists the main agent");
+        assert_eq!(listed.preset.as_deref(), Some("reviewer"));
+
+        // And the run reached the index, which is the only thing that answers
+        // "every run of this preset" without loading every session there is.
+        // Asserted through the tool a tuning agent would call, not through the
+        // store: the store is tested on its own, and what can silently do
+        // nothing here is the actor's write.
+        let list_runs = crate::control::operations()
+            .into_iter()
+            .find(|o| o.resource == "agent-runs" && o.action == "list")
+            .expect("the agent-runs tool exists");
+        // Polled: the index write is spawned off the session's mailbox, so it
+        // lands shortly after the create returns rather than within it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let runs = loop {
+            let runs = list_runs
+                .run(t.services().await, serde_json::json!({"agent": "reviewer"}))
+                .await
+                .unwrap();
+            if runs["runs"][0]["sessionId"] == serde_json::json!(id) {
+                break runs;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the invoked session is findable by the preset it ran: {runs}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(runs["runs"][0]["agentId"], "main");
+
         // Unknown agent -> 404; empty message -> 422.
         let res = app
             .clone()
