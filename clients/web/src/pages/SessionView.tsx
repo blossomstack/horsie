@@ -489,6 +489,7 @@ export function SessionView() {
 
   const [scrolledUnder, setScrolledUnder] = useState(false);
   const [contentBelow, setContentBelow] = useState(false);
+  const [spine, setSpine] = useState({ view: 1, progress: 0 });
 
   /* Both edges of the transcript, from one measurement.
    *
@@ -501,6 +502,15 @@ export function SessionView() {
     setScrolledUnder((prev) => (prev === under ? prev : under));
     const below = el.scrollHeight - el.scrollTop - el.clientHeight > 2;
     setContentBelow((prev) => (prev === below ? prev : below));
+    // The spine draws the scrollbar, so it works from the same two numbers a
+    // native one does. Quantised to 1/500ths: a re-render per pixel of a long
+    // transcript buys nothing a 3px thumb can show.
+    const span = el.scrollHeight - el.clientHeight;
+    const v = Math.round((el.clientHeight / Math.max(el.scrollHeight, 1)) * 500) / 500;
+    const g = span > 0 ? Math.round((el.scrollTop / span) * 500) / 500 : 0;
+    setSpine((prev) =>
+      prev.view === v && prev.progress === g ? prev : { view: v, progress: g },
+    );
   };
 
   const onScroll = () => {
@@ -807,17 +817,15 @@ export function SessionView() {
             </SessionPane>
           )}
 
-          {/* Transcript */}
+          {/* Transcript. The pane scrolls; the spine is pinned to it from
+              outside, so it stays put while the transcript moves under it. */}
+          <div className={cn("relative flex min-h-0 flex-1", overlayOpen && "hidden")}>
           <SessionPane
             scroll
             ref={scrollRef}
             onScroll={onScroll}
             data-testid="transcript-scroll"
-            className={cn(overlayOpen && "hidden")}
           >
-            {/* Inside the scroller so the spine's own `sticky` keeps it in
-                view; outside it there would be nothing to stick to. */}
-            <TranscriptSpine boundaries={boundaries} onSeek={seek} />
             {isLoading && stream.items.length === 0 ? (
               <div className="flex h-full items-center justify-center gap-2">
                 <span className="lamp lamp-live text-live-ink" aria-hidden />
@@ -874,6 +882,18 @@ export function SessionView() {
               </>
             )}
           </SessionPane>
+            <TranscriptSpine
+              boundaries={boundaries}
+              onSeek={seek}
+              view={spine.view}
+              progress={spine.progress}
+              onScrollTo={(f) => {
+                const el = scrollRef.current;
+                if (!el) return;
+                el.scrollTop = f * (el.scrollHeight - el.clientHeight);
+              }}
+            />
+          </div>
 
           {/* Errors */}
           {(sendError || stream.streamError) && (

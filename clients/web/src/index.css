@@ -341,8 +341,20 @@
   }
 }
 
-/* A scrollbar is furniture. It appears on hover of what it scrolls and is
- * otherwise a hint. */
+/* The transcript's scrollbar is the spine down its right edge, so the native
+ * one is hidden — but ONLY at the width where the spine is drawn. Below `lg`
+ * the spine is `hidden`, and taking the scrollbar away there would leave a
+ * long session with no scroll indicator at all. */
+@media (min-width: 64rem) {
+  [data-testid="transcript-scroll"] {
+    scrollbar-width: none;
+  }
+  [data-testid="transcript-scroll"]::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Everywhere else a scrollbar is furniture: a hint, not a control. */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--rule-strong) transparent;
