@@ -280,6 +280,21 @@ fn now_secs() -> String {
         .to_string()
 }
 
+/// Resolving a name into a runtime environment, for the `spawn_subsession`
+/// tool.
+///
+/// Implemented here rather than in the tool because this is the module that
+/// knows how an environment becomes the vendor, repos, variables and steps a
+/// runtime is built from — the same conversion the sessions API does at create,
+/// so a sub session's machine is exactly the machine a session would have got.
+#[async_trait::async_trait]
+impl crate::sessions::sub_session_tool::EnvironmentResolver for EnvironmentService {
+    async fn resolve(&self, name: &str) -> Result<crate::sessions::spec::RuntimeEnv, String> {
+        let view = self.get(name).await.map_err(|e| e.to_string())?;
+        crate::sessions::builder::runtime_env_from_environment(&view)
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {

@@ -104,6 +104,8 @@ export function RoutineDetailPage() {
                 >
                   {routine.environment.value.name}
                 </Link>
+              ) : routine.environment.type === "None" ? (
+                <span className="text-faint">No runtime</span>
               ) : (
                 <>
                   <span className="font-mono">{routine.environment.value.vendor}</span>

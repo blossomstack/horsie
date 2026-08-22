@@ -182,4 +182,36 @@ describe("useAgentDraft", () => {
       result.current.buildAgentInput("reviewer", "", "").thinkingEffort,
     ).toBeUndefined();
   });
+
+  // `PUT` is a full replace, so a preset someone turned tuning on for must not
+  // have it turned back off by anyone who opens the form and presses Save.
+  it("carries a tunable preset through an untouched save", () => {
+    const { result } = render({ ...preset, tunable: true });
+    expect(result.current.tunable).toBe(true);
+    expect(result.current.buildAgentInput("reviewer", "", "").tunable).toBe(
+      true,
+    );
+  });
+
+  // The direction that matters: opting in has to be an act, so a preset that
+  // never mentioned tuning must not acquire it by being saved.
+  it("does not opt a preset in by saving it", () => {
+    const { result } = render(preset);
+    expect(result.current.tunable).toBe(false);
+    expect(
+      result.current.buildAgentInput("reviewer", "", "").tunable,
+    ).toBeUndefined();
+  });
+
+  it("turns tuning on and off from the form", () => {
+    const { result } = render(preset);
+    act(() => result.current.setTunable(true));
+    expect(result.current.buildAgentInput("reviewer", "", "").tunable).toBe(
+      true,
+    );
+    act(() => result.current.setTunable(false));
+    expect(
+      result.current.buildAgentInput("reviewer", "", "").tunable,
+    ).toBeUndefined();
+  });
 });

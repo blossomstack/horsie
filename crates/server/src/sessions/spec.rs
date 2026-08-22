@@ -54,10 +54,48 @@ pub type RuntimeVendorMap =
 /// `session/<id>` and `agent/<id>` journals share the same `<id>`.
 pub type SessionId = String;
 
+/// Where an agent's settings came from.
+///
+/// The settings themselves are present either way — a preset is flattened at
+/// creation, and that snapshotting is what stops an edit from reshaping a run
+/// already under way. This records only *which* preset that flattening came
+/// from, which is what lets a run be found again afterwards.
+///
+/// Deliberately **not** `#[serde(default)]` on the field that holds it.
+/// Defaulting to `AdHoc` would relabel every agent that predates this as
+/// having been configured inline — the one untruth this type exists to
+/// prevent, and one that would outlive every session carrying it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentSource {
+    /// Supplied inline at creation: a session started without naming a preset.
+    AdHoc,
+    /// Resolved from a saved preset.
+    Preset { name: String },
+}
+
+impl AgentSource {
+    /// The preset this ran under, if it ran under one.
+    #[must_use]
+    pub fn preset(&self) -> Option<&str> {
+        match self {
+            Self::AdHoc => None,
+            Self::Preset { name } => Some(name),
+        }
+    }
+}
+
 /// Agent settings supplied at session creation. Storage copy of the wire
 /// `horsie_models::session::AgentSettings`, with defaults applied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSettings {
+    /// Which preset these settings were flattened from, or that they were not.
+    ///
+    /// Every agent kind carries one, because `SessionActor::effective_settings`
+    /// resolves this same struct for a main agent, a workflow step, a subagent
+    /// and a sub session alike. Today a subagent inherits its parent's, which
+    /// is honest — it really does run under that preset — and leaves room for a
+    /// subagent to name its own later without anything else changing.
+    pub source: AgentSource,
     pub model: String,
     pub allowed_tools: Option<Vec<String>>,
     pub use_plugins: Option<bool>,
@@ -164,7 +202,13 @@ pub enum SessionOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionKind {
     /// A session: one main agent under these settings, and its sub sessions.
-    Agent { settings: AgentSettings },
+    ///
+    /// Boxed because an enum is as big as its widest arm and the other arm
+    /// holds an `Arc`: unboxed, every `SessionKind` anywhere — including the
+    /// workflow runs that carry none of this — would be the size of a whole
+    /// `AgentSettings`. Same reason `SessionDomainEvent::SpecRecorded` boxes
+    /// its spec.
+    Agent { settings: Box<AgentSettings> },
     /// A run of a workflow. No main agent — the definition decides who runs —
     /// and each step carries its own settings in the snapshot.
     Workflow {
@@ -172,17 +216,81 @@ pub enum SessionKind {
     },
 }
 
+/// A runtime's identity, minted when one is asked for.
+///
+/// Its own value rather than the session's id, which is what it used to be.
+/// A session owns several runtimes now — its own, and one per sub session that
+/// asked for a different environment — so a name that *was* the session's could
+/// only ever address the first of them.
+///
+/// Opaque to everything below this layer: the vendor names its object after it,
+/// the dial token claims it, and the bus builds the runtime's topics from it,
+/// none of which ever needed it to be a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RuntimeId(pub uuid::Uuid);
+
+impl RuntimeId {
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for RuntimeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One runtime, as the session that owns it persists it: everything a vendor
+/// needs to build the sandbox, resolved once at the moment it was asked for.
+///
+/// Its own type rather than fields on [`SessionSpec`] because a session owns
+/// *several* of these — its own and one per sub session that asked for a
+/// different environment — and a runtime's identity has to be able to differ
+/// from the session's for that to be sayable at all.
+///
+/// A snapshot, never a reference: `environment` is provenance only. A session
+/// revived next week gets what it was created with rather than what a
+/// since-edited environment now says, which is the same rule the session spec
+/// has always followed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeEnv {
+    /// Runtime vendor name (key into [`RuntimeVendorMap`]).
+    pub vendor: String,
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Setup steps the runtime runs at every create/attach (idempotent).
+    #[serde(default)]
+    pub provision: Vec<ProvisionStepSpec>,
+    /// Environment variables injected into the runtime child.
+    #[serde(default)]
+    pub env_vars: Vec<EnvVarSpec>,
+    /// The predefined environment this was resolved from. Provenance only —
+    /// everything it contributed is in the fields above, so nothing re-reads
+    /// it. `None` for an ad-hoc environment.
+    #[serde(default)]
+    pub environment: Option<String>,
+}
+
 /// Persisted, self-contained description of one session (lives in the
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
     pub kind: SessionKind,
-    pub workspaces: Vec<WorkspaceDef>,
-    /// Setup steps run by the runtime at every create/attach (idempotent).
+    /// What this session's *own* runtime is built from — the one its main agent
+    /// runs on.
+    ///
+    /// `None` means it runs without a sandbox at all: no runtime tools, no
+    /// plugin skills, no hooks. An `Option` rather than an empty vendor,
+    /// because a session with nowhere to run tools is a legitimate thing to ask
+    /// for and a sentinel would leave every reader deciding for itself what
+    /// counts as absent.
+    ///
+    /// Only the session's own. A sub session that asked for an environment of
+    /// its own gets a runtime record instead; this is the seed for the first
+    /// record, not a registry of them.
     #[serde(default)]
-    pub provision: Vec<ProvisionStepSpec>,
-    /// Runtime vendor name (key into [`ServerDeps::vendors`]).
-    pub vendor: String,
+    pub runtime: Option<RuntimeEnv>,
     /// Selected plugin-bundle names to provision for this session. Resolved to
     /// current artifact hashes at each create/attach (latest-at-start); the
     /// runtime fetches them into its plugins dir before scanning.
@@ -192,15 +300,6 @@ pub struct SessionSpec {
     /// journal row loads as [`SessionOrigin::User`].
     #[serde(default)]
     pub origin: SessionOrigin,
-    /// The predefined environment this session was created from. Provenance
-    /// only — everything it contributed is resolved into the fields above, so
-    /// nothing re-reads it. `None` for an ad-hoc environment.
-    #[serde(default)]
-    pub environment: Option<String>,
-    /// Environment variables injected into the runtime child, from the
-    /// environment. Snapshotted with the rest.
-    #[serde(default)]
-    pub env_vars: Vec<EnvVarSpec>,
 }
 
 impl SessionSpec {
@@ -211,7 +310,8 @@ impl SessionSpec {
     pub(crate) fn for_vendor(vendor: &str) -> Self {
         Self {
             kind: SessionKind::Agent {
-                settings: AgentSettings {
+                settings: Box::new(AgentSettings {
+                    source: AgentSource::AdHoc,
                     instructions: None,
                     model: "m".into(),
                     allowed_tools: None,
@@ -224,16 +324,47 @@ impl SessionSpec {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     plugins: Vec::new(),
-                },
+                }),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.to_string(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.to_string(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
+    }
+
+    /// A minimal spec with no runtime at all, for tests about the sessions that
+    /// run without one.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn runtime_less() -> Self {
+        let mut spec = Self::for_vendor("unused");
+        spec.runtime = None;
+        spec
+    }
+
+    /// What this session's own runtime is built from, if it has one.
+    #[must_use]
+    pub fn runtime_env(&self) -> Option<RuntimeEnv> {
+        self.runtime.clone()
+    }
+
+    /// The vendor this session's own runtime is built by, if it has one.
+    #[must_use]
+    pub fn vendor(&self) -> Option<&str> {
+        self.runtime.as_ref().map(|r| r.vendor.as_str())
+    }
+
+    /// The predefined environment this session was created from, if any.
+    /// Provenance only — everything it contributed is already resolved.
+    #[must_use]
+    pub fn environment(&self) -> Option<&str> {
+        self.runtime.as_ref().and_then(|r| r.environment.as_deref())
     }
 
     /// The routine this session is a run of, if any.
@@ -400,6 +531,7 @@ mod tests {
 
     pub(super) fn agent_settings() -> AgentSettings {
         AgentSettings {
+            source: AgentSource::AdHoc,
             instructions: None,
             model: "m".into(),
             allowed_tools: None,
@@ -418,15 +550,17 @@ mod tests {
     pub(super) fn agent_spec(vendor: &str, origin: SessionOrigin) -> SessionSpec {
         SessionSpec {
             kind: SessionKind::Agent {
-                settings: agent_settings(),
+                settings: Box::new(agent_settings()),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.into(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.into(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
@@ -441,13 +575,15 @@ mod tests {
                     max_steps: 10,
                 }),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: vendor.into(),
+            runtime: Some(RuntimeEnv {
+                vendor: vendor.into(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
@@ -488,7 +624,11 @@ mod tests {
         // The row still carries `control_plane`, dropped in 0039. Left in on
         // purpose: an unknown key must stay ignorable, or every session
         // journaled before the tool selection would fail to load.
+        //
+        // `source` is present because it is required — the one field here that
+        // is. See `settings_without_a_source_are_refused_rather_than_assumed_ad_hoc`.
         let row = r#"{"name":null,"kind":{"Agent":{"settings":{"model":"m",
+            "source":"AdHoc",
             "allowed_tools":null,"use_plugins":null,"max_iterations":null,
             "max_retries":0,"mcp_servers":[],"memory_spaces":[],
             "thinking_effort":null,"max_concurrent_subagents":null,
@@ -550,9 +690,10 @@ mod tests {
 
     #[test]
     fn agent_settings_default_max_subagents_and_read_old_rows() {
-        // Pre-subagent journal rows carry no field; they must still load and
-        // resolve to the built-in default.
-        let old = r#"{"model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
+        // Pre-subagent journal rows carry no `max_concurrent_subagents`; they
+        // must still load and resolve to the built-in default. `source` is
+        // present because it is required — see the test below.
+        let old = r#"{"source":"AdHoc","model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
         let s: AgentSettings = serde_json::from_str(old).unwrap();
         assert_eq!(s.max_concurrent_subagents, None);
         assert_eq!(
@@ -561,10 +702,48 @@ mod tests {
         );
 
         let s = AgentSettings {
+            source: AgentSource::AdHoc,
             max_concurrent_subagents: Some(3),
             ..serde_json::from_str::<AgentSettings>(old).unwrap()
         };
         assert_eq!(s.max_subagents(), 3);
+    }
+
+    /// `source` is the one field here without `#[serde(default)]`, and that is
+    /// the decision this pins.
+    ///
+    /// Every other field defaults so an old journal row loads. This one must
+    /// not: `AdHoc` would be a claim about how those agents were configured,
+    /// asserted on rows that never said, and it would stay wrong for as long as
+    /// the session lives — including in the index a tuning agent reads. A row
+    /// written before this field is instead refused, and the journal is reset
+    /// as part of shipping it.
+    ///
+    /// If this test ever starts failing because someone added a default,
+    /// that is the bug, not the test.
+    #[test]
+    fn settings_without_a_source_are_refused_rather_than_assumed_ad_hoc() {
+        let no_source = r#"{"model":"m","allowed_tools":null,"use_plugins":null,"max_iterations":null,"max_retries":0}"#;
+        assert!(
+            serde_json::from_str::<AgentSettings>(no_source).is_err(),
+            "a row that never named a source must not load as AdHoc"
+        );
+    }
+
+    #[test]
+    fn a_source_round_trips_and_names_its_preset() {
+        let preset = AgentSource::Preset {
+            name: "reviewer".into(),
+        };
+        assert_eq!(preset.preset(), Some("reviewer"));
+        assert_eq!(AgentSource::AdHoc.preset(), None);
+
+        let json = serde_json::to_string(&preset).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSource>(&json).unwrap(),
+            preset,
+            "the journal reads back what it wrote"
+        );
     }
 
     #[test]

@@ -1,8 +1,12 @@
-//! Getting and releasing this session's sandbox.
+//! Getting and releasing this session's sandboxes.
 //!
 //! A precondition rather than a participant: nothing else here talks to it, and
 //! its whole interface to the rest of the session is [`RuntimeLifecycle::ready`],
 //! which the turn boundary checks before asking any component what to start.
+//!
+//! Plural, since a sub session may ask for an environment of its own. Each
+//! runtime is provisioned, narrated and failed independently, so a branch
+//! booting a machine leaves the session it branched from working.
 //!
 //! The create is journaled *before* the vendor is called and runs off the
 //! mailbox, so an interrupted create is discoverable at load and a session stays
@@ -10,13 +14,17 @@
 
 use super::component::Component;
 use super::{
-    CommandEffect, LifecycleCommand, ProvisioningState, SessionActor, SessionCommand,
+    AgentRuntime, CommandEffect, LifecycleCommand, ProvisioningState, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState,
 };
 use crate::runtime_manager::RuntimeError;
 use crate::sessions::addressing::SessionInbox;
+use crate::sessions::run_forest::RuntimeChoice;
+use crate::sessions::spec::RuntimeId;
 use horsie_actor::{ActorContext, EventSourcedActor};
 use horsie_models::now_ms;
+#[cfg(test)]
+use uuid::Uuid;
 
 /// RuntimeLifecycle.
 pub(super) struct RuntimeLifecycle;
@@ -30,11 +38,35 @@ impl RuntimeLifecycle {
     /// them: a create that failed on something retryable leaves a session with
     /// no runtime at all, and a turn started there would ask a vendor for one
     /// and be told, terminally, that it is gone.
-    pub(super) fn ready(state: &SessionState) -> bool {
-        !matches!(
-            state.provisioning,
-            ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
-        )
+    #[cfg(test)]
+    pub(super) fn ready(state: &SessionState, agent: Uuid) -> bool {
+        Self::ready_on(state.runtime_for(agent))
+    }
+
+    /// The same answer, from a runtime already resolved by some other walk —
+    /// a step's, resolved through its run, or the session's own, resolved
+    /// through its root entry whether that entry is a main agent or a run.
+    pub(super) fn ready_on(runtime: AgentRuntime<'_>) -> bool {
+        match runtime {
+            // Per agent, not per session: what gates a turn is the runtime
+            // *that agent* runs on. A sub session waiting on a machine of its
+            // own must not hold up the session it branched from.
+            AgentRuntime::On(_, rec) => !matches!(
+                rec.provisioning,
+                ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
+            ),
+            // It asked for no sandbox. Nothing to wait for, so nothing to gate
+            // — this is the runtime-less session's whole interaction with this
+            // component.
+            AgentRuntime::Without => true,
+            // It should have one and this state cannot yet say which. Wait.
+            //
+            // The distinction this arm exists for: reading it as "no runtime,
+            // so nothing to wait for" let a session run its entire first turn
+            // with no sandbox, silently, because the record naming its runtime
+            // had not been journaled when the turn started.
+            AgentRuntime::Pending => false,
+        }
     }
 }
 
@@ -46,26 +78,51 @@ impl RuntimeLifecycle {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
-            LifecycleCommand::Provision => {
-                // Provision only while no runtime has ever been confirmed: a
-                // session just created, one found mid-create at load because
-                // the process died inside it, and one whose create failed on
-                // something retryable. `Ready` means a create already
-                // succeeded, and re-running one would rebuild a workspace
-                // someone may be using — the thing this design exists to make
-                // impossible. This used to be a status check whose `Idle` arm
-                // was every healthy session's status too; the provisioning
-                // slice having one owner is what lets the gate say what it
-                // means.
-                if state.fatal.is_some()
-                    || matches!(state.provisioning, ProvisioningState::Ready { .. })
-                {
+            LifecycleCommand::Provision { owner, env } => {
+                if state.fatal.is_some() {
                     return CommandEffect::none();
                 }
+                // Which runtime this is about, and whether it needs building.
+                // A record already `Ready` is not rebuilt — that would destroy
+                // a workspace someone may be using, the thing this design
+                // exists to make impossible. A record that is `InFlight` or
+                // `Failed` is re-attempted, which is safe precisely because no
+                // turn can have run under it.
+                let existing = state
+                    .runtimes_owned_by(owner)
+                    .next()
+                    .map(|(id, rec)| (id, rec.provisioning.clone(), rec.env.clone()));
+                let (runtime, env, requested) = match (existing, env) {
+                    (Some((_, ProvisioningState::Ready { .. }, _)), _) => {
+                        return CommandEffect::none();
+                    }
+                    // A re-attempt: same id, same environment. Re-resolving one
+                    // that may since have been edited would build a different
+                    // sandbox under a session that believes it has the first.
+                    (Some((id, _, env)), _) => (id, env, false),
+                    // The first ask, with the environment the caller resolved.
+                    // That is a sub session asking for one of its own.
+                    (None, Some(env)) => (RuntimeId::generate(), *env, true),
+                    // The session's own first ask. Its environment comes from
+                    // the spec rather than the command, because the command is
+                    // sent by the same write that records the spec — reading it
+                    // at the send would read it before it was set.
+                    (None, None) if owner == actor.id => {
+                        match actor.spec().runtime_env() {
+                            Some(env) => (RuntimeId::generate(), env, true),
+                            // The session asked for no runtime. Nothing to
+                            // build, and nothing wrong.
+                            None => return CommandEffect::none(),
+                        }
+                    }
+                    // Nothing to build one from and nobody to ask: this owner
+                    // runs without a sandbox, which is a choice, not a fault.
+                    (None, None) => return CommandEffect::none(),
+                };
                 let runtimes = actor.deps().runtimes.clone();
-                let session = actor.id.to_string();
-                let vendor = actor.spec().vendor.clone();
-                let spec = actor.spec().clone();
+                let vendor = env.vendor.clone();
+                let spec_env = env.clone();
+                let id = runtime.to_string();
                 let me = actor.me(ctx);
                 // Minted here and journaled below in the same breath, so the
                 // sandbox this create starts and the entry that records it
@@ -78,60 +135,98 @@ impl RuntimeLifecycle {
                 // throughout. The status it just journaled is what holds the
                 // turn back meanwhile.
                 tokio::spawn(async move {
-                    let (error, terminal, detail) = match runtimes
-                        .create(&session, &incarnation, &vendor, &spec)
-                        .await
-                    {
-                        Ok(detail) => (None, false, detail),
-                        // Exactly the split `get` makes: only a live vendor
-                        // refusing to produce the runtime is terminal. An
-                        // offline vendor or a failed token mint is a bad
-                        // moment, not a dead session.
-                        Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
-                        Err(e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_))) => {
-                            (Some(e.to_string()), false, None)
-                        }
-                    };
+                    let (error, terminal, detail) =
+                        match runtimes.create(&id, &incarnation, &vendor, &spec_env).await {
+                            Ok(detail) => (None, false, detail),
+                            // Exactly the split `get` makes: only a live vendor
+                            // refusing to produce the runtime is terminal. An
+                            // offline vendor or a failed token mint is a bad
+                            // moment, not a dead session.
+                            Err(e @ RuntimeError::Gone(_)) => (Some(e.to_string()), true, None),
+                            Err(
+                                e @ (RuntimeError::Unavailable(_) | RuntimeError::Provision(_)),
+                            ) => (Some(e.to_string()), false, None),
+                        };
                     // Before the outcome, and separately from it: the vendor
                     // described the runtime it accepted, and that sentence
                     // belongs to the wait rather than to how the wait ended.
                     if let Some(detail) = detail {
                         let _ = me
                             .tell(SessionCommand::Lifecycle(
-                                LifecycleCommand::NarrateProvisioning { detail },
+                                LifecycleCommand::NarrateProvisioning { runtime, detail },
                             ))
                             .await;
                     }
                     let _ = me
                         .tell(SessionCommand::Lifecycle(
-                            LifecycleCommand::FinishProvisioning { error, terminal },
+                            LifecycleCommand::FinishProvisioning {
+                                runtime,
+                                error,
+                                terminal,
+                            },
                         ))
                         .await;
                 });
-                CommandEffect::persist(vec![SessionDomainEvent::ProvisioningStarted { at_ms }])
+                let mut events = Vec::with_capacity(2);
+                if requested {
+                    events.push(SessionDomainEvent::RuntimeRequested {
+                        at_ms,
+                        runtime,
+                        owner,
+                        env,
+                    });
+                }
+                events.push(SessionDomainEvent::ProvisioningStarted { at_ms, runtime });
+                // The agents now know which runtime is theirs, even though it
+                // is not up yet. Naming it here rather than only on success is
+                // what makes a re-provision move a resident agent to the new
+                // incarnation instead of leaving it on the old one.
+                let mut next = state.clone();
+                for e in &events {
+                    next = SessionActor::apply_event(next, e.clone());
+                }
+                actor.repoint_agent_runtimes(&next);
+                CommandEffect::persist(events)
             }
-            LifecycleCommand::NarrateProvisioning { detail } => {
-                // Only while a create is actually outstanding. A vendor's word
-                // that lands after the outcome would say a session is still
-                // coming up when it is already running.
-                if !matches!(state.provisioning, ProvisioningState::InFlight { .. }) {
+            LifecycleCommand::NarrateProvisioning { runtime, detail } => {
+                // Only while that create is actually outstanding. A vendor's
+                // word that lands after the outcome would say a runtime is
+                // still coming up when it is already running.
+                if !matches!(
+                    state.runtimes.get(&runtime).map(|r| &r.provisioning),
+                    Some(ProvisioningState::InFlight { .. })
+                ) {
                     return CommandEffect::none();
                 }
                 CommandEffect::persist(vec![SessionDomainEvent::ProvisioningProgress {
                     at_ms: now_ms(),
+                    runtime,
                     detail,
                 }])
             }
-            LifecycleCommand::FinishProvisioning { error, terminal } => {
+            LifecycleCommand::FinishProvisioning {
+                runtime,
+                error,
+                terminal,
+            } => {
                 let event = match error {
-                    None => SessionDomainEvent::ProvisioningSucceeded { at_ms: now_ms() },
+                    None => SessionDomainEvent::ProvisioningSucceeded {
+                        at_ms: now_ms(),
+                        runtime,
+                    },
                     Some(error) => SessionDomainEvent::ProvisioningFailed {
                         at_ms: now_ms(),
+                        runtime,
                         error,
                         terminal,
                     },
                 };
                 let next = SessionActor::apply_event(state.clone(), event.clone());
+                // Before anything runs on it. An agent spawned while this
+                // create was outstanding is holding `Pending`, and the flush
+                // below is exactly what would have it take a turn — so the
+                // answer has to reach it first.
+                actor.repoint_agent_runtimes(&next);
                 let mut events = vec![event];
                 // The runtime landed, so whatever queued behind it starts now.
                 // A failure drains nothing: the messages stay owed, and the
@@ -149,11 +244,17 @@ impl RuntimeLifecycle {
                     return CommandEffect::none();
                 }
                 actor.stop_agents().await;
-                actor
-                    .deps()
-                    .runtimes
-                    .hibernate(&actor.id.to_string(), &actor.spec().vendor)
-                    .await;
+                // Every runtime this session owns, not just its own: a sub
+                // session that asked for a machine of its own has one too, and
+                // an unloaded session leaving it warm is a bill nobody is
+                // watching.
+                for (runtime, rec) in state.runtimes.iter() {
+                    actor
+                        .deps()
+                        .runtimes
+                        .hibernate(&runtime.to_string(), &rec.env.vendor)
+                        .await;
+                }
                 // Answered as this actor's last act: it writes nothing after
                 // returning, so the supervisor can drop its reference the
                 // moment it sees `true`.
@@ -163,11 +264,21 @@ impl RuntimeLifecycle {
             LifecycleCommand::Delete { reply } => {
                 actor.cancel_in_flight(state).await;
                 actor.stop_agents().await;
-                actor
-                    .deps()
-                    .runtimes
-                    .delete(&actor.id.to_string(), &actor.spec().vendor)
-                    .await;
+                // Deleting the session deletes every runtime under it. The
+                // per-owner rule only decides what a *sub session's* deletion
+                // takes with it; the session going away takes everything.
+                for (runtime, rec) in state.runtimes.iter() {
+                    actor
+                        .deps()
+                        .runtimes
+                        .delete(&runtime.to_string(), &rec.env.vendor)
+                        .await;
+                }
+                // Here, with the rest of the teardown, rather than at the
+                // supervisor: an index entry outliving its transcript is worse
+                // than no entry, because every search that hits it costs the
+                // reader a call to discover the session is gone.
+                actor.forget_agent_runs().await;
                 let _ = reply.send(());
                 CommandEffect::stop()
             }
@@ -181,16 +292,37 @@ impl Component for RuntimeLifecycle {
     /// precisely the state in which no turn has run, so there is no work in the
     /// workspace for a rebuild to destroy.
     fn on_load(state: &SessionState) -> Option<SessionCommand> {
-        (state.fatal.is_none()
-            && matches!(
-                state.provisioning,
-                ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
-            ))
-        .then_some(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+        if state.fatal.is_some() {
+            return None;
+        }
+        // The first unfinished one. One command per load rather than one per
+        // record, because each re-attempt sends the next: a session with two
+        // half-built sandboxes finishes both, and a session with none sends
+        // nothing at all.
+        state
+            .runtimes
+            .values()
+            .find(|r| {
+                matches!(
+                    r.provisioning,
+                    ProvisioningState::InFlight { .. } | ProvisioningState::Failed { .. }
+                )
+            })
+            .map(|r| {
+                SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                    owner: r.owner,
+                    // The record carries the environment; a re-attempt must not
+                    // re-resolve one that may since have been edited.
+                    env: None,
+                })
+            })
     }
 
     fn busy(state: &SessionState) -> bool {
-        matches!(state.provisioning, ProvisioningState::InFlight { .. })
+        state
+            .runtimes
+            .values()
+            .any(|r| matches!(r.provisioning, ProvisioningState::InFlight { .. }))
     }
 
     /// The three provisioning facts. Each one sets `status`, which is how the
@@ -206,31 +338,66 @@ impl Component for RuntimeLifecycle {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
-            SessionDomainEvent::ProvisioningStarted { at_ms } => {
+            SessionDomainEvent::RuntimeRequested {
+                runtime,
+                owner,
+                env,
+                ..
+            } => {
+                state.runtimes.insert(
+                    runtime,
+                    crate::sessions::session_actor::RuntimeRecord {
+                        env,
+                        owner,
+                        provisioning: ProvisioningState::Never,
+                    },
+                );
+                // And the asking conversation now runs on it. The same write,
+                // because a record nobody points at is a sandbox no agent can
+                // reach — and one pointed at by an entry with no record is an
+                // agent waiting on nothing.
+                state
+                    .forest
+                    .point_at_runtime(owner, RuntimeChoice::On(runtime));
+            }
+            SessionDomainEvent::ProvisioningStarted { at_ms, runtime } => {
                 // `at_ms` is the identity of this provision: every later
                 // acquisition addresses the sandbox this create produced, so
                 // the name has to outlive the create — and a reload.
-                state.provisioning = ProvisioningState::InFlight { at_ms };
+                if let Some(rec) = state.runtimes.get_mut(&runtime) {
+                    rec.provisioning = ProvisioningState::InFlight { at_ms };
+                }
             }
             // Narration: it changes nothing, and the state it is describing
             // was set by the `ProvisioningStarted` before it. Journaled all the
             // same, so a client that arrives mid-create reads the same account
             // of the wait as one that watched it live.
             SessionDomainEvent::ProvisioningProgress { .. } => {}
-            SessionDomainEvent::ProvisioningSucceeded { .. } => {
-                let at_ms = state.provisioning.at_ms().unwrap_or_default();
-                state.provisioning = ProvisioningState::Ready { at_ms };
+            SessionDomainEvent::ProvisioningSucceeded { runtime, .. } => {
+                if let Some(rec) = state.runtimes.get_mut(&runtime) {
+                    let at_ms = rec.provisioning.at_ms().unwrap_or_default();
+                    rec.provisioning = ProvisioningState::Ready { at_ms };
+                }
             }
             SessionDomainEvent::ProvisioningFailed {
-                error, terminal, ..
+                runtime,
+                error,
+                terminal,
+                ..
             } => {
-                let at_ms = state.provisioning.at_ms().unwrap_or_default();
-                state.provisioning = ProvisioningState::Failed {
-                    at_ms,
-                    reason: error.clone(),
-                };
+                if let Some(rec) = state.runtimes.get_mut(&runtime) {
+                    let at_ms = rec.provisioning.at_ms().unwrap_or_default();
+                    rec.provisioning = ProvisioningState::Failed {
+                        at_ms,
+                        reason: error.clone(),
+                    };
+                }
                 // A live vendor refusing to produce the runtime ends the
                 // session; anything else stays a retryable provisioning fact.
+                //
+                // Session-wide even for a sub session's runtime: the vendor has
+                // said this account cannot have the sandbox at all, which is
+                // not a fact about which branch asked for it.
                 if terminal {
                     state.fatal = Some(error);
                 }
@@ -260,6 +427,62 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    /// One fixed runtime for these tests. Which id it is never matters here —
+    /// what matters is that the provisioning facts land on a record that
+    /// exists, since a session now owns a map of them rather than one field.
+    /// The session id `provisioning` seeds, so a readiness check can name the
+    /// agent it is asking about.
+    fn seeded_session() -> Uuid {
+        Uuid::from_bytes([1; 16])
+    }
+
+    fn rt() -> crate::sessions::spec::RuntimeId {
+        crate::sessions::spec::RuntimeId(Uuid::from_bytes([3; 16]))
+    }
+
+    /// The ask that has to precede any provisioning fact.
+    ///
+    /// A journal that starts at `ProvisioningStarted` describes a runtime the
+    /// session never asked for — nothing names it, so nothing can be recovered
+    /// against it. Seeding this first is what makes the seeded history one the
+    /// running code could actually have written.
+    fn asked_for_rt(owner: Uuid) -> SessionDomainEvent {
+        SessionDomainEvent::RuntimeRequested {
+            at_ms: 0,
+            runtime: rt(),
+            owner,
+            env: actor_spec_fixture()
+                .runtime_env()
+                .expect("the fixture has a runtime"),
+        }
+    }
+
+    /// A session that has asked for its own runtime, then whatever happened to
+    /// it. The seed is two events rather than a hand-built state so these tests
+    /// still run the fold they are about.
+    fn provisioning(events: Vec<SessionDomainEvent>) -> SessionState {
+        let session = Uuid::from_bytes([1; 16]);
+        let mut seed = vec![SessionDomainEvent::RuntimeRequested {
+            at_ms: 0,
+            runtime: rt(),
+            owner: session,
+            env: crate::sessions::spec::SessionSpec::for_vendor("mock")
+                .runtime_env()
+                .expect("a vendor spec has a runtime"),
+        }];
+        seed.extend(events);
+        let mut state = SessionState::default();
+        // The root entry, seeded directly: this module's tests are about the
+        // provisioning fold, and a session's own creation is another module's.
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
+        seed.into_iter()
+            .fold(state, super::SessionActor::apply_event)
+    }
+
     /// The identity a sandbox is addressed by, recovered from the journal.
     ///
     /// It has to come back on a reload: re-acquiring means reaching the sandbox
@@ -267,10 +490,14 @@ mod tests {
     /// would address one that never existed.
     #[test]
     fn a_provision_is_named_by_the_entry_that_began_it() {
-        let started = fold(vec![SessionDomainEvent::ProvisioningStarted {
+        let started = provisioning(vec![SessionDomainEvent::ProvisioningStarted {
             at_ms: 1234,
+            runtime: rt(),
         }]);
-        assert_eq!(started.provisioning.at_ms(), Some(1234));
+        assert_eq!(
+            started.root_runtime().and_then(|r| r.provisioning.at_ms()),
+            Some(1234)
+        );
     }
 
     /// And a second provision replaces the first, which is the whole point: a
@@ -279,11 +506,22 @@ mod tests {
     /// replacement.
     #[test]
     fn provisioning_again_gives_the_session_a_new_name() {
-        let reprovisioned = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
-            SessionDomainEvent::ProvisioningStarted { at_ms: 2 },
+        let reprovisioned = provisioning(vec![
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 1,
+                runtime: rt(),
+            },
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 2,
+                runtime: rt(),
+            },
         ]);
-        assert_eq!(reprovisioned.provisioning.at_ms(), Some(2));
+        assert_eq!(
+            reprovisioned
+                .root_runtime()
+                .and_then(|r| r.provisioning.at_ms()),
+            Some(2)
+        );
     }
 
     /// A session is `Provisioning` from the moment its create is journaled
@@ -291,14 +529,113 @@ mod tests {
     /// this status, and no turn can run inside it.
     #[test]
     fn a_created_session_provisions_before_it_is_idle() {
-        let started = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
+        let started = provisioning(vec![SessionDomainEvent::ProvisioningStarted {
+            at_ms: 0,
+            runtime: rt(),
+        }]);
         assert_eq!(started.status(), SessionStatus::Provisioning);
 
-        let ready = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
-            SessionDomainEvent::ProvisioningSucceeded { at_ms: 1 },
+        let ready = provisioning(vec![
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 0,
+                runtime: rt(),
+            },
+            SessionDomainEvent::ProvisioningSucceeded {
+                at_ms: 1,
+                runtime: rt(),
+            },
         ]);
         assert_eq!(ready.status(), SessionStatus::Idle);
+    }
+
+    /// A session that asked for no runtime is *ready*, not waiting.
+    ///
+    /// The two answers a create is gated on are deliberately different values:
+    /// "this session has no sandbox" runs, "nobody has said yet" waits. Reading
+    /// the first as the second parks a runtime-less session on a create that
+    /// will never come; reading the second as the first runs an ordinary
+    /// session's whole first turn with no sandbox and no complaint.
+    #[test]
+    fn a_session_that_asked_for_no_runtime_is_ready_rather_than_waiting() {
+        let session = seeded_session();
+        let spec = crate::sessions::spec::SessionSpec::runtime_less();
+        assert!(spec.runtime_env().is_none(), "the fixture has no runtime");
+        let mut state = SessionState::default();
+        state.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Without,
+        );
+        assert!(matches!(
+            state.runtime_for(session),
+            crate::sessions::session_actor::AgentRuntime::Without
+        ));
+        assert!(
+            RuntimeLifecycle::ready(&state, session),
+            "nothing is being waited for, so nothing is gated"
+        );
+
+        // And the contrast, on the same shape: unanswered is not the same fact.
+        let mut unanswered = SessionState::default();
+        unanswered.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
+        assert!(
+            !RuntimeLifecycle::ready(&unanswered, session),
+            "an unresolved runtime must hold the turn, never run without one"
+        );
+    }
+
+    /// The same, for a workflow session — whose root is a run, not a main
+    /// agent.
+    ///
+    /// The two roots record the *same* fact and were not reading the spec the
+    /// same way: an agent session's root asked what the spec wanted, a run's
+    /// root always said "unanswered". A runtime-less run therefore waited
+    /// forever on a create that correctly never came.
+    #[test]
+    fn a_runtime_less_workflow_session_is_ready_like_any_other() {
+        use crate::sessions::run_forest::{RunId, RuntimeChoice};
+        let session = seeded_session();
+        let graph = std::sync::Arc::new(crate::sessions::workflow::WorkflowRunSpec {
+            workflow: "nightly".into(),
+            start: "first".into(),
+            steps: Vec::new(),
+            input: String::new(),
+            max_steps: 1,
+        });
+
+        let mut without = SessionState::default();
+        without.forest.apply_root_workflow(
+            session,
+            "nightly".into(),
+            graph.clone(),
+            0,
+            RuntimeChoice::Without,
+        );
+        assert!(
+            RuntimeLifecycle::ready_on(
+                without.runtime_of_choice(without.forest.runtime_of_run(RunId(session)))
+            ),
+            "a run that asked for no runtime has nothing to wait for"
+        );
+
+        let mut pending = SessionState::default();
+        pending.forest.apply_root_workflow(
+            session,
+            "nightly".into(),
+            graph,
+            0,
+            RuntimeChoice::Pending,
+        );
+        assert!(
+            !RuntimeLifecycle::ready_on(
+                pending.runtime_of_choice(pending.forest.runtime_of_run(RunId(session)))
+            ),
+            "a run still waiting on its create must not start a step"
+        );
     }
 
     /// The message the session was created with waits in its agent's queue
@@ -307,19 +644,25 @@ mod tests {
     /// that answer is pushed to every agent.
     #[test]
     fn a_session_is_not_runnable_until_its_runtime_lands() {
-        let waiting = fold(vec![SessionDomainEvent::ProvisioningStarted { at_ms: 0 }]);
+        let waiting = provisioning(vec![SessionDomainEvent::ProvisioningStarted {
+            at_ms: 0,
+            runtime: rt(),
+        }]);
         assert_eq!(waiting.status(), SessionStatus::Provisioning);
         assert!(
-            !RuntimeLifecycle::ready(&waiting),
+            !RuntimeLifecycle::ready(&waiting, seeded_session()),
             "nothing may run before the runtime exists"
         );
 
         let ready = SessionActor::apply_event(
             waiting,
-            SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
+            SessionDomainEvent::ProvisioningSucceeded {
+                at_ms: 2,
+                runtime: rt(),
+            },
         );
         assert_eq!(ready.status(), SessionStatus::Idle);
-        assert!(RuntimeLifecycle::ready(&ready));
+        assert!(RuntimeLifecycle::ready(&ready, seeded_session()));
     }
 
     /// A create that failed on something retryable — an offline vendor, a
@@ -328,10 +671,14 @@ mod tests {
     /// "no such runtime" a later `get` would have invented.
     #[test]
     fn a_retryable_create_failure_is_reported_verbatim() {
-        let s = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+        let s = provisioning(vec![
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 0,
+                runtime: rt(),
+            },
             SessionDomainEvent::ProvisioningFailed {
                 at_ms: 1,
+                runtime: rt(),
                 error: "runtime vendor unavailable: vendor 'local' is not connected".into(),
                 terminal: false,
             },
@@ -354,16 +701,20 @@ mod tests {
     /// that it is gone. That is the whole defect in #239.
     #[test]
     fn a_failed_create_starts_no_turn() {
-        let s = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+        let s = provisioning(vec![
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 0,
+                runtime: rt(),
+            },
             SessionDomainEvent::ProvisioningFailed {
                 at_ms: 1,
+                runtime: rt(),
                 error: "runtime vendor unavailable".into(),
                 terminal: false,
             },
         ]);
         assert!(
-            !RuntimeLifecycle::ready(&s),
+            !RuntimeLifecycle::ready(&s, seeded_session()),
             "a session with no runtime must build one before it runs anything"
         );
     }
@@ -372,10 +723,14 @@ mod tests {
     /// the only one: it is the same `Gone` a `get` reports.
     #[test]
     fn a_terminal_create_failure_ends_the_session() {
-        let s = fold(vec![
-            SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+        let s = provisioning(vec![
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 0,
+                runtime: rt(),
+            },
             SessionDomainEvent::ProvisioningFailed {
                 at_ms: 1,
+                runtime: rt(),
                 error: "runtime is gone: vendor cannot provision".into(),
                 terminal: true,
             },
@@ -403,7 +758,10 @@ mod tests {
         let (session, journal) = spawn_unprovisioned(&f, id).await;
 
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: seeded_session(),
+                env: None,
+            }))
             .await
             .unwrap();
         let (tx, _rx) = oneshot::channel();
@@ -459,7 +817,13 @@ mod tests {
             &f,
             id,
             actor_spec_fixture(),
-            &[SessionDomainEvent::ProvisioningStarted { at_ms: 0 }],
+            &[
+                asked_for_rt(id),
+                SessionDomainEvent::ProvisioningStarted {
+                    at_ms: 0,
+                    runtime: rt(),
+                },
+            ],
         )
         .await;
         wait_for_state(&journal, id, "the runtime finished after a restart", |s| {
@@ -467,10 +831,7 @@ mod tests {
         })
         .await;
         assert!(
-            f.agent
-                .signals()
-                .iter()
-                .any(|s| s == &format!("create:{id}")),
+            f.agent.signals().iter().any(|s| s.starts_with("create:")),
             "the interrupted create has to be finished by somebody"
         );
     }
@@ -501,7 +862,10 @@ mod tests {
         let id = Uuid::new_v4();
         let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: seeded_session(),
+                env: None,
+            }))
             .await
             .unwrap();
         let failed = wait_for_state(
@@ -541,10 +905,7 @@ mod tests {
         })
         .await;
         assert!(
-            f.agent
-                .signals()
-                .iter()
-                .any(|s| s == &format!("create:{id}")),
+            f.agent.signals().iter().any(|s| s.starts_with("create:")),
             "the retry has to build the runtime, not ask for one: {:?}",
             f.agent.signals()
         );
@@ -576,9 +937,14 @@ mod tests {
             id,
             actor_spec_fixture(),
             &[
-                SessionDomainEvent::ProvisioningStarted { at_ms: 0 },
+                asked_for_rt(id),
+                SessionDomainEvent::ProvisioningStarted {
+                    at_ms: 0,
+                    runtime: rt(),
+                },
                 SessionDomainEvent::ProvisioningFailed {
                     at_ms: 1,
+                    runtime: rt(),
                     error: "runtime vendor unavailable: vendor 'mock' is not connected".into(),
                     terminal: false,
                 },
@@ -590,10 +956,7 @@ mod tests {
         })
         .await;
         assert!(
-            f.agent
-                .signals()
-                .iter()
-                .any(|s| s == &format!("create:{id}")),
+            f.agent.signals().iter().any(|s| s.starts_with("create:")),
             "the runtime has to actually get built: {:?}",
             f.agent.signals()
         );
@@ -613,7 +976,10 @@ mod tests {
         let id = Uuid::new_v4();
         let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: seeded_session(),
+                env: None,
+            }))
             .await
             .unwrap();
 
@@ -656,7 +1022,10 @@ mod tests {
         let id = Uuid::new_v4();
         let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: seeded_session(),
+                env: None,
+            }))
             .await
             .unwrap();
         let events = wait_for_events(&journal, id, "the create finishing", |events| {
@@ -682,7 +1051,10 @@ mod tests {
         let id = Uuid::new_v4();
         let (session, journal) = spawn_unprovisioned(&f, id).await;
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: seeded_session(),
+                env: None,
+            }))
             .await
             .unwrap();
         // Asserted on the event, not the folded status: a session that has not
@@ -698,6 +1070,7 @@ mod tests {
         session
             .tell(SessionCommand::Lifecycle(
                 LifecycleCommand::NarrateProvisioning {
+                    runtime: rt(),
                     detail: BOOTING_CREATE.into(),
                 },
             ))
@@ -723,7 +1096,14 @@ mod tests {
         let id = Uuid::new_v4();
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &actor_spec_fixture()
+                    .runtime_env()
+                    .expect("the fixture has a runtime"),
+            )
             .await
             .expect("create");
         let provider = BlockingProvider::new();

@@ -54,21 +54,73 @@ impl Reads {
             }
             ReadCommand::PageLog {
                 agent_id,
-                before,
+                anchor,
                 max,
+                filter,
                 reply,
             } => {
                 let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
                     Some((_, agent)) => agent
                         .ask(|reply| {
-                            AgentCommand::Read(AgentReadCommand::PageLog { before, max, reply })
+                            AgentCommand::Read(AgentReadCommand::PageLog {
+                                anchor,
+                                max,
+                                filter,
+                                reply,
+                            })
                         })
                         .await
                         .ok(),
                     None => None,
                 };
                 let _ = reply.send(page);
+                CommandEffect::none()
+            }
+            ReadCommand::SearchLog {
+                agent_id,
+                needle,
+                max,
+                filter,
+                reply,
+            } => {
+                let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
+                let hits = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| {
+                            AgentCommand::Read(AgentReadCommand::SearchLog {
+                                needle,
+                                max,
+                                filter,
+                                reply,
+                            })
+                        })
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let _ = reply.send(hits);
+                CommandEffect::none()
+            }
+            ReadCommand::SeqOfId {
+                agent_id,
+                entry_id,
+                reply,
+            } => {
+                let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
+                let seq = match agent {
+                    Some((_, agent)) => agent
+                        .ask(|reply| {
+                            AgentCommand::Read(AgentReadCommand::SeqOfId {
+                                id: entry_id,
+                                reply,
+                            })
+                        })
+                        .await
+                        .ok(),
+                    None => None,
+                };
+                let _ = reply.send(seq);
                 CommandEffect::none()
             }
             ReadCommand::Agent { agent_id, reply } => {
@@ -113,6 +165,7 @@ fn main_entry(
         title: state.forest.main_title().map(str::to_string),
         depth: 0,
         agent_type: None,
+        preset: None,
         status: match status {
             SessionStatus::Provisioning => AgentStatus::Provisioning,
             SessionStatus::Running => AgentStatus::Running,
@@ -156,6 +209,7 @@ fn step_entry(execution: &StepRun, state: &SessionState, model: Option<String>) 
         title: Some(execution.step.clone()),
         depth: 0,
         agent_type: None,
+        preset: None,
         status: match execution.status {
             StepStatus::Running => AgentStatus::Running,
             StepStatus::Concluded => AgentStatus::Completed,
@@ -226,6 +280,8 @@ fn sub_session_as_agent(entry: &SubSessionEntry) -> AgentEntry {
         agent_type: None,
         status: entry.status,
         error: None,
+        // Stamped by the roster loop, like every other entry's.
+        preset: None,
         kind: AgentKind::SubSession,
         input: Some(entry.input.clone()),
         // A session is talked to; it owes nobody a result.
@@ -265,6 +321,7 @@ fn sub_entry(
         title: Some(rec.title.clone()),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
+        preset: None,
         status: match rec.status {
             SubAgentStatus::Running => AgentStatus::Running,
             SubAgentStatus::Completed => AgentStatus::Completed,
@@ -306,7 +363,7 @@ impl SessionActor {
                 self.id,
                 state,
                 &state.status(),
-                self.model_of(state, AgentKey::Main),
+                self.model_of(state, MAIN_AGENT_ID),
             )],
         };
         // Every run's executions — the session's own and any invoked one's —
@@ -318,27 +375,60 @@ impl SessionActor {
                 .workflows()
                 .flat_map(|(_, w)| w.run.steps.iter())
                 .map(|execution| {
-                    let model = self.model_of(state, AgentKey::Step(execution.agent));
+                    let model = self.model_of(state, &execution.agent.to_string());
                     step_entry(execution, state, model)
                 }),
         );
         agents.extend(state.forest.sub_ids().into_iter().filter_map(|id| {
-            let model = self.model_of(state, AgentKey::Sub(id));
+            let model = self.model_of(state, &id.to_string());
             state
                 .forest
                 .sub(id)
                 .map(|rec| sub_entry(id, state, rec, model))
         }));
+        // Stamped here, once, over whatever the per-kind builders produced.
+        // Those builders each see one slice of the forest; only the actor can
+        // resolve settings for an arbitrary key, and resolving it in four
+        // places is four chances for main, step, subagent and sub session to
+        // disagree about what they ran under.
+        for entry in &mut agents {
+            entry.preset = self.preset_of(state, &entry.id);
+        }
         agents
     }
 
-    /// The model one agent runs under, as a name the HTTP layer can look a
-    /// context window up by. `None` for an agent whose settings cannot be
-    /// resolved — a step whose definition has gone, or a session that has not
-    /// been told what it is.
-    fn model_of(&self, state: &SessionState, key: AgentKey) -> Option<String> {
+    /// The settings one agent runs under, by the id the roster speaks. `None`
+    /// for an id this session does not host.
+    ///
+    /// Read-only, unlike `resolve_agent`: this answers about an agent's
+    /// configuration and must not spawn a cold one to do it — the roster asks
+    /// for every agent at once, and a session with a finished run would then
+    /// wake every step it ever executed just to render a list.
+    fn settings_of<'a>(
+        &'a self,
+        state: &'a SessionState,
+        agent_id: &str,
+    ) -> Option<&'a crate::sessions::spec::AgentSettings> {
+        let key = match agent_id {
+            MAIN_AGENT_ID => AgentKey::Main,
+            other => self.agent_key_of(state, Uuid::parse_str(other).ok()?)?,
+        };
         self.effective_settings(state, key)
-            .map(|settings| settings.model.clone())
+    }
+
+    /// The saved preset an agent's settings came from. `None` for an agent
+    /// configured inline.
+    pub(super) fn preset_of(&self, state: &SessionState, agent_id: &str) -> Option<String> {
+        self.settings_of(state, agent_id)
+            .and_then(|s| s.source.preset())
+            .map(str::to_string)
+    }
+
+    /// The model it runs, as a name the HTTP layer can look a context window
+    /// up by — which this actor cannot, not knowing which models are
+    /// configured.
+    fn model_of(&self, state: &SessionState, agent_id: &str) -> Option<String> {
+        self.settings_of(state, agent_id).map(|s| s.model.clone())
     }
 
     /// Every sub session branched out of this one, with the numbers only this
@@ -349,7 +439,7 @@ impl SessionActor {
             .sub_session_ids()
             .into_iter()
             .filter_map(|id| {
-                let model = self.model_of(state, AgentKey::SubSession(id));
+                let model = self.model_of(state, &id.to_string());
                 state
                     .forest
                     .sub_session(id)
@@ -383,8 +473,8 @@ impl SessionActor {
             AgentKey::Sub(id) => state.forest.sub(id),
             AgentKey::Main | AgentKey::Step(_) | AgentKey::SubSession(_) => None,
         };
-        let model = self.model_of(state, key);
-        let entry = match key {
+        let model = self.effective_settings(state, key).map(|s| s.model.clone());
+        let mut entry = match key {
             AgentKey::Main => main_entry(self.id, state, &state.status(), model),
             AgentKey::Step(_) => step_entry(execution?, state, model),
             AgentKey::Sub(id) => sub_entry(id, state, node?, model),
@@ -395,6 +485,13 @@ impl SessionActor {
                 model,
             )),
         };
+        // From the settings just below, not from a second lookup: one agent
+        // read must not be able to say it runs under one preset and was
+        // configured by another.
+        entry.preset = self
+            .effective_settings(state, key)
+            .and_then(|s| s.source.preset())
+            .map(str::to_string);
         Some(AgentDetail {
             entry,
             // Resolved from the key, never from the session's own settings: a
@@ -566,6 +663,8 @@ mod tests {
                         seed: crate::sessions::run_forest::SeedMode::Fresh,
                         message: "try the other migration".into(),
                         title: "the other migration".into(),
+                        // Nothing named, so it works where its parent works.
+                        env: crate::sessions::session_actor::RequestedRuntime::Inherit,
                         reply,
                     },
                 )
@@ -674,7 +773,12 @@ mod tests {
         };
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &spec)
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &spec.runtime_env().expect("the fixture has a runtime"),
+            )
             .await
             .expect("create");
         // The plan step concludes and routes to code; code stays in flight on
@@ -841,7 +945,14 @@ mod tests {
         let id = Uuid::new_v4();
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &actor_spec_fixture())
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &actor_spec_fixture()
+                    .runtime_env()
+                    .expect("the fixture has a runtime"),
+            )
             .await
             .expect("create");
         f.deps.provider_registry.write().unwrap().insert(

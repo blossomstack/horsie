@@ -20,7 +20,8 @@
 
 use crate::sessions::addressing::SessionRef;
 use crate::sessions::run_forest::SeedMode;
-use crate::sessions::session_actor::{SessionCommand, SubSessionCommand};
+use crate::sessions::session_actor::{RequestedRuntime, SessionCommand, SubSessionCommand};
+use crate::sessions::spec::RuntimeEnv;
 use async_trait::async_trait;
 use horsie_agentcore::{ToolCallError, ToolOutcome, ToolSpec, Toolbox};
 use serde_json::{Value, json};
@@ -30,7 +31,7 @@ use uuid::Uuid;
 /// Name of the built-in sub-session hand-off tool.
 pub const SPAWN_SUBSESSION_TOOL: &str = "spawn_subsession";
 
-fn spawn_subsession_spec() -> ToolSpec {
+fn spawn_subsession_spec(environments: &[(String, String)]) -> ToolSpec {
     ToolSpec {
         name: SPAWN_SUBSESSION_TOOL.to_string(),
         description: "Start a sub session — a second session under this one — and hand it \
@@ -56,6 +57,10 @@ fn spawn_subsession_spec() -> ToolSpec {
                         this is what the user sees in their session list and in this \
                         session's agent graph."
                 },
+                "environment": {
+                    "type": "string",
+                    "description": environment_help(environments)
+                },
                 "task": {
                     "type": "string",
                     "description": "The complete, self-contained task for the sub \
@@ -67,20 +72,80 @@ fn spawn_subsession_spec() -> ToolSpec {
     }
 }
 
+/// What the `environment` parameter accepts, listed the way `invoke_workflow`
+/// lists its saved workflows: in prose the model reads to *choose* with, not as
+/// a bare enum of names that says nothing about when to pick one.
+///
+/// The listing is a snapshot from when this turn's toolbox was built; the call
+/// re-resolves, so a name gone stale degrades to a clean refusal rather than a
+/// wrong sandbox.
+fn environment_help(environments: &[(String, String)]) -> String {
+    let mut help = "Where the sub session runs. Omit it — the usual case — and \
+        the sub session shares this session's runtime and workspace, so it \
+        picks up the same checkout and the same uncommitted edits. \
+        \n\nPass \"none\" to give it no sandbox at all: no shell, no files, no \
+        skills. Only worth it for work that is purely reasoning or purely \
+        about calling MCP tools."
+        .to_string();
+    if environments.is_empty() {
+        return help;
+    }
+    let listing = environments
+        .iter()
+        .map(|(name, description)| match description.is_empty() {
+            true => format!("- {name}"),
+            false => format!("- {name}: {description}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    help.push_str(&format!(
+        "\n\nOr name a saved environment to give the sub session a machine of \
+         its own, built fresh. It will not see this session's workspace or \
+         edits, and it takes minutes to come up — so pick one only when the \
+         work genuinely needs a different machine:\n{listing}"
+    ));
+    help
+}
+
 /// Wraps a session's toolbox, adding `spawn_subsession`.
 pub struct SubSessionToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
     /// The session that branches — the main agent's id is the session's.
     caller: Uuid,
+    /// Saved environments as they stood when this toolbox was built: name and
+    /// description, for the tool's own prose.
+    environments: Vec<(String, String)>,
+    /// Resolves a name into something a runtime can be built from. Held rather
+    /// than reached through the session, because resolving is a database read
+    /// and the session's mailbox must not wait on one.
+    resolver: Option<Arc<dyn EnvironmentResolver>>,
+}
+
+/// Turns the name a model wrote into the environment a runtime is built from.
+///
+/// A trait rather than the concrete service so this file — which a model's
+/// words reach directly — has no opinion about where environments are stored,
+/// and so a test can answer without a database.
+#[async_trait]
+pub trait EnvironmentResolver: Send + Sync + 'static {
+    async fn resolve(&self, name: &str) -> Result<RuntimeEnv, String>;
 }
 
 impl SubSessionToolbox {
-    pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef, caller: Uuid) -> Self {
+    pub fn new(
+        inner: Arc<dyn Toolbox>,
+        session: SessionRef,
+        caller: Uuid,
+        environments: Vec<(String, String)>,
+        resolver: Option<Arc<dyn EnvironmentResolver>>,
+    ) -> Self {
         Self {
             inner,
             session,
             caller,
+            environments,
+            resolver,
         }
     }
 }
@@ -89,7 +154,7 @@ impl SubSessionToolbox {
 impl Toolbox for SubSessionToolbox {
     fn specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.inner.specs();
-        specs.push(spawn_subsession_spec());
+        specs.push(spawn_subsession_spec(&self.environments));
         specs
     }
 
@@ -110,6 +175,30 @@ impl Toolbox for SubSessionToolbox {
             .get("task")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'task'".to_string()))?;
+        // Resolved here, on this agent's own task: a name reaches a database,
+        // and the session's mailbox must not wait on one. A name that does not
+        // resolve is a refusal the model reads and can correct, not a sub
+        // session built somewhere unintended.
+        // Three answers, one variant each. Omitting the parameter must not
+        // mean "no sandbox": a model that just wants to hand work off writes no
+        // `environment`, and silently taking its filesystem away is the
+        // opposite of what it asked for.
+        let env = match input.get("environment").and_then(Value::as_str) {
+            None => RequestedRuntime::Inherit,
+            // The one name that resolves to nothing rather than failing: an
+            // explicit "no sandbox" is an answer, not a missing environment.
+            Some("none") => RequestedRuntime::Without,
+            Some(name) => {
+                let resolver = self.resolver.as_ref().ok_or_else(|| {
+                    ToolCallError::ExecutionFailed(
+                        "this server has no saved environments".to_string(),
+                    )
+                })?;
+                RequestedRuntime::Own(Box::new(resolver.resolve(name).await.map_err(|e| {
+                    ToolCallError::InvalidInput(format!("no environment named '{name}': {e}"))
+                })?))
+            }
+        };
         let id = self
             .session
             .ask(|reply| {
@@ -118,15 +207,27 @@ impl Toolbox for SubSessionToolbox {
                     seed: SeedMode::Fresh,
                     message: task.to_string(),
                     title: title.to_string(),
+                    env: env.clone(),
                     reply,
                 })
             })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?
             .map_err(ToolCallError::ExecutionFailed)?;
+        // What it got, said plainly: a model that asked for a machine of its
+        // own and silently received a shared one would go on to give the sub
+        // session instructions that assume a fresh checkout.
+        let where_it_runs = match env {
+            RequestedRuntime::Inherit => "It shares this session's workspace.".to_string(),
+            RequestedRuntime::Without => "It has no sandbox: no shell, no files.".to_string(),
+            RequestedRuntime::Own(env) => format!(
+                "It is building a machine of its own on '{}'; its first turn waits for that.",
+                env.vendor
+            ),
+        };
         Ok(ToolOutcome::Result(Value::String(format!(
-            "Started a sub session: {id}. It carries on with the user from here; you will \
-             hear nothing back from it."
+            "Started a sub session: {id}. {where_it_runs} It carries on with the user from \
+             here; you will hear nothing back from it."
         ))))
     }
 }
@@ -151,11 +252,16 @@ mod tests {
     #[derive(Serialize, Deserialize, Default)]
     struct Empty;
 
+    /// What the stub records of each `Create` it answered: who asked, how the
+    /// sub session is seeded, the message, the title it was given, and where
+    /// it was told to run.
+    type Created = Arc<Mutex<Vec<(Uuid, SeedMode, String, String, String)>>>;
+
     /// Answers `Create` the way the session will, and records what it was
     /// asked for — the tool's whole job is to turn a call into that command.
     struct StubSession {
         result: Result<Uuid, String>,
-        seen: Seen,
+        seen: Created,
     }
 
     #[async_trait::async_trait]
@@ -184,26 +290,57 @@ mod tests {
                 seed,
                 message,
                 title,
+                env,
                 reply,
             }) = cmd.cmd
             {
-                self.seen
-                    .lock()
-                    .unwrap()
-                    .push((parent, seed, message, title));
+                self.seen.lock().unwrap().push((
+                    parent,
+                    seed,
+                    message,
+                    title,
+                    // The variant itself, not a flattened vendor: telling
+                    // `Inherit` from `Without` is the whole point of the
+                    // type, so a test that collapsed them could not catch
+                    // the flaw it exists to prevent.
+                    match env {
+                        RequestedRuntime::Inherit => "inherit".to_string(),
+                        RequestedRuntime::Without => "without".to_string(),
+                        RequestedRuntime::Own(e) => format!("own:{}", e.vendor),
+                    },
+                ));
                 let _ = reply.send(self.result.clone());
             }
             CommandEffect::none()
         }
     }
 
-    /// What the fake session recorded: caller, seed mode, brief, title.
-    type Seen = Arc<Mutex<Vec<(Uuid, SeedMode, String, String)>>>;
-
     struct Harness {
         toolbox: SubSessionToolbox,
         caller: Uuid,
-        seen: Seen,
+        /// What the session was asked for: who branched, how it is seeded, the
+        /// brief, the title, and which of the three runtime answers it carried.
+        seen: Created,
+    }
+
+    /// Answers any name with a runtime on a vendor called after it, so a test
+    /// can tell which environment a call resolved without a database.
+    struct StubEnvironments;
+
+    #[async_trait]
+    impl EnvironmentResolver for StubEnvironments {
+        async fn resolve(&self, name: &str) -> Result<RuntimeEnv, String> {
+            if name == "missing" {
+                return Err("unknown environment 'missing'".to_string());
+            }
+            Ok(RuntimeEnv {
+                vendor: format!("vendor-for-{name}"),
+                workspaces: Vec::new(),
+                provision: Vec::new(),
+                env_vars: Vec::new(),
+                environment: Some(name.to_string()),
+            })
+        }
     }
 
     fn harness(result: Result<Uuid, String>) -> Harness {
@@ -222,7 +359,13 @@ mod tests {
         );
         let caller = Uuid::new_v4();
         Harness {
-            toolbox: SubSessionToolbox::new(Arc::new(EmptyToolbox), session, caller),
+            toolbox: SubSessionToolbox::new(
+                Arc::new(EmptyToolbox),
+                session,
+                caller,
+                vec![("staging".to_string(), "a throwaway copy".to_string())],
+                Some(Arc::new(StubEnvironments) as Arc<dyn EnvironmentResolver>),
+            ),
             caller,
             seen,
         }
@@ -244,7 +387,7 @@ mod tests {
     /// here.
     #[test]
     fn the_description_says_nothing_comes_back_and_nothing_goes_with_it() {
-        let spec = spawn_subsession_spec();
+        let spec = spawn_subsession_spec(&[]);
         assert!(spec.description.contains("never reports back"), "{spec:?}");
         assert!(spec.description.contains("spawn_agent"), "{spec:?}");
         assert!(
@@ -279,7 +422,9 @@ mod tests {
                 h.caller,
                 SeedMode::Fresh,
                 "try the other migration".to_string(),
-                "the other migration".to_string()
+                "the other migration".to_string(),
+                // Omitted, so it inherits.
+                "inherit".to_string()
             )]
         );
         match out {
@@ -302,6 +447,152 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));
         assert!(h.seen.lock().unwrap().is_empty());
+    }
+
+    /// The three answers the `environment` parameter can give, and the fact
+    /// that they are three rather than two.
+    ///
+    /// Omitting it must not mean "no sandbox": a model that just wants to hand
+    /// work off writes no `environment`, and silently taking its filesystem
+    /// away would break the sub session in a way neither party asked for.
+    #[tokio::test]
+    async fn omitting_the_environment_inherits_and_naming_none_does_not() {
+        let h = harness(Ok(Uuid::new_v4()));
+        h.toolbox
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "go"}),
+                "tc1",
+            )
+            .await
+            .unwrap();
+        h.toolbox
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "think", "environment": "none"}),
+                "tc2",
+            )
+            .await
+            .unwrap();
+        h.toolbox
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "build", "environment": "staging"}),
+                "tc3",
+            )
+            .await
+            .unwrap();
+
+        let seen = h.seen.lock().unwrap();
+        // Both of the first two carry no environment to the session, and they
+        // are still different asks: the session tells them apart by whether the
+        // sub session was pointed at a runtime of its own.
+        // Three distinct answers reach the session. Omitting the parameter and
+        // asking for "none" must not arrive as the same thing: the first shares
+        // the parent's sandbox, the second has none, and a model that omitted
+        // it did not ask to lose its filesystem.
+        assert_eq!(seen[0].4, "inherit", "omitted inherits");
+        assert_eq!(seen[1].4, "without", "\"none\" asks for no sandbox");
+        assert_eq!(
+            seen[2].4, "own:vendor-for-staging",
+            "a named environment is resolved before the session is asked"
+        );
+    }
+
+    /// And the model is told which of the three it got. A model that asked for
+    /// a machine of its own and silently received a shared one would go on to
+    /// brief the sub session as though it had a fresh checkout.
+    #[tokio::test]
+    async fn the_result_says_where_the_sub_session_runs() {
+        let h = harness(Ok(Uuid::new_v4()));
+        let text = |out: ToolOutcome| match out {
+            ToolOutcome::Result(Value::String(t)) => t,
+            other => panic!("{other:?}"),
+        };
+        let inherited = text(
+            h.toolbox
+                .execute(
+                    SPAWN_SUBSESSION_TOOL,
+                    json!({"title": "a branch", "task": "go"}),
+                    "tc1",
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(
+            inherited.contains("shares this session's workspace"),
+            "{inherited}"
+        );
+
+        let none = text(
+            h.toolbox
+                .execute(
+                    SPAWN_SUBSESSION_TOOL,
+                    json!({"title": "a branch", "task": "think", "environment": "none"}),
+                    "tc2",
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(none.contains("no sandbox"), "{none}");
+
+        let own = text(
+            h.toolbox
+                .execute(
+                    SPAWN_SUBSESSION_TOOL,
+                    json!({"title": "a branch", "task": "build", "environment": "staging"}),
+                    "tc3",
+                )
+                .await
+                .unwrap(),
+        );
+        assert!(own.contains("vendor-for-staging"), "{own}");
+        assert!(own.contains("waits"), "the wait has to be said: {own}");
+    }
+
+    /// A name that does not resolve is a refusal the model reads and can
+    /// correct — never a sub session quietly built somewhere else.
+    #[tokio::test]
+    async fn an_unknown_environment_refuses_before_anything_is_created() {
+        let h = harness(Ok(Uuid::new_v4()));
+        let err = h
+            .toolbox
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "go", "environment": "missing"}),
+                "tc1",
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolCallError::InvalidInput(ref m) if m.contains("missing")),
+            "{err:?}"
+        );
+        assert!(
+            h.seen.lock().unwrap().is_empty(),
+            "nothing may be created when the environment did not resolve"
+        );
+    }
+
+    /// The saved environments ride in the description, the way
+    /// `invoke_workflow` carries its catalogue — a bare name parameter says
+    /// nothing about when to pick one.
+    #[test]
+    fn the_description_lists_the_environments_and_says_omitting_is_normal() {
+        let listed = spawn_subsession_spec(&[("staging".into(), "a throwaway copy".into())]);
+        let help = listed.input_schema["properties"]["environment"]["description"]
+            .as_str()
+            .expect("the environment parameter documents itself");
+        assert!(help.contains("staging: a throwaway copy"), "{help}");
+        assert!(help.contains("Omit it"), "{help}");
+        assert!(help.contains("\"none\""), "{help}");
+
+        // With none saved, the listing is absent rather than an empty heading.
+        let bare = spawn_subsession_spec(&[]);
+        let help = bare.input_schema["properties"]["environment"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(!help.contains("saved environment"), "{help}");
     }
 
     #[tokio::test]

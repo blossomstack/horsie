@@ -1,4 +1,4 @@
-//! One interactive session: the conversational state machine and the owner of
+//! One interactive session: the session state machine and the owner of
 //! its agents.
 //!
 //! Three things are deliberately *not* here. The session does not know how a
@@ -137,6 +137,12 @@ impl SessionAgents {
         self.live.insert(id, agent);
     }
 
+    /// Every resident agent with the id it is registered under — which is the
+    /// id the forest resolves a runtime for.
+    fn iter(&self) -> impl Iterator<Item = (Uuid, &ResidentAgent)> {
+        self.live.iter().map(|(id, agent)| (*id, agent))
+    }
+
     /// Forget one agent, handing it back so the caller can stop it. Only a sub
     /// session's delete uses this: every other agent lives as long as the
     /// session is loaded, and nothing else removes one on request.
@@ -168,6 +174,14 @@ struct AgentPlan {
     /// Where a sub session came from, for the section of its system prompt
     /// that says so. `None` for every other kind of agent.
     origin: Option<crate::sessions::session_actor::context::SubSessionOrigin>,
+    /// The run to resolve this agent's runtime through, when the forest cannot
+    /// yet resolve it by the agent's own id.
+    ///
+    /// Only a step needs it, and only because it is spawned in the same breath
+    /// that journals the entry naming it. Asking the run instead is exact
+    /// rather than approximate: a step never chooses a runtime of its own, so
+    /// its run's answer *is* its answer.
+    runtime_via: Option<crate::sessions::run_forest::RunId>,
 }
 
 pub struct SessionActor {
@@ -211,6 +225,68 @@ pub struct SessionActor {
     /// — which costs nothing, because a session with no sub sessions reports
     /// none either way.
     last_reported_sub_sessions: Vec<SubSessionRow>,
+    /// The agent-run rows this actor last wrote to the index, so a batch that
+    /// changed nothing writes nothing.
+    ///
+    /// The whole point of holding it: an agent's log grows on every turn but
+    /// its *row* — who it is, what preset, whether it is over — changes twice
+    /// in its life. Comparing against this is what turns "write the roster on
+    /// every persisted batch" into those two writes.
+    last_indexed_runs: Vec<crate::agent_runs::AgentRunRow>,
+    /// The last index write this actor spawned, so the next one can queue
+    /// behind it.
+    ///
+    /// A chain rather than a channel: there is at most one of these in flight
+    /// at a time and two per agent run in total, so a consumer task with a
+    /// mailbox would be machinery for a queue that is almost always empty.
+    indexing: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// How `agent` reaches its sandbox, as `state` resolves it right now.
+///
+/// The three answers are kept distinct all the way to the agent: a runtime it
+/// can address, a deliberate absence of one, or an answer the session has not
+/// given yet. Collapsing the last two is what let an agent spawned during a
+/// create run its first turn with no tools at all.
+pub(in crate::sessions::session_actor) fn runtime_binding(
+    deps: &ServerDeps,
+    state: &SessionState,
+    agent: Uuid,
+) -> crate::sessions::session_actor::context::AgentRuntimeBinding {
+    runtime_binding_for(deps, state, state.forest.runtime_of_agent(agent))
+}
+
+/// The same, from a choice already resolved by some other walk.
+pub(in crate::sessions::session_actor) fn runtime_binding_for(
+    deps: &ServerDeps,
+    state: &SessionState,
+    choice: crate::sessions::run_forest::RuntimeChoice,
+) -> crate::sessions::session_actor::context::AgentRuntimeBinding {
+    use crate::sessions::session_actor::context::AgentRuntimeBinding;
+    match state.runtime_of_choice(choice) {
+        AgentRuntime::On(runtime, rec) => AgentRuntimeBinding::On(Box::new(
+            deps.runtimes.provider(
+                runtime.to_string(),
+                // The provision this run speaks to. One that has never provisioned
+                // has none, and the empty string is what the acquisition will fail
+                // on rather than silently addressing some other sandbox.
+                rec.provisioning
+                    .at_ms()
+                    .map(|at| at.to_string())
+                    .unwrap_or_default(),
+                // A create is still outstanding. The journal is the only thing
+                // that knows, and it has to say so: a substrate that has not
+                // reported the object yet is indistinguishable from one with
+                // nothing there, and the difference is between waiting for a
+                // runtime and declaring it gone.
+                matches!(rec.provisioning, ProvisioningState::InFlight { .. }),
+                rec.env.vendor.clone(),
+                rec.env.clone(),
+            ),
+        )),
+        AgentRuntime::Without => AgentRuntimeBinding::Without,
+        AgentRuntime::Pending => AgentRuntimeBinding::Pending,
+    }
 }
 
 impl SessionActor {
@@ -229,6 +305,8 @@ impl SessionActor {
             agents: SessionAgents::new(entity.session),
             last_reported: None,
             last_reported_sub_sessions: Vec::new(),
+            last_indexed_runs: Vec::new(),
+            indexing: None,
         }
     }
 
@@ -432,6 +510,131 @@ impl SessionActor {
             .await;
     }
 
+    /// This session's rows for the agent-run index, derived from the roster.
+    ///
+    /// Pure, so the diffing below and the load-time reconcile agree by
+    /// construction rather than by two people keeping them in step.
+    fn agent_run_rows(&self, state: &SessionState) -> Vec<crate::agent_runs::AgentRunRow> {
+        self.agent_roster(state)
+            .into_iter()
+            .map(|entry| crate::agent_runs::AgentRunRow {
+                session_id: self.id.to_string(),
+                agent_id: entry.id,
+                preset: entry.preset,
+                status: entry.status.as_wire().to_string(),
+                started_at: i64::try_from(entry.started_at_ms).unwrap_or(i64::MAX),
+                // Zero means "no end", which is what a `SubAgentView` carries
+                // for a run still going *and* for a main agent that will never
+                // have one. NULL is the honest column value for both.
+                ended_at: (entry.ended_at_ms != 0)
+                    .then(|| i64::try_from(entry.ended_at_ms).unwrap_or(i64::MAX)),
+            })
+            .collect()
+    }
+
+    /// Run an index write off this actor's task, behind whatever it last
+    /// spawned.
+    ///
+    /// Off the mailbox because the index is a read model and the session is
+    /// not: making a turn wait for a row to land trades the thing that matters
+    /// for the thing that does not. Chained rather than free-running because
+    /// the rows describe a moving state — "this run ended" arriving before
+    /// "this run started" would leave the index claiming the opposite of what
+    /// happened.
+    fn spawn_index_write<F>(&mut self, write: F)
+    where
+        F: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let previous = self.indexing.take();
+        let session = self.id;
+        self.indexing = Some(tokio::spawn(async move {
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
+            if let Err(e) = write.await {
+                // Not fatal, and deliberately not retried here. A lost write
+                // costs a reader one run's visibility until this session is
+                // next loaded, where the reconcile puts it back.
+                tracing::warn!(error = %e, %session, "agent-run index write failed");
+            }
+        }));
+    }
+
+    /// Write what changed about this session's agent runs into the index.
+    ///
+    /// Only the difference, which is what keeps this to two writes per run: an
+    /// agent's row is written when it first appears and again when it reaches a
+    /// terminal state, and a session that runs for an hour without gaining or
+    /// finishing one writes nothing at all.
+    ///
+    /// Removals are not handled here — an agent leaving a roster is not an
+    /// event this can see the far side of, and inferring a deletion from a
+    /// shorter list would delete every row whenever a reload started the
+    /// comparison from empty. `reconcile_agent_runs` at load is what makes the
+    /// index agree again.
+    fn index_agent_runs(&mut self, state: &SessionState) {
+        let rows = self.agent_run_rows(state);
+        if rows == self.last_indexed_runs {
+            return;
+        }
+        let changed: Vec<crate::agent_runs::AgentRunRow> = rows
+            .iter()
+            .filter(|row| !self.last_indexed_runs.contains(row))
+            .cloned()
+            .collect();
+        // Updated here rather than after the write lands: this is what *this
+        // actor has decided to write*, and the spawned chain preserves that
+        // order. Waiting for the write would mean holding the mailbox, which
+        // is the whole thing being avoided.
+        self.last_indexed_runs = rows;
+        if changed.is_empty() {
+            return;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        self.spawn_index_write(async move { services.agent_runs.record(&changed).await });
+    }
+
+    /// Make the index agree with this session's own state, wholesale.
+    ///
+    /// Runs once at load. Covers both directions the incremental write cannot:
+    /// a row lost to a crash between the persist and the write, and a row for
+    /// an agent this session no longer hosts.
+    fn reconcile_agent_runs(&mut self, state: &SessionState) {
+        let rows = self.agent_run_rows(state);
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        self.last_indexed_runs = rows.clone();
+        let id = self.id.to_string();
+        self.spawn_index_write(async move { services.agent_runs.reconcile(&id, &rows).await });
+    }
+
+    /// Drop this session's rows from the index, because the session is going.
+    ///
+    /// The one index write that *is* awaited. The actor stops immediately
+    /// after, so a spawned task would be racing its own session's disappearance
+    /// — and an entry outliving its transcript is the failure this prevents.
+    async fn forget_agent_runs(&mut self) {
+        self.last_indexed_runs.clear();
+        // Drain what is queued first, or a `record` still in flight lands after
+        // the delete and resurrects the rows it was about to remove.
+        if let Some(previous) = self.indexing.take() {
+            let _ = previous.await;
+        }
+        let Some(services) = self.services.clone() else {
+            return;
+        };
+        if let Err(e) = services
+            .agent_runs
+            .forget_session(&self.id.to_string())
+            .await
+        {
+            tracing::warn!(error = %e, session = %self.id, "failed to drop agent runs");
+        }
+    }
+
     async fn report_status(&mut self, state: &SessionState) {
         let status = state.status();
         if self.last_reported.as_ref() == Some(&status) {
@@ -445,6 +648,26 @@ impl SessionActor {
                 status,
             })
             .await;
+    }
+
+    /// Re-point every resident agent at the runtime this state resolves for
+    /// it.
+    ///
+    /// Called whenever a runtime record changes, because an agent outlives the
+    /// answer: the main agent is spawned at load, when its session has not yet
+    /// asked for a runtime, and a sub session's agent may exist before the
+    /// runtime it asked for is built. Re-resolving rather than patching the
+    /// one that changed keeps this correct for a re-provision too, where the
+    /// incarnation moves under an agent that is already resident.
+    fn repoint_agent_runtimes(&self, state: &SessionState) {
+        for (id, resident) in self.agents.iter() {
+            let binding = runtime_binding(self.deps(), state, id);
+            *resident
+                .provider
+                .runtimes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = binding;
+        }
     }
 
     /// Spawn one of this session's agents and register it.
@@ -487,30 +710,20 @@ impl SessionActor {
             | SessionAgentKind::SubSession(id) => id.to_string(),
         };
         let key = plan.kind.agent_key();
+        // Which runtime *this agent* runs on, resolved through the forest: its
+        // own session's, or the sub session's that branched it, or none at all.
+        // Read here rather than per acquisition so every call in one run
+        // addresses the same sandbox even if the session re-provisions beneath
+        // it — the same reason the incarnation is bound once.
+        //
+        // The main agent is spawned at load, before its session has asked for
+        // a runtime, so this is routinely `Pending`. It stays behind a lock
+        // for exactly that reason: `runtime_bindings` re-points it when the
+        // create lands.
+        let choice = self.runtime_choice_for(state, &plan);
+        let runtimes = runtime_binding_for(self.deps(), state, choice);
         let provider = Arc::new(SessionContextProvider {
-            runtimes: self.deps().runtimes.provider(
-                self.id.to_string(),
-                // The provision this run speaks to. A session that has never
-                // provisioned has none, and the empty string is what the
-                // acquisition below will fail on rather than silently
-                // addressing some other sandbox.
-                state
-                    .provisioning
-                    .at_ms()
-                    .map(|at| at.to_string())
-                    .unwrap_or_default(),
-                // A create is still outstanding. The journal is the only thing
-                // that knows, and it has to say so: a substrate that has not
-                // reported the object yet is indistinguishable from one with
-                // nothing there, and the difference is between waiting for a
-                // runtime and declaring it gone.
-                matches!(
-                    state.provisioning,
-                    crate::sessions::session_actor::ProvisioningState::InFlight { .. }
-                ),
-                self.spec().vendor.clone(),
-                self.spec().clone(),
-            ),
+            runtimes: Mutex::new(runtimes),
             registry: self.deps().provider_registry.clone(),
             mcp: self.deps().mcp.clone(),
             memory: self.deps().memory.clone(),
@@ -557,7 +770,8 @@ impl SessionActor {
             // remembered: an agent built after the runtime landed starts ready,
             // and one built before it starts waiting. Changes reach it as the
             // `Runtime` records it is sent anyway.
-            ready: Self::runnable(state),
+            ready: RuntimeLifecycle::ready_on(state.runtime_of_choice(choice))
+                && state.fatal.is_none(),
         };
         // A child of this session, named by the id it journals under — `main`
         // for the primary agent, the node id for a subagent or a step. Created
@@ -599,6 +813,7 @@ impl SessionActor {
                 step_result: Default::default(),
                 agent_type: None,
                 origin: None,
+                runtime_via: None,
             },
         );
     }
@@ -939,9 +1154,14 @@ impl SessionActor {
     /// parent waiting on its children is work already in flight, and the next
     /// turn or step can wait a boundary.
     fn next_actions(&self, state: &SessionState) -> Vec<AgentAction> {
-        // Nothing starts before the runtime it would run on exists. One gate,
-        // checked once, for every component.
-        if !RuntimeLifecycle::ready(state) {
+        // Nothing the *session* drives starts before its own runtime exists.
+        // A sub session's turn is gated separately, by the `ready` flag its
+        // agent is built with, because it may be waiting on a different one.
+        //
+        // Walked from the root *entry* rather than from an agent with the
+        // session's id: a workflow session has no main agent, so there is no
+        // such agent to ask, and asking anyway answered "unresolved" forever.
+        if !RuntimeLifecycle::ready_on(self.session_runtime(state)) {
             return Vec::new();
         }
         [
@@ -1128,11 +1348,41 @@ impl SessionActor {
         }
     }
 
-    /// Whether this session's agents may start a turn at all: it has a runtime,
-    /// and it is not terminal. The whole of what an agent's own drain gate
-    /// cannot answer for itself.
-    fn runnable(state: &SessionState) -> bool {
-        RuntimeLifecycle::ready(state) && state.fatal.is_none()
+    /// Whether `agent` may start a turn at all: the runtime *it* runs on is
+    /// there, and the session is not terminal. The whole of what an agent's own
+    /// drain gate cannot answer for itself.
+    ///
+    /// Per agent since a session may own several runtimes: a sub session
+    /// waiting on a machine of its own must not hold back the session it
+    /// branched from, and an agent with no runtime at all is never waiting.
+    /// Which runtime the session itself drives work on.
+    ///
+    /// Walked from the root entry, so it answers for a workflow session — whose
+    /// root is a run, not a main agent — as readily as for an agent session.
+    fn session_runtime<'a>(&self, state: &'a SessionState) -> AgentRuntime<'a> {
+        state.runtime_of_choice(
+            state
+                .forest
+                .runtime_of_run(crate::sessions::run_forest::RunId(self.id)),
+        )
+    }
+
+    /// Which runtime the agent in `plan` will run on.
+    ///
+    /// A step is resolved through its run rather than through itself, because
+    /// the event that puts it in the forest persists *after* this call — and a
+    /// step never chooses a runtime of its own, so its run's answer is exact
+    /// rather than a stand-in.
+    fn runtime_choice_for(
+        &self,
+        state: &SessionState,
+        plan: &AgentPlan,
+    ) -> crate::sessions::run_forest::RuntimeChoice {
+        let agent = plan.kind.agent_id(self.id);
+        match plan.runtime_via {
+            Some(run) if !state.forest.is_known_agent(agent) => state.forest.runtime_of_run(run),
+            _ => state.forest.runtime_of_agent(agent),
+        }
     }
 
     /// Stop every agent this session hosts. Used when the session unloads.
@@ -1168,7 +1418,8 @@ impl EventSourcedActor for SessionActor {
 
     fn apply_event(mut state: SessionState, event: SessionDomainEvent) -> SessionState {
         match event {
-            SessionDomainEvent::ProvisioningStarted { .. }
+            SessionDomainEvent::RuntimeRequested { .. }
+            | SessionDomainEvent::ProvisioningStarted { .. }
             | SessionDomainEvent::ProvisioningProgress { .. }
             | SessionDomainEvent::ProvisioningSucceeded { .. }
             | SessionDomainEvent::ProvisioningFailed { .. } => {
@@ -1219,6 +1470,7 @@ impl EventSourcedActor for SessionActor {
         self.record_lifecycle(events, state).await;
         self.report_sub_sessions(state).await;
         self.report_status(state).await;
+        self.index_agent_runs(state);
     }
 
     /// Every command arrives addressed to a session, and this is the one place
@@ -1289,6 +1541,10 @@ impl EventSourcedActor for SessionActor {
             return;
         };
         self.adopt(spec, state, ctx).await;
+        // After `adopt`, which is what puts the spec on this actor — and so
+        // what lets `agent_roster` resolve a preset at all. Reconciling before
+        // it would file every agent this session hosts as ad-hoc.
+        self.reconcile_agent_runs(state);
     }
 }
 

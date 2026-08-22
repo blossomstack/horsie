@@ -39,6 +39,10 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await page
     .getByTestId("agent-instructions-input")
     .fill("Always end every reply with the word PELICAN.");
+  // Opting in has to be an act, so the box starts clear on a preset created
+  // through the API without mentioning tuning.
+  await expect(page.getByTestId("agent-tunable")).not.toBeChecked();
+  await page.getByTestId("agent-tunable").check();
   await page.getByTestId("save-agent-button").click();
   await page.waitForURL((url) => url.pathname === projectRoot() + "/agents");
   await expect(page.getByTestId("agent-row")).toContainText("edited");
@@ -47,6 +51,9 @@ test("N1: agents page lists, edits, and deletes an agent", async ({
   await expect(page.getByTestId("agent-instructions-input")).toHaveValue(
     "Always end every reply with the word PELICAN.",
   );
+  // Round-tripped through the API and back into the form. `PUT` is a full
+  // replace, so a flag the form failed to carry would come back off.
+  await expect(page.getByTestId("agent-tunable")).toBeChecked();
   await page.goto(`${appBase}/agents`);
 
   // Delete, accepting the confirm.

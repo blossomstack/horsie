@@ -84,11 +84,12 @@ async fn memory_spaces_and_memories_are_isolated() {
         name: "todo".into(),
         description: String::new(),
         content: content.into(),
+        revision: None,
         created_at: T.into(),
         updated_at: T.into(),
     };
-    mine.create_memory(&memory("mine")).await.unwrap();
-    theirs.create_memory(&memory("theirs")).await.unwrap();
+    mine.create_memory(&memory("mine"), "{}").await.unwrap();
+    theirs.create_memory(&memory("theirs"), "{}").await.unwrap();
     assert_eq!(mine.list_memories(None).await.unwrap().len(), 1);
     assert_eq!(
         mine.get_memory_by_ref("notes", "todo")
@@ -163,21 +164,42 @@ async fn agents_are_isolated() {
         updated_at: T.into(),
         auto_compact: None,
         allowed_tools: None,
+        tunable: None,
+        revision: None,
     };
-    mine.insert(&agent("mine")).await.unwrap();
+    mine.insert(&agent("mine"), "{}").await.unwrap();
 
     assert!(theirs.get("reviewer").await.unwrap().is_none());
     assert!(theirs.list().await.unwrap().is_empty());
 
-    theirs.insert(&agent("theirs")).await.unwrap();
+    theirs.insert(&agent("theirs"), "{}").await.unwrap();
     assert_eq!(mine.get("reviewer").await.unwrap().unwrap().model, "mine");
 
     // A replace against a name the other project owns matches nothing.
-    assert!(theirs.replace(&agent("clobbered")).await.unwrap());
+    assert!(
+        theirs
+            .replace(&agent("clobbered"), "{}")
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(mine.get("reviewer").await.unwrap().unwrap().model, "mine");
 
-    assert!(theirs.delete("reviewer").await.unwrap());
+    assert!(theirs.delete("reviewer", "{}", T).await.unwrap());
     assert!(mine.get("reviewer").await.unwrap().is_some());
+
+    // The history is scoped too: a project's revisions must not be readable —
+    // or restorable — from another's store.
+    use horsie_server::revisions::EntityKind;
+    assert!(
+        mine.revisions()
+            .list(EntityKind::Agent, "reviewer")
+            .await
+            .unwrap()
+            .len()
+            == 1,
+        "one project's writes are the only ones in its history"
+    );
 }
 
 #[tokio::test]

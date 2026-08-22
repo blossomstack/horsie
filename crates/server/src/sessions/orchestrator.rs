@@ -106,7 +106,11 @@ mod tests {
     fn owing_main(label: &str, output: &str) -> (SessionState, Uuid, Uuid) {
         let mut s = SessionState::default();
         let session = Uuid::new_v4();
-        s.forest.apply_root_agent(session, 0);
+        s.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         let id = Uuid::new_v4();
         s.forest
             .apply_sub_spawned(id, session, label.into(), "t".into(), None, 100);
@@ -156,7 +160,11 @@ mod tests {
     fn a_nested_child_is_owed_to_the_subagent_that_spawned_it() {
         let mut s = SessionState::default();
         let session = Uuid::new_v4();
-        s.forest.apply_root_agent(session, 0);
+        s.forest.apply_root_agent(
+            session,
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
         s.forest
@@ -189,8 +197,13 @@ mod tests {
             input: "go".into(),
             max_steps: 5,
         });
-        s.forest
-            .apply_root_workflow(session, "review".into(), graph.clone(), 0);
+        s.forest.apply_root_workflow(
+            session,
+            "review".into(),
+            graph.clone(),
+            0,
+            crate::sessions::run_forest::RuntimeChoice::Pending,
+        );
         let step_agent = Uuid::new_v4();
         s.forest.apply_step_started(
             RunId(session),

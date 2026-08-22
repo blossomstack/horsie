@@ -110,8 +110,7 @@ impl AgentState {
             };
         };
 
-        let entries =
-            crate::agent_loop::agent_log::page_after(&self.log, cursor.entry_seq).to_vec();
+        let entries = crate::agent_loop::agent_log::since(&self.log, cursor.entry_seq).to_vec();
         if !entries.is_empty() {
             // Behind the tail. The deltas belong after the entries this reader
             // is only now receiving, so they wait for the next step.
@@ -172,10 +171,30 @@ impl Reads {
                 let _ = reply.send(state.read_from(after, &actor.deltas));
                 CommandEffect::none()
             }
-            ReadCommand::PageLog { before, max, reply } => {
-                let _ = reply.send(crate::agent_loop::agent_log::page_before(
-                    &state.log, before, max,
+            ReadCommand::PageLog {
+                anchor,
+                max,
+                filter,
+                reply,
+            } => {
+                let _ = reply.send(crate::agent_loop::agent_log::page(
+                    &state.log, anchor, max, &filter,
                 ));
+                CommandEffect::none()
+            }
+            ReadCommand::SearchLog {
+                needle,
+                max,
+                filter,
+                reply,
+            } => {
+                let _ = reply.send(crate::agent_loop::agent_log::search(
+                    &state.log, &needle, &filter, max,
+                ));
+                CommandEffect::none()
+            }
+            ReadCommand::SeqOfId { id, reply } => {
+                let _ = reply.send(crate::agent_loop::agent_log::seq_of_id(&state.log, &id));
                 CommandEffect::none()
             }
             ReadCommand::GetUsage { reply } => {

@@ -9,8 +9,8 @@
 use crate::config::ConfigStore;
 use crate::environments::{EnvironmentError, EnvironmentService};
 use crate::sessions::spec::{
-    AgentSettings, EnvVarSpec, ProvisionStepSpec, SessionKind, SessionOrigin, SessionSpec,
-    WorkspaceDef,
+    AgentSettings, AgentSource, EnvVarSpec, ProvisionStepSpec, RuntimeEnv, SessionKind,
+    SessionOrigin, SessionSpec, WorkspaceDef,
 };
 use horsie_models::environments::EnvironmentSpec;
 use horsie_models::session::AgentSettings as WireAgentSettings;
@@ -34,9 +34,45 @@ impl std::fmt::Display for SpecError {
 
 impl std::error::Error for SpecError {}
 
+/// What agent a session runs, and where its configuration came from.
+///
+/// One argument rather than two because it is one fact told in two halves, and
+/// the wire type cannot carry the second: a request body says what the settings
+/// *are*, but only the server knows which preset — if any — it resolved them
+/// from, and a caller-supplied provenance would be a claim anyone could make.
+pub struct AgentChoice {
+    pub settings: WireAgentSettings,
+    pub source: AgentSource,
+}
+
+impl AgentChoice {
+    /// Settings supplied inline, naming no preset.
+    #[must_use]
+    pub fn ad_hoc(settings: WireAgentSettings) -> Self {
+        Self {
+            settings,
+            source: AgentSource::AdHoc,
+        }
+    }
+
+    /// Settings flattened from the preset called `name`.
+    #[must_use]
+    pub fn from_preset(settings: WireAgentSettings, name: String) -> Self {
+        Self {
+            settings,
+            source: AgentSource::Preset { name },
+        }
+    }
+}
+
 /// Storage `AgentSettings` from the wire request, applying defaults.
-fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
+fn settings_from_wire(choice: AgentChoice) -> AgentSettings {
+    let AgentChoice {
+        settings: w,
+        source,
+    } = choice;
     AgentSettings {
+        source,
         model: w.model,
         allowed_tools: w.allowed_tools,
         use_plugins: w.use_plugins,
@@ -59,13 +95,51 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
 /// environment/provision facts and provenance, with nothing about which agent
 /// or workflow runs in it.
 struct CommonSpec {
-    workspaces: Vec<WorkspaceDef>,
-    provision: Vec<ProvisionStepSpec>,
-    vendor: String,
+    /// Everything a vendor needs to build the sandbox, resolved once. The same
+    /// value a runtime record holds, so a sub session asking for its own
+    /// environment resolves it through this exact path. `None` when the
+    /// environment asked for no runtime.
+    runtime: Option<RuntimeEnv>,
     plugins: Vec<String>,
     origin: SessionOrigin,
-    environment: Option<String>,
-    env_vars: Vec<EnvVarSpec>,
+}
+
+/// The runtime half of a saved environment, in the shape a runtime record
+/// holds.
+///
+/// Shared with `resolve_common` deliberately: a sub session asking for an
+/// environment by name must get the same sandbox a session created from that
+/// name would, down to the order the checkout steps run in. Two conversions
+/// would be two answers.
+pub fn runtime_env_from_environment(
+    view: &horsie_models::environments::EnvironmentView,
+) -> Result<RuntimeEnv, String> {
+    let provision: Vec<ProvisionStepSpec> = horsie_models::provision_from_repos(&view.repos)
+        .map_err(|e| format!("invalid repos: {e}"))?
+        .into_iter()
+        .chain(view.provision.clone())
+        .map(|s| ProvisionStepSpec {
+            name: s.name,
+            uses: s.uses,
+            with: s.with.into_iter().map(|p| (p.key, p.value)).collect(),
+        })
+        .collect();
+    Ok(RuntimeEnv {
+        vendor: view.vendor.clone(),
+        workspaces: vec![WorkspaceDef {
+            name: "main".into(),
+        }],
+        provision,
+        env_vars: view
+            .env_vars
+            .iter()
+            .map(|v| EnvVarSpec {
+                name: v.name.clone(),
+                value: v.value.clone(),
+            })
+            .collect(),
+        environment: Some(view.name.clone()),
+    })
 }
 
 /// Resolve the environment and provenance facts every spec carries, once,
@@ -81,9 +155,19 @@ async fn resolve_common(
 ) -> Result<CommonSpec, SpecError> {
     let environment_name = match &environment {
         EnvironmentSpec::Named(n) => Some(n.name.clone()),
-        EnvironmentSpec::Runtime(_) => None,
+        EnvironmentSpec::Runtime(_) | EnvironmentSpec::None(_) => None,
     };
     let (vendor, repos, env_vars, setup) = match environment {
+        // Nothing to resolve and nothing to build: the session runs with no
+        // sandbox. Returned here rather than falling through with an empty
+        // vendor, so no later step has to recognise a sentinel.
+        EnvironmentSpec::None(_) => {
+            return Ok(CommonSpec {
+                runtime: None,
+                plugins: plugins.unwrap_or_default(),
+                origin,
+            });
+        }
         EnvironmentSpec::Runtime(r) => (r.vendor, r.repos.unwrap_or_default(), vec![], vec![]),
         EnvironmentSpec::Named(n) => {
             let env = environments.get(&n.name).await.map_err(|e| match e {
@@ -132,13 +216,15 @@ async fn resolve_common(
         name: "main".into(),
     }];
     Ok(CommonSpec {
-        workspaces,
-        provision,
-        vendor,
+        runtime: Some(RuntimeEnv {
+            vendor,
+            workspaces,
+            provision,
+            env_vars,
+            environment: environment_name,
+        }),
         plugins: plugins.unwrap_or_default(),
         origin,
-        environment: environment_name,
-        env_vars,
     })
 }
 
@@ -147,7 +233,7 @@ async fn resolve_common(
 pub async fn build_session_spec(
     config: &Arc<dyn ConfigStore>,
     environments: &EnvironmentService,
-    agent: WireAgentSettings,
+    agent: AgentChoice,
     environment: EnvironmentSpec,
     plugins: Option<Vec<String>>,
     origin: SessionOrigin,
@@ -202,14 +288,12 @@ pub async fn build_session_spec(
         }
     }
     Ok(SessionSpec {
-        kind: SessionKind::Agent { settings: agent },
-        workspaces: common.workspaces,
-        provision: common.provision,
-        vendor: common.vendor,
+        kind: SessionKind::Agent {
+            settings: Box::new(agent),
+        },
+        runtime: common.runtime,
         plugins: common.plugins,
         origin: common.origin,
-        environment: common.environment,
-        env_vars: common.env_vars,
     })
 }
 
@@ -231,13 +315,9 @@ pub async fn build_workflow_spec(
     .await?;
     Ok(SessionSpec {
         kind: SessionKind::Workflow { run },
-        workspaces: common.workspaces,
-        provision: common.provision,
-        vendor: common.vendor,
+        runtime: common.runtime,
         plugins: common.plugins,
         origin: common.origin,
-        environment: common.environment,
-        env_vars: common.env_vars,
     })
 }
 
@@ -333,7 +413,7 @@ mod tests {
         build_session_spec(
             config,
             envs,
-            wire_settings(),
+            AgentChoice::ad_hoc(wire_settings()),
             environment,
             None,
             SessionOrigin::User,
@@ -354,12 +434,32 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(spec.vendor, "fly");
+        assert_eq!(spec.vendor().expect("a vendor spec has a runtime"), "fly");
         // Nothing predefined was named, so there is no provenance to record.
-        assert_eq!(spec.environment, None);
-        assert_eq!(spec.provision.len(), 1);
-        assert_eq!(spec.provision[0].uses, "git_checkout");
-        assert!(spec.env_vars.is_empty());
+        assert_eq!(spec.environment().map(str::to_string), None);
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .provision
+                .len(),
+            1
+        );
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .provision[0]
+                .uses,
+            "git_checkout"
+        );
+        assert!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .env_vars
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -394,13 +494,44 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(spec.vendor, "fly");
-        assert_eq!(spec.environment.as_deref(), Some("staging"));
+        assert_eq!(spec.vendor().expect("a vendor spec has a runtime"), "fly");
+        assert_eq!(
+            spec.environment().map(str::to_string).as_deref(),
+            Some("staging")
+        );
         // The checkout first: `make setup` needs the repo to be there.
-        assert_eq!(spec.provision[0].uses, "git_checkout");
-        assert_eq!(spec.provision[1].uses, "run");
-        assert_eq!(spec.env_vars[0].name, "RUST_LOG");
-        assert_eq!(spec.env_vars[0].value, "debug");
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .provision[0]
+                .uses,
+            "git_checkout"
+        );
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .provision[1]
+                .uses,
+            "run"
+        );
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .env_vars[0]
+                .name,
+            "RUST_LOG"
+        );
+        assert_eq!(
+            spec.runtime
+                .as_ref()
+                .expect("a vendor spec has a runtime")
+                .env_vars[0]
+                .value,
+            "debug"
+        );
     }
 
     #[tokio::test]

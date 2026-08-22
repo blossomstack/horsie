@@ -1,0 +1,13 @@
+-- Whether this preset opts in to being tuned: a scheduled agent may read the
+-- runs of a preset marked here, decide what would make it better, and write the
+-- preset back.
+--
+-- NULL means no, unlike `auto_compact` where NULL means yes. The two defaults
+-- differ because the risks do: compaction failing to happen costs a session its
+-- context, while tuning happening unasked lets one agent rewrite another's
+-- instructions. Opting in has to be an act.
+--
+-- INTEGER, not BOOLEAN: the `sqlx::Any` driver cannot decode SQLite's BOOLEAN,
+-- and every other flag in this schema is stored the same way for the same
+-- reason.
+ALTER TABLE agents ADD COLUMN tunable INTEGER;

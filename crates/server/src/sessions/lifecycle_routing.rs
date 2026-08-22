@@ -52,6 +52,10 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
             .collect()
     };
     match event {
+        // A runtime being *asked for* reaches no log. What a reader waits on is
+        // the create it starts, which the next event says — and a sub session
+        // that asked for its own has not been told anything yet.
+        E::RuntimeRequested { .. } => Vec::new(),
         E::ProvisioningStarted { .. } => on_session(
             state,
             LifecycleEvent::Runtime(RuntimeLifecycle {
@@ -459,17 +463,40 @@ mod tests {
     /// a fact that silently never reaches a client, which no other test would
     /// catch — the session would journal it, fold it, and nobody would ever see
     /// it.
+    /// One fixed runtime id for the whole list: which runtime a provisioning
+    /// event names does not change where it is routed, and a fresh id per event
+    /// would only make the list harder to read.
+    fn rt() -> crate::sessions::spec::RuntimeId {
+        crate::sessions::spec::RuntimeId(Uuid::from_bytes([7; 16]))
+    }
+
     fn every_variant(session: Uuid, sub: Uuid, step_agent: Uuid) -> Vec<SessionDomainEvent> {
         use SessionDomainEvent as E;
         vec![
-            E::ProvisioningStarted { at_ms: 1 },
+            E::RuntimeRequested {
+                at_ms: 1,
+                runtime: rt(),
+                owner: session,
+                env: crate::sessions::spec::SessionSpec::for_vendor("mock")
+                    .runtime_env()
+                    .expect("a vendor spec has a runtime"),
+            },
+            E::ProvisioningStarted {
+                at_ms: 1,
+                runtime: rt(),
+            },
             E::ProvisioningProgress {
                 at_ms: 1,
+                runtime: rt(),
                 detail: "the machine is booting".into(),
             },
-            E::ProvisioningSucceeded { at_ms: 1 },
+            E::ProvisioningSucceeded {
+                at_ms: 1,
+                runtime: rt(),
+            },
             E::ProvisioningFailed {
                 at_ms: 1,
+                runtime: rt(),
                 error: "no".into(),
                 terminal: false,
             },
@@ -634,7 +661,10 @@ mod tests {
         for event in every_variant(session, sub, step_agent) {
             let bookkeeping = matches!(
                 event,
-                SessionDomainEvent::UsageRecorded { .. }
+                // Asking for a runtime is not a fact a reader waits on — the
+                // create it starts is, and that is the next event.
+                SessionDomainEvent::RuntimeRequested { .. }
+                    | SessionDomainEvent::UsageRecorded { .. }
                     | SessionDomainEvent::SubAgentRunning { .. }
                     | SessionDomainEvent::SubAgentNotified { .. }
                     | SessionDomainEvent::RunNotified { .. }
@@ -662,6 +692,7 @@ mod tests {
         let entries = route(
             &SessionDomainEvent::ProvisioningProgress {
                 at_ms: 1,
+                runtime: rt(),
                 detail: "the machine is booting".into(),
             },
             &state,
@@ -683,8 +714,14 @@ mod tests {
     fn the_ends_of_a_provisioning_wait_have_nothing_to_say() {
         let state = fold(vec![session_root(Uuid::new_v4())]);
         for event in [
-            SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
-            SessionDomainEvent::ProvisioningSucceeded { at_ms: 2 },
+            SessionDomainEvent::ProvisioningStarted {
+                at_ms: 1,
+                runtime: rt(),
+            },
+            SessionDomainEvent::ProvisioningSucceeded {
+                at_ms: 2,
+                runtime: rt(),
+            },
         ] {
             let entries = route(&event, &state);
             let Some((_, LifecycleEvent::Runtime(payload))) = entries.first() else {
@@ -701,6 +738,7 @@ mod tests {
         let entries = route(
             &SessionDomainEvent::ProvisioningFailed {
                 at_ms: 1,
+                runtime: rt(),
                 error: "no capacity in region".into(),
                 terminal: false,
             },
@@ -721,7 +759,10 @@ mod tests {
         let state = fold(vec![workflow_root(Uuid::new_v4())]);
         assert!(
             route(
-                &SessionDomainEvent::ProvisioningStarted { at_ms: 1 },
+                &SessionDomainEvent::ProvisioningStarted {
+                    at_ms: 1,
+                    runtime: rt()
+                },
                 &state
             )
             .is_empty()
@@ -1090,6 +1131,7 @@ mod tests {
             parent: session,
             source_seq: 0,
             seed: SeedMode::Copy,
+            runtime: crate::sessions::run_forest::RuntimeChoice::Inherit,
             message: "go".into(),
             title: "a branch".into(),
         }

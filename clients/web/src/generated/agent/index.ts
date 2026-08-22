@@ -13,6 +13,7 @@ export * from './taskStatus';
 export * from './taskItem';
 export * from './agentLogEntry';
 export * from './agentLogBody';
+export * from './logEntryKind';
 export * from './lifecycleEvent';
 export * from './runtimeLifecycle';
 export * from './runtimeStatus';

@@ -18,6 +18,7 @@ use executor.ProvisionStep;
 union EnvironmentSpec {
     Runtime(RuntimeEnvironment),
     Named(NamedEnvironment),
+    None(NoRuntime),
 }
 
 /// The ad-hoc environment: a runtime vendor, plus the repos to check out into
@@ -35,6 +36,15 @@ struct RuntimeEnvironment {
 /// A predefined environment, by name. Resolved and snapshotted when the session
 /// is created, so editing or deleting it never re-points one that exists.
 struct NamedEnvironment { name: String }
+
+/// No runtime at all: the session runs with no sandbox, so it has no shell, no
+/// files and no plugin skills — only the model, its MCP servers, its memory,
+/// and the tools that delegate.
+///
+/// A variant rather than an absent field, for the same reason the union has no
+/// default: "where does this run" is always answered, and "nowhere" is one of
+/// the answers rather than the shape of a question nobody asked.
+struct NoRuntime {}
 
 /// A predefined environment as shown to clients.
 struct EnvironmentView {

@@ -178,13 +178,31 @@ pub enum SessionSupervisorCommand {
         after: Option<crate::agent_loop::Cursor>,
         reply: ReplyTo<Option<crate::agent_loop::ReadOutcome>>,
     },
-    /// Read a window backwards from a cursor — scroll-back.
+    /// Read a bounded, filtered window of one agent's log.
     PageLog {
         id: SessionId,
         agent_id: Option<String>,
-        before: Option<u64>,
+        anchor: crate::agent_loop::Anchor,
         max: usize,
+        filter: crate::agent_loop::LogFilter,
         reply: ReplyTo<Option<crate::agent_loop::LogPage>>,
+    },
+    /// Find where in one agent's log something was said.
+    SearchLog {
+        id: SessionId,
+        agent_id: Option<String>,
+        needle: String,
+        max: usize,
+        filter: crate::agent_loop::LogFilter,
+        reply: ReplyTo<Option<Vec<horsie_models::session_api::LogSearchHit>>>,
+    },
+    /// Resolve an entry id to its seq within one agent's log, so a caller
+    /// holding an id can anchor a page on it.
+    SeqOfId {
+        id: SessionId,
+        agent_id: Option<String>,
+        entry_id: String,
+        reply: ReplyTo<Option<Option<u64>>>,
     },
     /// Read a session's aggregated usage.
     UsageStats {
@@ -1011,8 +1029,9 @@ impl EventSourcedActor for SessionSupervisor {
             SessionSupervisorCommand::PageLog {
                 id,
                 agent_id,
-                before,
+                anchor,
                 max,
+                filter,
                 reply,
             } => {
                 match self.session(ctx, state, &id) {
@@ -1021,8 +1040,65 @@ impl EventSourcedActor for SessionSupervisor {
                         let _ = session
                             .tell(SessionCommand::Read(ReadCommand::PageLog {
                                 agent_id,
-                                before,
+                                anchor,
                                 max,
+                                filter,
+                                reply: ReplyTo::from_sender(tx),
+                            }))
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SearchLog {
+                id,
+                agent_id,
+                needle,
+                max,
+                filter,
+                reply,
+            } => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = session
+                            .tell(SessionCommand::Read(ReadCommand::SearchLog {
+                                agent_id,
+                                needle,
+                                max,
+                                filter,
+                                reply: ReplyTo::from_sender(tx),
+                            }))
+                            .await;
+                        tokio::spawn(async move {
+                            let _ = reply.send(rx.await.ok().flatten());
+                        });
+                    }
+                    None => {
+                        let _ = reply.send(None);
+                    }
+                }
+                CommandEffect::none()
+            }
+            SessionSupervisorCommand::SeqOfId {
+                id,
+                agent_id,
+                entry_id,
+                reply,
+            } => {
+                match self.session(ctx, state, &id) {
+                    Some(session) => {
+                        let (tx, rx) = oneshot::channel();
+                        let _ = session
+                            .tell(SessionCommand::Read(ReadCommand::SeqOfId {
+                                agent_id,
+                                entry_id,
                                 reply: ReplyTo::from_sender(tx),
                             }))
                             .await;
@@ -1380,7 +1456,8 @@ mod tests {
     fn spec_fixture() -> SessionSpec {
         SessionSpec {
             kind: crate::sessions::spec::SessionKind::Agent {
-                settings: AgentSettings {
+                settings: Box::new(AgentSettings {
+                    source: crate::sessions::spec::AgentSource::AdHoc,
                     instructions: None,
                     model: "mock".into(),
                     allowed_tools: None,
@@ -1393,15 +1470,17 @@ mod tests {
                     max_concurrent_subagents: None,
                     auto_compact: None,
                     plugins: Vec::new(),
-                },
+                }),
             },
-            workspaces: vec![],
-            provision: vec![],
-            vendor: "mock".into(),
+            runtime: Some(crate::sessions::spec::RuntimeEnv {
+                vendor: "mock".into(),
+                workspaces: vec![],
+                provision: vec![],
+                env_vars: vec![],
+                environment: None,
+            }),
             plugins: vec![],
             origin: crate::sessions::spec::SessionOrigin::User,
-            environment: None,
-            env_vars: vec![],
         }
     }
 
@@ -1630,14 +1709,39 @@ mod tests {
         .id
     }
 
-    async fn await_signal(agent: &FakeRuntimeVendor, signal: &str) -> bool {
+    /// Wait for the session to have created *a* runtime, and answer with the
+    /// id the vendor was asked for.
+    ///
+    /// Not `create:<session id>`: a runtime is named independently of the
+    /// session that asked for it — that is the whole point of the id — so a
+    /// test that wants to address the sandbox reads its name off the signal
+    /// rather than assuming it knows it.
+    /// Wait for the vendor to be told `verb` about *some* runtime — the same
+    /// reading as [`await_create`], for the verbs a test asserts by shape
+    /// rather than by name.
+    async fn await_verb(agent: &FakeRuntimeVendor, verb: &str) -> bool {
+        let prefix = format!("{verb}:");
         for _ in 0..100 {
-            if agent.signals().iter().any(|s| s == signal) {
+            if agent.signals().iter().any(|s| s.starts_with(&prefix)) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         false
+    }
+
+    async fn await_create(agent: &FakeRuntimeVendor) -> Option<String> {
+        for _ in 0..100 {
+            if let Some(id) = agent
+                .signals()
+                .iter()
+                .find_map(|s| s.strip_prefix("create:").map(str::to_string))
+            {
+                return Some(id);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
     }
 
     #[test]
@@ -1756,7 +1860,7 @@ mod tests {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        assert!(await_create(&f.agent).await.is_some());
         // Wait for the session to have finished provisioning and said so, so
         // the restart below has a status to lose.
         wait_for_status(&sup, &id, &SessionStatus::Idle).await;
@@ -1798,7 +1902,7 @@ mod tests {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        assert!(await_create(&f.agent).await.is_some());
         let _ = sup
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: id.clone(),
@@ -1844,7 +1948,7 @@ mod tests {
         let journal = f.journal();
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        assert!(await_create(&f.agent).await.is_some());
         let _ = sup
             .tell(SessionSupervisorCommand::SessionStatusChanged {
                 id: id.clone(),
@@ -1914,7 +2018,7 @@ mod tests {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        assert!(await_create(&f.agent).await.is_some());
 
         let before = f.agent.signals();
         let stats = sup
@@ -2148,12 +2252,12 @@ mod tests {
         // it first. Seeding the journal behind a live actor would prove
         // nothing about where a *reload* reads its status from.
         assert!(
-            await_signal(&f.agent, &format!("create:{id}")).await,
+            await_create(&f.agent).await.is_some(),
             "the create has to finish before the session can go idle"
         );
         f.go_idle(&sup).await;
         assert!(
-            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            await_verb(&f.agent, "hibernate").await,
             "the session must actually unload for this test to mean anything"
         );
 
@@ -2257,7 +2361,7 @@ mod tests {
 
         f.go_idle(&sup).await;
         assert!(
-            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            await_verb(&f.agent, "hibernate").await,
             "the session must actually unload for this test to mean anything"
         );
 
@@ -2399,7 +2503,10 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !f.agent.signals().contains(&format!("hibernate:{id}")),
+            !f.agent
+                .signals()
+                .iter()
+                .any(|s| s.starts_with("hibernate:")),
             "a session inside its idle window must not be unloaded"
         );
 
@@ -2409,7 +2516,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            await_verb(&f.agent, "hibernate").await,
             "going cold must tell the vendor: {:?}",
             f.agent.signals()
         );
@@ -2419,8 +2526,8 @@ mod tests {
     async fn a_reloaded_session_never_creates_a_second_runtime() {
         let f = fixture().await;
         let sup = f.supervisor().await;
-        let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        let _ = create(&sup).await;
+        assert!(await_create(&f.agent).await.is_some());
 
         for _ in 0..3 {
             // A cheap call that does not load the session, so the loop tests
@@ -2602,11 +2709,11 @@ mod tests {
         let f = fixture().await;
         let sup = f.supervisor().await;
         let id = create(&sup).await;
-        assert!(await_signal(&f.agent, &format!("create:{id}")).await);
+        assert!(await_create(&f.agent).await.is_some());
         wait_for_status(&sup, &id, &SessionStatus::Idle).await;
         f.go_idle(&sup).await;
         assert!(
-            await_signal(&f.agent, &format!("hibernate:{id}")).await,
+            await_verb(&f.agent, "hibernate").await,
             "the session must actually unload for this test to mean anything"
         );
         let cold = f.node.projects.shared().system.hosted();

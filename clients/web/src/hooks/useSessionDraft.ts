@@ -235,7 +235,9 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const resolvedVendor =
     environment.kind === "named"
       ? (environments ?? []).find((e) => e.name === environment.name)?.vendor
-      : environment.vendor;
+      : environment.kind === "none"
+        ? undefined
+        : environment.vendor;
   const provisions = !!activeVendors.find((v) => v.name === resolvedVendor)
     ?.capabilities?.supportsProvisioning;
   const githubConnected = !!ghStatus?.connected;
@@ -243,7 +245,7 @@ export function useSessionDraft(initialWorkflow = ""): SessionDraft {
   const chosen =
     environment.kind === "named"
       ? !!environment.name
-      : !!environment.vendor.trim();
+      : environment.kind === "none" || !!environment.vendor.trim();
   // Only an ad-hoc selection with repos needs GitHub: a predefined
   // environment's repos were resolved when it was saved.
   const needsGithub =

@@ -100,8 +100,9 @@ pub async fn github_credential(
     // one repository has no business minting credentials for every other.
     let matched = record
         .spec
-        .provision
+        .runtime
         .iter()
+        .flat_map(|r| r.provision.iter())
         .filter(|step| step.uses == "git_checkout")
         .filter_map(|step| {
             step.with

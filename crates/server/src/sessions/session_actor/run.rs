@@ -469,6 +469,9 @@ impl SessionActor {
                 },
                 agent_type: None,
                 origin: None,
+                // For the same reason the settings come off the spec above:
+                // the entry naming this agent is not in the forest yet.
+                runtime_via: Some(run),
             },
         )
         .map(|resident| resident.actor)
@@ -953,7 +956,10 @@ mod tests {
         let journal = f.journal();
         let session = f.start(id, spec).await;
         session
-            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision))
+            .tell(SessionCommand::Lifecycle(LifecycleCommand::Provision {
+                owner: id,
+                env: None,
+            }))
             .await
             .unwrap();
 
@@ -1083,7 +1089,12 @@ mod tests {
         };
         f.deps
             .runtimes
-            .create(&id.to_string(), "i1", "mock", &spec)
+            .create(
+                &id.to_string(),
+                "i1",
+                "mock",
+                &spec.runtime_env().expect("the fixture has a runtime"),
+            )
             .await
             .expect("create");
 

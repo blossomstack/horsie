@@ -12,6 +12,7 @@ use session.SubAgentView;
 use agent.Usage;
 use agent.Message;
 use agent.AgentLogEntry;
+use agent.LogEntryKind;
 
 /// One repository to provision into the session workspace.
 struct RepoConfig {
@@ -48,6 +49,30 @@ struct CreateSessionRequest {
 /// page it could not distinguish "nothing newer" from "nothing newer yet".
 struct MessagesPage {
     entries: Vec<AgentLogEntry>,
+}
+
+/// One entry matching a transcript search.
+///
+/// A position and just enough text to judge it by — never the entry itself. A
+/// search exists to say *where to read*, and one that answered with whole
+/// entries would cost the same context as the paging it is there to avoid.
+struct LogSearchHit {
+    /// Where this entry sits in the log. Feed it back as `before` or `after`
+    /// to read around it.
+    seq: u64,
+    at_ms: u64,
+    kind: LogEntryKind,
+    /// The match with a little text either side, capped by the server.
+    snippet: String,
+}
+
+/// Matches for one transcript search, oldest first.
+///
+/// Ordered oldest-first even though pages read newest-first: matches are read
+/// as a set to choose from rather than scrolled, and a run's story goes
+/// forwards.
+struct LogSearchPage {
+    hits: Vec<LogSearchHit>,
 }
 
 /// One agent's current values: what it is, what became of it, what it runs

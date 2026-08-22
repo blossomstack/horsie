@@ -4,7 +4,7 @@
 use crate::http::error::Api;
 use crate::http::{Scope, Scoped};
 use crate::sessions::UserMessageError;
-use crate::sessions::builder::build_session_spec;
+use crate::sessions::builder::{AgentChoice, build_session_spec};
 use crate::sessions::session_actor::{AgentEntry, AskAnswer};
 use crate::sessions::spec::{SessionOrigin, SessionStatus, status_kind, status_reason};
 use crate::sessions::supervisor::{SessionRecord, SessionSupervisorCommand};
@@ -115,7 +115,9 @@ pub async fn create_session(
     let spec = build_session_spec(
         &state.config_store,
         &state.environments,
-        req.agent,
+        // The sessions API takes settings inline; nothing named a preset, so
+        // claiming one would be an invention.
+        AgentChoice::ad_hoc(req.agent),
         req.environment,
         req.plugins,
         SessionOrigin::User,
@@ -178,12 +180,16 @@ pub(crate) fn detail(
         created_at: rec.created_at,
         last_error: status_reason(&status),
         annotations: wire_annotations(&rec.annotations),
-        environment: rec.spec.environment.clone(),
-        vendor: rec.spec.vendor.clone(),
+        environment: rec.spec.environment().map(str::to_string),
+        // A session that runs without a sandbox names no vendor. The wire field
+        // stays required and reads empty, which is what every client already
+        // renders as "nothing to show".
+        vendor: rec.spec.vendor().unwrap_or_default().to_string(),
         repos: rec
             .spec
-            .provision
+            .runtime
             .iter()
+            .flat_map(|r| r.provision.iter())
             .filter(|s| s.uses == "git_checkout")
             .filter_map(|s| {
                 s.with
@@ -279,6 +285,7 @@ fn to_wire_agent(agent: &AgentEntry, windows: &ContextWindows) -> SubAgentView {
         stats: to_wire_stats(&agent.stats, agent.model.as_deref(), windows),
         depth: agent.depth,
         agent_type: agent.agent_type.clone(),
+        preset: agent.preset.clone(),
         status: agent.status.as_wire().to_string(),
         error: agent.error.clone(),
         spawned_at_ms: agent.started_at_ms,
@@ -526,6 +533,7 @@ mod tests {
                     ..Default::default()
                 },
                 model: Some("m".into()),
+                preset: Some("reviewer".into()),
                 started_at_ms: 100,
                 ended_at_ms: 400,
             },
@@ -541,6 +549,10 @@ mod tests {
         assert_eq!(view.stats.context_tokens, 4_000);
         assert_eq!(view.stats.context_window, Some(200_000));
         assert_eq!(view.agent_type.as_deref(), Some("auditor"));
+        // The two are different questions and are carried separately: a typed
+        // subagent has an `agent_type` from a plugin and a `preset` it
+        // inherited, and collapsing them would file it under the wrong one.
+        assert_eq!(view.preset.as_deref(), Some("reviewer"));
         assert_eq!(view.depth, 2);
         assert_eq!(view.status, "failed");
         assert_eq!(view.error.as_deref(), Some("boom"));

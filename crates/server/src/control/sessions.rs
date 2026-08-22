@@ -6,13 +6,17 @@
 //! actually said. It is [`Expose::ToolOnly`] because the route it shares a path
 //! with is a stream — see `read` below.
 
+use crate::agent_loop::{Anchor, LogFilter};
 use crate::control::{ControlError, Expose, Method, Operation, Resource, ask, op};
 use crate::http::handlers;
 use crate::projects::ProjectServices;
 use crate::sessions::supervisor::RenameSessionError;
 use crate::sessions::supervisor::SessionSupervisorCommand;
+use horsie_models::agent::LogEntryKind;
 use horsie_models::session::SessionSummary;
-use horsie_models::session_api::{Ack, GetSessionResponse, ListSessionsResponse, MessagesPage};
+use horsie_models::session_api::{
+    Ack, GetSessionResponse, ListSessionsResponse, LogSearchPage, MessagesPage,
+};
 use std::sync::Arc;
 
 /// What a model gets by default, and the most it can ask for.
@@ -62,6 +66,35 @@ pub struct StopAgent {
     pub agent_id: String,
 }
 
+/// What to keep out of a transcript read, shared by `read` and `search`.
+///
+/// Flattened into both inputs rather than nested, so a model writes
+/// `{"kinds": ["UserMessage"]}` and not `{"filter": {"kinds": [...]}}` — one
+/// less level to get wrong, and the two operations stay describable as the same
+/// question asked two ways.
+#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
+pub struct EntryFilter {
+    /// Only entries of these kinds. Absent or empty means every kind.
+    ///
+    /// This is the lever that makes a long run readable: `["UserMessage"]`
+    /// answers "what was this agent asked to do" in one small page, where the
+    /// unfiltered version of that same page is mostly tool output.
+    pub kinds: Option<Vec<LogEntryKind>>,
+    /// Drop the model's reasoning from the messages that come back, keeping
+    /// what it actually said. Usually what you want: thinking is the bulk of an
+    /// assistant message and rarely what you are reading for.
+    pub without_thinking: Option<bool>,
+}
+
+impl EntryFilter {
+    fn resolve(self) -> LogFilter {
+        LogFilter {
+            kinds: self.kinds.unwrap_or_default(),
+            without_thinking: self.without_thinking.unwrap_or(false),
+        }
+    }
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ReadSession {
     pub id: String,
@@ -71,8 +104,30 @@ pub struct ReadSession {
     /// means the latest ones. This is how you page backwards through a long
     /// transcript.
     pub before: Option<u64>,
+    /// Return the entries immediately after this sequence number — how you walk
+    /// a run forwards from a point of interest. Ignored when `before` is given.
+    pub after: Option<u64>,
+    /// Anchor on the entry carrying this id rather than on a sequence number,
+    /// for when you have an id you saw quoted rather than a position you paged
+    /// to. Reads forwards from it unless `before` is also set.
+    pub id_anchor: Option<String>,
     /// How many entries, at most 100. Defaults to 20.
     pub max: Option<usize>,
+    #[serde(flatten)]
+    pub filter: EntryFilter,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchSession {
+    pub id: String,
+    /// Whose log: "main" (the default), or a subagent, step or sub session id.
+    pub aid: Option<String>,
+    /// Case-insensitive substring to look for. Not a regular expression.
+    pub query: String,
+    /// How many matches, at most 100. Defaults to 20.
+    pub max: Option<usize>,
+    #[serde(flatten)]
+    pub filter: EntryFilter,
 }
 
 /// The running work: sessions, their transcripts, and stopping them.
@@ -167,12 +222,28 @@ impl Resource for Sessions {
                 "read",
                 Method::Get,
                 "/sessions/{id}/messages",
-                "Read one agent's transcript, newest entries first. Use this to \
-                 find out what a session actually did. Ask for a small page and \
-                 use `before` to go further back — the whole transcript will not \
-                 fit in your context.",
+                "Read one agent's transcript. Use this to find out what a session \
+                 actually did. The whole transcript will not fit in your context, \
+                 so narrow it: `kinds` picks which entries come back (filtered \
+                 before the page is cut, so asking for 20 user messages gets you \
+                 20), `without_thinking` drops the model's reasoning, and \
+                 `before`/`after` walk backwards or forwards from a position.",
                 Expose::ToolOnly,
                 |s: Arc<ProjectServices>, i: ReadSession| async move { read(&s, i).await },
+            ),
+            // Tool-only for the same reason `read` is: it answers positions in
+            // the log a stream shares its path with, and a browser scrolls a
+            // transcript instead of searching one.
+            op(
+                "search",
+                Method::Get,
+                "/sessions/{id}/messages/search",
+                "Find where in one agent's transcript something was said, without \
+                 reading the transcript to get there. Answers positions and short \
+                 snippets; feed a `seq` back to `read` as `before` or `after` to \
+                 see what surrounds it.",
+                Expose::ToolOnly,
+                |s: Arc<ProjectServices>, i: SearchSession| async move { search(&s, i).await },
             ),
         ]
     }
@@ -218,22 +289,83 @@ async fn rename(services: &ProjectServices, input: RenameSession) -> Result<Ack,
     Ok(Ack {})
 }
 
+/// The agent a caller means, which is "main" unless it named another.
+fn agent_of(aid: Option<String>) -> String {
+    aid.unwrap_or_else(|| MAIN_AGENT.to_string())
+}
+
+/// What a model may ask for in one read or search.
+fn clamp(max: Option<usize>) -> usize {
+    max.unwrap_or(TOOL_PAGE_DEFAULT).clamp(1, TOOL_PAGE_MAX)
+}
+
 async fn read(
     services: &ProjectServices,
     input: ReadSession,
 ) -> Result<MessagesPage, ControlError> {
-    let max = input
-        .max
-        .unwrap_or(TOOL_PAGE_DEFAULT)
-        .clamp(1, TOOL_PAGE_MAX);
+    let max = clamp(input.max);
+    let agent = agent_of(input.aid);
+    // Resolved before the read, not during it: `id_anchor` names an entry and
+    // an anchor names a position, and only the agent that owns the log can turn
+    // one into the other. Failing here rather than answering an empty page is
+    // what tells a caller its id was wrong instead of letting it read "there is
+    // nothing there" off a log that is full.
+    let anchored = match input.id_anchor {
+        None => None,
+        Some(entry_id) => Some(
+            ask(services, |reply| SessionSupervisorCommand::SeqOfId {
+                id: input.id.clone(),
+                agent_id: Some(agent.clone()),
+                entry_id: entry_id.clone(),
+                reply,
+            })
+            .await?
+            .ok_or_else(|| ControlError::NotFound("no such agent".to_string()))?
+            .ok_or_else(|| {
+                ControlError::Invalid(format!("this agent's log has no entry '{entry_id}'"))
+            })?,
+        ),
+    };
+    // `before` wins over `after`, and an id anchor supplies the seq for
+    // whichever was asked for — defaulting to forwards, since an id you were
+    // handed is usually a place to continue from rather than to scroll back
+    // above.
+    let anchor = match (input.before, input.after, anchored) {
+        (Some(_), _, Some(seq)) | (Some(seq), _, None) => Anchor::Before(seq),
+        (None, _, Some(seq)) => Anchor::After(seq),
+        (None, Some(seq), None) => Anchor::After(seq),
+        (None, None, None) => Anchor::Tail,
+    };
     crate::http::messages::read_page(
         services,
         input.id,
-        input.aid.unwrap_or_else(|| MAIN_AGENT.to_string()),
-        input.before,
+        agent,
+        anchor,
         max,
+        input.filter.resolve(),
     )
     .await
+}
+
+async fn search(
+    services: &ProjectServices,
+    input: SearchSession,
+) -> Result<LogSearchPage, ControlError> {
+    if input.query.trim().is_empty() {
+        return Err(ControlError::Invalid("query must not be empty".to_string()));
+    }
+    let max = clamp(input.max);
+    let hits = ask(services, |reply| SessionSupervisorCommand::SearchLog {
+        id: input.id,
+        agent_id: Some(agent_of(input.aid)),
+        needle: input.query,
+        max,
+        filter: input.filter.resolve(),
+        reply,
+    })
+    .await?
+    .ok_or_else(|| ControlError::NotFound("no such agent".to_string()))?;
+    Ok(LogSearchPage { hits })
 }
 
 #[cfg(test)]
@@ -254,7 +386,10 @@ mod tests {
     fn every_action_is_declared_once_on_one_resource() {
         let mut actions: Vec<&str> = operations().iter().map(|o| o.action).collect();
         actions.sort_unstable();
-        assert_eq!(actions, ["delete", "get", "list", "read", "rename", "stop"]);
+        assert_eq!(
+            actions,
+            ["delete", "get", "list", "read", "rename", "search", "stop"]
+        );
         assert_eq!(Sessions.name(), "sessions");
     }
 
@@ -272,5 +407,60 @@ mod tests {
             .find(|o| o.action == "read")
             .unwrap();
         assert_eq!(read.expose, Expose::ToolOnly);
+    }
+
+    /// `kinds` and `without_thinking` are flattened, so they must land as
+    /// top-level properties of both schemas. Nested under a `filter` object the
+    /// model would still be *told* about them and the deserialize would still
+    /// succeed — with the filter silently defaulted, which reads as "the filter
+    /// does nothing" rather than as an error.
+    #[test]
+    fn the_entry_filter_is_flattened_into_both_inputs() {
+        for action in ["read", "search"] {
+            let operation = operations()
+                .into_iter()
+                .find(|o| o.action == action)
+                .unwrap();
+            let properties = &operation.schema["properties"];
+            assert!(
+                properties.get("kinds").is_some(),
+                "{action} does not offer `kinds` at the top level"
+            );
+            assert!(
+                properties.get("without_thinking").is_some(),
+                "{action} does not offer `without_thinking` at the top level"
+            );
+            assert!(
+                properties.get("filter").is_none(),
+                "{action} nested the filter, so a model setting `kinds` would be ignored"
+            );
+        }
+    }
+
+    /// Every kind the log can hold must be nameable, or a reader could not ask
+    /// for it. Anchored to the enum rather than to a hand-copied list: a variant
+    /// added to `LogEntryKind` should appear here without anyone remembering.
+    #[test]
+    fn every_entry_kind_is_offered_to_the_model() {
+        let operation = operations()
+            .into_iter()
+            .find(|o| o.action == "read")
+            .unwrap();
+        let offered = operation.schema["properties"]["kinds"].to_string();
+        for kind in [
+            LogEntryKind::UserMessage,
+            LogEntryKind::AssistantMessage,
+            LogEntryKind::ToolResult,
+            LogEntryKind::Hook,
+            LogEntryKind::Lifecycle,
+            LogEntryKind::Compaction,
+        ] {
+            let name = serde_json::to_string(&kind).unwrap();
+            let name = name.trim_matches('"');
+            assert!(
+                offered.contains(name),
+                "'{name}' is a kind of log entry but no read can ask for it"
+            );
+        }
     }
 }

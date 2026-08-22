@@ -530,7 +530,9 @@ export function useEnvironmentPicker(d: EnvironmentChannel): PickerSpec {
   const chosen =
     d.environment.kind === "named"
       ? d.environment.name
-      : d.environment.vendor;
+      : d.environment.kind === "none"
+        ? ""
+        : d.environment.vendor;
   // What a predefined selection resolves to, for the read-only summary the
   // picker shows under it.
   const namedName = d.environment.kind === "named" ? d.environment.name : undefined;

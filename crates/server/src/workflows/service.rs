@@ -427,6 +427,8 @@ mod tests {
                     thinking_effort: None,
                     auto_compact: None,
                     allowed_tools: None,
+                    tunable: None,
+                    expected_revision: None,
                 })
                 .await
                 .unwrap();

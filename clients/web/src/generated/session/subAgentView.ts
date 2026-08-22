@@ -52,6 +52,16 @@ export interface SubAgentView {
    */
   agentType?: string;
   /**
+   * The saved agent preset this agent's settings came from; absent when they
+   * were supplied inline. Every kind of agent answers it: a main agent names
+   * the preset it was invoked from, a workflow step names its own, and a
+   * subagent or sub session names whichever it inherited.
+   *
+   * Here so one read of a session says which of its agents are runs of which
+   * preset, rather than needing a lookup per agent.
+   */
+  preset?: string;
+  /**
    * What became of this agent: "provisioning" | "running" | "idle" |
    * "awaiting_input" | "completed" | "failed" | "cancelled". A main agent
    * reports its session's state and never *completes*; a subagent or a step

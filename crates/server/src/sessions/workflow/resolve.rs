@@ -12,7 +12,7 @@
 //! created mid-session identical to one created by a request.
 
 use crate::projects::ProjectServices;
-use crate::sessions::spec::AgentSettings;
+use crate::sessions::spec::{AgentSettings, AgentSource};
 use crate::sessions::workflow::{
     DEFAULT_MAX_STEPS, TransitionSpec, WorkflowRunSpec, WorkflowStepSpec, outcomes_or_default,
 };
@@ -182,6 +182,11 @@ fn step_settings(
     max_retries: Option<u32>,
 ) -> AgentSettings {
     AgentSettings {
+        // A step names its own preset, which is what makes the steps of one run
+        // separately findable — and separately tunable.
+        source: AgentSource::Preset {
+            name: preset.name.clone(),
+        },
         model: preset.model.clone(),
         allowed_tools: None,
         use_plugins: None,
@@ -224,6 +229,8 @@ mod tests {
             thinking_effort: None,
             auto_compact: None,
             allowed_tools: None,
+            tunable: None,
+            revision: None,
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -267,6 +274,24 @@ mod tests {
             ResolveRunError::Invalid(m) => assert!(m.contains("input must not be empty"), "{m}"),
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    /// Each step's settings name the step's *own* preset, not the run's or the
+    /// first step's. Getting this wrong would file every step of a run under
+    /// one agent, which is the case a tuning agent most needs kept apart: two
+    /// steps of one workflow are two agents to improve, separately.
+    #[test]
+    fn every_step_records_the_preset_it_was_flattened_from() {
+        let r = row(vec![step("plan", "architect"), step("build", "coder")]);
+        let presets = presets_of(&[preset("architect", &[]), preset("coder", &[])]);
+        let resolved = assemble_run_spec(&r, &presets, &["sonnet".into()], "go").unwrap();
+        let sources: Vec<Option<&str>> = resolved
+            .run
+            .steps
+            .iter()
+            .map(|s| s.settings.source.preset())
+            .collect();
+        assert_eq!(sources, vec![Some("architect"), Some("coder")]);
     }
 
     #[test]

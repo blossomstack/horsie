@@ -60,6 +60,8 @@ pub const SCOPED_TABLES: &[&str] = &[
     "model_cards",
     "github_credentials",
     "runtime_vendors",
+    "agent_runs",
+    "entity_revisions",
 ];
 
 pub struct ProjectService {
