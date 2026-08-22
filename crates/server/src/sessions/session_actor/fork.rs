@@ -19,6 +19,10 @@ use super::{
     SessionDomainEvent, SessionState, TurnEnd,
 };
 use crate::agent_loop::{AgentCommand, AgentState, Incoming};
+use crate::agent_loop::{
+    ForkCommand as AgentForkCommand, QueueCommand as AgentQueueCommand,
+    ReadCommand as AgentReadCommand,
+};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::run_forest::ForkMode;
 use horsie_actor::{ActorContext, ActorRef, ReplyTo};
@@ -423,7 +427,7 @@ impl SessionActor {
     ) -> Option<u64> {
         let agent = self.fork_source(state, ctx, parent)?;
         agent
-            .ask(|reply| AgentCommand::LogHead { reply })
+            .ask(|reply| AgentCommand::Read(AgentReadCommand::LogHead { reply }))
             .await
             .ok()
     }
@@ -483,13 +487,13 @@ impl SessionActor {
         };
         tokio::spawn(async move {
             let _ = source
-                .tell(AgentCommand::Enqueue {
+                .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                     item: Incoming::Fork {
                         id: format!("fork-summarise:{id}"),
                         fork: id,
                     },
                     ack: None,
-                })
+                }))
                 .await;
         });
     }
@@ -639,9 +643,11 @@ async fn seed_fork(
     let state = match seed {
         ForkSeed::Summary(_) | ForkSeed::Fresh => Box::new(AgentState::default()),
         ForkSeed::Copy => source
-            .ask(|reply| AgentCommand::ForkSeed {
-                at_seq: source_seq,
-                reply,
+            .ask(|reply| {
+                AgentCommand::Fork(AgentForkCommand::ForkSeed {
+                    at_seq: source_seq,
+                    reply,
+                })
             })
             .await
             .map_err(|e| format!("read the conversation to fork: {e}"))?,
@@ -655,11 +661,13 @@ async fn seed_fork(
         created_at_ms: now_ms(),
         started_at_ms: None,
     };
-    fork.ask(|reply| AgentCommand::SeedFrom {
-        state,
-        seed: Box::new(seed),
-        message,
-        reply,
+    fork.ask(|reply| {
+        AgentCommand::Fork(AgentForkCommand::SeedFrom {
+            state,
+            seed: Box::new(seed),
+            message,
+            reply,
+        })
     })
     .await
     .map_err(|e| format!("seed the fork: {e}"))?

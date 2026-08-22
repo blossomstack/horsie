@@ -36,6 +36,7 @@ struct ForkRequest {
     mode: ForkMode,
     message: String,
 }
+use crate::agent_loop::QueueCommand as AgentQueueCommand;
 use horsie_actor::ActorContext;
 use horsie_actor::ReplyTo;
 use horsie_models::now_ms;
@@ -210,7 +211,10 @@ impl SessionActor {
             return CommandEffect::none();
         };
         if agent
-            .tell(AgentCommand::Answer { answers, reply })
+            .tell(AgentCommand::Queue(AgentQueueCommand::Answer {
+                answers,
+                reply,
+            }))
             .await
             .is_err()
         {
@@ -460,10 +464,10 @@ impl SessionActor {
             let _ = reply.send(answer);
         });
         if agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                 item,
                 ack: Some(ReplyTo::from_sender(tx)),
-            })
+            }))
             .await
             .is_err()
         {

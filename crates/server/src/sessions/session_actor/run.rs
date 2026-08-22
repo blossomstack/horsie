@@ -17,6 +17,7 @@ use super::{
     AgentAction, AgentKey, AgentPlan, CommandEffect, RunCommand, SessionActor, SessionCommand,
     SessionDomainEvent, SessionState, TurnEnd,
 };
+use crate::agent_loop::QueueCommand as AgentQueueCommand;
 use crate::agent_loop::{AgentCommand, Incoming};
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::orchestrator::StepStart;
@@ -190,13 +191,13 @@ impl SessionActor {
         // goes through the one door, so a step that is asked something and
         // answered later resumes down the same path.
         if actor
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                 item: Incoming::User {
                     id: format!("step:{index}:{attempt}"),
                     text: input.clone(),
                 },
                 ack: None,
-            })
+            }))
             .await
             .is_err()
         {

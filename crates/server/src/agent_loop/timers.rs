@@ -4,6 +4,10 @@
 //! re-armed from the journal on recovery. Time-derived fields (`fire_at_unix_ms`)
 //! are computed once in the actor's command handler and carried in events, never
 //! recomputed during the pure `apply_event` fold.
+//!
+//! Only the domain lives here. The tool an agent calls, the commands, the fold
+//! and the re-arm recovery owes are the actor's half, in
+//! `agent_actor/timers.rs`.
 
 use horsie_agentcore::ToolSpec;
 use serde::{Deserialize, Serialize};

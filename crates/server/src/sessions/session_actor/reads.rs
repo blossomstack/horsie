@@ -14,6 +14,7 @@ use super::{
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
+use crate::agent_loop::ReadCommand as AgentReadCommand;
 use crate::sessions::addressing::SessionInbox;
 use crate::sessions::run_forest::{ForkRun, RunForest, SubAgentRun, SubAgentStatus};
 use crate::sessions::spec::SessionStatus;
@@ -43,7 +44,7 @@ impl Reads {
                 let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
                 let out = match agent {
                     Some((_, agent)) => agent
-                        .ask(|reply| AgentCommand::ReadLog { after, reply })
+                        .ask(|reply| AgentCommand::Read(AgentReadCommand::ReadLog { after, reply }))
                         .await
                         .ok(),
                     None => None,
@@ -60,7 +61,9 @@ impl Reads {
                 let agent = actor.resolve_agent(state, ctx, agent_id.as_deref());
                 let page = match agent {
                     Some((_, agent)) => agent
-                        .ask(|reply| AgentCommand::PageLog { before, max, reply })
+                        .ask(|reply| {
+                            AgentCommand::Read(AgentReadCommand::PageLog { before, max, reply })
+                        })
                         .await
                         .ok(),
                     None => None,
@@ -288,7 +291,7 @@ impl SessionActor {
                 (None, None) => None,
             },
             state: agent
-                .ask(|reply| AgentCommand::GetState { reply })
+                .ask(|reply| AgentCommand::Read(AgentReadCommand::GetState { reply }))
                 .await
                 .ok()?,
         })
@@ -299,7 +302,7 @@ impl SessionActor {
     pub(super) async fn read_usage(&self, state: &SessionState) -> SessionUsageStats {
         let snapshot = match self.agent() {
             Some(agent) => agent
-                .ask(|reply| AgentCommand::GetUsage { reply })
+                .ask(|reply| AgentCommand::Read(AgentReadCommand::GetUsage { reply }))
                 .await
                 .unwrap_or_default(),
             None => AgentUsageSnapshot::default(),

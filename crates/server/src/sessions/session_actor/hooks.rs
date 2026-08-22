@@ -18,6 +18,9 @@ use super::{
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::{AgentOutcome, AgentOutcomeSink, Incoming};
+use crate::agent_loop::{
+    LogCommand as AgentLogCommand, QueueCommand as AgentQueueCommand, RunCommand as AgentRunCommand,
+};
 use crate::sessions::addressing::{SessionInbox, SessionRef};
 use crate::sessions::run_forest::{SubAgentStatus, TurnPhase};
 use async_trait::async_trait;
@@ -451,7 +454,10 @@ impl HookRouting {
                 // gone is not an error: the records describe a call it made
                 // before it left, and there is nothing left to tell.
                 if let Some(agent) = actor.agents.get(key) {
-                    let _ = agent.actor.tell(AgentCommand::HooksRan { records }).await;
+                    let _ = agent
+                        .actor
+                        .tell(AgentCommand::Log(AgentLogCommand::HooksRan { records }))
+                        .await;
                 }
                 CommandEffect::none()
             }
@@ -478,9 +484,9 @@ impl HookRouting {
                 let (tx, rx) = oneshot::channel();
                 let _ = agent
                     .actor
-                    .tell(AgentCommand::Cancel {
+                    .tell(AgentCommand::Run(AgentRunCommand::Cancel {
                         ack: Some(ReplyTo::from_sender(tx)),
-                    })
+                    }))
                     .await;
                 if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
                     tracing::warn!(session = %actor.id, "halted agent did not finish in time");
@@ -515,13 +521,13 @@ impl HookRouting {
                 if let Some(agent) = actor.agents.get(key) {
                     let _ = agent
                         .actor
-                        .tell(AgentCommand::Enqueue {
+                        .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                             item: Incoming::Continue {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 reason,
                             },
                             ack: None,
-                        })
+                        }))
                         .await;
                 }
                 CommandEffect::none()

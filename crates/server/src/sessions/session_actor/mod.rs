@@ -52,6 +52,10 @@ use turns::Turns;
 use crate::agent_loop::{
     AgentActor, AgentCommand, AgentOutcome, AgentParams, AgentRunDef, AgentRuntimeContext, Incoming,
 };
+use crate::agent_loop::{
+    CoreCommand as AgentCoreCommand, QueueCommand as AgentQueueCommand,
+    RunCommand as AgentRunCommand,
+};
 use crate::projects::{ProjectRegistry, ProjectServices, resolve};
 use crate::sessions::{
     addressing::{SessionEntityId, SessionInbox, SessionRef, SupervisorRef},
@@ -768,9 +772,9 @@ impl SessionActor {
         let (tx, rx) = oneshot::channel();
         let _ = agent
             .actor
-            .tell(AgentCommand::Cancel {
+            .tell(AgentCommand::Run(AgentRunCommand::Cancel {
                 ack: Some(ReplyTo::from_sender(tx)),
-            })
+            }))
             .await;
         if tokio::time::timeout(CANCEL_TIMEOUT, rx).await.is_err() {
             tracing::warn!(
@@ -844,13 +848,13 @@ impl SessionActor {
             return Vec::new();
         };
         if agent
-            .tell(AgentCommand::Enqueue {
+            .tell(AgentCommand::Queue(AgentQueueCommand::Enqueue {
                 item: Incoming::SubAgent {
                     id: child.0.to_string(),
                     part: Box::new(part),
                 },
                 ack: None,
-            })
+            }))
             .await
             .is_err()
         {
@@ -1119,8 +1123,14 @@ impl SessionActor {
         for agent in self.agents.drain_all() {
             // Cancel first: a stopped mailbox makes the run task's next persist
             // fail, but an in-flight tool call would run to completion first.
-            let _ = agent.actor.tell(AgentCommand::Cancel { ack: None }).await;
-            let _ = agent.actor.tell(AgentCommand::Shutdown).await;
+            let _ = agent
+                .actor
+                .tell(AgentCommand::Run(AgentRunCommand::Cancel { ack: None }))
+                .await;
+            let _ = agent
+                .actor
+                .tell(AgentCommand::Core(AgentCoreCommand::Shutdown))
+                .await;
         }
     }
 }

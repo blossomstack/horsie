@@ -24,8 +24,9 @@ mod workspace;
 
 pub use agent_actor::{
     AgentActor, AgentCommand, AgentDomainEvent, AgentObserver, AgentParams, AgentState,
-    AgentStateView, AgentUsageSnapshot, ReadOutcome, ReplayWindow, UsageTotal, hook_entry,
-    hook_entry_id,
+    AgentStateView, AgentUsageSnapshot, CoreCommand, ForkCommand, LogCommand, QueueCommand,
+    ReadCommand, ReadOutcome, ReplayWindow, RunCommand, TaskListCommand, TimerCommand, UsageTotal,
+    hook_entry, hook_entry_id,
 };
 pub use agent_log::{Cursor, LogPage, REPLAY_CAP, page_after, page_before, replay_window};
 pub use context::compaction_window;

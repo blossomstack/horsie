@@ -138,7 +138,7 @@ impl horsie_agentcore::CompactionPolicy for ActorCompactionPolicy {
         // compaction still records what it summarised, and nothing invents
         // state that could not be read.
         self.actor
-            .ask(|reply| super::AgentCommand::CarriedState { reply })
+            .ask(|reply| super::AgentCommand::Read(super::ReadCommand::CarriedState { reply }))
             .await
             .unwrap_or_default()
     }
