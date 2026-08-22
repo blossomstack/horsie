@@ -163,14 +163,14 @@ function WorkflowEditor() {
           {editing ? `Edit ${name}` : "New workflow"}
         </h1>
         <button
-          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          className="key key-blank key-sm"
           onClick={() => navigate("/workflows")}
           data-testid="cancel-workflow"
         >
           Cancel
         </button>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go key-sm"
           onClick={save}
           data-testid="save-workflow"
           disabled={!slug.trim() || stepNames.length === 0}
@@ -264,7 +264,7 @@ function WorkflowEditor() {
                     )}
                   </button>
                   <button
-                    className="key key-danger !px-1.5 !py-1 md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+                    className="key key-danger key-sm md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
                     aria-label={`Remove step ${s.name || i + 1}`}
                     onClick={() => removeStep(i)}
                     data-testid="remove-step"
@@ -291,7 +291,7 @@ function WorkflowEditor() {
               // a config key holding a value does. Amber would be wrong — it
               // means a live measured value, not a control that is on.
               className={cn(
-                "key key-blank !px-2 !py-1.5 text-xs md:w-full",
+                "key key-blank key-sm md:w-full",
                 visualizing && "bg-raised !text-legend",
               )}
               onClick={() => setVisualizing((v) => !v)}

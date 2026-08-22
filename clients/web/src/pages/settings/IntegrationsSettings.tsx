@@ -304,7 +304,7 @@ function McpSection() {
           </div>
         </div>
         <button
-          className="key shrink-0 !px-2.5 !py-1.5 text-xs"
+          className="key shrink-0 key-sm"
           onClick={() => setAdding(true)}
         >
           <Plus size={14} /> Add server

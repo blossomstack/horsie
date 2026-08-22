@@ -83,14 +83,14 @@ function AgentForm({ initial }: { initial?: AgentView }) {
           {editing ? `Edit ${initial.name}` : "New agent"}
         </h1>
         <button
-          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          className="key key-blank"
           onClick={() => navigate("/agents")}
           data-testid="cancel-agent-button"
         >
           Cancel
         </button>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-agent-button"

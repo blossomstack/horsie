@@ -45,7 +45,7 @@ export function WorkflowDetailPage() {
         <RailToggle />
         <Link
           to="/workflows"
-          className="key !px-2.5 !py-1.5 text-xs"
+          className="key key-sm"
           data-testid="return-to-workflows"
         >
           <ArrowLeft size={14} />
@@ -54,7 +54,7 @@ export function WorkflowDetailPage() {
         <h1 className="page-title min-w-0 flex-1 truncate">{workflow.name}</h1>
         <Link
           to={`/workflows/${encodeURIComponent(workflow.name)}/edit`}
-          className="key ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key ml-auto key-sm"
           data-testid="edit-workflow"
         >
           <Pencil size={14} />
@@ -62,7 +62,7 @@ export function WorkflowDetailPage() {
         </Link>
         <Link
           to={`/?workflow=${encodeURIComponent(workflow.name)}`}
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go key-sm"
           data-testid="run-workflow"
         >
           <Play size={14} />

@@ -30,7 +30,7 @@ export function RoutinesPage() {
         <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button
-          className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-go ml-auto key-sm"
           onClick={() => navigate("/routines/new")}
           data-testid="new-routine-button"
         >

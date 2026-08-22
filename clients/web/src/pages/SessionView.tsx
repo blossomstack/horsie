@@ -938,7 +938,7 @@ export function SessionView() {
                   beside it. */}
               {mainAgent?.status === "running" && (
                 <button
-                  className="key key-stop ml-auto !px-2 !py-1 text-xs"
+                  className="key key-stop ml-auto key-sm"
                   onClick={handleStop}
                   data-testid="step-stop"
                 >

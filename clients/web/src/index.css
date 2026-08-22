@@ -508,6 +508,19 @@
     pointer-events: none;
   }
 
+  /* A key in a dense row: a header bar, a step's own controls, a table cell.
+   *
+   * A SIZE, not a variant — it composes with `key-go`, `key-blank` and the
+   * rest. Fifteen call sites were each reaching past `.key` with their own
+   * `!px-2 !py-1 text-xs`, in three different sizes, because the system had
+   * one key and they needed a smaller one. That is not fifteen decisions, it
+   * is one missing recipe. */
+  .key-sm {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    gap: 0.3125rem;
+  }
+
   /* The one control that commits. */
   .key-go {
     background: var(--accent);

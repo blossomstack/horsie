@@ -1,3 +1,4 @@
+import { RowLabel } from "../settings/fields";
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { RailToggle } from "../../components/rail";
@@ -241,14 +242,14 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           {editing ? `Edit ${initial.name}` : "New routine"}
         </h1>
         <button
-          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          className="key key-blank"
           onClick={() => navigate("/routines")}
           data-testid="cancel-routine-button"
         >
           Cancel
         </button>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-routine-button"
@@ -259,9 +260,9 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto w-full max-w-3xl space-y-4">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
+            <RowLabel>
               Name
-            </span>
+            </RowLabel>
             <input
               className="field w-full font-mono"
               placeholder="nightly-triage"
@@ -273,9 +274,9 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
+            <RowLabel>
               Description
-            </span>
+            </RowLabel>
             <input
               className="field w-full"
               placeholder="What this routine is for"
@@ -286,9 +287,9 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
+            <RowLabel>
               Agent
-            </span>
+            </RowLabel>
             <select
               className="field w-full"
               value={agent}
@@ -327,9 +328,9 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </div>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-dim">
+            <RowLabel>
               Prompt
-            </span>
+            </RowLabel>
             <textarea
               className="field h-40 w-full resize-y font-mono text-sm"
               placeholder="Everything the run gets told. It cannot ask you a question, so say what to do when a choice comes up."
@@ -340,9 +341,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
           </label>
 
           <fieldset className="space-y-2">
-            <legend className="mb-1 text-xs font-medium text-dim">
-              Trigger
-            </legend>
+            <legend className="section-title mb-1.5">Trigger</legend>
             <div className="flex flex-wrap items-center gap-3">
               <select
                 className="field"
@@ -410,7 +409,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                     </span>
                     <button
                       type="button"
-                      className="key-flat !px-1.5 !py-1 text-xs"
+                      className="key key-flat"
                       aria-controls="routine-timezone-editor"
                       aria-expanded={timezoneEditorOpen}
                       data-testid="routine-timezone-toggle"
@@ -475,7 +474,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                       </div>
                       <button
                         type="button"
-                        className="key-flat !px-2 !py-1.5 text-xs"
+                        className="key key-flat"
                         onClick={() =>
                           setWeekdays(new Set(WEEKDAY_ORDER.slice(0, 5)))
                         }

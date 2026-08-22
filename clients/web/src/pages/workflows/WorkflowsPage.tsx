@@ -20,7 +20,7 @@ export function WorkflowsPage() {
         <RailToggle />
         <h1 className="page-title">Workflows</h1>
         <button
-          className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-go ml-auto key-sm"
           onClick={() => navigate("/workflows/new")}
           data-testid="new-workflow-button"
         >

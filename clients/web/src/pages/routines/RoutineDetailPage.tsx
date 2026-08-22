@@ -48,7 +48,7 @@ export function RoutineDetailPage() {
         <RailToggle />
         <Link
           to="/routines"
-          className="key !px-2.5 !py-1.5 text-xs"
+          className="key key-sm"
           data-testid="return-to-routines"
         >
           <ArrowLeft size={15} />
@@ -62,14 +62,14 @@ export function RoutineDetailPage() {
         )}
         <Link
           to={`/routines/${encodeURIComponent(routine.name)}/edit`}
-          className="key ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key ml-auto key-sm"
           data-testid="edit-routine-link"
         >
           <Pencil size={15} />
           Edit
         </Link>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go key-sm"
           onClick={handleRun}
           disabled={run.isPending}
           data-testid="run-routine-button"

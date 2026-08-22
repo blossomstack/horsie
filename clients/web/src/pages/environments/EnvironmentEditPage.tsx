@@ -133,14 +133,14 @@ function EnvironmentForm({ initial }: { initial?: EnvironmentView }) {
           {editing ? `Edit ${initial.name}` : "New environment"}
         </h1>
         <button
-          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          className="key key-blank"
           onClick={() => navigate("/environments")}
           data-testid="cancel-environment-button"
         >
           Cancel
         </button>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go"
           disabled={!canSave}
           onClick={handleSave}
           data-testid="save-environment-button"
