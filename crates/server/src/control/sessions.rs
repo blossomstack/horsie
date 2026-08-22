@@ -107,10 +107,13 @@ impl Resource for Sessions {
                     })
                     .await?
                     .ok_or_else(|| ControlError::NotFound(format!("no such session: {}", i.id)))?;
+                    let windows = handlers::context_windows(&s.config_store)
+                        .await
+                        .map_err(ControlError::Internal)?;
                     // The *detail* document, not a summary: the two differ and
                     // the web UI reads this one.
                     Ok::<GetSessionResponse, ControlError>(GetSessionResponse {
-                        session: handlers::detail(&i.id, &rec, snapshot.as_ref()),
+                        session: handlers::detail(&i.id, &rec, snapshot.as_ref(), &windows),
                     })
                 },
             ),

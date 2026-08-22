@@ -125,14 +125,14 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         // happens *in* the parent's trajectory, and the child's own log starts
         // with its own work.
         E::SubAgentSpawned {
-            id, parent, label, ..
+            id, parent, title, ..
         } => parent_key(*parent, state)
             .map(|key| {
                 (
                     key,
                     LifecycleEvent::SubAgent(SubAgentLifecycle {
                         id: id.to_string(),
-                        label: label.clone(),
+                        title: title.clone(),
                         status: "running".into(),
                     }),
                 )
@@ -184,7 +184,7 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
                     key,
                     LifecycleEvent::SubAgent(SubAgentLifecycle {
                         id: id.to_string(),
-                        label: format!("workflow {}", graph.workflow),
+                        title: format!("workflow {}", graph.workflow),
                         status: "running".into(),
                     }),
                 )
@@ -216,14 +216,22 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
         // and telling the source about it would disturb its prompt cache for
         // nothing.
         E::SubSessionCreated {
-            id, parent, seed, ..
+            id,
+            parent,
+            seed,
+            title,
+            ..
         } => parent_key(*parent, state)
             .map(|key| {
                 (
                     key,
                     LifecycleEvent::SubSession(SubSessionLifecycle {
                         id: id.to_string(),
-                        title: None,
+                        // Named at the branch, so the marker in the source's
+                        // transcript says what was branched rather than
+                        // waiting for the sub session to name itself — which
+                        // it no longer can.
+                        title: Some(title.clone()),
                         seed: seed.as_str().to_string(),
                     }),
                 )
@@ -231,13 +239,11 @@ pub fn route(event: &SessionDomainEvent, state: &SessionState) -> Vec<Entry> {
             .into_iter()
             .collect(),
         // Nothing in the source's transcript changes when a sub session is
-        // seeded, renames itself, moves or goes. Those belong in the sub
-        // session's own log, and the session list is where a reader watches
-        // them.
-        E::SubSessionSeeded { .. }
-        | E::SubSessionTitled { .. }
-        | E::SubSessionStatusChanged { .. }
-        | E::SubSessionDeleted { .. } => Vec::new(),
+        // seeded, moves or goes. Those belong in the sub session's own log,
+        // and the session list is where a reader watches them.
+        E::SubSessionSeeded { .. } | E::SubSessionStatusChanged { .. } | E::AgentDeleted { .. } => {
+            Vec::new()
+        }
         // On the sub session itself, not on the session it branched from: this
         // is the boundary of the sub session's *own* turn, and a page folds a
         // `TurnBegan` as `Running` until it sees the matching end. Left out, a
@@ -315,7 +321,7 @@ fn terminal_subagent(id: uuid::Uuid, error: Option<&String>, state: &SessionStat
                 key,
                 LifecycleEvent::SubAgent(SubAgentLifecycle {
                     id: id.to_string(),
-                    label: record.label.clone(),
+                    title: record.title.clone(),
                     status: match error {
                         Some(_) => "failed".into(),
                         None => "completed".into(),
@@ -381,7 +387,7 @@ fn run_report_entry(run: RunId, status: &str, state: &SessionState) -> Vec<Entry
         key,
         LifecycleEvent::SubAgent(SubAgentLifecycle {
             id: run.0.to_string(),
-            label: format!("workflow {}", w.workflow),
+            title: format!("workflow {}", w.workflow),
             status: status.into(),
         }),
     )]
@@ -500,12 +506,13 @@ mod tests {
                 at_ms: 1,
                 agent_id: "main".into(),
                 usage_total: crate::agent_loop::UsageTotal::default(),
+                context_tokens: 0,
             },
             E::SubAgentSpawned {
                 at_ms: 1,
                 id: sub,
                 parent: session,
-                label: "l".into(),
+                title: "l".into(),
                 task: "t".into(),
                 agent_type: None,
             },
@@ -615,7 +622,7 @@ mod tests {
                 at_ms: 1,
                 id: sub,
                 parent: session,
-                label: "l".into(),
+                title: "l".into(),
                 task: "t".into(),
                 agent_type: None,
             },
@@ -733,7 +740,7 @@ mod tests {
             at_ms: 1,
             id: child,
             parent,
-            label: "child".into(),
+            title: "child".into(),
             task: "t".into(),
             agent_type: None,
         };
@@ -748,7 +755,7 @@ mod tests {
                 at_ms: 0,
                 id: parent,
                 parent: session,
-                label: "lead".into(),
+                title: "lead".into(),
                 task: "t".into(),
                 agent_type: None,
             },
@@ -765,9 +772,9 @@ mod tests {
             let LifecycleEvent::SubAgent(payload) = &entries[0].1 else {
                 panic!("expected a SubAgent entry");
             };
-            // The label comes off the forest, so a terminal result names the
+            // The title comes off the forest, so a terminal result names the
             // child rather than carrying a bare uuid.
-            assert_eq!(payload.label, "child");
+            assert_eq!(payload.title, "child");
         }
     }
 
@@ -846,7 +853,7 @@ mod tests {
         let LifecycleEvent::SubAgent(payload) = &entries[0].1 else {
             panic!("expected a SubAgent entry, got {:?}", entries[0].1);
         };
-        assert_eq!(payload.label, "workflow deploy");
+        assert_eq!(payload.title, "workflow deploy");
         assert_eq!(payload.status, "running");
         let entries = route(&finished, &state);
         assert!(
@@ -904,7 +911,7 @@ mod tests {
             at_ms: 2,
             id: child,
             parent: agent,
-            label: "helper".into(),
+            title: "helper".into(),
             task: "t".into(),
             agent_type: None,
         };
@@ -1051,7 +1058,7 @@ mod tests {
                 at_ms: 1,
                 id: child,
                 parent: session,
-                label: "helper".into(),
+                title: "helper".into(),
                 task: "t".into(),
                 agent_type: None,
             },
@@ -1084,6 +1091,7 @@ mod tests {
             source_seq: 0,
             seed: SeedMode::Copy,
             message: "go".into(),
+            title: "a branch".into(),
         }
     }
 

@@ -356,11 +356,15 @@ export const api = {
         },
       ),
 
-    /** Remove one sub session. Only a sub session: a subagent and a workflow step are part of
-     * what their session did, and nothing removes one. */
-    deleteSubSession: (id: string, subSessionId: string): Promise<Ack> =>
+    /** Remove one agent a session hosts — a subagent's run or a sub session —
+     * and everything below it.
+     *
+     * Not the main agent, which is the session (`remove` deletes that), and
+     * not a workflow step, which belongs to its run's log. The server refuses
+     * both rather than this guessing which an id names. */
+    deleteAgent: (id: string, agentId: string): Promise<Ack> =>
       request(
-        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(subSessionId)}`,
+        `/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}`,
         { method: "DELETE" },
       ),
 

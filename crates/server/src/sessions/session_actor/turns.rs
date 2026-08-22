@@ -345,6 +345,13 @@ impl SessionActor {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         let SubSessionRequest { seed, message } = req;
+        // A person typing `/fork` names nothing, and a sub session can no
+        // longer name itself — `set_session_title` is the main agent's alone.
+        // So it is named from its brief, by the same rule a session with no
+        // name takes one from its first message. `spawn_subsession` reaches
+        // this command with a title the caller chose and never lands here.
+        let title =
+            super::core::derive_title(&message).unwrap_or_else(|| "Sub session".to_string());
         // Which agent typed it, as an id `Create` can validate. Everything
         // else a sub session needs to be true — a message, a session rather
         // than a run — is checked there, where a sub session is written.
@@ -364,6 +371,7 @@ impl SessionActor {
                         parent,
                         seed,
                         message,
+                        title,
                         reply: r,
                     })
                 })
@@ -423,7 +431,7 @@ impl SessionActor {
         // An unnamed session is titled from its first message, once. The rule
         // is `SessionCore`'s — a session's name is its own bookkeeping, not
         // the turn's — so this only says when to apply it.
-        self.title_from_first_message(&text).await;
+        let titled = self.title_from_first_message(state, &text).await;
 
         let id = Uuid::new_v4().to_string();
         // A built-in is resolved here, before anything treats the text as a
@@ -493,7 +501,7 @@ impl SessionActor {
         // parents. Those strand once every node is terminal — no further
         // subagent outcome will arrive to trigger the flush — so the next thing
         // the user does has to be what delivers them.
-        self.persist_and_advance(state, Vec::new(), ctx).await
+        self.persist_and_advance(state, titled.into_iter().collect(), ctx).await
     }
 }
 

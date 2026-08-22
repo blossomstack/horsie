@@ -7,7 +7,10 @@
  */
 export interface SubAgentResultPart {
   subagentId: string;
-  label: string;
+  /**
+   * What the subagent was called: the `title` its spawner gave it.
+   */
+  title: string;
   /**
    * "completed" | "failed" — the SubAgentView.status vocabulary.
    */

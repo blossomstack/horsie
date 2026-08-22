@@ -34,7 +34,7 @@ export interface RenderedToolCall {
 
 export interface RenderedSubAgent {
   subagentId: string;
-  label: string;
+  title: string;
   status: string;
   text: string;
   spawnedAtMs: number;
@@ -376,7 +376,7 @@ export function fold(entries: AgentLogEntry[]): Folded {
       case "SubAgent":
         out.progression = {
           stage: `subagent_${ev.value.status}`,
-          detail: `"${ev.value.label}" (${ev.value.id})`,
+          detail: `"${ev.value.title}" (${ev.value.id})`,
         };
         break;
       // A step's own turn boundary. A step never gets a `TurnEnded` — its
@@ -456,7 +456,7 @@ function subAgentResultsOf(parts: ContentPart[]): RenderedSubAgent[] {
     )
     .map((p) => ({
       subagentId: p.value.subagentId,
-      label: p.value.label,
+      title: p.value.title,
       status: p.value.status,
       text: p.value.text,
       spawnedAtMs: p.value.spawnedAtMs,

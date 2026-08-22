@@ -48,6 +48,7 @@ impl SubSessions {
                 parent,
                 seed,
                 message,
+                title,
                 reply,
             } => {
                 if let Err(why) = branchable(actor.id, state, parent, &message) {
@@ -69,6 +70,7 @@ impl SubSessions {
                     source_seq,
                     seed,
                     message: message.clone(),
+                    title,
                 };
                 // Persist first, spawn second — see the module doc.
                 let (tx, rx) = oneshot::channel();
@@ -170,38 +172,6 @@ impl SubSessions {
                     status: AgentStatus::Failed,
                 }])
             }
-            SubSessionCommand::SetTitle { id, title, reply } => {
-                let normalized = match crate::sessions::title_tool::normalize_session_title(&title)
-                {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = reply.send(Err(e.to_string()));
-                        return CommandEffect::none();
-                    }
-                };
-                if state.forest.sub_session(id).is_none() {
-                    let _ = reply.send(Err(format!("no such sub session: {id}")));
-                    return CommandEffect::none();
-                }
-                let _ = reply.send(Ok(normalized.clone()));
-                CommandEffect::persist(vec![SessionDomainEvent::SubSessionTitled {
-                    at_ms: now_ms(),
-                    id,
-                    name: normalized,
-                }])
-            }
-            SubSessionCommand::Delete { id, reply } => {
-                if state.forest.sub_session(id).is_none() {
-                    let _ = reply.send(Err(format!("no such sub session: {id}")));
-                    return CommandEffect::none();
-                }
-                actor.retire_sub_session_actor(id).await;
-                let _ = reply.send(Ok(()));
-                CommandEffect::persist(vec![SessionDomainEvent::SubSessionDeleted {
-                    at_ms: now_ms(),
-                    id,
-                }])
-            }
             SubSessionCommand::ReseedInterrupted => {
                 for id in state.forest.seeding_sub_sessions() {
                     // Spawning is what a sub session needs to be seeded
@@ -265,15 +235,13 @@ impl Component for SubSessions {
                 source_seq,
                 seed,
                 message,
+                title,
                 at_ms,
             } => state
                 .forest
-                .apply_sub_session_created(id, parent, source_seq, seed, message, at_ms),
+                .apply_sub_session_created(id, parent, source_seq, seed, message, title, at_ms),
             SessionDomainEvent::SubSessionSeeded { id, .. } => {
                 state.forest.apply_sub_session_seeded(id)
-            }
-            SessionDomainEvent::SubSessionTitled { id, name, .. } => {
-                state.forest.apply_sub_session_titled(id, name);
             }
             SessionDomainEvent::SubSessionStatusChanged { at_ms, id, status } => {
                 state.forest.apply_sub_session_status(id, status, at_ms);
@@ -290,9 +258,6 @@ impl Component for SubSessions {
                     | TurnOutcome::Interrupted(_) => AgentStatus::Idle,
                 };
                 state.forest.apply_sub_session_status(id, status, at_ms);
-            }
-            SessionDomainEvent::SubSessionDeleted { id, .. } => {
-                state.forest.apply_sub_session_deleted(id)
             }
             other => unreachable!("SubSessions was handed {other:?}"),
         }
@@ -607,11 +572,11 @@ impl SessionActor {
     /// phrase rather than to an id, which means nothing to a reader.
     fn source_title(&self, state: &SessionState, parent: Uuid) -> String {
         let named = match parent == self.id {
-            true => self.spec().name.clone(),
+            true => state.forest.main_title().map(str::to_string),
             false => state
                 .forest
                 .sub_session(parent)
-                .and_then(|rec| rec.title.clone()),
+                .map(|rec| rec.title.clone()),
         };
         named.unwrap_or_else(|| "the session before this one".to_string())
     }
@@ -621,7 +586,7 @@ impl SessionActor {
     /// Best effort: a sub session that is not resident has nothing to stop,
     /// and the `ForkDeleted` that follows is what makes the removal durable
     /// either way.
-    pub(super) async fn retire_sub_session_actor(&mut self, id: Uuid) {
+    pub(super) async fn retire_agent_actor(&mut self, id: Uuid) {
         let Some(agent) = self.agents.remove(id) else {
             return;
         };
@@ -759,6 +724,7 @@ mod tests {
             0,
             SeedMode::Summary,
             "go".into(),
+            "a branch".into(),
             1,
         );
         state.forest.apply_sub_session_status(id(1), status, 5_000);
@@ -856,6 +822,7 @@ mod tests {
                 source_seq: 12,
                 seed: SeedMode::Copy,
                 message: "go".into(),
+                title: "Other migration".into(),
             },
         );
         assert_eq!(
@@ -873,21 +840,15 @@ mod tests {
             state.forest.sub_session(id(1)).unwrap().status,
             AgentStatus::Idle
         );
-        SubSessions::apply(
-            &mut state,
-            &SessionDomainEvent::SubSessionTitled {
-                at_ms: 3,
-                id: id(1),
-                name: "Other migration".to_string(),
-            },
-        );
         assert_eq!(
-            state.forest.sub_session(id(1)).unwrap().title.as_deref(),
-            Some("Other migration")
+            state.forest.sub_session(id(1)).unwrap().title,
+            "Other migration"
         );
-        SubSessions::apply(
+        // Removal is `SessionCore`'s: one event for both kinds of agent, and
+        // the fold takes the whole subtree, which can span both.
+        crate::sessions::session_actor::core::SessionCore::apply(
             &mut state,
-            &SessionDomainEvent::SubSessionDeleted {
+            &SessionDomainEvent::AgentDeleted {
                 at_ms: 4,
                 id: id(1),
             },
@@ -1426,7 +1387,10 @@ mod tests {
                     horsie_agentcore::ToolCallPart {
                         id: "sub_session-1".into(),
                         name: crate::sessions::sub_session_tool::SPAWN_SUBSESSION_TOOL.into(),
-                        input: serde_json::json!({"task": "try the materialised view"}),
+                        input: serde_json::json!({
+                            "title": "the materialised view",
+                            "task": "try the materialised view"
+                        }),
                     },
                 )],
                 stop_reason: StopReason::ToolUse,

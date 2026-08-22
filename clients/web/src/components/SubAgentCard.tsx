@@ -39,7 +39,7 @@ export function SubAgentCard({ result }: { result: RenderedSubAgent }) {
         subagent
       </span>
       <span className="min-w-0 flex-1 truncate font-mono text-[0.6875rem] text-faint">
-        {result.label}
+        {result.title}
       </span>
       {failed && <span className="legend shrink-0 !text-red-ink">Failed</span>}
       {duration && (
@@ -53,7 +53,7 @@ export function SubAgentCard({ result }: { result: RenderedSubAgent }) {
   return (
     <div
       data-testid="subagent-card"
-      data-subagent={result.label}
+      data-subagent={result.title}
       data-status={result.status}
     >
       {hasText ? (

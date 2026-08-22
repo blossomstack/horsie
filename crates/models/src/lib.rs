@@ -402,7 +402,7 @@ impl agent::SubAgentResultPart {
     /// definition of the format rather than two that can drift.
     #[must_use]
     pub fn to_wire_text(&self) -> String {
-        let header = format!("[subagent \"{}\" {}]", self.label, self.status);
+        let header = format!("[subagent \"{}\" {}]", self.title, self.status);
         if self.text.is_empty() {
             header
         } else {
@@ -808,10 +808,10 @@ mod tests {
         assert_eq!(back, body);
     }
 
-    fn result_part(label: &str) -> agent::SubAgentResultPart {
+    fn result_part(title: &str) -> agent::SubAgentResultPart {
         agent::SubAgentResultPart {
             subagent_id: "11111111-1111-1111-1111-111111111111".into(),
-            label: label.into(),
+            title: title.into(),
             status: "completed".into(),
             text: "did the thing".into(),
             spawned_at_ms: 10,
@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(msg.parts.len(), 2);
         assert!(matches!(&msg.parts[0], agent::ContentPart::Text(t) if t.text == "keep going"));
         assert!(
-            matches!(&msg.parts[1], agent::ContentPart::SubAgentResult(r) if r.label == "audit")
+            matches!(&msg.parts[1], agent::ContentPart::SubAgentResult(r) if r.title == "audit")
         );
     }
 

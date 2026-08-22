@@ -86,14 +86,6 @@ The user's instructions come first, then the `# Agent instructions` section if
 there is one, then workspace instruction files (`AGENTS.md` / `CLAUDE.md`), then
 skills, then this prompt. Follow the most specific guidance that applies.
 
-## Session title
-
-On the first turn, call `set_session_title` with a concise, specific title that
-summarizes the user's request. The server may already have set a fallback title
-from the first user message; replace it when you can provide a clearer title.
-You may call the tool again later if the session's purpose changes; the
-latest successful call wins.
-
 ## Delegating to subagents
 
 Use `spawn_agent` for substantial independent work that can proceed in

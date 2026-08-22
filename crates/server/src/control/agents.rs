@@ -159,10 +159,10 @@ async fn invoke(
         instructions: agent.instructions.clone(),
         auto_compact: agent.auto_compact,
     };
+    let name = request.name;
     let spec = build_session_spec(
         &services.config_store,
         &services.environments,
-        request.name,
         wire,
         request.environment,
         Some(agent.plugins.clone()),
@@ -186,6 +186,7 @@ async fn invoke(
     // addressed separately and land on different nodes.
     let id = ask(services, |reply| SessionSupervisorCommand::Create {
         spec: spec.clone(),
+        name: name.clone(),
         created_at,
         message: Some(request.message),
         reply,
@@ -195,6 +196,7 @@ async fn invoke(
     .id;
     let rec = SessionRecord {
         spec,
+        name,
         created_at,
         annotations: BTreeMap::new(),
         status: SessionStatus::Idle,

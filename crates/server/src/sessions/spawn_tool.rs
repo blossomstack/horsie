@@ -31,10 +31,12 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
         .to_string();
     let mut properties = serde_json::Map::new();
     properties.insert(
-        "label".to_string(),
+        "title".to_string(),
         json!({
             "type": "string",
-            "description": "A short human-readable label for the subagent (a few words)."
+            "description": "A short, specific title for the subagent — a few words \
+                naming what it is doing. It is what the session's agent graph shows \
+                for this subagent, so make it read on its own."
         }),
     );
     properties.insert(
@@ -77,7 +79,7 @@ fn spawn_agent_spec(catalog: &AgentCatalog) -> ToolSpec {
         description,
         input_schema: json!({
             "type": "object",
-            "required": ["label", "task"],
+            "required": ["title", "task"],
             "properties": properties,
         }),
     }
@@ -176,10 +178,10 @@ impl Toolbox for SubAgentToolbox {
         tool_call_id: &str,
     ) -> Result<ToolOutcome, ToolCallError> {
         if name == SPAWN_AGENT_TOOL {
-            let label = input
-                .get("label")
+            let title = input
+                .get("title")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ToolCallError::InvalidInput("missing 'label'".to_string()))?;
+                .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
             let task = input
                 .get("task")
                 .and_then(Value::as_str)
@@ -190,7 +192,7 @@ impl Toolbox for SubAgentToolbox {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Spawn {
                         caller: self.caller,
-                        label: label.to_string(),
+                        title: title.to_string(),
                         task: task.to_string(),
                         agent_type,
                         reply,
@@ -414,7 +416,7 @@ mod tests {
         let err = tb
             .execute(
                 SPAWN_AGENT_TOOL,
-                json!({"label": "x", "task": "y", "agent_type": "reviewer"}),
+                json!({"title": "x", "task": "y", "agent_type": "reviewer"}),
                 "tc1",
             )
             .await
@@ -432,8 +434,8 @@ mod tests {
     async fn an_absent_agent_type_spawns_a_general_purpose_subagent() {
         let tb = with_catalog(Ok(Uuid::new_v4()), catalog_of("code-reviewer", "reviews"));
         for input in [
-            json!({"label": "x", "task": "y"}),
-            json!({"label": "x", "task": "y", "agent_type": "  "}),
+            json!({"title": "x", "task": "y"}),
+            json!({"title": "x", "task": "y", "agent_type": "  "}),
         ] {
             assert!(tb.execute(SPAWN_AGENT_TOOL, input, "tc1").await.is_ok());
         }
@@ -445,7 +447,7 @@ mod tests {
         let out = toolbox(Ok(id))
             .execute(
                 SPAWN_AGENT_TOOL,
-                json!({"label": "research", "task": "dig"}),
+                json!({"title": "research", "task": "dig"}),
                 "tc1",
             )
             .await
@@ -459,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_surfaces_limit_errors_as_tool_errors() {
         let err = toolbox(Err("8 subagents already active".into()))
-            .execute(SPAWN_AGENT_TOOL, json!({"label": "x", "task": "y"}), "tc1")
+            .execute(SPAWN_AGENT_TOOL, json!({"title": "x", "task": "y"}), "tc1")
             .await
             .unwrap_err();
         match err {
@@ -469,9 +471,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_requires_label_and_task() {
+    async fn spawn_requires_title_and_task() {
         let err = toolbox(Ok(Uuid::new_v4()))
-            .execute(SPAWN_AGENT_TOOL, json!({"label": "x"}), "tc1")
+            .execute(SPAWN_AGENT_TOOL, json!({"title": "x"}), "tc1")
             .await
             .unwrap_err();
         assert!(matches!(err, ToolCallError::InvalidInput(_)));

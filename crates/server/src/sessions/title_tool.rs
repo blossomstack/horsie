@@ -59,8 +59,9 @@ pub(crate) fn normalize_session_title(input: &str) -> Result<String, SessionTitl
 fn set_session_title_spec() -> ToolSpec {
     ToolSpec {
         name: SET_SESSION_TITLE_TOOL.to_string(),
-        description: "Rename this session at any point with a concise, specific, \
-            single-line title. The latest successful call wins."
+        description: "Title this session at any point with a concise, specific, \
+            single-line title. It is your own title as this session's main agent, and \
+            the name the session is listed under. The latest successful call wins."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -77,41 +78,22 @@ fn set_session_title_spec() -> ToolSpec {
     }
 }
 
-/// Which session a `set_session_title` call renames.
-///
-/// A target rather than a second toolbox type: the tool's name, schema and
-/// description are identical either way, and the model should not have to know
-/// what kind of session it is in to name the one it is having.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitleTarget {
-    Session,
-    SubSession(uuid::Uuid),
-}
-
 /// Wraps the session toolbox, adding the server-owned title tool.
+///
+/// The main agent's alone. A sub session used to get the same tool pointed at
+/// its own row, which made naming a session something two different kinds of
+/// agent did to two different things — and left a sub session nameless for as
+/// long as it took the model to get round to it. A sub session is named by
+/// whoever branched it, at the moment it is branched, so there is nothing here
+/// for it to call.
 pub struct SessionTitleToolbox {
     inner: Arc<dyn Toolbox>,
     session: SessionRef,
-    target: TitleTarget,
 }
 
 impl SessionTitleToolbox {
     pub fn new(inner: Arc<dyn Toolbox>, session: SessionRef) -> Self {
-        Self {
-            inner,
-            session,
-            target: TitleTarget::Session,
-        }
-    }
-
-    /// The same tool, renaming one sub session instead of the session it lives
-    /// in.
-    pub fn for_sub_session(inner: Arc<dyn Toolbox>, session: SessionRef, id: uuid::Uuid) -> Self {
-        Self {
-            inner,
-            session,
-            target: TitleTarget::SubSession(id),
-        }
+        Self { inner, session }
     }
 }
 
@@ -138,18 +120,11 @@ impl Toolbox for SessionTitleToolbox {
             .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
         let title = self
             .session
-            .ask(|reply| match self.target {
-                TitleTarget::Session => SessionCommand::Core(CoreCommand::SetTitle {
+            .ask(|reply| {
+                SessionCommand::Core(CoreCommand::SetTitle {
                     title: title.to_string(),
                     reply,
-                }),
-                TitleTarget::SubSession(id) => SessionCommand::SubSession(
-                    crate::sessions::session_actor::SubSessionCommand::SetTitle {
-                        id,
-                        title: title.to_string(),
-                        reply,
-                    },
-                ),
+                })
             })
             .await
             .map_err(|e| ToolCallError::ExecutionFailed(e.to_string()))?

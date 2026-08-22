@@ -59,7 +59,6 @@ fn settings_from_wire(w: WireAgentSettings) -> AgentSettings {
 /// environment/provision facts and provenance, with nothing about which agent
 /// or workflow runs in it.
 struct CommonSpec {
-    name: Option<String>,
     workspaces: Vec<WorkspaceDef>,
     provision: Vec<ProvisionStepSpec>,
     vendor: String,
@@ -76,7 +75,6 @@ struct CommonSpec {
 /// environment now says.
 async fn resolve_common(
     environments: &EnvironmentService,
-    name: Option<String>,
     environment: EnvironmentSpec,
     plugins: Option<Vec<String>>,
     origin: SessionOrigin,
@@ -134,7 +132,6 @@ async fn resolve_common(
         name: "main".into(),
     }];
     Ok(CommonSpec {
-        name,
         workspaces,
         provision,
         vendor,
@@ -150,13 +147,12 @@ async fn resolve_common(
 pub async fn build_session_spec(
     config: &Arc<dyn ConfigStore>,
     environments: &EnvironmentService,
-    name: Option<String>,
     agent: WireAgentSettings,
     environment: EnvironmentSpec,
     plugins: Option<Vec<String>>,
     origin: SessionOrigin,
 ) -> Result<SessionSpec, SpecError> {
-    let common = resolve_common(environments, name, environment, plugins, origin).await?;
+    let common = resolve_common(environments, environment, plugins, origin).await?;
     let mut agent = settings_from_wire(agent);
     // Selected bundle names (empty → the provisioner falls back to the
     // default-enabled set). Selecting bundles implies plugins are surfaced, so
@@ -212,7 +208,6 @@ pub async fn build_session_spec(
         vendor: common.vendor,
         plugins: common.plugins,
         origin: common.origin,
-        name: common.name,
         environment: common.environment,
         env_vars: common.env_vars,
     })
@@ -223,14 +218,12 @@ pub async fn build_session_spec(
 /// fabricated — the steps own their own, and nothing session-shaped needs one.
 pub async fn build_workflow_spec(
     environments: &EnvironmentService,
-    name: Option<String>,
     environment: EnvironmentSpec,
     plugins: Vec<String>,
     run: Arc<crate::sessions::workflow::WorkflowRunSpec>,
 ) -> Result<SessionSpec, SpecError> {
     let common = resolve_common(
         environments,
-        name,
         environment,
         Some(plugins),
         SessionOrigin::User,
@@ -243,7 +236,6 @@ pub async fn build_workflow_spec(
         vendor: common.vendor,
         plugins: common.plugins,
         origin: common.origin,
-        name: common.name,
         environment: common.environment,
         env_vars: common.env_vars,
     })
@@ -341,7 +333,6 @@ mod tests {
         build_session_spec(
             config,
             envs,
-            None,
             wire_settings(),
             environment,
             None,

@@ -1,6 +1,7 @@
-import { ChevronsRight, Circle, CircleCheck } from "lucide-react";
+import { Circle, CircleCheck } from "lucide-react";
 import { TaskStatus, type TaskItem } from "../api/types";
 import { cn } from "../lib/cn";
+import { SidePanel } from "./SidePanel";
 
 function StatusIcon({ status }: { status: TaskStatus }) {
   switch (status) {
@@ -39,44 +40,20 @@ export function TaskListPanel({
   const done = tasks.filter((t) => t.status === TaskStatus.Completed).length;
 
   return (
-    <>
-      {/* Below lg the panel is an overlay, so it needs a scrim. Without one the
-          transcript behind stayed scrollable and tappable, and on a phone the
-          panel covered the session header — including the very key that opens
-          it — leaving the chevron as the only way back out. */}
-      <button
-        type="button"
-        className="fixed inset-0 z-10 cursor-default bg-chassis/60 lg:hidden"
-        onClick={onClose}
-        aria-label="Close the plan"
-        data-testid="task-list-scrim"
-      />
-      <aside
-        // A third column below lg leaves nothing to read, so it overlays. Below
-        // sm a 16rem overlay left a ~134px sliver of transcript with code
-        // clipped mid-token, so there it takes the full width instead of
-        // pretending to still be a column.
-        className="column-edge-l flex w-64 shrink-0 flex-col bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--float)] max-sm:w-full"
-        data-testid="task-list-panel"
-      >
-        <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 px-3">
-          <h2 className="legend !text-dim">Plan</h2>
-          {tasks.length > 0 && (
-            <span className="readout text-[0.6875rem]" data-testid="task-list-progress">
-              {done}/{tasks.length} done
-            </span>
-          )}
-          <button
-            className="key-icon ml-auto !h-7 !w-7"
-            onClick={onClose}
-            title="Hide the plan"
-            aria-label="Hide the plan"
-            data-testid="task-list-collapse"
-          >
-            <ChevronsRight size={14} aria-hidden />
-          </button>
-        </div>
-
+    <SidePanel
+      legend="Plan"
+      readout={
+        tasks.length > 0 ? (
+          <span className="readout text-[0.6875rem]" data-testid="task-list-progress">
+            {done}/{tasks.length} done
+          </span>
+        ) : undefined
+      }
+      onClose={onClose}
+      closeLabel="Hide the plan"
+      testId="task-list-panel"
+      closeTestId="task-list-collapse"
+    >
         {tasks.length === 0 ? (
           <p
             className="px-3 py-6 text-center text-xs leading-relaxed text-faint"
@@ -115,7 +92,6 @@ export function TaskListPanel({
             ))}
           </ul>
         )}
-      </aside>
-    </>
+    </SidePanel>
   );
 }

@@ -11,7 +11,13 @@ function agent(
   return {
     id,
     parent,
-    label: undefined,
+    title: undefined,
+    kind: "subagent",
+    stats: {
+      usage: { inputTokens: 0, outputTokens: 0 },
+      subtreeUsage: { inputTokens: 0, outputTokens: 0 },
+      contextTokens: 0,
+    },
     depth,
     agentType: undefined,
     status: "completed",
@@ -24,7 +30,7 @@ function agent(
 function subSession(
   id: string,
   parent?: string,
-  title?: string,
+  title = "a branch",
   createdAtMs = 1,
 ): SubSessionView {
   return {
@@ -214,9 +220,12 @@ describe("layoutAgentTree", () => {
       ]);
     });
 
-    it("says what an unnamed sub session is rather than showing its id", () => {
-      const tree = layoutAgentTree([main], [subSession("s")]);
-      expect(tree.nodes[1].label).toBe("untitled sub session");
+    /* A sub session is named at the branch, by whoever branched it — the tool
+       takes a title and `/fork` derives one — so there is no such thing as an
+       unnamed one and nothing has to invent a name for it. */
+    it("draws a sub session under the title it was branched with", () => {
+      const tree = layoutAgentTree([main], [subSession("s", undefined, "the other migration")]);
+      expect(tree.nodes[1].label).toBe("the other migration");
     });
 
     /* One lineage, one ordering: a sub session branched before a subagent was
@@ -237,15 +246,25 @@ describe("layoutAgentTree", () => {
     });
   });
 
-  it("names an agent by its label, else its preset, else what it is", () => {
-    const labelled = { ...agent("a"), label: "review the diff" };
+  it("names an agent by its title, else its preset, else what it is", () => {
+    const titled = { ...agent("a"), title: "review the diff" };
     const preset = { ...agent("b"), agentType: "code-reviewer" };
-    const tree = layoutAgentTree([main, labelled, preset, agent("c")]);
+    const tree = layoutAgentTree([main, titled, preset, agent("c")]);
     expect(tree.nodes.map((n) => n.label)).toEqual([
+      // The main agent has no title in this roster, so it falls back to what
+      // it is. Given one, that title is the session's name.
       "main agent",
       "review the diff",
       "code-reviewer",
       "subagent",
     ]);
+  });
+
+  /* The main agent carries the session's title, because naming the session
+     *is* naming its main agent. It used to read "main agent" — the one node in
+     the picture that said what it was instead of what it was doing. */
+  it("draws the main agent under the session's own title", () => {
+    const tree = layoutAgentTree([{ ...main, title: "port the journal" }]);
+    expect(tree.nodes[0].label).toBe("port the journal");
   });
 });

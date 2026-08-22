@@ -22,7 +22,7 @@ use horsie_models::now_ms;
 const TITLE_MAX_CHARS: usize = crate::sessions::title_tool::SESSION_TITLE_MAX_CHARS;
 
 /// A short title derived from a user's first message.
-fn derive_title(text: &str) -> Option<String> {
+pub(super) fn derive_title(text: &str) -> Option<String> {
     let first_line = text.lines().next().unwrap_or("").trim();
     if first_line.is_empty() {
         return None;
@@ -45,9 +45,40 @@ impl SessionCore {
         ctx: &ActorContext<SessionInbox>,
     ) -> CommandEffect<SessionDomainEvent> {
         match cmd {
+            CoreCommand::DeleteAgent { id, reply } => {
+                // Resolved against the forest, not against a kind the caller
+                // claimed: an id is all a URL carries, and only this session
+                // knows what it names.
+                let removable =
+                    state.forest.sub(id).is_some() || state.forest.sub_session(id).is_some();
+                if !removable {
+                    let _ = reply.send(Err(match id == actor.id {
+                        // The main agent is the session. Removing it is
+                        // deleting the session, which is a different route
+                        // with a different confirmation.
+                        true => {
+                            "the main agent is the session; delete the session instead".to_string()
+                        }
+                        false => format!("no such subagent or sub session: {id}"),
+                    }));
+                    return CommandEffect::none();
+                }
+                // Every actor under it, not just its own: the entries go in
+                // one fold, and an actor left running would keep writing to a
+                // log nothing can reach any more.
+                for below in state.forest.descendant_agents(id) {
+                    actor.retire_agent_actor(below).await;
+                }
+                actor.retire_agent_actor(id).await;
+                let _ = reply.send(Ok(()));
+                CommandEffect::persist(vec![SessionDomainEvent::AgentDeleted {
+                    at_ms: now_ms(),
+                    id,
+                }])
+            }
             CoreCommand::SetTitle { title, reply } => {
                 let result = match normalize_session_title(&title) {
-                    Ok(title) => actor.rename_session(title).await,
+                    Ok(title) => actor.rename_main_agent(title).await,
                     Err(error) => Err(error.to_string()),
                 };
                 // Journal the name this session now answers to, but only if it
@@ -62,10 +93,13 @@ impl SessionCore {
                 effect
             }
             CoreCommand::TitleSet { name } => {
-                actor.spec_mut().name = Some(name.clone());
                 CommandEffect::persist(vec![SessionDomainEvent::Renamed { name }])
             }
-            CoreCommand::Create { spec, message } => {
+            CoreCommand::Create {
+                spec,
+                name,
+                message,
+            } => {
                 // Whether *this* command is what brings the session into being,
                 // and the answer to it is what makes the whole command
                 // idempotent. A log that already says what this session is has
@@ -109,11 +143,17 @@ impl SessionCore {
                 if !creating {
                     CommandEffect::none()
                 } else {
-                    let event = SessionDomainEvent::SpecRecorded {
+                    let mut events = vec![SessionDomainEvent::SpecRecorded {
                         at_ms: now_ms(),
                         session: actor.id,
                         spec,
-                    };
+                    }];
+                    // After the spec, never before: `SpecRecorded` is what
+                    // roots the forest, and a title has nowhere to land until
+                    // the root entry exists.
+                    if let Some(name) = name {
+                        events.push(SessionDomainEvent::Renamed { name });
+                    }
                     // The other half of how a session learns what it is.
                     // Recovery covers a session with a history; this covers the
                     // one case it cannot — a session created a moment ago,
@@ -121,11 +161,14 @@ impl SessionCore {
                     // ever start. Adopted against the folded state, because
                     // this event is what roots the forest and the repairs read
                     // the root.
-                    let next = SessionActor::apply_event(state.clone(), event.clone());
+                    let next = events
+                        .iter()
+                        .cloned()
+                        .fold(state.clone(), SessionActor::apply_event);
                     if let Some(spec) = next.spec.clone() {
                         actor.adopt(spec, &next, ctx).await;
                     }
-                    CommandEffect::persist(vec![event])
+                    CommandEffect::persist(events)
                 }
             }
             CoreCommand::Progress { key, stage, detail } => {
@@ -147,26 +190,48 @@ impl SessionCore {
 /// fields — the roster, the supervisor link, the spawn helpers. An inherent
 /// `impl` in a child module sees them, so moving the code needed no plumbing.
 impl SessionActor {
-    /// Title an as-yet-unnamed session from the first thing the user says.
+    /// Title an as-yet-unnamed main agent from the first thing the user says.
     ///
-    /// Best-effort and fire-and-forget: a session that could not be titled is
-    /// still a session, so a failure is logged and the message goes on to start
-    /// its turn. The built-in title tool overwrites this later if the agent
-    /// picks something better.
-    pub(super) async fn title_from_first_message(&mut self, text: &str) {
-        if self.spec().name.is_some() {
-            return;
+    /// Best-effort: a session that could not be titled is still a session, so a
+    /// failure is logged and the message goes on to start its turn. The
+    /// built-in title tool overwrites this later if the agent picks something
+    /// better.
+    ///
+    /// Hands the event back rather than journaling it, because the caller is
+    /// already returning an effect and a second write from inside here would be
+    /// a second journal round-trip on the message path. That the event is
+    /// *returned at all* is the fix for a real gap: this used to update the
+    /// resident spec copy and tell the supervisor, and write nothing to the
+    /// session's own log — so a title derived from the first message survived
+    /// in the session list and vanished from the session itself at the next
+    /// load. Nothing noticed while the name lived in two places; now that the
+    /// main agent's title *is* the session's name, the graph drew the main
+    /// agent as "main agent" for ever.
+    pub(super) async fn title_from_first_message(
+        &mut self,
+        state: &SessionState,
+        text: &str,
+    ) -> Option<SessionDomainEvent> {
+        if state.forest.main_title().is_some() {
+            return None;
         }
-        let Some(title) = derive_title(text) else {
-            return;
-        };
-        if let Err(error) = self.rename_session(title).await {
-            tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
+        let title = derive_title(text)?;
+        match self.rename_main_agent(title).await {
+            Ok(name) => Some(SessionDomainEvent::Renamed { name }),
+            Err(error) => {
+                tracing::warn!(session = %self.id, error, "failed to persist fallback session title");
+                None
+            }
         }
     }
 
-    /// Persist a session title through the supervisor, then publish it.
-    pub(super) async fn rename_session(&mut self, title: String) -> Result<String, String> {
+    /// Persist the main agent's title through the supervisor, then publish it.
+    ///
+    /// The main agent *is* the session, so its title is what a session list
+    /// shows and what a rename writes. The supervisor's copy is an index —
+    /// what makes a name readable without loading the session — and the fold
+    /// of [`SessionDomainEvent::Renamed`] onto the root run entry is the truth.
+    pub(super) async fn rename_main_agent(&mut self, title: String) -> Result<String, String> {
         let id = self.id.to_string();
         let supervisor = self.supervisor.clone();
         let persisted = supervisor
@@ -179,7 +244,6 @@ impl SessionActor {
             .map_err(|e| format!("session supervisor unavailable: {e}"))?;
         persisted.map_err(|e| format!("persist session title: {e}"))?;
 
-        self.spec_mut().name = Some(title.clone());
         let _ = supervisor
             .tell(SessionSupervisorCommand::PublishSessionTitle {
                 id,
@@ -267,12 +331,17 @@ impl Component for SessionCore {
     #[allow(clippy::wildcard_enum_match_arm)]
     fn apply(state: &mut SessionState, event: &SessionDomainEvent) {
         match event.clone() {
+            SessionDomainEvent::AgentDeleted { id, .. } => {
+                state.forest.apply_agent_deleted(id);
+            }
             SessionDomainEvent::UsageRecorded {
                 agent_id,
                 usage_total,
+                context_tokens,
                 ..
             } => {
-                state.agent_usage.insert(agent_id, usage_total);
+                state.agent_usage.insert(agent_id.clone(), usage_total);
+                state.agent_context_tokens.insert(agent_id, context_tokens);
             }
             SessionDomainEvent::SpecRecorded {
                 at_ms,
@@ -298,12 +367,12 @@ impl Component for SessionCore {
                 state.spec = Some(*spec);
             }
             SessionDomainEvent::Renamed { name } => {
-                // Only the name moves. A rename must not resurrect a spec that
-                // was never recorded, or a session would start believing in a
-                // default it was never created with.
-                if let Some(spec) = state.spec.as_mut() {
-                    spec.name = Some(name);
-                }
+                // Onto the root run entry, which is the main agent's: the main
+                // agent is the session, so the session's name and its main
+                // agent's title are one fact with one owner. A run has no main
+                // agent and the fold is a no-op there — a run is named by its
+                // workflow.
+                state.forest.apply_main_titled(name);
             }
             other => unreachable!("SessionCore was handed {other:?}"),
         }
@@ -321,10 +390,7 @@ mod tests {
 
     /// Fold a session's own journal back into state, so a test can assert on
     /// what was recorded rather than on what the actor happens to hold.
-    async fn journaled_spec(
-        journal: &Arc<dyn horsie_actor::Journal>,
-        id: Uuid,
-    ) -> Option<crate::sessions::spec::SessionSpec> {
+    async fn journaled_state(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid) -> SessionState {
         use futures_util::StreamExt;
         let pid = SessionActor::persistence_id_for(id);
         #[expect(
@@ -338,19 +404,31 @@ mod tests {
             let event: SessionDomainEvent = serde_json::from_slice(&payload).unwrap();
             state = <SessionActor as horsie_actor::EventSourcedActor>::apply_event(state, event);
         }
-        state.spec
+        state
+    }
+
+    async fn journaled_spec(
+        journal: &Arc<dyn horsie_actor::Journal>,
+        id: Uuid,
+    ) -> Option<crate::sessions::spec::SessionSpec> {
+        journaled_state(journal, id).await.spec
+    }
+
+    /// The session's name, read where it now lives: the main agent's title on
+    /// the root run entry.
+    async fn journaled_title(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid) -> Option<String> {
+        journaled_state(journal, id)
+            .await
+            .forest
+            .main_title()
+            .map(str::to_string)
     }
 
     /// Wait until the session's log says what the test is waiting for. `tell`
     /// is fire-and-forget, so there is nothing to await on the send itself.
     async fn until_named(journal: &Arc<dyn horsie_actor::Journal>, id: Uuid, name: &str) {
         for _ in 0..100 {
-            if journaled_spec(journal, id)
-                .await
-                .and_then(|s| s.name)
-                .as_deref()
-                == Some(name)
-            {
+            if journaled_title(journal, id).await.as_deref() == Some(name) {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -381,7 +459,7 @@ mod tests {
             .expect("the spec is recorded");
         assert_eq!(spec.vendor, actor_spec_fixture().vendor);
         assert_eq!(
-            spec.name.as_deref(),
+            journaled_title(&journal, id).await.as_deref(),
             Some("named"),
             "a rename is durable in the session's own log, not only the supervisor's"
         );
@@ -442,6 +520,7 @@ mod tests {
         let _ = session
             .tell(SessionCommand::Core(CoreCommand::Create {
                 spec: Box::new(actor_spec_fixture()),
+                name: None,
                 message: Some(FirstMessage {
                     text: "hi".into(),
                     reply: horsie_actor::ReplyTo::from_sender(tx),
@@ -461,6 +540,34 @@ mod tests {
             journaled_spec(&journal, id).await.is_some(),
             "the same command must have recorded what this session is"
         );
+    }
+
+    /// The fallback title reaches the session's own log, not just the list.
+    ///
+    /// It used to write the resident spec copy and tell the supervisor, and
+    /// journal nothing — so the name survived in the session list and was gone
+    /// from the session itself at the next load. Invisible while a name lived
+    /// in two places; fatal once the main agent's title became the one copy.
+    #[tokio::test]
+    async fn a_title_derived_from_the_first_message_is_in_the_sessions_own_log() {
+        let f = actor_fixture().await;
+        let id = Uuid::new_v4();
+        let journal = f.journal();
+        let session = f.start(id, actor_spec_fixture()).await;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = session
+            .tell(SessionCommand::Turn(
+                crate::sessions::session_actor::TurnCommand::UserMessage {
+                    agent_id: None,
+                    text: "migrate the journal to postgres".into(),
+                    reply: horsie_actor::ReplyTo::from_sender(tx),
+                },
+            ))
+            .await;
+        let _ = rx.await;
+
+        until_named(&journal, id, "migrate the journal to postgres").await;
     }
 
     /// The log is the truth, so loading again must adopt what is there rather
@@ -504,7 +611,7 @@ mod tests {
             "loading again must add only the rename, never a second spec"
         );
         assert_eq!(
-            journaled_spec(&journal, id).await.and_then(|s| s.name),
+            journaled_title(&journal, id).await,
             Some("named".to_string())
         );
     }

@@ -276,18 +276,6 @@ impl SessionActor {
             .expect("a session is told what it is before anything else can reach it")
     }
 
-    /// The same, for the two renames that keep the resident copy in step with
-    /// what has just been journaled.
-    #[expect(
-        clippy::expect_used,
-        reason = "a session is told what it is before anything else can reach it"
-    )]
-    pub(super) fn spec_mut(&mut self) -> &mut SessionSpec {
-        self.spec
-            .as_mut()
-            .expect("a session is told what it is before anything else can reach it")
-    }
-
     /// This session's own mailbox, as the thing that reaches it.
     pub(super) fn me(&self, ctx: &ActorContext<SessionInbox>) -> SessionRef {
         SessionRef::new(ctx.self_ref(), self.account.clone(), self.id, None)
@@ -1038,7 +1026,13 @@ impl SessionActor {
             // were spent whatever became of the turn that spent them. The main
             // agent banks under a fixed name because its journal is keyed by
             // the session id; every other agent banks under its own.
-            Err((agent, NotAnEnd::Usage(usage_total))) => {
+            Err((
+                agent,
+                NotAnEnd::Usage {
+                    usage_total,
+                    context_tokens,
+                },
+            )) => {
                 let agent_id = match agent == self.id {
                     true => MAIN_AGENT_ID.to_string(),
                     false => agent.to_string(),
@@ -1047,6 +1041,7 @@ impl SessionActor {
                     at_ms: now_ms(),
                     agent_id,
                     usage_total,
+                    context_tokens,
                 }]);
             }
             Err((agent, NotAnEnd::Started)) => {
@@ -1201,13 +1196,12 @@ impl EventSourcedActor for SessionActor {
             | SessionDomainEvent::SubAgentNotified { .. } => SubAgents::apply(&mut state, &event),
             SessionDomainEvent::SubSessionCreated { .. }
             | SessionDomainEvent::SubSessionSeeded { .. }
-            | SessionDomainEvent::SubSessionTitled { .. }
             | SessionDomainEvent::SubSessionStatusChanged { .. }
-            | SessionDomainEvent::SubSessionTurnEnded { .. }
-            | SessionDomainEvent::SubSessionDeleted { .. } => {
+            | SessionDomainEvent::SubSessionTurnEnded { .. } => {
                 SubSessions::apply(&mut state, &event)
             }
             SessionDomainEvent::UsageRecorded { .. }
+            | SessionDomainEvent::AgentDeleted { .. }
             | SessionDomainEvent::SpecRecorded { .. }
             | SessionDomainEvent::Renamed { .. } => SessionCore::apply(&mut state, &event),
         }

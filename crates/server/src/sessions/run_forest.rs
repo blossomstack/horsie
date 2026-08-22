@@ -124,8 +124,17 @@ pub enum TurnPhase {
 
 /// The main session.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MainRun {
     pub turn: TurnPhase,
+    /// What this agent is called — and therefore what the session is called.
+    ///
+    /// Here rather than beside the session, because the main agent *is* the
+    /// session: a sub session's title is its entry's, a subagent's is its
+    /// entry's, and a session that kept its name somewhere else was the one
+    /// kind of agent whose title nothing in the roster could answer for.
+    /// `None` until something names it.
+    pub title: Option<String>,
 }
 
 /// Lifecycle of one subagent. `Completed`/`Failed` are turn-terminal, not
@@ -141,7 +150,8 @@ pub enum SubAgentStatus {
 /// One delegated task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubAgentRun {
-    pub label: String,
+    /// What this subagent is called: the spawner's `title`.
+    pub title: String,
     pub task: String,
     /// The plugin-declared agent type this runs as, if any. `None` is the
     /// general-purpose subagent.
@@ -191,8 +201,9 @@ pub struct SubSessionRun {
     /// on the agent, because a sub session abandoned mid-seed is re-seeded
     /// from this record.
     pub message: String,
-    /// What the sub session has named itself, once it has.
-    pub title: Option<String>,
+    /// What this sub session is called: whoever branched it said so, because
+    /// a sub session has no `set_session_title` to name itself with.
+    pub title: String,
     /// `Provisioning` is the seeding window — the one state in which no turn
     /// has run, and the reason an interrupted seed is safe to re-attempt.
     pub status: AgentStatus,
@@ -293,7 +304,32 @@ impl RunForest {
         self.root = Some(id);
     }
 
+    /// The main agent named itself (or a person renamed it), which is the same
+    /// thing as the session being renamed: the root entry owns the title.
+    ///
+    /// A no-op on a workflow session, whose root is a run rather than an agent.
+    /// A run is named by its workflow, and there is nothing there to write to.
+    pub fn apply_main_titled(&mut self, title: String) {
+        if let Some(RunState::Main(main)) = self.root_mut().map(|entry| &mut entry.state) {
+            main.title = Some(title);
+        }
+    }
+
     // -------------------------------------------------------------- lookups
+
+    /// What the session is called: its main agent's title.
+    #[must_use]
+    pub fn main_title(&self) -> Option<&str> {
+        match self.root().map(|entry| &entry.state) {
+            Some(RunState::Main(main)) => main.title.as_deref(),
+            Some(RunState::Sub(_) | RunState::Workflow(_) | RunState::SubSession(_)) | None => None,
+        }
+    }
+
+    fn root_mut(&mut self) -> Option<&mut RunEntry> {
+        let id = self.root?;
+        self.entries.get_mut(&id)
+    }
 
     #[must_use]
     pub fn root_id(&self) -> Option<RunId> {
@@ -401,6 +437,23 @@ impl RunForest {
         Some(depth)
     }
 
+    /// Every agent below `agent`, at any depth: the subagents it spawned, the
+    /// sub sessions branched from it, the steps of the runs it invoked, and
+    /// everything below those.
+    ///
+    /// Answered by walking each agent *up* to `agent` rather than down from
+    /// it, because up is the one direction the forest links: an entry names
+    /// its parent, and a step agent's next hop up is its run's inviter. A
+    /// downward walk would need a second index kept in step with this one.
+    #[must_use]
+    pub fn descendant_agents(&self, agent: Uuid) -> Vec<Uuid> {
+        self.agents
+            .keys()
+            .copied()
+            .filter(|id| *id != agent && self.descends_from(*id, agent))
+            .collect()
+    }
+
     /// Whether `descendant` sits anywhere under `ancestor`'s agent — the
     /// visibility rule: an agent sees itself and its own subtree, never a
     /// sibling's.
@@ -431,7 +484,7 @@ impl RunForest {
         &mut self,
         id: Uuid,
         parent: Uuid,
-        label: String,
+        title: String,
         task: String,
         agent_type: Option<String>,
         at_ms: u64,
@@ -442,7 +495,7 @@ impl RunForest {
                 parent: Some(parent),
                 created_at_ms: at_ms,
                 state: RunState::Sub(SubAgentRun {
-                    label,
+                    title,
                     task,
                     agent_type,
                     status: SubAgentStatus::Running,
@@ -801,6 +854,7 @@ impl RunForest {
         source_seq: u64,
         seed: SeedMode,
         message: String,
+        title: String,
         at_ms: u64,
     ) {
         self.entries.insert(
@@ -812,7 +866,7 @@ impl RunForest {
                     source_seq,
                     seed,
                     message,
-                    title: None,
+                    title,
                     // Nothing may run until the seed lands — the same status a
                     // session uses while its runtime is built, and the reason
                     // a sub session found in it at load is safe to re-seed: it
@@ -840,12 +894,6 @@ impl RunForest {
         }
     }
 
-    pub fn apply_sub_session_titled(&mut self, id: Uuid, title: String) {
-        if let Some(sub_session) = self.sub_session_mut(id) {
-            sub_session.title = Some(title);
-        }
-    }
-
     pub fn apply_sub_session_status(&mut self, id: Uuid, status: AgentStatus, at_ms: u64) {
         if let Some(sub_session) = self.sub_session_mut(id) {
             sub_session.status = status;
@@ -853,14 +901,69 @@ impl RunForest {
         }
     }
 
-    pub fn apply_sub_session_deleted(&mut self, id: Uuid) {
-        if matches!(
+    /// Remove one agent-shaped entry, and the work it delegated with it.
+    ///
+    /// Only a subagent or a sub session: the main agent *is* the session, and a
+    /// workflow step belongs to its run's log rather than to whoever is
+    /// looking at it. Both are refused above this, and both are ignored here,
+    /// so a replayed event cannot delete what a command would not.
+    ///
+    /// **Delegated work goes; sessions do not.** A subagent below this one, and
+    /// a workflow run this one invoked, are what it was doing — leaving them
+    /// behind left entries parented on an id nothing resolves, and
+    /// `depth_of_entry` stops at a chain it cannot follow, so every orphan came
+    /// back reporting depth 0 and drew hanging off the main agent as though the
+    /// session had spawned it. A sub session below it is not its work: it is a
+    /// session somebody is having, it owes nobody a result, and it is nobody's
+    /// to close but its own reader's. So the walk stops there and leaves it
+    /// standing, exactly as removing its parent sub session already did.
+    pub fn apply_agent_deleted(&mut self, id: Uuid) {
+        if !matches!(
             self.entries.get(&RunId(id)).map(|e| &e.state),
-            Some(RunState::SubSession(_))
+            Some(RunState::Sub(_) | RunState::SubSession(_))
         ) {
-            self.entries.remove(&RunId(id));
-            self.agents.remove(&id);
+            return;
         }
+        // Collected before anything is removed: the walk follows parent links,
+        // and removing as it goes would cut the chain it is reading.
+        let mut doomed: Vec<RunId> = Vec::new();
+        let mut frontier = vec![id];
+        while let Some(above) = frontier.pop() {
+            for (run, entry) in &self.entries {
+                if entry.parent != Some(above) {
+                    continue;
+                }
+                match &entry.state {
+                    // Its work: taken, and descended through.
+                    RunState::Sub(_) => {
+                        doomed.push(*run);
+                        frontier.push(run.0);
+                    }
+                    // A run it invoked is its work too, and the run owns its
+                    // steps — so the entry goes and the step agents go with it,
+                    // but a step's own subagents hang off the *step*, which the
+                    // frontier reaches through the agents index below.
+                    RunState::Workflow(w) => {
+                        doomed.push(*run);
+                        for step in &w.run.steps {
+                            frontier.push(step.agent);
+                        }
+                    }
+                    // A session, not a task. Left standing.
+                    RunState::SubSession(_) | RunState::Main(_) => {}
+                }
+            }
+        }
+        for run in doomed {
+            self.entries.remove(&run);
+            self.agents.remove(&run.0);
+            // A workflow entry hosts step agents keyed by their own uuids; the
+            // entry's removal has to take the index with it or a step id keeps
+            // resolving to a run that is gone.
+            self.agents.retain(|_, hosted| *hosted != run);
+        }
+        self.entries.remove(&RunId(id));
+        self.agents.remove(&id);
     }
 
     #[must_use]
@@ -963,7 +1066,7 @@ impl RunForest {
         let depth = self.depth_of_agent(id).unwrap_or(0);
         let mut out = format!(
             "subagent \"{}\" ({id}) — {status}, depth {depth}",
-            sub.label
+            sub.title
         );
         if let Some(output) = &sub.output {
             out.push_str(&format!("\n\noutput:\n{}", truncate_result(output)));
@@ -999,7 +1102,7 @@ impl RunForest {
                         SubAgentStatus::Failed => "failed",
                     };
                     let pad = "  ".repeat(indent);
-                    out.push_str(&format!("{pad}- \"{}\" ({}) [{status}]\n", sub.label, id.0));
+                    out.push_str(&format!("{pad}- \"{}\" ({}) [{status}]\n", sub.title, id.0));
                     self.render_children(id.0, indent + 1, out);
                 }
                 // A step's subagents hang off the step agent, which the walk
@@ -1028,7 +1131,7 @@ fn sub_result_part(id: Uuid, sub: &SubAgentRun) -> SubAgentResultPart {
     };
     SubAgentResultPart {
         subagent_id: id.to_string(),
-        label: sub.label.clone(),
+        title: sub.title.clone(),
         status: status.to_string(),
         text: truncate_result(body),
         spawned_at_ms: sub.started_at_ms,
@@ -1056,7 +1159,7 @@ fn run_result_part(id: RunId, created_at_ms: u64, w: &WorkflowRun) -> SubAgentRe
         .unwrap_or(0);
     SubAgentResultPart {
         subagent_id: id.0.to_string(),
-        label: format!("workflow {}", w.workflow),
+        title: format!("workflow {}", w.workflow),
         status: if failed { "failed" } else { "completed" }.to_string(),
         text: truncate_result(&body),
         spawned_at_ms: created_at_ms,
@@ -1309,7 +1412,7 @@ mod tests {
         assert_eq!(owed.len(), 1);
         assert_eq!(owed[0].to, session);
         assert_eq!(owed[0].child, run);
-        assert_eq!(owed[0].part.label, "workflow deploy");
+        assert_eq!(owed[0].part.title, "workflow deploy");
         assert_eq!(owed[0].part.status, "completed");
         assert!(
             owed[0].part.text.contains("shipped"),
@@ -1373,7 +1476,15 @@ mod tests {
     fn a_sub_session_lifecycle_folds_like_the_roster_did() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 42, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            42,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            1_000,
+        );
         let rec = f.sub_session(sub_session).unwrap();
         assert_eq!(rec.source_seq, 42);
         assert_eq!(rec.status, AgentStatus::Provisioning);
@@ -1384,12 +1495,11 @@ mod tests {
             AgentStatus::Idle
         );
         assert!(!f.has_seeding_sub_sessions());
-        f.apply_sub_session_titled(sub_session, "Try the other migration".into());
         f.apply_sub_session_status(sub_session, AgentStatus::Running, 2_000);
         let rec = f.sub_session(sub_session).unwrap();
-        assert_eq!(rec.title.as_deref(), Some("Try the other migration"));
+        assert_eq!(rec.title, "a branch");
         assert_eq!(rec.last_activity_ms, 2_000);
-        f.apply_sub_session_deleted(sub_session);
+        f.apply_agent_deleted(sub_session);
         assert!(f.sub_session(sub_session).is_none());
         assert!(!f.is_known_agent(sub_session));
     }
@@ -1398,7 +1508,15 @@ mod tests {
     fn seeding_does_not_overwrite_a_sub_session_that_is_already_working() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            1_000,
+        );
         f.apply_sub_session_status(sub_session, AgentStatus::Running, 1_100);
         f.apply_sub_session_seeded(sub_session);
         assert_eq!(
@@ -1411,10 +1529,17 @@ mod tests {
     fn events_for_a_deleted_sub_session_are_ignored() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
-        f.apply_sub_session_deleted(sub_session);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            1_000,
+        );
+        f.apply_agent_deleted(sub_session);
         f.apply_sub_session_seeded(sub_session);
-        f.apply_sub_session_titled(sub_session, "ghost".into());
         f.apply_sub_session_status(sub_session, AgentStatus::Running, 2_000);
         assert!(f.sub_session(sub_session).is_none());
     }
@@ -1423,9 +1548,69 @@ mod tests {
     fn a_sub_session_never_appears_in_owed_deliveries() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            1_000,
+        );
         f.apply_sub_session_status(sub_session, AgentStatus::Idle, 2_000);
         assert!(f.owed().is_empty());
+    }
+
+    /// Deleting a subagent takes the work it delegated with it.
+    ///
+    /// It used to remove the one entry, which left every subagent below it
+    /// parented on an id nothing resolves. `depth_of_entry` stops at a chain it
+    /// cannot follow, so each orphan came back reporting depth 0 and drew
+    /// hanging off the main agent — the session appeared to have spawned work
+    /// it never asked for, and no fold could hide it.
+    #[test]
+    fn deleting_a_subagent_takes_the_subagents_below_it() {
+        let (mut f, session) = session_forest();
+        let lead = uid(3);
+        let helper = uid(4);
+        let deeper = uid(5);
+        f.apply_sub_spawned(lead, session, "lead".into(), "t".into(), None, 1_000);
+        f.apply_sub_spawned(helper, lead, "helper".into(), "t".into(), None, 1_100);
+        f.apply_sub_spawned(deeper, helper, "deeper".into(), "t".into(), None, 1_200);
+
+        f.apply_agent_deleted(lead);
+
+        assert!(f.sub(lead).is_none(), "the subagent asked for is gone");
+        assert!(f.sub(helper).is_none(), "so is the work it delegated");
+        assert!(f.sub(deeper).is_none(), "at any depth");
+        assert!(!f.is_known_agent(helper), "and none of it still resolves");
+    }
+
+    /// The other half of the same rule: a sub session below a deleted subagent
+    /// is a session somebody is having, not that subagent's work, so it stays.
+    #[test]
+    fn deleting_a_subagent_leaves_a_sub_session_branched_from_it() {
+        let (mut f, session) = session_forest();
+        let lead = uid(3);
+        let branched = uid(4);
+        f.apply_sub_spawned(lead, session, "lead".into(), "t".into(), None, 1_000);
+        f.apply_sub_session_created(
+            branched,
+            lead,
+            0,
+            SeedMode::Fresh,
+            "go".into(),
+            "a branch".into(),
+            1_100,
+        );
+
+        f.apply_agent_deleted(lead);
+
+        assert!(f.sub(lead).is_none());
+        assert!(
+            f.sub_session(branched).is_some(),
+            "a sub session is nobody's to close but its own reader's"
+        );
     }
 
     #[test]
@@ -1433,9 +1618,25 @@ mod tests {
         let (mut f, session) = session_forest();
         let parent = uid(3);
         let child = uid(4);
-        f.apply_sub_session_created(parent, session, 0, SeedMode::Copy, "go".into(), 1_000);
-        f.apply_sub_session_created(child, parent, 0, SeedMode::Copy, "go".into(), 2_000);
-        f.apply_sub_session_deleted(parent);
+        f.apply_sub_session_created(
+            parent,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            1_000,
+        );
+        f.apply_sub_session_created(
+            child,
+            parent,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            "a branch".into(),
+            2_000,
+        );
+        f.apply_agent_deleted(parent);
         assert!(
             f.sub_session(child).is_some(),
             "a child sub_session is its own session"
@@ -1452,7 +1653,15 @@ mod tests {
         f.apply_sub_spawned(sub, session, "x".into(), "t".into(), None, 100);
         let run = RunId(uid(7));
         f.apply_run_created(run, sub, "deploy".into(), graph("deploy"), 500);
-        f.apply_sub_session_created(uid(3), session, 0, SeedMode::Summary, "go".into(), 600);
+        f.apply_sub_session_created(
+            uid(3),
+            session,
+            0,
+            SeedMode::Summary,
+            "go".into(),
+            "a branch".into(),
+            600,
+        );
         let json = serde_json::to_value(&f).unwrap();
         let back: RunForest = serde_json::from_value(json).unwrap();
         assert_eq!(back, f);

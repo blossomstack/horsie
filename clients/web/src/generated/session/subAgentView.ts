@@ -1,9 +1,12 @@
 
+import { AgentStats } from './agentStats';
 /**
- * One agent this session hosts. The main agent has `parent`/`label` absent
- * and `depth` 0; subagents carry their spawn metadata; a workflow step is
- * labelled with the step it ran. `output` and the full transcript live on the
- * agent document and its history, not here.
+ * One agent this session hosts — enough of it to draw the session's shape and
+ * to answer for any one agent without reading its transcript.
+ *
+ * Everything here is folded from the session's own journal, so a roster of
+ * thirty agents costs no agent recoveries. The transcript is the one thing
+ * that is not: it is read per agent, at `/sessions/:id/agents/:id/messages`.
  */
 export interface SubAgentView {
   id: string;
@@ -12,7 +15,35 @@ export interface SubAgentView {
    * agent is: its main agent, or the step that spawned it.
    */
   parent?: string;
-  label?: string;
+  /**
+   * What this agent is called. For the main agent it is the session's name,
+   * because the main agent *is* the session; for a subagent it is the title
+   * its spawner gave it; for a workflow step it is the step's name. Absent
+   * only while nothing has named it — a session whose first turn has not
+   * produced a title yet.
+   */
+  title?: string;
+  /**
+   * What kind of agent this is: "main" | "subagent" | "step". A sub session
+   * is not here — it has its own list, for the reason `subSessions` gives.
+   */
+  kind: string;
+  /**
+   * What it was asked to do: a subagent's task. Absent for the main agent,
+   * which is talked to turn by turn rather than briefed once, and for a
+   * step, whose brief is its definition's.
+   */
+  input?: string;
+  /**
+   * What it produced, once it has. Only delegated work has one: a
+   * subagent's report or a step's output. Never the main agent's — a
+   * session concludes nothing.
+   */
+  output?: string;
+  /**
+   * Its banked numbers.
+   */
+  stats: AgentStats;
   depth: number;
   /**
    * The plugin-declared agent type this subagent runs as, when it was

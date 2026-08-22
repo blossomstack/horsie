@@ -121,7 +121,13 @@ const msg = (
 });
 
 const agent = (o: Partial<SubAgentView> & { id: string }): SubAgentView => ({
-  label: o.id,
+  title: o.id,
+  kind: "subagent",
+  stats: {
+      usage: { inputTokens: 0, outputTokens: 0 },
+      subtreeUsage: { inputTokens: 0, outputTokens: 0 },
+      contextTokens: 0,
+    },
   depth: 0,
   status: "completed",
   spawnedAtMs: 0,
@@ -130,6 +136,7 @@ const agent = (o: Partial<SubAgentView> & { id: string }): SubAgentView => ({
 });
 
 const subSession = (o: Partial<SubSessionView> & { id: string }): SubSessionView => ({
+  title: o.id,
   status: "idle",
   createdAtMs: 0,
   lastActivityMs: 0,
@@ -146,7 +153,7 @@ const SESSION: TranscriptItem[] = [
   }),
 ];
 
-const MAIN = [agent({ id: "main", label: undefined })];
+const MAIN = [agent({ id: "main", kind: "main", title: undefined })];
 
 describe("buildTimeline", () => {
   it("draws one bar per entry on the main lane, in order", () => {
@@ -224,7 +231,7 @@ describe("buildTimeline", () => {
   it("hangs a subagent under the main lane, anchored at its spawn", () => {
     const t = buildTimeline(
       SESSION,
-      [...MAIN, agent({ id: "s1", label: "Explore", spawnedAtMs: 6_000, endedAtMs: 11_000 })],
+      [...MAIN, agent({ id: "s1", title: "Explore", spawnedAtMs: 6_000, endedAtMs: 11_000 })],
       [],
       20_000,
     );
@@ -249,7 +256,7 @@ describe("buildTimeline", () => {
   it("leaves every sub session's span open, because a session never ends", () => {
     const t = buildTimeline(SESSION, MAIN, [subSession({ id: "f1", createdAtMs: 6_000 })], 20_000);
     const lane = t.lanes.find((l) => l.agentId === "f1");
-    expect(lane?.kind).toBe("subSession");
+    expect(lane?.kind).toBe("sub_session");
     expect(lane?.span?.open).toBe(true);
   });
 
@@ -261,15 +268,17 @@ describe("buildTimeline", () => {
       20_000,
     );
     const child = t.lanes.find((l) => l.agentId === "f2");
-    expect(child?.depth).toBe(1);
+    // Depth 2: one edge from the root to `f1`, another from `f1` to this.
+    expect(child?.depth).toBe(2);
     expect(child?.anchor?.parentAgentId).toBe("f1");
   });
 
-  it("shows a subSession whose parent was deleted, at the top level", () => {
+  it("shows a sub session whose parent was deleted, at the top level", () => {
     const t = buildTimeline(SESSION, MAIN, [subSession({ id: "f2", parent: "gone", createdAtMs: 8_000 })], 20_000);
     const lane = t.lanes.find((l) => l.agentId === "f2");
     expect(lane).toBeDefined();
-    expect(lane?.depth).toBe(0);
+    // Top level *relative to the root*, which is depth 1.
+    expect(lane?.depth).toBe(1);
     expect(lane?.anchor?.parentAgentId).toBe("main");
   });
 
@@ -282,11 +291,11 @@ describe("buildTimeline", () => {
     );
     const lane = t.lanes.find((l) => l.agentId === "s9");
     expect(lane?.anchor?.parentAgentId).toBe("main");
-    expect(lane?.depth).toBe(0);
+    expect(lane?.depth).toBe(1);
   });
 
   it("marks an agent with no usable stamps as unplaced rather than dropping it", () => {
-    const t = buildTimeline(SESSION, [...MAIN, agent({ id: "old", label: "ancient" })], [], 20_000);
+    const t = buildTimeline(SESSION, [...MAIN, agent({ id: "old", title: "ancient" })], [], 20_000);
     const lane = t.lanes.find((l) => l.agentId === "old");
     expect(lane?.placed).toBe(false);
     expect(lane?.span).toBeUndefined();
@@ -308,7 +317,7 @@ describe("buildTimeline", () => {
           subagentResults: [
             {
               subagentId: "s1",
-              label: "Explore",
+              title: "Explore",
               status: "completed",
               text: "done",
               spawnedAtMs: 6_000,
@@ -397,6 +406,57 @@ describe("parallel tool calls", () => {
   });
 });
 
+describe("folding", () => {
+  /** Folding a lane removes the lanes hanging off it.
+   *
+   * It used to be the renderer's, done by skipping lanes deeper than a folded
+   * one — and it silently did nothing, because everything hanging off the root
+   * arrived at the root's own depth. Nothing was ever *deeper* than the lane it
+   * was under, so nothing was ever skipped and the chevron was inert. */
+  it("removes the lanes hanging off a folded one, at any depth", () => {
+    const roster = [
+      agent({ id: "main", kind: "main", title: undefined }),
+      agent({ id: "p", title: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+      agent({ id: "c", title: "lockfile", parent: "p", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+      agent({ id: "other", title: "sibling", spawnedAtMs: 5_600, endedAtMs: 9_000 }),
+    ];
+    const open = buildTimeline(SESSION, roster, [], 20_000);
+    expect(open.lanes.map((l) => l.agentId)).toContain("c");
+
+    const folded = buildTimeline(SESSION, roster, [], 20_000, {}, undefined, ["p"]);
+    const ids = folded.lanes.map((l) => l.agentId);
+    expect(ids).toContain("p");
+    expect(ids).not.toContain("c");
+    // A sibling is not a child, so it stays.
+    expect(ids).toContain("other");
+  });
+});
+
+describe("scope", () => {
+  /** A page scoped to one agent draws that agent's work. The transcript above
+   *  it is that agent's, and a lane labelled for the main agent over a
+   *  subagent's bars was the picture contradicting the prose beside it. */
+  it("roots the timeline on the agent it is given", () => {
+    const t = buildTimeline(
+      SESSION,
+      [
+        agent({ id: "main", kind: "main", title: "the session" }),
+        agent({ id: "p", title: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+        agent({ id: "c", title: "lockfile", parent: "p", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+      ],
+      [],
+      20_000,
+      {},
+      "p",
+    );
+    expect(t.lanes[0].agentId).toBe("p");
+    expect(t.lanes[0].label).toBe("audit");
+    expect(t.lanes[0].kind).toBe("subagent");
+    // Only what hangs off it: the main agent is above this run, not below it.
+    expect(t.lanes.map((l) => l.agentId)).toEqual(["p", "c"]);
+  });
+});
+
 describe("nesting", () => {
   it("puts a subagent's child under it, indented, not beside it", () => {
     // The roster is keyed by uuid, so a child can sort above its parent and the
@@ -404,17 +464,20 @@ describe("nesting", () => {
     const t = buildTimeline(
       SESSION,
       [
-        agent({ id: "main", label: undefined }),
-        agent({ id: "zzz-child", label: "lockfile", parent: "aaa-parent", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
-        agent({ id: "aaa-parent", label: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+        agent({ id: "main", title: undefined }),
+        agent({ id: "zzz-child", title: "lockfile", parent: "aaa-parent", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+        agent({ id: "aaa-parent", title: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
       ],
       [],
       20_000,
     );
     const order = t.lanes.filter((l) => l.kind === "subagent").map((l) => [l.label, l.depth]);
+    // Depth 1 for anything hanging off the root, not 0. A child drawn at its
+    // parent's own depth is a child no fold can hide: the fold walk reads
+    // depth, and nothing was ever deeper than the lane it was under.
     expect(order).toEqual([
-      ["audit", 0],
-      ["lockfile", 1],
+      ["audit", 1],
+      ["lockfile", 2],
     ]);
   });
 
@@ -422,9 +485,9 @@ describe("nesting", () => {
     const t = buildTimeline(
       SESSION,
       [
-        agent({ id: "main", label: undefined }),
-        agent({ id: "p", label: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
-        agent({ id: "c", label: "lockfile", parent: "p", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
+        agent({ id: "main", title: undefined }),
+        agent({ id: "p", title: "audit", spawnedAtMs: 5_500, endedAtMs: 9_000 }),
+        agent({ id: "c", title: "lockfile", parent: "p", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
       ],
       [],
       20_000,
@@ -436,7 +499,7 @@ describe("nesting", () => {
     const t = buildTimeline(
       SESSION,
       [
-        agent({ id: "main", label: undefined }),
+        agent({ id: "main", title: undefined }),
         agent({ id: "a", parent: "b", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
         agent({ id: "b", parent: "a", spawnedAtMs: 6_000, endedAtMs: 7_000 }),
       ],
@@ -474,7 +537,7 @@ describe("nesting", () => {
     ];
     const t = buildTimeline(
       SESSION,
-      [...MAIN, agent({ id: "sub", label: "audit", spawnedAtMs: 6_000, endedAtMs: 9_000 })],
+      [...MAIN, agent({ id: "sub", title: "audit", spawnedAtMs: 6_000, endedAtMs: 9_000 })],
       [],
       20_000,
       { sub: own },

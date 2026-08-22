@@ -176,7 +176,6 @@ pub enum SessionKind {
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
-    pub name: Option<String>,
     pub kind: SessionKind,
     pub workspaces: Vec<WorkspaceDef>,
     /// Setup steps run by the runtime at every create/attach (idempotent).
@@ -211,7 +210,6 @@ impl SessionSpec {
     #[must_use]
     pub(crate) fn for_vendor(vendor: &str) -> Self {
         Self {
-            name: None,
             kind: SessionKind::Agent {
                 settings: AgentSettings {
                     instructions: None,
@@ -419,7 +417,6 @@ mod tests {
 
     pub(super) fn agent_spec(vendor: &str, origin: SessionOrigin) -> SessionSpec {
         SessionSpec {
-            name: None,
             kind: SessionKind::Agent {
                 settings: agent_settings(),
             },
@@ -435,7 +432,6 @@ mod tests {
 
     pub(super) fn workflow_spec(vendor: &str, workflow: &str) -> SessionSpec {
         SessionSpec {
-            name: None,
             kind: SessionKind::Workflow {
                 run: Arc::new(crate::sessions::workflow::WorkflowRunSpec {
                     workflow: workflow.into(),

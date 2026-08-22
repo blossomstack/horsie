@@ -40,7 +40,7 @@ impl SubAgents {
         match cmd {
             SubAgentCommand::Spawn {
                 caller,
-                label,
+                title,
                 task,
                 agent_type,
                 reply,
@@ -75,7 +75,7 @@ impl SubAgents {
                     at_ms: now_ms(),
                     id,
                     parent: caller,
-                    label: label.clone(),
+                    title: title.clone(),
                     task: task.clone(),
                     agent_type: agent_type.clone(),
                 };
@@ -295,14 +295,14 @@ impl Component for SubAgents {
             SessionDomainEvent::SubAgentSpawned {
                 id,
                 parent,
-                label,
+                title,
                 task,
                 at_ms,
                 agent_type,
             } => {
                 state
                     .forest
-                    .apply_sub_spawned(id, parent, label, task, agent_type, at_ms);
+                    .apply_sub_spawned(id, parent, title, task, agent_type, at_ms);
             }
             SessionDomainEvent::SubAgentRunning { id, at_ms } => {
                 state.forest.apply_sub_running(id, at_ms);
@@ -378,7 +378,7 @@ mod tests {
             at_ms: 0,
             id,
             parent,
-            label: "research".into(),
+            title: "research".into(),
             task: "look into it".into(),
             agent_type: None,
         }]);
@@ -408,7 +408,7 @@ mod tests {
             at_ms: 0,
             id,
             parent,
-            label: "w".into(),
+            title: "w".into(),
             task: "t".into(),
             agent_type: None,
         }]);
@@ -444,7 +444,7 @@ mod tests {
             Some(id),
             "a top-level spawn hangs off the main agent"
         );
-        assert_eq!(rec.label, "research");
+        assert_eq!(rec.title, "research");
         assert_eq!(rec.task, "dig into it");
     }
 
@@ -461,7 +461,7 @@ mod tests {
                 .ask(|reply| {
                     SessionCommand::SubAgent(SubAgentCommand::Spawn {
                         caller: parent,
-                        label: "w".into(),
+                        title: "w".into(),
                         task: "t".into(),
                         agent_type: None,
                         reply,
@@ -477,7 +477,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: parent,
-                    label: "x".into(),
+                    title: "x".into(),
                     task: "y".into(),
                     agent_type: None,
                     reply,
@@ -500,7 +500,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: id,
-                    label: "x".into(),
+                    title: "x".into(),
                     task: "y".into(),
                     agent_type: None,
                     reply,
@@ -519,7 +519,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: Uuid::new_v4(),
-                    label: "x".into(),
+                    title: "x".into(),
                     task: "y".into(),
                     agent_type: None,
                     reply,
@@ -686,7 +686,7 @@ mod tests {
                 at_ms: 0,
                 id: p,
                 parent: id,
-                label: "parent".into(),
+                title: "parent".into(),
                 task: "parent task".into(),
                 agent_type: None,
             },
@@ -700,7 +700,7 @@ mod tests {
                 at_ms: 0,
                 id: c,
                 parent: p,
-                label: "child".into(),
+                title: "child".into(),
                 task: "child task".into(),
                 agent_type: None,
             },
@@ -897,7 +897,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: parent,
-                    label: "helper".into(),
+                    title: "helper".into(),
                     task: "dig".into(),
                     agent_type: None,
                     reply,
@@ -924,7 +924,7 @@ mod tests {
             .apply_sub_spawned(id, session, "x".into(), "t".into(), None, 100);
         let json = serde_json::to_value(&state).unwrap();
         let back: SessionState = serde_json::from_value(json).unwrap();
-        assert_eq!(back.forest.sub(id).unwrap().label, "x");
+        assert_eq!(back.forest.sub(id).unwrap().title, "x");
     }
 
     /// The outstanding-work gate: a subagent whose turn ends while work it
@@ -993,7 +993,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: parent,
-                    label: "helper".into(),
+                    title: "helper".into(),
                     task: "HANG-CHILD until stopped".into(),
                     agent_type: None,
                     reply,

@@ -178,7 +178,7 @@ pub enum SubAgentCommand {
     /// that called it, whichever kind it is.
     Spawn {
         caller: Uuid,
-        label: String,
+        title: String,
         task: String,
         /// A plugin-declared agent type, already checked against the catalogue
         /// by the tool that advertised it. The session journals the name and
@@ -249,6 +249,10 @@ pub enum SubSessionCommand {
         parent: Uuid,
         seed: SeedMode,
         message: String,
+        /// What to call it. A sub session has no `set_session_title` of its
+        /// own — it is named by whoever branched it, at the moment it is
+        /// branched, so it is never a session with no name.
+        title: String,
         reply: ReplyTo<Result<Uuid, String>>,
     },
     /// Internal: the `ForkCreated` write came back — only now does the sub
@@ -275,20 +279,6 @@ pub enum SubSessionCommand {
     /// Internal: the detached seeding task could not. Carries the reason
     /// verbatim, because that string is what the user is shown.
     SeedFailed { id: Uuid, error: String },
-    /// A sub session's own `set_session_title` call. Renames the sub session,
-    /// never the session — the model should not have to know which kind of
-    /// session it is in to name it.
-    SetTitle {
-        id: Uuid,
-        title: String,
-        reply: ReplyTo<Result<String, String>>,
-    },
-    /// Someone asked for this sub session to go. Nothing ever removes one on
-    /// its own.
-    Delete {
-        id: Uuid,
-        reply: ReplyTo<Result<(), String>>,
-    },
     /// Internal: recovery found sub sessions a dead process abandoned mid-seed.
     ReseedInterrupted,
 }
@@ -366,6 +356,15 @@ pub struct FirstMessage {
 /// The session's own bookkeeping.
 #[derive(Serialize, Deserialize)]
 pub enum CoreCommand {
+    /// Remove one agent this session hosts, and everything below it.
+    ///
+    /// Here rather than on either agent-owning component because the id does
+    /// not say which kind it is: resolving that is the session's job, and the
+    /// removal is identical once it has.
+    DeleteAgent {
+        id: Uuid,
+        reply: ReplyTo<Result<(), String>>,
+    },
     /// Set the session title from the built-in title tool.
     SetTitle {
         title: String,
@@ -400,6 +399,10 @@ pub enum CoreCommand {
     /// this write — the same path rather than a special case.
     Create {
         spec: Box<crate::sessions::spec::SessionSpec>,
+        /// What to call it, when the creator said. Journaled as the main
+        /// agent's title, because the main agent is the session and its title
+        /// is the session's name.
+        name: Option<String>,
         /// The first thing said to this session, when it was created with one.
         message: Option<FirstMessage>,
     },
@@ -433,8 +436,9 @@ pub enum SessionDomainEvent {
         session: Uuid,
         spec: Box<SessionSpec>,
     },
-    /// This session was given a name — by a person, by the title tool, or
-    /// derived from the first message.
+    /// The main agent was given a title — by a person, by `set_session_title`,
+    /// or derived from the first message. The session's name *is* that title:
+    /// the main agent is the session, so there is one fact and one owner.
     ///
     /// Journaled here as well as in the supervisor's list because this is the
     /// copy the running session reads. The supervisor's is what the session
@@ -523,12 +527,30 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         reason: String,
     },
-    /// One agent's cumulative usage after a completed run. Durable here so the
-    /// session-level total never requires waking an idle agent.
+    /// A subagent or a sub session was removed, because someone asked. Never
+    /// automatic, and never the main agent or a workflow step: the first *is*
+    /// the session and the second belongs to its run's log.
+    ///
+    /// One event for both kinds, and `SessionCore`'s rather than either
+    /// component's, for the reason `UsageRecorded` is: two components own
+    /// agents, the removal is identical for both, and the fold takes the whole
+    /// subtree — which can span both kinds anyway.
+    AgentDeleted {
+        at_ms: u64,
+        id: Uuid,
+    },
+    /// One agent's cumulative usage after a completed run, and how full its
+    /// context was when the run ended. Durable here so neither the
+    /// session-level total nor a per-agent readout requires waking an idle
+    /// agent — which is the whole point: a graph of thirty agents must not be
+    /// thirty recoveries.
     UsageRecorded {
         at_ms: u64,
         agent_id: String,
         usage_total: UsageTotal,
+        /// Tokens the agent's context held at that point. Zero before the
+        /// agent has run a turn.
+        context_tokens: u32,
     },
     /// A subagent was spawned by agent `parent` — main, a step, a sub session,
     /// or another subagent. Persisted before the child actor exists — a crash
@@ -540,7 +562,7 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         id: Uuid,
         parent: Uuid,
-        label: String,
+        title: String,
         task: String,
         /// The plugin-declared agent type this subagent runs as, if any.
         agent_type: Option<String>,
@@ -648,18 +670,14 @@ pub enum SessionDomainEvent {
         /// session abandoned mid-seed can be re-seeded with it, rather than
         /// coming back idle with nothing to answer.
         message: String,
+        /// What to call it, chosen by whoever branched it.
+        title: String,
     },
     /// The sub session's initial state is durable, so it may run and the
     /// message seeded alongside it is drained.
     SubSessionSeeded {
         at_ms: u64,
         id: Uuid,
-    },
-    /// A sub session named itself.
-    SubSessionTitled {
-        at_ms: u64,
-        id: Uuid,
-        name: String,
     },
     /// A sub session moved. Journaled so the session list can show it without
     /// loading the session, exactly as the session's own status is.
@@ -684,11 +702,6 @@ pub enum SessionDomainEvent {
         at_ms: u64,
         id: Uuid,
         outcome: horsie_agentcore::TurnOutcome,
-    },
-    /// A sub session was removed, because someone asked. Never automatic.
-    SubSessionDeleted {
-        at_ms: u64,
-        id: Uuid,
     },
 }
 
@@ -753,9 +766,17 @@ impl TurnEnd {
                 terminal,
                 ..
             } => Ok((agent, Self::Failed { error, terminal })),
-            AgentOutcome::UsageRecorded { agent, usage_total } => {
-                Err((agent, NotAnEnd::Usage(usage_total)))
-            }
+            AgentOutcome::UsageRecorded {
+                agent,
+                usage_total,
+                context_tokens,
+            } => Err((
+                agent,
+                NotAnEnd::Usage {
+                    usage_total,
+                    context_tokens,
+                },
+            )),
             AgentOutcome::Started { agent } => Err((agent, NotAnEnd::Started)),
             AgentOutcome::SeedSummary {
                 agent,
@@ -776,8 +797,12 @@ impl TurnEnd {
 pub(super) enum NotAnEnd {
     /// A turn began. The agent decided it, so the session is being told.
     Started,
-    /// Tokens to bank. The turn they were spent on is a separate report.
-    Usage(UsageTotal),
+    /// Tokens to bank, and how full the agent's context is now. The turn they
+    /// were spent on is a separate report.
+    Usage {
+        usage_total: UsageTotal,
+        context_tokens: u32,
+    },
     /// The summary a `/summary-n-fork` turn was asked for. Nothing about how
     /// that turn ended — it is still running, or it ended some other way.
     SeedSummary {
@@ -850,6 +875,11 @@ pub struct SessionState {
     pub provisioning: ProvisioningState,
     #[serde(default)]
     pub agent_usage: HashMap<String, UsageTotal>,
+    /// How full each agent's context was at the end of its last turn, keyed as
+    /// `agent_usage` is. Banked from the same event, so a roster can report it
+    /// without waking anything.
+    #[serde(default)]
+    pub agent_context_tokens: HashMap<String, u32>,
     /// Every unit of work this session hosts — the main session, its
     /// workflow runs, every subagent and every sub session — as one hierarchy.
     #[serde(default)]
@@ -863,6 +893,46 @@ impl SessionState {
         self.agent_usage
             .values()
             .fold(UsageTotal::default(), |acc, u| acc.combine(u))
+    }
+
+    /// One agent's banked numbers, its subtree's included.
+    ///
+    /// `agent` is `None` for the main agent, whose usage is keyed by name
+    /// rather than by uuid — the one place the two vocabularies meet, and the
+    /// reason this takes the key apart rather than making callers assemble it.
+    #[must_use]
+    pub fn agent_stats(&self, agent: Option<Uuid>, key: &str) -> AgentStats {
+        let usage = self.agent_usage.get(key).copied().unwrap_or_default();
+        // The subtree walk needs a uuid; the main agent's is the session's,
+        // which the forest roots itself by. Without one — a key the forest
+        // does not know — the agent stands alone, which is what its own total
+        // already says.
+        let subtree_usage = match agent {
+            Some(agent) => {
+                self.forest
+                    .descendant_agents(agent)
+                    .into_iter()
+                    .fold(usage, |acc, below| {
+                        acc.combine(
+                            &self
+                                .agent_usage
+                                .get(&below.to_string())
+                                .copied()
+                                .unwrap_or_default(),
+                        )
+                    })
+            }
+            None => usage,
+        };
+        AgentStats {
+            usage,
+            subtree_usage,
+            context_tokens: self
+                .agent_context_tokens
+                .get(key)
+                .copied()
+                .unwrap_or_default(),
+        }
     }
 
     /// The session's status, as a pure projection: a terminal failure, then
@@ -951,6 +1021,35 @@ pub struct SessionSnapshot {
     /// Every agent this session hosts, in the vocabulary of
     /// `/sessions/:id/agents/:agent_id`.
     pub agents: Vec<AgentEntry>,
+    /// The sub sessions branched out of this one, with the numbers only this
+    /// actor holds.
+    ///
+    /// Their own list rather than more `agents`, for the reason the wire
+    /// document keeps them apart: a sub session never ends, so it has no
+    /// result and no end stamp, and folding it into a roster of things that do
+    /// would mean a null in every entry that is not one. The supervisor keeps
+    /// a parallel row per sub session for the session *list*; this is the same
+    /// sub session with what the list has no use for.
+    pub sub_sessions: Vec<SubSessionEntry>,
+}
+
+/// One sub session, as the session that hosts it can answer for it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubSessionEntry {
+    pub id: Uuid,
+    /// The sub session this was branched from; `None` means the main agent.
+    pub parent: Option<Uuid>,
+    pub title: String,
+    pub status: AgentStatus,
+    pub created_at_ms: u64,
+    /// The moment of its last status change — the end of its last turn once it
+    /// is idle again. A session has no *end*, so this is not one.
+    pub last_activity_ms: u64,
+    /// The brief it was branched with.
+    pub input: String,
+    pub stats: AgentStats,
+    /// The model it runs under, for the window lookup above this actor.
+    pub model: Option<String>,
 }
 
 /// What became of one of a session's agents.
@@ -1012,20 +1111,76 @@ pub struct AgentEntry {
     /// which the definition chose, not an agent — and for a subagent rooted
     /// directly on either.
     pub parent: Option<Uuid>,
-    /// A subagent's label, or the name of the step this agent is one execution
-    /// of. Absent for a main agent, which is not one of several.
-    pub label: Option<String>,
+    /// What this agent is called: the main agent's title (and so the
+    /// session's), a subagent's or sub session's, or the name of the step this
+    /// agent is one execution of. `None` only while nothing has named it.
+    pub title: Option<String>,
     pub depth: u32,
     /// The plugin-declared agent type a typed subagent runs as.
     pub agent_type: Option<String>,
     pub status: AgentStatus,
     pub error: Option<String>,
+    /// What kind of agent this is. On the entry rather than inferred from
+    /// which fields happen to be set: a reader has to be able to tell a sub
+    /// session from a subagent, and "it has no end stamp" is not a kind.
+    pub kind: AgentKind,
+    /// What this agent was asked to do: a subagent's task, a sub session's
+    /// brief, a step's instruction. `None` for the main agent, which is asked
+    /// things one turn at a time rather than briefed once.
+    pub input: Option<String>,
+    /// What it produced, once it has. Only work that owes a result has one —
+    /// a subagent's report or a step's output. A main agent and a sub session
+    /// answer their user turn by turn and conclude nothing.
+    pub output: Option<String>,
+    /// Its numbers, banked. Read from the session's own record, so a roster of
+    /// thirty agents costs no recoveries.
+    pub stats: AgentStats,
+    /// The model alias it runs under — a step's own preset's, a subagent's
+    /// inherited tree root's, the session's otherwise. Here so the HTTP layer
+    /// can name the context window that goes with it; the actor cannot, since
+    /// it does not know which models are configured.
+    pub model: Option<String>,
     /// When this agent started and when it reached its result. Zero for a main
     /// agent — nothing spawned it, and it is as old as the session, whose
     /// `created_at` is on the same document — and zero for `ended_at_ms` while
     /// an agent is still running.
     pub started_at_ms: u64,
     pub ended_at_ms: u64,
+}
+
+/// What kind of work one roster entry is.
+///
+/// The four things a session hosts, and they are genuinely four: only two of
+/// them owe a result, only one of them is the session, and only one of them is
+/// itself a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentKind {
+    /// The session's own agent. There is exactly one, and it is the session.
+    Main,
+    /// Delegated work: spawned with a task, owes its spawner a report.
+    Sub,
+    /// One execution of a workflow step. The definition chose it, not an agent.
+    Step,
+    /// A session branched out of this one. Talked to, owes nobody anything.
+    SubSession,
+}
+
+/// One agent's numbers, as the session's own record has them.
+///
+/// Banked, never live: every field here is folded from an event this session
+/// journaled, so the whole roster is answerable without waking a single agent.
+/// The live figure — what an agent's context holds *mid-turn* — is on the
+/// agent document, which is a read of the agent itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentStats {
+    /// Tokens this agent alone has spent.
+    pub usage: UsageTotal,
+    /// `usage` plus every agent below it — the subagents it spawned, the sub
+    /// sessions branched from it, the steps of the runs it invoked, and
+    /// everything below those. What a folded node in the graph stands for.
+    pub subtree_usage: UsageTotal,
+    /// Tokens its context held at the end of its last turn.
+    pub context_tokens: u32,
 }
 
 /// Everything a session knows about one of its agents: its entry in the roster,

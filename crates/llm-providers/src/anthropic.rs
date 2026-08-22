@@ -962,7 +962,7 @@ mod tests {
         let parts = vec![ContentPart::SubAgentResult(
             horsie_models::agent::SubAgentResultPart {
                 subagent_id: "id".into(),
-                label: "audit".into(),
+                title: "audit".into(),
                 status: "completed".into(),
                 text: "three stale crates".into(),
                 spawned_at_ms: 100,

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink } from "lucide-react";
 import type { Bar, BarKind, Lane, Timeline } from "../lib/timeline";
 import { cn } from "../lib/cn";
 
@@ -56,6 +56,9 @@ export function SessionTimeline({
   onToggleExpand,
   onSelectEntry,
   onSelectAgent,
+  onOpenAgent,
+  selectedAgent,
+  selectedEntry,
 }: {
   timeline: Timeline;
   /** Agents whose own history is being shown on their lane. */
@@ -66,10 +69,16 @@ export function SessionTimeline({
   onToggleCollapse: (agentId: string) => void;
   /** Show or hide one agent's own bars. */
   onToggleExpand: (agentId: string) => void;
-  /** A bar: go and read that entry. */
+  /** A bar: show what that entry was, beside the picture. */
   onSelectEntry: (entryId: string) => void;
-  /** A lane's name: go and open that agent. */
+  /** A lane's name: show what that agent is, beside the picture. */
   onSelectAgent: (agentId: string) => void;
+  /** The jump key: leave the timeline for that agent's transcript. */
+  onOpenAgent: (agentId: string) => void;
+  /** Whichever agent the panel is showing. */
+  selectedAgent?: string;
+  /** Whichever entry the panel is showing. */
+  selectedEntry?: string;
 }) {
   if (timeline.lanes.length === 0 || timeline.lanes[0].bars.length === 0) {
     return (
@@ -82,23 +91,17 @@ export function SessionTimeline({
     );
   }
 
-  // A collapsed lane hides everything hanging off it. Walked by depth rather
-  // than by parent id: lanes already arrive in tree order, so anything deeper
-  // than a collapsed lane, until the depth comes back up, is its descendants.
-  const visible: Lane[] = [];
-  let hiddenBelow: number | null = null;
-  for (const lane of timeline.lanes) {
-    if (hiddenBelow !== null && lane.depth > hiddenBelow) continue;
-    hiddenBelow = null;
-    visible.push(lane);
-    if (collapsed.includes(lane.agentId)) hiddenBelow = lane.depth;
-  }
-
-  const placed = visible.filter((l) => l.placed);
-  const unplaced = visible.filter((l) => !l.placed);
+  // Folding is `buildTimeline`'s, not this component's. It used to be done
+  // here, by skipping lanes deeper than a folded one — and it silently did
+  // nothing, because every lane hanging off the root arrived at the root's own
+  // depth: nothing was ever *deeper* than the lane it was under, so nothing was
+  // ever skipped. Doing it in the model also means a fold and the tree it folds
+  // are decided in one place.
+  const placed = timeline.lanes.filter((l) => l.placed);
+  const unplaced = timeline.lanes.filter((l) => !l.placed);
   // Subagents are work inside a turn; sub sessions are other sessions. The same
   // distinction `SubAgentCard` and `SubSessionMarker` already draw, carried here.
-  const firstSubSessionAt = placed.findIndex((l) => l.kind === "subSession");
+  const firstSubSessionAt = placed.findIndex((l) => l.kind === "sub_session");
 
   // Every lane's top, so a connector can be drawn from a lane all the way back
   // up to the one it branched from. Computed here rather than in the model
@@ -166,6 +169,9 @@ export function SessionTimeline({
               onToggleExpand={onToggleExpand}
               onSelectEntry={onSelectEntry}
               onSelectAgent={onSelectAgent}
+              onOpenAgent={onOpenAgent}
+              selectedAgent={selectedAgent}
+              selectedEntry={selectedEntry}
             />
           </div>
         ))}
@@ -186,6 +192,9 @@ export function SessionTimeline({
                 onToggleExpand={onToggleExpand}
                 onSelectEntry={onSelectEntry}
                 onSelectAgent={onSelectAgent}
+                onOpenAgent={onOpenAgent}
+                selectedAgent={selectedAgent}
+                selectedEntry={selectedEntry}
               />
             ))}
           </div>
@@ -204,6 +213,9 @@ function LaneRow({
   onToggleExpand,
   onSelectEntry,
   onSelectAgent,
+  onOpenAgent,
+  selectedAgent,
+  selectedEntry,
 }: {
   lane: Lane;
   /** Pixels from this lane up to the lane it branched from. */
@@ -214,15 +226,26 @@ function LaneRow({
   onToggleExpand: (agentId: string) => void;
   onSelectEntry: (entryId: string) => void;
   onSelectAgent: (agentId: string) => void;
+  onOpenAgent: (agentId: string) => void;
+  selectedAgent?: string;
+  selectedEntry?: string;
 }) {
   const sub = lane.kind !== "main";
+  const isSelected = selectedAgent === lane.agentId;
   return (
     <div
       data-testid={`timeline-lane-${lane.agentId}`}
       data-kind={lane.kind}
       data-placed={lane.placed ? "true" : "false"}
       data-expanded={expanded ? "true" : undefined}
-      className="group relative flex items-center"
+      data-selected={isSelected ? "true" : undefined}
+      className={cn(
+        "group relative flex items-center",
+        // Which run you are looking at, when the transcript key would open one.
+        // Without it the three views were three pictures of the same session
+        // with no shared "you are here".
+        isSelected && "bg-raised",
+      )}
       style={{ height: LANE_H }}
     >
       {/* The sidebar. Sticky rather than a separate column so it cannot drift
@@ -248,16 +271,36 @@ function LaneRow({
         ) : (
           <span className="w-3 shrink-0" aria-hidden />
         )}
-        {lane.kind === "main" ? (
-          <span className="truncate text-xs font-medium text-legend">{lane.label}</span>
-        ) : (
+        {/* The name shows what this agent *is*, beside the picture. It used
+            to navigate to the agent's own page, which answered "what is this
+            lane?" by closing the timeline that raised the question. Leaving is
+            still one key away, on the right. */}
+        <button
+          type="button"
+          data-testid={`timeline-select-${lane.agentId}`}
+          aria-pressed={isSelected}
+          className={cn(
+            "min-w-0 flex-1 truncate text-left text-xs hover:text-legend",
+            lane.kind === "main" ? "font-medium text-legend" : "text-faint",
+            isSelected && "!text-legend",
+          )}
+          onClick={() => onSelectAgent(lane.agentId)}
+        >
+          {lane.label}
+        </button>
+        {/* Straight to that agent's transcript. Only on hover or focus: a key
+            on every row at rest turns a sidebar of names into a sidebar of
+            controls. */}
+        {lane.kind !== "main" && (
           <button
             type="button"
             data-testid={`timeline-open-${lane.agentId}`}
-            className="min-w-0 truncate text-left text-xs text-faint hover:text-legend"
-            onClick={() => onSelectAgent(lane.agentId)}
+            className="shrink-0 text-faint opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-legend"
+            title={`Open ${lane.label}'s transcript`}
+            aria-label={`Open ${lane.label}'s transcript`}
+            onClick={() => onOpenAgent(lane.agentId)}
           >
-            {lane.label}
+            <ExternalLink size={11} aria-hidden />
           </button>
         )}
 
@@ -300,7 +343,12 @@ function LaneRow({
         )}
 
         {lane.bars.map((bar) => (
-          <BarView key={bar.key} bar={bar} onSelect={onSelectEntry} />
+          <BarView
+            key={bar.key}
+            bar={bar}
+            onSelect={onSelectEntry}
+            selected={selectedEntry === bar.entryId}
+          />
         ))}
 
         {/* Once a lane is showing its own work, the span behind it would be a
@@ -360,7 +408,15 @@ function Drop({
   );
 }
 
-function BarView({ bar, onSelect }: { bar: Bar; onSelect: (entryId: string) => void }) {
+function BarView({
+  bar,
+  onSelect,
+  selected,
+}: {
+  bar: Bar;
+  onSelect: (entryId: string) => void;
+  selected: boolean;
+}) {
   // A compaction is a boundary, not a stretch of work, so it stays a hairline
   // the full height of the lane rather than a block with a width to misread.
   const boundary = bar.kind === "compaction";
@@ -373,12 +429,18 @@ function BarView({ bar, onSelect }: { bar: Bar; onSelect: (entryId: string) => v
       data-testid={`timeline-bar-${bar.key}`}
       data-entry-id={bar.entryId}
       data-kind={bar.kind}
+      data-selected={selected ? "true" : undefined}
+      aria-pressed={selected}
       onClick={() => onSelect(bar.entryId)}
       title={`${bar.title} · ${bar.detail}`}
       className={cn(
         "absolute top-1/2 -translate-y-1/2 transition-[filter] hover:brightness-125",
         BAR_CLASS[bar.kind],
         bar.live && "animate-pulse",
+        // A ring rather than a colour change: the fill already means what kind
+        // of work this was, and overwriting it to say "selected" would cost the
+        // one thing the bar exists to show.
+        selected && "ring-2 ring-legend ring-offset-1 ring-offset-[var(--panel)]",
       )}
       style={{
         left: bar.x,

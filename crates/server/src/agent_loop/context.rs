@@ -101,6 +101,10 @@ pub enum AgentOutcome {
     UsageRecorded {
         agent: Uuid,
         usage_total: UsageTotal,
+        /// How full this agent's context is now. Reported alongside the total
+        /// so its owner can bank both, and answer for either without waking
+        /// the agent again.
+        context_tokens: u32,
     },
     /// A `/summary-n-fork` turn produced the summary the sub sessions
     /// branching off this agent are waiting on.

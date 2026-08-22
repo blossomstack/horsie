@@ -40,7 +40,7 @@ const TIMELINE: Timeline = {
     },
     {
       agentId: "f1",
-      kind: "subSession",
+      kind: "sub_session",
       label: "try postgres",
       status: "idle",
       depth: 0,
@@ -74,6 +74,7 @@ const view = (
     expanded: string[];
     collapse: (id: string) => void;
     collapsed: string[];
+    open: (id: string) => void;
   }> = {},
 ) =>
   render(
@@ -85,6 +86,7 @@ const view = (
       onToggleExpand={handlers.expand ?? vi.fn()}
       onSelectEntry={handlers.entry ?? vi.fn()}
       onSelectAgent={handlers.agent ?? vi.fn()}
+      onOpenAgent={handlers.open ?? vi.fn()}
     />,
   );
 
@@ -103,11 +105,25 @@ describe("SessionTimeline", () => {
     expect(entry).toHaveBeenCalledWith("m2");
   });
 
-  it("opens an agent from its name in the sidebar", () => {
+  /** The name shows what the agent *is*, beside the picture. It used to
+   *  navigate, which answered "what is this lane?" by closing the timeline
+   *  that raised the question. */
+  it("shows an agent from its name in the sidebar rather than leaving", () => {
     const agent = vi.fn();
-    view(TIMELINE, { agent });
-    fireEvent.click(screen.getByTestId("timeline-open-s1"));
+    const open = vi.fn();
+    view(TIMELINE, { agent, open });
+    fireEvent.click(screen.getByTestId("timeline-select-s1"));
     expect(agent).toHaveBeenCalledWith("s1");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("leaves for an agent's transcript from the jump key beside its name", () => {
+    const agent = vi.fn();
+    const open = vi.fn();
+    view(TIMELINE, { agent, open });
+    fireEvent.click(screen.getByTestId("timeline-open-s1"));
+    expect(open).toHaveBeenCalledWith("s1");
+    expect(agent).not.toHaveBeenCalled();
   });
 
   it("expands a lane from its span, and from the chevron beside its name", () => {
@@ -223,14 +239,6 @@ describe("disclosure and the hover card", () => {
       TIMELINE.lanes[3],
     ],
   };
-
-  it("hides a lane's children when it is collapsed", () => {
-    view(NESTED, { collapsed: ["s1"] });
-    expect(screen.getByTestId("timeline-lane-s1")).toBeTruthy();
-    expect(screen.queryByTestId("timeline-lane-s2")).toBeNull();
-    // A sibling at the same depth is not a child, so it stays.
-    expect(screen.getByTestId("timeline-lane-f1")).toBeTruthy();
-  });
 
   it("offers a chevron only where something hangs off the lane", () => {
     view(NESTED);

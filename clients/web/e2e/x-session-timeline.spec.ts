@@ -21,7 +21,7 @@ async function delegatingSession(page: import("@playwright/test").Page, appBase:
   queueToolCall: (name: string, input: unknown) => Promise<void>;
   queueText: (text: string) => Promise<void>;
 }) {
-  await mock.queueToolCall("spawn_agent", { label: "audit", task: "audit the dependencies" });
+  await mock.queueToolCall("spawn_agent", { title: "audit", task: "audit the dependencies" });
   await mock.queueText(RACING);
   await mock.queueText(RACING);
   await mock.queueText(FINAL);
@@ -59,17 +59,26 @@ test("X1: the timeline draws the session and clicks through to the subagent", as
   await expect(sub).toHaveAttribute("data-expanded", "true");
   await expect(page).not.toHaveURL(/\/agents\//);
 
+  // The name shows what the agent is, beside the picture.
+  await sub.locator('[data-testid^="timeline-select-"]').click();
+  await expect(page.getByTestId("agent-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-panel-title")).toHaveText("audit");
+  await expect(page).not.toHaveURL(/\/agents\//);
+
+  // The jump key is what leaves.
   await sub.locator('[data-testid^="timeline-open-"]').click();
   await expect(page).toHaveURL(/\/agents\//);
 
-  // ...and there the toggle is gone. Scoped to one agent, the transcript is
-  // that agent's while the roster is still the whole session's, so the map
-  // would label the open agent "main agent" and hang its siblings off it.
-  await expect(page.getByTestId("timeline-toggle")).toHaveCount(0);
-  await expect(page.getByTestId("session-timeline")).toHaveCount(0);
+  // ...and there the switch is still offered: the timeline is now drawn of
+  // whichever run the page is on, so a subagent's page has one of its own.
+  await expect(page.getByTestId("timeline-toggle")).toBeVisible();
 });
 
-test("X3: a scoped agent page will not open the timeline, even if the URL asks", async ({
+/** A scoped page draws its *own* run, which is what makes the view offerable
+ *  there at all. It used to be refused: the timeline was always the main
+ *  agent's, so on a subagent's page it drew the wrong session over the right
+ *  transcript. Now the root lane is the run you are on. */
+test("X3: a scoped agent page draws the timeline of that run", async ({
   page,
   appBase,
   mock,
@@ -81,14 +90,15 @@ test("X3: a scoped agent page will not open the timeline, even if the URL asks",
   await sub.locator('[data-testid^="timeline-open-"]').click();
   await expect(page).toHaveURL(/\/agents\//);
 
-  // `view=timeline` is still on the URL from the toggle — the agent page must
-  // ignore it rather than draw the session's map over one agent's transcript.
-  await page.goto(`${page.url().split("?")[0]}?view=timeline`);
-  await expect(page.getByTestId("transcript-scroll")).toBeVisible();
-  await expect(page.getByTestId("session-timeline")).toHaveCount(0);
+  await page.getByTestId("timeline-toggle").click();
+  await expect(page.getByTestId("session-timeline")).toBeVisible();
+  // One lane: this run's. The main agent is above it, not below it.
+  const lanes = page.locator('[data-testid^="timeline-lane-"]');
+  await expect(lanes).toHaveCount(1);
+  await expect(lanes.first()).toHaveAttribute("data-kind", "subagent");
 });
 
-test("X2: a bar goes back to the transcript, and the view lives in the URL", async ({
+test("X2: a bar reads in the panel, and the view lives in the URL", async ({
   page,
   appBase,
   mock,
@@ -101,8 +111,16 @@ test("X2: a bar goes back to the transcript, and the view lives in the URL", asy
   await page.reload();
   await expect(page.getByTestId("session-timeline")).toBeVisible();
 
+  // A bar says what it was, beside the picture. It used to switch straight
+  // back to the transcript, which answered "what is this bar?" by closing the
+  // timeline that raised the question.
   await page.locator('[data-testid^="timeline-bar-"]').first().click();
+  await expect(page.getByTestId("entry-panel")).toBeVisible();
+  await expect(page.getByTestId("session-timeline")).toBeVisible();
+  await expect(page).toHaveURL(/view=timeline/);
 
+  // Reading it in place is the panel's own key, and that is what leaves.
+  await page.getByTestId("entry-panel-open").click();
   await expect(page.getByTestId("session-timeline")).toHaveCount(0);
   await expect(page.getByTestId("transcript-scroll")).toBeVisible();
   await expect(page).not.toHaveURL(/view=timeline/);

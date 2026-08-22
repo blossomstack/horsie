@@ -8,15 +8,15 @@
 //! No events and no state: this component only ever answers.
 
 use super::{
-    AgentDetail, AgentEntry, AgentKey, AgentStatus, AgentUsageEntry, CommandEffect, MAIN_AGENT_ID,
-    ReadCommand, SessionActor, SessionDomainEvent, SessionSnapshot, SessionState,
-    SessionUsageStats,
+    AgentDetail, AgentEntry, AgentKey, AgentKind, AgentStatus, AgentUsageEntry, CommandEffect,
+    MAIN_AGENT_ID, ReadCommand, SessionActor, SessionDomainEvent, SessionSnapshot, SessionState,
+    SessionUsageStats, SubSessionEntry,
 };
 use crate::agent_loop::AgentCommand;
 use crate::agent_loop::AgentUsageSnapshot;
 use crate::agent_loop::ReadCommand as AgentReadCommand;
 use crate::sessions::addressing::SessionInbox;
-use crate::sessions::run_forest::{RunForest, SubAgentRun, SubAgentStatus, SubSessionRun};
+use crate::sessions::run_forest::{SubAgentRun, SubAgentStatus, SubSessionRun};
 use crate::sessions::spec::SessionStatus;
 use crate::sessions::workflow::{StepRun, StepStatus};
 use horsie_actor::ActorContext;
@@ -84,6 +84,7 @@ impl Reads {
                     // is on the agent document rather than here.
                     usage_total: state.session_usage_total(),
                     agents: actor.agent_roster(state),
+                    sub_sessions: actor.sub_session_roster(state),
                 });
                 CommandEffect::none()
             }
@@ -98,11 +99,18 @@ impl Reads {
 
 /// A session's primary agent. It has no lifecycle of its own — it is the
 /// session, so the session's status *is* its status.
-fn main_entry(status: &SessionStatus) -> AgentEntry {
+fn main_entry(
+    session: Uuid,
+    state: &SessionState,
+    status: &SessionStatus,
+    model: Option<String>,
+) -> AgentEntry {
     AgentEntry {
         id: MAIN_AGENT_ID.to_string(),
         parent: None,
-        label: None,
+        // The session's name *is* this agent's title — one fact, read from the
+        // one place that owns it.
+        title: state.forest.main_title().map(str::to_string),
         depth: 0,
         agent_type: None,
         status: match status {
@@ -123,6 +131,16 @@ fn main_entry(status: &SessionStatus) -> AgentEntry {
             SessionStatus::Idle | SessionStatus::Finished => AgentStatus::Idle,
         },
         error: crate::sessions::spec::status_reason(status),
+        kind: AgentKind::Main,
+        // A main agent is not briefed and does not conclude: it is talked to,
+        // turn by turn, and its transcript is the whole of what it was asked
+        // and what it answered.
+        input: None,
+        output: None,
+        // Its subtree is the session, so this row's subtree total and the
+        // session's total are the same number by construction.
+        stats: state.agent_stats(Some(session), MAIN_AGENT_ID),
+        model,
         started_at_ms: 0,
         ended_at_ms: 0,
     }
@@ -130,12 +148,12 @@ fn main_entry(status: &SessionStatus) -> AgentEntry {
 
 /// One execution of a workflow step. A step reached twice has two of these, and
 /// each is its own agent.
-fn step_entry(execution: &StepRun) -> AgentEntry {
+fn step_entry(execution: &StepRun, state: &SessionState, model: Option<String>) -> AgentEntry {
     AgentEntry {
         id: execution.agent.to_string(),
         // The definition chose this step, so no agent is its parent.
         parent: None,
-        label: Some(execution.step.clone()),
+        title: Some(execution.step.clone()),
         depth: 0,
         agent_type: None,
         status: match execution.status {
@@ -145,6 +163,16 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
             StepStatus::Cancelled => AgentStatus::Cancelled,
         },
         error: execution.error.clone(),
+        kind: AgentKind::Step,
+        // A step's brief is its definition's, which the run graph holds; what
+        // it produced is its own.
+        input: None,
+        output: execution
+            .output
+            .as_ref()
+            .map(crate::sessions::workflow::output_as_input),
+        stats: state.agent_stats(Some(execution.agent), &execution.agent.to_string()),
+        model,
         started_at_ms: execution.started_at_ms,
         ended_at_ms: execution.ended_at_ms.unwrap_or(0),
     }
@@ -157,29 +185,67 @@ fn step_entry(execution: &StepRun) -> AgentEntry {
 /// vocabulary its record is kept in. `label` carries the title it gave itself,
 /// which is `None` until it does — a client shows what it was branched from
 /// instead.
-fn sub_session_entry(id: Uuid, forest: &RunForest, rec: &SubSessionRun) -> AgentEntry {
+fn sub_session_entry(
+    id: Uuid,
+    state: &SessionState,
+    rec: &SubSessionRun,
+    model: Option<String>,
+) -> SubSessionEntry {
+    let forest = &state.forest;
     let (created_at_ms, parent) = forest
         .owner_of_agent(id)
         .map(|(_, e)| (e.created_at_ms, e.parent))
         .unwrap_or((0, None));
-    AgentEntry {
-        id: id.to_string(),
+    SubSessionEntry {
+        id,
         // Rooted on the session's main agent, which is not a sub session, so
         // only a sub session parent is reported.
         parent: parent.filter(|pid| forest.sub_session(*pid).is_some()),
-        label: rec.title.clone(),
-        depth: forest.depth_of_agent(id).unwrap_or(0),
-        agent_type: None,
+        title: rec.title.clone(),
         status: rec.status,
+        created_at_ms,
+        last_activity_ms: rec.last_activity_ms,
+        input: rec.message.clone(),
+        stats: state.agent_stats(Some(id), &id.to_string()),
+        model,
+    }
+}
+
+/// The same sub session, in the shape an agent-scoped read answers with.
+///
+/// A sub session is not a subagent, and this is the one place the two shapes
+/// meet: `read_agent` answers for every agent a session hosts, and a sub
+/// session is one of them. What it cannot honestly fill in — an end stamp, a
+/// result — stays absent rather than being invented.
+fn sub_session_as_agent(entry: &SubSessionEntry) -> AgentEntry {
+    AgentEntry {
+        id: entry.id.to_string(),
+        parent: entry.parent,
+        title: Some(entry.title.clone()),
+        depth: 0,
+        agent_type: None,
+        status: entry.status,
         error: None,
-        started_at_ms: created_at_ms,
+        kind: AgentKind::SubSession,
+        input: Some(entry.input.clone()),
+        // A session is talked to; it owes nobody a result.
+        output: None,
+        stats: entry.stats,
+        model: entry.model.clone(),
+        started_at_ms: entry.created_at_ms,
         // A session is never *done*, so it has no end.
         ended_at_ms: 0,
     }
 }
 
 /// One subagent of the forest.
-fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
+fn sub_entry(
+    id: Uuid,
+    state: &SessionState,
+    rec: &SubAgentRun,
+    model: Option<String>,
+) -> AgentEntry {
+    let forest = &state.forest;
     AgentEntry {
         id: id.to_string(),
         // Reported when the parent is another subagent or the sub session
@@ -196,7 +262,7 @@ fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
             .owner_of_agent(id)
             .and_then(|(_, e)| e.parent)
             .filter(|pid| forest.sub(*pid).is_some() || forest.sub_session(*pid).is_some()),
-        label: Some(rec.label.clone()),
+        title: Some(rec.title.clone()),
         depth: forest.depth_of_agent(id).unwrap_or(0),
         agent_type: rec.agent_type.clone(),
         status: match rec.status {
@@ -205,6 +271,11 @@ fn sub_entry(id: Uuid, forest: &RunForest, rec: &SubAgentRun) -> AgentEntry {
             SubAgentStatus::Failed => AgentStatus::Failed,
         },
         error: rec.error.clone(),
+        kind: AgentKind::Sub,
+        input: Some(rec.task.clone()),
+        output: rec.output.clone(),
+        stats: state.agent_stats(Some(id), &id.to_string()),
+        model,
         started_at_ms: rec.started_at_ms,
         ended_at_ms: rec.ended_at_ms,
     }
@@ -231,25 +302,60 @@ impl SessionActor {
         // *is* its steps.
         let mut agents: Vec<AgentEntry> = match state.forest.root_is_workflow() {
             true => Vec::new(),
-            false => vec![main_entry(&state.status())],
+            false => vec![main_entry(
+                self.id,
+                state,
+                &state.status(),
+                self.model_of(state, AgentKey::Main),
+            )],
         };
         // Every run's executions — the session's own and any invoked one's —
-        // then every subagent. Sub sessions are read through `read_agent`, as
-        // before.
+        // then every subagent. Sub sessions are their own roster, for the
+        // reason `SubSessionEntry` gives.
         agents.extend(
             state
                 .forest
                 .workflows()
                 .flat_map(|(_, w)| w.run.steps.iter())
-                .map(step_entry),
+                .map(|execution| {
+                    let model = self.model_of(state, AgentKey::Step(execution.agent));
+                    step_entry(execution, state, model)
+                }),
         );
         agents.extend(state.forest.sub_ids().into_iter().filter_map(|id| {
+            let model = self.model_of(state, AgentKey::Sub(id));
             state
                 .forest
                 .sub(id)
-                .map(|rec| sub_entry(id, &state.forest, rec))
+                .map(|rec| sub_entry(id, state, rec, model))
         }));
         agents
+    }
+
+    /// The model one agent runs under, as a name the HTTP layer can look a
+    /// context window up by. `None` for an agent whose settings cannot be
+    /// resolved — a step whose definition has gone, or a session that has not
+    /// been told what it is.
+    fn model_of(&self, state: &SessionState, key: AgentKey) -> Option<String> {
+        self.effective_settings(state, key)
+            .map(|settings| settings.model.clone())
+    }
+
+    /// Every sub session branched out of this one, with the numbers only this
+    /// actor holds.
+    pub(super) fn sub_session_roster(&self, state: &SessionState) -> Vec<SubSessionEntry> {
+        state
+            .forest
+            .sub_session_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let model = self.model_of(state, AgentKey::SubSession(id));
+                state
+                    .forest
+                    .sub_session(id)
+                    .map(|rec| sub_session_entry(id, state, rec, model))
+            })
+            .collect()
     }
 
     /// One agent's document. `None` when this session hosts no such agent.
@@ -277,13 +383,17 @@ impl SessionActor {
             AgentKey::Sub(id) => state.forest.sub(id),
             AgentKey::Main | AgentKey::Step(_) | AgentKey::SubSession(_) => None,
         };
+        let model = self.model_of(state, key);
         let entry = match key {
-            AgentKey::Main => main_entry(&state.status()),
-            AgentKey::Step(_) => step_entry(execution?),
-            AgentKey::Sub(id) => sub_entry(id, &state.forest, node?),
-            AgentKey::SubSession(id) => {
-                sub_session_entry(id, &state.forest, state.forest.sub_session(id)?)
-            }
+            AgentKey::Main => main_entry(self.id, state, &state.status(), model),
+            AgentKey::Step(_) => step_entry(execution?, state, model),
+            AgentKey::Sub(id) => sub_entry(id, state, node?, model),
+            AgentKey::SubSession(id) => sub_session_as_agent(&sub_session_entry(
+                id,
+                state,
+                state.forest.sub_session(id)?,
+                model,
+            )),
         };
         Some(AgentDetail {
             entry,
@@ -365,6 +475,7 @@ mod tests {
     fn usage_is_recorded_per_agent() {
         let s = fold(vec![SessionDomainEvent::UsageRecorded {
             at_ms: 0,
+            context_tokens: 0,
             agent_id: MAIN_AGENT_ID.to_string(),
             usage_total: UsageTotal {
                 input_tokens: 10,
@@ -407,7 +518,7 @@ mod tests {
                 AgentStatus::Failed,
             ),
         ] {
-            let entry = main_entry(&status);
+            let entry = main_entry(Uuid::nil(), &SessionState::default(), &status, None);
             assert_eq!(entry.status, expected, "{status:?}");
             assert_eq!(entry.id, MAIN_AGENT_ID);
             assert_eq!(
@@ -428,7 +539,10 @@ mod tests {
 
         let agents = roster(&session).await;
         assert_eq!(agents[0].id, MAIN_AGENT_ID);
-        assert_eq!(agents[0].label, None, "the main agent is not one of many");
+        assert_eq!(
+            agents[0].title, None,
+            "an untitled session's main agent has no title yet"
+        );
         assert!(
             agents.iter().any(|a| a.id == sub.to_string()),
             "a subagent is an agent of its session: {agents:?}"
@@ -451,6 +565,7 @@ mod tests {
                         parent: id,
                         seed: crate::sessions::run_forest::SeedMode::Fresh,
                         message: "try the other migration".into(),
+                        title: "the other migration".into(),
                         reply,
                     },
                 )
@@ -464,7 +579,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: sub_session,
-                    label: "audit".into(),
+                    title: "audit".into(),
                     task: "audit the dependencies".into(),
                     agent_type: None,
                     reply,
@@ -498,7 +613,7 @@ mod tests {
         );
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].id, run.steps[0].agent.to_string());
-        assert_eq!(agents[0].label.as_deref(), Some(run.steps[0].step.as_str()));
+        assert_eq!(agents[0].title.as_deref(), Some(run.steps[0].step.as_str()));
         assert_eq!(agents[0].status, AgentStatus::Running);
     }
 
@@ -637,7 +752,7 @@ mod tests {
             .ask(|reply| {
                 SessionCommand::SubAgent(SubAgentCommand::Spawn {
                     caller: code_agent,
-                    label: "second".into(),
+                    title: "second".into(),
                     task: "more".into(),
                     agent_type: None,
                     reply,

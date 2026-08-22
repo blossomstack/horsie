@@ -112,9 +112,16 @@ struct SessionSummary {
 struct SubSessionView {
     id: String,
     parent: Option<String>,
-    /// What the sub session named itself, once it has. Absent until then — a
-    /// client shows what it was branched from instead of inventing a name.
-    title: Option<String>,
+    /// What it is called. Always set: a sub session cannot name itself, so
+    /// whoever branched it chose a title at the branch — `spawn_subsession`
+    /// takes one, and `/fork` derives one from the brief.
+    title: String,
+    /// The brief it was branched with — the first thing it reads. Absent on
+    /// the session *list*, which does not read the sessions it lists; present
+    /// on a session's own document.
+    input: Option<String>,
+    /// Its banked numbers. Absent on the session list, for the same reason.
+    stats: Option<AgentStats>,
     /// The same vocabulary an agent's document speaks: "provisioning" |
     /// "running" | "idle" | "awaiting_input" | "failed" | "cancelled". A sub
     /// session is talked to rather than delegated to, so it never reads
@@ -129,6 +136,27 @@ struct SubSessionView {
     /// session's shape actually needs; without it a sub session can only be
     /// drawn as running forever. Zero before it has moved at all.
     last_activity_ms: u64,
+}
+
+/// One agent's banked numbers: what it spent, what everything under it spent,
+/// and how full its context is.
+///
+/// Banked rather than live — every figure is folded from an event the session
+/// journaled — which is what lets a whole roster report them without waking a
+/// single agent. `contextTokens` is therefore as of the end of that agent's
+/// last turn, not as of now.
+struct AgentStats {
+    /// Tokens this agent alone has spent.
+    usage: UsageView,
+    /// `usage` plus every agent below it: the subagents it spawned, the sub
+    /// sessions branched from it, the steps of the workflows it invoked, and
+    /// everything below those.
+    subtree_usage: UsageView,
+    /// Tokens its context held at the end of its last turn.
+    context_tokens: u32,
+    /// The window the model it runs allows, when that model is configured.
+    /// Absent when it is not — a number with no denominator is not a gauge.
+    context_window: Option<u32>,
 }
 
 /// Answers to every question one agent is parked on, delivered together
@@ -182,16 +210,36 @@ struct SessionDetail {
     workflow: Option<String>,
 }
 
-/// One agent this session hosts. The main agent has `parent`/`label` absent
-/// and `depth` 0; subagents carry their spawn metadata; a workflow step is
-/// labelled with the step it ran. `output` and the full transcript live on the
-/// agent document and its history, not here.
+/// One agent this session hosts — enough of it to draw the session's shape and
+/// to answer for any one agent without reading its transcript.
+///
+/// Everything here is folded from the session's own journal, so a roster of
+/// thirty agents costs no agent recoveries. The transcript is the one thing
+/// that is not: it is read per agent, at `/sessions/:id/agents/:id/messages`.
 struct SubAgentView {
     id: String,
     /// Parent agent id; absent → rooted on whatever this session's primary
     /// agent is: its main agent, or the step that spawned it.
     parent: Option<String>,
-    label: Option<String>,
+    /// What this agent is called. For the main agent it is the session's name,
+    /// because the main agent *is* the session; for a subagent it is the title
+    /// its spawner gave it; for a workflow step it is the step's name. Absent
+    /// only while nothing has named it — a session whose first turn has not
+    /// produced a title yet.
+    title: Option<String>,
+    /// What kind of agent this is: "main" | "subagent" | "step". A sub session
+    /// is not here — it has its own list, for the reason `subSessions` gives.
+    kind: String,
+    /// What it was asked to do: a subagent's task. Absent for the main agent,
+    /// which is talked to turn by turn rather than briefed once, and for a
+    /// step, whose brief is its definition's.
+    input: Option<String>,
+    /// What it produced, once it has. Only delegated work has one: a
+    /// subagent's report or a step's output. Never the main agent's — a
+    /// session concludes nothing.
+    output: Option<String>,
+    /// Its banked numbers.
+    stats: AgentStats,
     depth: u32,
     /// The plugin-declared agent type this subagent runs as, when it was
     /// spawned with one. Absent for the main agent and for a general-purpose

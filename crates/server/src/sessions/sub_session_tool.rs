@@ -47,8 +47,15 @@ fn spawn_subsession_spec() -> ToolSpec {
             .to_string(),
         input_schema: json!({
             "type": "object",
-            "required": ["task"],
+            "required": ["title", "task"],
             "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "A short, specific title for the sub session — a few \
+                        words naming what it is for. A sub session cannot name itself, so \
+                        this is what the user sees in their session list and in this \
+                        session's agent graph."
+                },
                 "task": {
                     "type": "string",
                     "description": "The complete, self-contained task for the sub \
@@ -95,6 +102,10 @@ impl Toolbox for SubSessionToolbox {
         if name != SPAWN_SUBSESSION_TOOL {
             return self.inner.execute(name, input, tool_call_id).await;
         }
+        let title = input
+            .get("title")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolCallError::InvalidInput("missing 'title'".to_string()))?;
         let task = input
             .get("task")
             .and_then(Value::as_str)
@@ -106,6 +117,7 @@ impl Toolbox for SubSessionToolbox {
                     parent: self.caller,
                     seed: SeedMode::Fresh,
                     message: task.to_string(),
+                    title: title.to_string(),
                     reply,
                 })
             })
@@ -143,7 +155,7 @@ mod tests {
     /// asked for — the tool's whole job is to turn a call into that command.
     struct StubSession {
         result: Result<Uuid, String>,
-        seen: Arc<Mutex<Vec<(Uuid, SeedMode, String)>>>,
+        seen: Seen,
     }
 
     #[async_trait::async_trait]
@@ -171,20 +183,27 @@ mod tests {
                 parent,
                 seed,
                 message,
+                title,
                 reply,
             }) = cmd.cmd
             {
-                self.seen.lock().unwrap().push((parent, seed, message));
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((parent, seed, message, title));
                 let _ = reply.send(self.result.clone());
             }
             CommandEffect::none()
         }
     }
 
+    /// What the fake session recorded: caller, seed mode, brief, title.
+    type Seen = Arc<Mutex<Vec<(Uuid, SeedMode, String, String)>>>;
+
     struct Harness {
         toolbox: SubSessionToolbox,
         caller: Uuid,
-        seen: Arc<Mutex<Vec<(Uuid, SeedMode, String)>>>,
+        seen: Seen,
     }
 
     fn harness(result: Result<Uuid, String>) -> Harness {
@@ -249,7 +268,7 @@ mod tests {
             .toolbox
             .execute(
                 SPAWN_SUBSESSION_TOOL,
-                json!({"task": "try the other migration"}),
+                json!({"title": "the other migration", "task": "try the other migration"}),
                 "tc1",
             )
             .await
@@ -259,7 +278,8 @@ mod tests {
             vec![(
                 h.caller,
                 SeedMode::Fresh,
-                "try the other migration".to_string()
+                "try the other migration".to_string(),
+                "the other migration".to_string()
             )]
         );
         match out {
@@ -268,6 +288,20 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The title is as required as the task: a sub session cannot name itself,
+    /// so a call that does not name it would leave one nameless for good.
+    #[tokio::test]
+    async fn a_missing_title_is_rejected() {
+        let h = harness(Ok(Uuid::new_v4()));
+        let err = h
+            .toolbox
+            .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolCallError::InvalidInput(_)));
+        assert!(h.seen.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -289,7 +323,11 @@ mod tests {
         let h = harness(Err("a workflow run cannot be branched".to_string()));
         let err = h
             .toolbox
-            .execute(SPAWN_SUBSESSION_TOOL, json!({"task": "go"}), "tc1")
+            .execute(
+                SPAWN_SUBSESSION_TOOL,
+                json!({"title": "a branch", "task": "go"}),
+                "tc1",
+            )
             .await
             .unwrap_err();
         assert!(
