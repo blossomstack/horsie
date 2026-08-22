@@ -663,6 +663,15 @@ pub enum SessionDomainEvent {
         /// session abandoned mid-seed can be re-seeded with it, rather than
         /// coming back idle with nothing to answer.
         message: String,
+        /// The runtime it was given, if it asked for one of its own. `None`
+        /// means it runs on whatever its parent runs on — resolved by walking
+        /// the forest, never copied, so it follows a re-provision.
+        ///
+        /// `#[serde(default)]` so sub sessions journaled before a session could
+        /// own more than one runtime replay as inheriting, which is what they
+        /// did.
+        #[serde(default)]
+        runtime: Option<crate::sessions::spec::RuntimeId>,
     },
     /// The sub session's initial state is durable, so it may run and the
     /// message seeded alongside it is drained.

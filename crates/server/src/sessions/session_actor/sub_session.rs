@@ -69,6 +69,11 @@ impl SubSessions {
                     source_seq,
                     seed,
                     message: message.clone(),
+                    // Always inherited, for now: every entry point that creates
+                    // a sub session — `/fork`, `/summary-n-fork`, and the tool
+                    // — reuses the branching session's runtime. Asking for one
+                    // of its own is the next thing this field exists for.
+                    runtime: None,
                 };
                 // Persist first, spawn second — see the module doc.
                 let (tx, rx) = oneshot::channel();
@@ -266,9 +271,10 @@ impl Component for SubSessions {
                 seed,
                 message,
                 at_ms,
+                runtime,
             } => state
                 .forest
-                .apply_sub_session_created(id, parent, source_seq, seed, message, at_ms),
+                .apply_sub_session_created(id, parent, source_seq, seed, message, at_ms, runtime),
             SessionDomainEvent::SubSessionSeeded { id, .. } => {
                 state.forest.apply_sub_session_seeded(id)
             }
@@ -760,6 +766,7 @@ mod tests {
             SeedMode::Summary,
             "go".into(),
             1,
+            None,
         );
         state.forest.apply_sub_session_status(id(1), status, 5_000);
         state
@@ -856,6 +863,7 @@ mod tests {
                 source_seq: 12,
                 seed: SeedMode::Copy,
                 message: "go".into(),
+                runtime: None,
             },
         );
         assert_eq!(

@@ -1083,6 +1083,7 @@ mod tests {
             parent: session,
             source_seq: 0,
             seed: SeedMode::Copy,
+            runtime: None,
             message: "go".into(),
         }
     }

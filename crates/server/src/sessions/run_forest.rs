@@ -22,6 +22,7 @@
 //! entry it resolves to, where a `match` must be exhaustive.
 
 use crate::sessions::session_actor::AgentStatus;
+use crate::sessions::spec::RuntimeId;
 use crate::sessions::workflow::{WorkflowRunSpec, WorkflowRunState, render_result};
 use horsie_models::agent::SubAgentResultPart;
 use serde::{Deserialize, Serialize};
@@ -126,6 +127,16 @@ pub enum TurnPhase {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MainRun {
     pub turn: TurnPhase,
+    /// The runtime this session's agent runs on. `None` while the session has
+    /// not provisioned one — and, once a session may be created without a
+    /// sandbox at all, for as long as it never does.
+    ///
+    /// On the entry rather than on the session, because a sub session may name
+    /// a different one: this and [`SubSessionRun::runtime`] are the only two
+    /// places a runtime is *chosen*, and everything delegated below them
+    /// inherits by walking up to the nearest of the two.
+    #[serde(default)]
+    pub runtime: Option<RuntimeId>,
 }
 
 /// Lifecycle of one subagent. `Completed`/`Failed` are turn-terminal, not
@@ -199,6 +210,14 @@ pub struct SubSessionRun {
     /// When this sub session last did anything — the moment of its most recent
     /// status change.
     pub last_activity_ms: u64,
+    /// The runtime this sub session runs on.
+    ///
+    /// Inherited from whoever branched it unless it asked for an environment of
+    /// its own, in which case this names a runtime the session provisioned for
+    /// it. `#[serde(default)]` so sub sessions journaled before a session could
+    /// own more than one runtime load as inheriting.
+    #[serde(default)]
+    pub runtime: Option<RuntimeId>,
 }
 
 /// How a sub session's history was seeded.
@@ -365,6 +384,50 @@ impl RunForest {
     #[must_use]
     pub fn is_known_agent(&self, agent: Uuid) -> bool {
         self.agents.contains_key(&agent)
+    }
+
+    /// The runtime `agent` runs on, resolved by walking up to the nearest
+    /// session or sub session.
+    ///
+    /// This walk *is* the inheritance rule. Only a session and a sub session
+    /// choose a runtime; a subagent, a workflow step and a workflow run choose
+    /// nothing and get whichever one their owner chose. Resolving rather than
+    /// copying is what makes that survive a re-provision: a subagent spawned
+    /// before its session rebuilt its sandbox still reaches the current one.
+    ///
+    /// `None` has two meanings the caller cannot tell apart, and does not need
+    /// to: the agent is unknown, or the session it belongs to has no runtime.
+    /// Both answer "there is nothing to run tools on".
+    #[must_use]
+    pub fn runtime_of_agent(&self, agent: Uuid) -> Option<RuntimeId> {
+        // Bounded exactly as `depth_of_entry` is, and for the same reason: this
+        // walks recovered data, where a chain that does not terminate is a
+        // corrupt journal rather than an impossibility.
+        let (_, mut entry) = self.owner_of_agent(agent)?;
+        let mut hops = 0usize;
+        loop {
+            match &entry.state {
+                RunState::Main(main) => return main.runtime,
+                RunState::SubSession(sub) => {
+                    // A sub session that named its own runtime stops the walk;
+                    // one that inherited carries on up.
+                    if let Some(runtime) = sub.runtime {
+                        return Some(runtime);
+                    }
+                }
+                // Neither chooses. Keep walking.
+                RunState::Sub(_) | RunState::Workflow(_) => {}
+            }
+            hops += 1;
+            if hops > self.entries.len() {
+                tracing::warn!(
+                    "a run entry's parent chain does not terminate; reporting no runtime"
+                );
+                return None;
+            }
+            let parent = entry.parent?;
+            entry = self.owner_of_agent(parent)?.1;
+        }
     }
 
     /// How deep `agent` sits, counting every delegation edge above it. Main is
@@ -597,6 +660,14 @@ impl RunForest {
         }
     }
 
+    /// The session provisioned its runtime. Records which one on the root
+    /// entry, where every agent that inherits it will resolve it from.
+    pub fn apply_session_runtime(&mut self, session: Uuid, runtime: RuntimeId) {
+        if let Some(main) = self.main_mut(session) {
+            main.runtime = Some(runtime);
+        }
+    }
+
     fn main_mut(&mut self, agent: Uuid) -> Option<&mut MainRun> {
         match self.entries.get_mut(&RunId(agent)).map(|e| &mut e.state) {
             Some(RunState::Main(main)) => Some(main),
@@ -802,6 +873,7 @@ impl RunForest {
         seed: SeedMode,
         message: String,
         at_ms: u64,
+        runtime: Option<RuntimeId>,
     ) {
         self.entries.insert(
             RunId(id),
@@ -819,6 +891,10 @@ impl RunForest {
                     // is precisely the state in which no turn has run.
                     status: AgentStatus::Provisioning,
                     last_activity_ms: at_ms,
+                    // `None` means "whatever my parent runs on", resolved by
+                    // walking up rather than copied down: a copy would go stale
+                    // the moment the parent re-provisioned.
+                    runtime,
                 }),
             },
         );
@@ -1093,6 +1169,80 @@ mod tests {
         let session = uid(1);
         f.apply_root_agent(session, 100);
         (f, session)
+    }
+
+    /// The walk *is* the inheritance rule, so each shape that inherits gets its
+    /// own case: delegated work reaches its owner's runtime, a sub session that
+    /// named one stops the walk there, and one that did not carries on up.
+    #[test]
+    fn delegated_work_inherits_the_runtime_of_the_session_it_runs_under() {
+        let (mut f, session) = session_forest();
+        let rt = RuntimeId(uid(7));
+        f.apply_session_runtime(session, rt);
+        let sub = uid(2);
+        f.apply_sub_spawned(sub, session, "l".into(), "t".into(), None, 200);
+        let nested = uid(3);
+        f.apply_sub_spawned(nested, sub, "l".into(), "t".into(), None, 300);
+
+        assert_eq!(f.runtime_of_agent(session), Some(rt));
+        assert_eq!(f.runtime_of_agent(sub), Some(rt), "a subagent chooses none");
+        assert_eq!(
+            f.runtime_of_agent(nested),
+            Some(rt),
+            "and neither does a subagent of a subagent"
+        );
+    }
+
+    #[test]
+    fn a_sub_session_inherits_unless_it_named_a_runtime_of_its_own() {
+        let (mut f, session) = session_forest();
+        let parent_rt = RuntimeId(uid(7));
+        f.apply_session_runtime(session, parent_rt);
+
+        let inherited = uid(2);
+        f.apply_sub_session_created(
+            inherited,
+            session,
+            0,
+            SeedMode::Fresh,
+            "go".into(),
+            200,
+            None,
+        );
+        let own_rt = RuntimeId(uid(8));
+        let owns = uid(3);
+        f.apply_sub_session_created(
+            owns,
+            session,
+            0,
+            SeedMode::Fresh,
+            "go".into(),
+            300,
+            Some(own_rt),
+        );
+
+        assert_eq!(f.runtime_of_agent(inherited), Some(parent_rt));
+        assert_eq!(f.runtime_of_agent(owns), Some(own_rt));
+
+        // A subagent under the sub session that owns a runtime gets *that*
+        // one, not the root's — which is the whole point of the walk stopping
+        // at the nearest chooser rather than running to the root.
+        let under = uid(4);
+        f.apply_sub_spawned(under, owns, "l".into(), "t".into(), None, 400);
+        assert_eq!(f.runtime_of_agent(under), Some(own_rt));
+    }
+
+    /// A session that has never provisioned answers "nothing to run tools on",
+    /// and so does everything under it — which is what a runtime-less session
+    /// will rely on.
+    #[test]
+    fn no_runtime_anywhere_resolves_to_none() {
+        let (mut f, session) = session_forest();
+        let sub = uid(2);
+        f.apply_sub_spawned(sub, session, "l".into(), "t".into(), None, 200);
+        assert_eq!(f.runtime_of_agent(session), None);
+        assert_eq!(f.runtime_of_agent(sub), None);
+        assert_eq!(f.runtime_of_agent(uid(9)), None, "an unknown agent");
     }
 
     #[test]
@@ -1373,7 +1523,15 @@ mod tests {
     fn a_sub_session_lifecycle_folds_like_the_roster_did() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 42, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            42,
+            SeedMode::Copy,
+            "go".into(),
+            1_000,
+            None,
+        );
         let rec = f.sub_session(sub_session).unwrap();
         assert_eq!(rec.source_seq, 42);
         assert_eq!(rec.status, AgentStatus::Provisioning);
@@ -1398,7 +1556,15 @@ mod tests {
     fn seeding_does_not_overwrite_a_sub_session_that_is_already_working() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            1_000,
+            None,
+        );
         f.apply_sub_session_status(sub_session, AgentStatus::Running, 1_100);
         f.apply_sub_session_seeded(sub_session);
         assert_eq!(
@@ -1411,7 +1577,15 @@ mod tests {
     fn events_for_a_deleted_sub_session_are_ignored() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            1_000,
+            None,
+        );
         f.apply_sub_session_deleted(sub_session);
         f.apply_sub_session_seeded(sub_session);
         f.apply_sub_session_titled(sub_session, "ghost".into());
@@ -1423,7 +1597,15 @@ mod tests {
     fn a_sub_session_never_appears_in_owed_deliveries() {
         let (mut f, session) = session_forest();
         let sub_session = uid(3);
-        f.apply_sub_session_created(sub_session, session, 0, SeedMode::Copy, "go".into(), 1_000);
+        f.apply_sub_session_created(
+            sub_session,
+            session,
+            0,
+            SeedMode::Copy,
+            "go".into(),
+            1_000,
+            None,
+        );
         f.apply_sub_session_status(sub_session, AgentStatus::Idle, 2_000);
         assert!(f.owed().is_empty());
     }
@@ -1433,8 +1615,8 @@ mod tests {
         let (mut f, session) = session_forest();
         let parent = uid(3);
         let child = uid(4);
-        f.apply_sub_session_created(parent, session, 0, SeedMode::Copy, "go".into(), 1_000);
-        f.apply_sub_session_created(child, parent, 0, SeedMode::Copy, "go".into(), 2_000);
+        f.apply_sub_session_created(parent, session, 0, SeedMode::Copy, "go".into(), 1_000, None);
+        f.apply_sub_session_created(child, parent, 0, SeedMode::Copy, "go".into(), 2_000, None);
         f.apply_sub_session_deleted(parent);
         assert!(
             f.sub_session(child).is_some(),
@@ -1452,7 +1634,15 @@ mod tests {
         f.apply_sub_spawned(sub, session, "x".into(), "t".into(), None, 100);
         let run = RunId(uid(7));
         f.apply_run_created(run, sub, "deploy".into(), graph("deploy"), 500);
-        f.apply_sub_session_created(uid(3), session, 0, SeedMode::Summary, "go".into(), 600);
+        f.apply_sub_session_created(
+            uid(3),
+            session,
+            0,
+            SeedMode::Summary,
+            "go".into(),
+            600,
+            None,
+        );
         let json = serde_json::to_value(&f).unwrap();
         let back: RunForest = serde_json::from_value(json).unwrap();
         assert_eq!(back, f);
