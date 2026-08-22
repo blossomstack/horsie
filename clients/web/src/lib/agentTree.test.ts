@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { layoutAgentTree } from "./agentTree";
+import { RUN_ROOT, layoutAgentTree, runStatus, stepRuns } from "./agentTree";
 import type { SubAgentView, SubSessionView } from "../api/types";
 
 function agent(
@@ -273,6 +273,95 @@ describe("layoutAgentTree", () => {
       expect(tree.nodes.map((n) => n.id)).toEqual(["main", "s"]);
       expect(tree.nodes[1]).toMatchObject({ collapsed: true, descendants: 1 });
       expect(tree.hidden).toBe(1);
+    });
+  });
+
+  /** A workflow run has no main agent — it *is* its steps, and every one of
+   *  them reaches the roster parentless, because the definition chose it. Both
+   *  pictures rooted on whichever step came first and hung the rest off it: a
+   *  three-step run drew as one step labelled "main session" that had somehow
+   *  spawned the other two, in no particular order. */
+  describe("workflow runs", () => {
+    const step = (id: string, at: number, status = "completed"): SubAgentView => ({
+      ...agent(id, undefined, 0, at),
+      kind: "step",
+      title: id,
+      status,
+    });
+
+    it("roots on the run, and chains its steps in the order they ran", () => {
+      const tree = layoutAgentTree(
+        [step("report", 30), step("gather", 10), step("review", 20)],
+        [],
+        [],
+        "nightly-audit",
+      );
+      expect(tree.nodes.map((n) => [n.id, n.kind, n.depth])).toEqual([
+        [RUN_ROOT, "run", 0],
+        ["gather", "step", 1],
+        ["review", "step", 2],
+        ["report", "step", 3],
+      ]);
+      // One edge per transition, and none of them from the run to a later step:
+      // a run is a sequence, and a fan of edges out of the root is not one.
+      expect(tree.edges).toEqual([
+        { from: RUN_ROOT, to: "gather" },
+        { from: "gather", to: "review" },
+        { from: "review", to: "report" },
+      ]);
+      // The run node is named for the workflow it is a run of.
+      expect(tree.nodes[0].label).toBe("nightly-audit");
+    });
+
+    /* A step delegates like any other agent, and what it delegated is its
+       own — drawn under it, above the step the run went to next. */
+    it("hangs a step's subagents off that step, before the step that followed", () => {
+      const tree = layoutAgentTree(
+        [step("gather", 10), step("review", 20), agent("helper", "gather", 1, 12)],
+        [],
+        [],
+        "nightly-audit",
+      );
+      expect(tree.nodes.map((n) => n.id)).toEqual([RUN_ROOT, "gather", "helper", "review"]);
+      expect(tree.edges).toEqual([
+        { from: RUN_ROOT, to: "gather" },
+        { from: "gather", to: "helper" },
+        { from: "gather", to: "review" },
+      ]);
+    });
+
+    it("folds the whole run away from its root", () => {
+      const tree = layoutAgentTree(
+        [step("gather", 10), step("review", 20)],
+        [],
+        [RUN_ROOT],
+        "nightly-audit",
+      );
+      expect(tree.nodes.map((n) => n.id)).toEqual([RUN_ROOT]);
+      expect(tree.nodes[0]).toMatchObject({ collapsed: true, descendants: 2 });
+    });
+
+    it("draws a run with no name rather than none at all", () => {
+      const tree = layoutAgentTree([step("gather", 10)]);
+      expect(tree.nodes[0].label).toBe("workflow run");
+    });
+
+    it("orders the run log by when each execution began", () => {
+      expect(stepRuns([step("c", 30), step("a", 10), step("b", 20)]).map((s) => s.id)).toEqual([
+        "a",
+        "b",
+        "c",
+      ]);
+    });
+
+    /* A run's status is folded from its steps, because the session's own is in
+       a different vocabulary — a session is `Finished`, an agent `completed`. */
+    it("folds the run's status from its steps, a fault outranking a finish", () => {
+      expect(runStatus([step("a", 1), step("b", 2)])).toBe("completed");
+      expect(runStatus([step("a", 1), step("b", 2, "running")])).toBe("running");
+      // The last step landing does not undo the middle one failing.
+      expect(runStatus([step("a", 1, "failed"), step("b", 2)])).toBe("failed");
+      expect(runStatus([])).toBe("idle");
     });
   });
 

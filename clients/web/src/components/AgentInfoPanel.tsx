@@ -1,6 +1,6 @@
 import { MessageSquareText, Trash2 } from "lucide-react";
 import type { AgentStats, SubAgentView, SubSessionView, UsageView } from "../api/types";
-import { KIND_LABEL, isLive, type AgentKind } from "../lib/agentTree";
+import { KIND_LABEL, RUN_ROOT, isLive, runStatus, stepRuns, type AgentKind } from "../lib/agentTree";
 import { absoluteTime, clockTime, compactNumber, humanDuration } from "../lib/format";
 import { cn } from "../lib/cn";
 import { SidePanel } from "./SidePanel";
@@ -46,13 +46,48 @@ export interface SelectedAgent {
   endedAtMs: number;
 }
 
+/**
+ * A workflow run, as the panel reads it.
+ *
+ * A run is not on either roster — it has no transcript, no context and no id
+ * of its own — so everything here is folded from its steps: when the first one
+ * began, when the last one stopped, and what they spent between them. Summed
+ * over each step's *subtree*, so the work a step delegated is counted once and
+ * counted here.
+ */
+function selectRun(agents: SubAgentView[], workflow: string | undefined): SelectedAgent | null {
+  const steps = stepRuns(agents);
+  if (steps.length === 0) return null;
+  const usage = steps.reduce(
+    (total, s) => ({
+      inputTokens: total.inputTokens + s.stats.subtreeUsage.inputTokens,
+      outputTokens: total.outputTokens + s.stats.subtreeUsage.outputTokens,
+    }),
+    { inputTokens: 0, outputTokens: 0 } as UsageView,
+  );
+  return {
+    id: RUN_ROOT,
+    title: workflow ?? "workflow run",
+    kind: "run",
+    status: runStatus(steps),
+    startedAtMs: steps[0].spawnedAtMs,
+    endedAtMs: steps.reduce((last, s) => Math.max(last, s.endedAtMs), 0),
+    // No context figure: a run has no single window to fill, which is why its
+    // own page carries no gauge either.
+    stats: { usage, subtreeUsage: usage, contextTokens: 0 },
+  };
+}
+
 /** The roster rows, in the one shape this panel reads. */
 export function selectAgent(
   id: string,
   agents: SubAgentView[],
   subSessions: SubSessionView[],
   sessionName: string | undefined,
+  /** The workflow this session is a run of, when it is one. */
+  workflow?: string,
 ): SelectedAgent | null {
+  if (id === RUN_ROOT) return selectRun(agents, workflow);
   const sub = subSessions.find((s) => s.id === id);
   if (sub) {
     return {
@@ -256,7 +291,7 @@ export function AgentInfoPanel({
 
   return (
     <SidePanel
-      legend="Agent"
+      legend={agent.kind === "run" ? "Run" : "Agent"}
       readout={
         <span className="readout truncate text-[0.6875rem]" data-testid="agent-panel-readout">
           {KIND_LABEL[agent.kind]}
@@ -295,7 +330,10 @@ export function AgentInfoPanel({
 
         <TimingSection agent={agent} />
 
-        {stats && (
+        {/* A run has no context of its own to draw: it is a sequence of
+            agents, each with a window of its own, and the run's page says as
+            much by carrying no gauge either. */}
+        {stats && agent.kind !== "run" && (
           <Section title="Context">
             {stats.contextWindow != null && stats.contextWindow > 0 ? (
               <ContextBar tokens={stats.contextTokens} window={stats.contextWindow} />

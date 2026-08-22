@@ -83,7 +83,15 @@ export function SessionTimeline({
   /** Whichever entry the panel is showing. */
   selectedEntry?: string;
 }) {
-  if (timeline.lanes.length === 0 || timeline.lanes[0].bars.length === 0) {
+  // An empty axis, rather than a first lane with no bars on it. Two things
+  // break that older reading: a workflow run's root lane is the run, which has
+  // no transcript of its own and so never has bars, and folding the root hides
+  // every lane that does — so a run reported an empty session, and folding one
+  // up replaced it with "nothing has happened yet".
+  //
+  // The width is the scale's, and the scale is built from everything the
+  // session has done. Zero means there was nothing to lay out at all.
+  if (timeline.lanes.length === 0 || timeline.width === 0) {
     return (
       <div className="flex h-full items-center justify-center px-6" data-testid="timeline-empty">
         <p className="max-w-sm text-center text-sm leading-relaxed text-dim">

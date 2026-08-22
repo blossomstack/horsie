@@ -266,3 +266,126 @@ test("T4: a step's question and its answer stand in the step's transcript", asyn
     timeout: 30_000,
   });
 });
+
+/** A three-step workflow, seeded through the API rather than the editor: this
+ *  is about what a run's *shape* looks like, not about building one. */
+const CHAIN_WORKFLOW = "e2e-workflow-chain";
+
+async function seedChainWorkflow(page: Page, apiBase: string): Promise<void> {
+  await seedAgent(page, apiBase);
+  const body = {
+    name: CHAIN_WORKFLOW,
+    description: "from e2e",
+    start: "gather",
+    steps: [
+      { name: "gather", agent: AGENT, prompt: "gather", transitions: [{ to: "review" }] },
+      { name: "review", agent: AGENT, prompt: "review", transitions: [{ to: "report" }] },
+      { name: "report", agent: AGENT, prompt: "report" },
+    ],
+  };
+  const res = await page.request.post(`${apiBase}/workflows`, { data: body });
+  if (res.status() === 201) return;
+  const put = await page.request.put(`${apiBase}/workflows/${CHAIN_WORKFLOW}`, { data: body });
+  expect(put.status()).toBe(200);
+}
+
+/** Where a node sits on the canvas: the per-node group carries the translate. */
+async function nodeAt(page: Page, testId: string): Promise<{ x: number; y: number }> {
+  const t = await page
+    .getByTestId(testId)
+    .evaluate((el) => (el.parentElement as SVGGElement).getAttribute("transform"));
+  const [x, y] = (t ?? "").replace(/[^0-9. ]/g, "").trim().split(/\s+/).map(Number);
+  return { x, y };
+}
+
+/**
+ * A run is a sequence, and both structural views used to deny it.
+ *
+ * Every step reaches the roster parentless — the definition chose it, no agent
+ * delegated to it — so the graph rooted on whichever step ran first, labelled
+ * it "main session", and fanned the rest out as its children. The timeline did
+ * the same and then scaled its axis to one step's transcript, which clamped
+ * every other step onto an edge: on the first step's page the two that
+ * followed it drew as slivers inside it.
+ */
+test("T5: a run's steps are drawn as the sequence they are, under the run", async ({
+  page,
+  appBase,
+  apiBase,
+  mock,
+}) => {
+  await mock.reset();
+  for (const d of ["gathered", "reviewed", "reported"]) {
+    await mock.queueToolCall("submit_result", { outcome: "success", description: d });
+  }
+  await seedChainWorkflow(page, apiBase);
+
+  await page.goto(`${appBase}/workflows/${CHAIN_WORKFLOW}`);
+  await page.getByTestId("run-workflow").click();
+  await page.waitForURL((url) => url.searchParams.get("workflow") === CHAIN_WORKFLOW);
+  const input = page.getByTestId("composer-input");
+  await input.fill("run it");
+  await input.press("Enter");
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+$/);
+  await expect(page.getByTestId("run-status")).toHaveAttribute("data-status", "Finished", {
+    timeout: 30_000,
+  });
+
+  // A step's own page is where the two session views are offered.
+  await page.getByTestId("workflow-node-gather").click();
+  await page.getByTestId("open-step").first().click();
+  await page.waitForURL(/\/sessions\/[0-9a-f-]+\/agents\/[0-9a-f-]+$/);
+
+  // The graph: the run, then its executions in the order they ran.
+  await page.getByTestId("graph-toggle").click();
+  await expect(page.getByTestId("agent-graph")).toBeVisible();
+  await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(4);
+  const run = page.getByTestId("agent-node-workflow-run");
+  await expect(run).toHaveAttribute("data-kind", "run");
+  const steps = page.locator('[data-testid^="agent-node-"][data-kind="step"]');
+  await expect(steps).toHaveCount(3);
+  // The step being read is marked, root included: it is a run like any other.
+  await expect(
+    page.locator('[data-testid^="agent-node-"][data-current="true"]'),
+  ).toHaveAttribute("data-kind", "step");
+
+  // A chain, not a fan: each execution one rank further right than the one it
+  // followed. Fanned out they shared a rank and differed only in row.
+  const ids = await steps.evaluateAll((els) =>
+    els.map((e) => e.getAttribute("data-testid") as string),
+  );
+  const places = [];
+  for (const id of ids) places.push(await nodeAt(page, id));
+  const xs = places.map((p) => p.x).sort((a, b) => a - b);
+  expect(new Set(xs).size).toBe(3);
+  expect(new Set(places.map((p) => p.y)).size).toBe(1);
+  const atRun = await nodeAt(page, "agent-node-workflow-run");
+  expect(atRun.x).toBeLessThan(xs[0]);
+
+  // The timeline: the same four, and the run is a parent that folds.
+  await page.getByTestId("timeline-toggle").click();
+  await expect(page.getByTestId("session-timeline")).toBeVisible();
+  const lanes = page.locator('[data-testid^="timeline-lane-"]');
+  await expect(lanes).toHaveCount(4);
+  await expect(page.getByTestId("timeline-lane-workflow-run")).toHaveAttribute("data-kind", "run");
+
+  // Every step is placed on the run's own axis, so none of them is stacked on
+  // the step whose page this is.
+  const spans = await page
+    .locator('[data-testid^="timeline-span-"]')
+    .evaluateAll((els) => els.map((e) => (e as HTMLElement).style.left));
+  expect(new Set(spans).size).toBe(3);
+
+  // The run folds away, and — the reason the root's own count is taken off the
+  // roster — it can be unfolded again.
+  const fold = page.getByTestId("timeline-collapse-workflow-run");
+  await fold.click();
+  await expect(lanes).toHaveCount(1);
+  await fold.click();
+  await expect(lanes).toHaveCount(4);
+
+  // And the panel answers for the run itself, which is on neither roster.
+  await page.getByTestId("timeline-select-workflow-run").click();
+  await expect(page.getByTestId("agent-panel-readout")).toHaveText("workflow run");
+  await expect(page.getByTestId("agent-panel-title")).toHaveText(CHAIN_WORKFLOW);
+});
