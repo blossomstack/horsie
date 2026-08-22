@@ -43,6 +43,10 @@ axum              = { version = "0.8", features = ["macros"] }
 tower-http        = { version = "0.7", features = ["fs"] }
 parking_lot       = "0.12"
 tracing           = "0.1"
+# A binary that emits `tracing` events and installs no subscriber throws
+# every one of them away. `env-filter` is what makes RUST_LOG mean
+# anything; the rest of the default feature set is the plain formatter.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url               = "2"
 reqwest           = { version = "0.12", features = ["json"] }
 eventsource-stream    = "0.2.3"

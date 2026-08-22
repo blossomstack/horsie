@@ -119,6 +119,21 @@ Writing either side never destroys the other's keys.
 | `HORSIE_BUS_URL` | Overrides `bus.url`. Takes precedence over the config file. |
 | `HORSIE_MODEL_CARDS_SEED` | Same as `--model-cards-seed`. |
 | `HORSIE_TOKEN` | **CLI.** Bearer token to send instead of reading stored credentials. For scripts and CI. |
+| `RUST_LOG` | Which log events the server prints. Unset, empty, or unparseable → `info`. |
+
+### Logs
+
+The server writes its log to stdout, at `info` and above by default. That
+default is what tells you a node refused to boot, or that an actor could not
+replay its journal and stopped — the class of fault whose only other symptom
+is an endpoint answering `500`.
+
+`RUST_LOG` narrows or widens it, either by level (`debug`) or per module
+(`info,horsie_server::sessions=debug`). Setting it to the empty string means
+*unset*, not *silent*: a container that passes `RUST_LOG` through without
+defining it still logs at `info`, because a stack that had quietly stopped
+logging looked exactly like a stack with nothing to say. To actually silence
+the server, ask for it — `RUST_LOG=off`.
 
 ### Running more than one node
 

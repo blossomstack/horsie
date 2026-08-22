@@ -25,6 +25,12 @@ use horsie_server::boot::{BootOptions, Booted};
 use horsie_server::config::model_cards;
 use horsie_server::http::{AppState, app};
 use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
+
+/// What is logged when `RUST_LOG` says nothing usable. `info` because the
+/// events this exists for — a refused boot, a failed recovery — are `error`
+/// and `warn`, and the level above them costs a handful of lines a start.
+const DEFAULT_LOG_FILTER: &str = "info";
 
 #[derive(Parser)]
 #[command(
@@ -53,11 +59,48 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+/// Install the subscriber that decides where this process's `tracing` events
+/// go.
+///
+/// Without one they go nowhere. The server narrates the things an operator
+/// needs when something is wrong — an actor that could not replay its journal
+/// says so through `tracing::error!` and then closes its mailbox — and for as
+/// long as no subscriber was installed the only visible symptom was every
+/// session route answering `500 session supervisor unavailable`, with two
+/// lines in the container log and no cause anywhere.
+///
+/// First thing in `main`, ahead of argument parsing, so a failure during boot
+/// is narrated too.
+fn init_tracing() {
+    // An *empty* RUST_LOG is treated as unset, not as "log nothing". The
+    // difference matters because it is what a deployment produces by accident:
+    // `RUST_LOG: ${RUST_LOG:-info}` in a compose file substitutes the empty
+    // string when the variable is merely undefined, and an empty filter has no
+    // directives, so it passes no event at any level — which is the silence
+    // this function exists to end, arrived at by a different route.
+    let requested = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    // A malformed directive downgrades to the default rather than aborting the
+    // process: losing the filter someone asked for is a smaller loss than a
+    // server that will not start, and the complaint says which it did.
+    let filter = match requested.as_deref().map(EnvFilter::try_new) {
+        Some(Ok(filter)) => filter,
+        Some(Err(e)) => {
+            eprintln!("ignoring RUST_LOG: {e}");
+            EnvFilter::new(DEFAULT_LOG_FILTER)
+        }
+        None => EnvFilter::new(DEFAULT_LOG_FILTER),
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
 async fn run(cli: Cli) -> Result<(), BootError> {
