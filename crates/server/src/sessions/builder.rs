@@ -9,7 +9,8 @@
 use crate::config::ConfigStore;
 use crate::environments::{EnvironmentError, EnvironmentService};
 use crate::sessions::spec::{
-    AgentSettings, AgentSource, EnvVarSpec, ProvisionStepSpec, SessionKind, SessionOrigin,
+    AgentSettings, AgentSource, EnvVarSpec, ProvisionStepSpec, RuntimeEnv, SessionKind,
+    SessionOrigin,
     SessionSpec, WorkspaceDef,
 };
 use horsie_models::environments::EnvironmentSpec;
@@ -96,13 +97,12 @@ fn settings_from_wire(choice: AgentChoice) -> AgentSettings {
 /// or workflow runs in it.
 struct CommonSpec {
     name: Option<String>,
-    workspaces: Vec<WorkspaceDef>,
-    provision: Vec<ProvisionStepSpec>,
-    vendor: String,
+    /// Everything a vendor needs to build the sandbox, resolved once. The same
+    /// value a runtime record holds, so a sub session asking for its own
+    /// environment resolves it through this exact path.
+    runtime: RuntimeEnv,
     plugins: Vec<String>,
     origin: SessionOrigin,
-    environment: Option<String>,
-    env_vars: Vec<EnvVarSpec>,
 }
 
 /// Resolve the environment and provenance facts every spec carries, once,
@@ -171,13 +171,15 @@ async fn resolve_common(
     }];
     Ok(CommonSpec {
         name,
-        workspaces,
-        provision,
-        vendor,
+        runtime: RuntimeEnv {
+            vendor,
+            workspaces,
+            provision,
+            env_vars,
+            environment: environment_name,
+        },
         plugins: plugins.unwrap_or_default(),
         origin,
-        environment: environment_name,
-        env_vars,
     })
 }
 
@@ -245,14 +247,14 @@ pub async fn build_session_spec(
         kind: SessionKind::Agent {
             settings: Box::new(agent),
         },
-        workspaces: common.workspaces,
-        provision: common.provision,
-        vendor: common.vendor,
+        workspaces: common.runtime.workspaces,
+        provision: common.runtime.provision,
+        vendor: common.runtime.vendor,
         plugins: common.plugins,
         origin: common.origin,
         name: common.name,
-        environment: common.environment,
-        env_vars: common.env_vars,
+        environment: common.runtime.environment,
+        env_vars: common.runtime.env_vars,
     })
 }
 
@@ -276,14 +278,14 @@ pub async fn build_workflow_spec(
     .await?;
     Ok(SessionSpec {
         kind: SessionKind::Workflow { run },
-        workspaces: common.workspaces,
-        provision: common.provision,
-        vendor: common.vendor,
+        workspaces: common.runtime.workspaces,
+        provision: common.runtime.provision,
+        vendor: common.runtime.vendor,
         plugins: common.plugins,
         origin: common.origin,
         name: common.name,
-        environment: common.environment,
-        env_vars: common.env_vars,
+        environment: common.runtime.environment,
+        env_vars: common.runtime.env_vars,
     })
 }
 

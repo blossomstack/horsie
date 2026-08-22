@@ -216,6 +216,64 @@ pub enum SessionKind {
     },
 }
 
+/// A runtime's identity, minted when one is asked for.
+///
+/// Its own value rather than the session's id, which is what it used to be.
+/// A session owns several runtimes now — its own, and one per sub session that
+/// asked for a different environment — so a name that *was* the session's could
+/// only ever address the first of them.
+///
+/// Opaque to everything below this layer: the vendor names its object after it,
+/// the dial token claims it, and the bus builds the runtime's topics from it,
+/// none of which ever needed it to be a session.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub struct RuntimeId(pub uuid::Uuid);
+
+impl RuntimeId {
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl std::fmt::Display for RuntimeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One runtime, as the session that owns it persists it: everything a vendor
+/// needs to build the sandbox, resolved once at the moment it was asked for.
+///
+/// Its own type rather than fields on [`SessionSpec`] because a session owns
+/// *several* of these — its own and one per sub session that asked for a
+/// different environment — and a runtime's identity has to be able to differ
+/// from the session's for that to be sayable at all.
+///
+/// A snapshot, never a reference: `environment` is provenance only. A session
+/// revived next week gets what it was created with rather than what a
+/// since-edited environment now says, which is the same rule the session spec
+/// has always followed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeEnv {
+    /// Runtime vendor name (key into [`RuntimeVendorMap`]).
+    pub vendor: String,
+    pub workspaces: Vec<WorkspaceDef>,
+    /// Setup steps the runtime runs at every create/attach (idempotent).
+    #[serde(default)]
+    pub provision: Vec<ProvisionStepSpec>,
+    /// Environment variables injected into the runtime child.
+    #[serde(default)]
+    pub env_vars: Vec<EnvVarSpec>,
+    /// The predefined environment this was resolved from. Provenance only —
+    /// everything it contributed is in the fields above, so nothing re-reads
+    /// it. `None` for an ad-hoc environment.
+    #[serde(default)]
+    pub environment: Option<String>,
+}
+
 /// Persisted, self-contained description of one session (lives in the
 /// supervisor journal, like the daemon's `JobSpec`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

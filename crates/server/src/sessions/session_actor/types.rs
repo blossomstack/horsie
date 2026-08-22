@@ -801,6 +801,26 @@ pub(super) enum NotAnEnd {
     },
 }
 
+/// One runtime this session owns, and where its build got to.
+///
+/// The session holds a map of these rather than one `ProvisioningState`,
+/// because a sub session may run on a sandbox of its own: a root idling while
+/// one of its branches boots a machine is now an ordinary shape, and a single
+/// session-wide provisioning field could not say it.
+///
+/// `owner` is what decides the runtime's lifetime. A runtime belongs to the
+/// session or sub session that *asked* for it — deleting that one shuts it
+/// down, and deleting a sub session that merely inherited its parent's changes
+/// nothing. One field, no reference counting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RuntimeRecord {
+    /// What to build it from, snapshotted when it was asked for.
+    pub env: crate::sessions::spec::RuntimeEnv,
+    /// The agent id of the session or sub session that created it.
+    pub owner: Uuid,
+    pub provisioning: ProvisioningState,
+}
+
 /// The runtime-build half of a session's life, folded from the provisioning
 /// events. Its own slice rather than writes into a shared `status` field, so
 /// the status can be a projection with one owner per fact.

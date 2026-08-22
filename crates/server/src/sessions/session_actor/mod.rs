@@ -1,4 +1,4 @@
-//! One interactive session: the conversational state machine and the owner of
+//! One interactive session: the session state machine and the owner of
 //! its agents.
 //!
 //! Three things are deliberately *not* here. The session does not know how a
