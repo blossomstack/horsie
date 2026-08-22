@@ -80,7 +80,7 @@ export function MarketplaceRow({
 
         <div className="flex shrink-0 items-center gap-2">
           <button
-            className="key shrink-0 !px-2.5 !py-1.5 text-xs"
+            className="key shrink-0 key-sm"
             onClick={() => refresh.mutate(marketplace.name)}
             disabled={refresh.isPending}
           >
@@ -149,7 +149,7 @@ export function MarketplaceRow({
                   )}
                 </div>
                 <button
-                  className="key shrink-0 !px-2.5 !py-1.5 text-xs"
+                  className="key shrink-0 key-sm"
                   data-testid={`entry-install-${p.name}`}
                   disabled={p.installed || install.isPending}
                   onClick={() =>

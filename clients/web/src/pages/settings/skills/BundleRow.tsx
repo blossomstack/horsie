@@ -149,7 +149,7 @@ export function BundleRow({ bundle }: { bundle: PluginView }) {
               one — so offering the button here would be offering an error. */}
           {bundle.kind.kind !== "Authored" && (
             <button
-              className="key shrink-0 !px-2.5 !py-1.5 text-xs"
+              className="key shrink-0 key-sm"
               onClick={() => update.mutate(bundle.name)}
               disabled={update.isPending}
             >

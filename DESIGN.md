@@ -208,9 +208,15 @@ horsie is a long-running process you watch. The interface's whole job is to show
 
 Three rules generate the rest of this document.
 
-**1. Nothing is separated by a line.** A 1px rule around a region is a boundary drawn twice — the region already has an edge, because its content stops. A screen full of them reads as clutter before it reads as structure. The only borders left in the build are the ones that carry meaning on their own: an error outline, the focus ring, the sub-session tree rail, a graph edge, a dashed timeline guide. `--rule` still exists for those; it is not a tool for bounding regions.
+**1. A line marks the chrome, never a region.** `--edge` draws exactly four things: the outer boundary of a column (rail, settings nav, task panel), the underside of a header bar, the top of a footer bar, and the separator between rows of one list. That is the structural frame, and it is what holds the layout together — without it the columns float and the app stops reading as one instrument.
+
+Everything *inside* the frame separates by a step in value, by whitespace, and by type weight. A box drawn round a settings section, or a card drawn round a list row, is a boundary stated twice. Beyond the frame a border must carry meaning on its own: an error outline, the focus ring, the sub-session tree rail, a graph edge, a dashed timeline guide.
+
+The four frame jobs have their own utilities — `column-edge-r`, `column-edge-l`, `bar-edge-b`, `bar-edge-t`, `list-divided` — so `border-edge` on an arbitrary element is reviewable as a mistake in a way a bare `border` never was.
 
 **2. A fill means something happened.** Ground is ground. A fill marks hover, selection, or machine output — and nothing else. When every list row is painted a permanent card, the fill that means "you are hovering this" has nowhere left to land, which is exactly the failure the previous system shipped.
+
+Hover and selection are **different fills**: hover is the neutral `panel-raised`, selected is the `accent-quiet` wash. Two greys a few points apart cannot say "you are pointing at this" and "this is the one you picked" at the same time, and while they did, a selected provider row was indistinguishable from a hovered one.
 
 **3. One accent.** `--accent` is the control that commits and nothing else: Send, Save, Create, New agent. `--live` is a measured value in flight. `--red` interrupts and destroys. `--lamp-ok` says a channel is healthy. A fifth colour would have to displace one of these.
 
@@ -259,19 +265,37 @@ Two full renditions live in `clients/web/src/index.css`: dark on `:root, [data-t
 
 Four values, and the steps between them are deliberately small.
 
+- **`edge`** — the chrome hairline, and only the four jobs above.
 - **`chassis`** — the frame: the session rail, the settings nav. The recessed column you navigate from.
 - **`panel`** — the surface you read: the content column, and anything that genuinely floats above it.
 - **`panel-raised`** — **the interaction fill.** Hover, selection, a menu. This is the one token whose *brightness* flips between exposures: lighter in the dark, **darker** in the light. What it has to do is separate from the ground it lands on, and a white fill on a white panel separates from nothing. The previous system held material roles by brightness in both exposures, which is precisely why every light-mode hover state was invisible.
 - **`screen`** — machine output: tool results, code blocks, log tails, and the fill inside a field. A tint that says "not written by a person", not a recessed hardware screen.
+- **`code-fill`** — a token inside running text: inline code, a `kbd` hint. Deliberately louder than the interaction fill, gated at 1.35:1 against the surface. It borrowed `panel-raised` and measured 1.22:1 — the right weight for a hover, which has the pointer helping it read, and the wrong weight for a code span, which has nothing.
+- **`code-fill`** — a token inside running text: inline code, a `kbd` hint. Deliberately louder than the interaction fill, and gated at 1.35:1 against the surface. It borrowed `panel-raised` and measured 1.22:1, which is the right weight for a hover — a hover has the pointer helping it read, and a code span has nothing.
 
 The rails are `chassis` and the content is `panel`, in that order. Painting the rail *lighter* than the content — which is what shipped before — inverts the reading and makes the navigation the loudest thing on screen.
 
 ### Semantic colour
-- **Accent** (`accent`, `accent-hover`, `accent-ink`, `accent-quiet`): the action that commits. `.key-go` (composer Send, settings Save, section Add, New agent, ask-user Send), the checked state of a display switch, the `h` nameplate, the focus ring, and prose links. Nowhere else.
+- **Accent** (`accent`, `accent-hover`, `accent-ink`, `accent-quiet`, `selection`): the action that commits — `.key-go` (composer Send, settings Save, section Add, New agent, ask-user Send), the `h` nameplate, the focus ring, and prose links — plus the two states that say "this one": `accent-quiet` fills a selected row or nav item, and `selection` is the text-selection tint. `selection` is a separate token, and it is **semi-transparent on purpose**.
 - **Live** (`live`, `live-ink`, `live-quiet`): a measured value in flight. Token counts, timers, the context meter fill, the "Running" / "Reconnecting" / "Saving" lamps, a selected weekday. `live-ink` is the *text* form (in light it darkens to clear AA); `live` is the *emissive* form used for lamps and meters.
 - **Red** (`red`, `red-ink`, `red-quiet`): interrupt and destroy. `.key-stop`, delete hover, error banners, failed tool rows. Red is never used to style anything that is merely important.
 - **Lamp OK** (`lamp-ok`, `lamp-ok-quiet`): the only "all good" signal — an idle session, a connected runtime, a completed task, a tool call that returned.
 - **Code** (`code-keyword`, `code-string`, `code-number`, `code-type`): its own palette, deliberately. Driving syntax from `--accent` puts the colour that means "this commits" on every `let` and `fn`.
+
+### Selection
+
+`::selection` is a wash **under** the text, not a block over it. The rule is: set `background-color` with alpha, and **do not set `color`**. That is what lets a selected paragraph keep its inline-code chips and a selected code block keep its syntax highlighting — and it is what every editor does. GitHub's own dark theme is `#3392FF44`: their brand blue at ~27% alpha.
+
+A solid fill plus a forced `color` shipped first, and flattened all of it into slabs.
+
+Two numbers pull against each other here, and both are gated on the **composite** rather than the declared colour, because the declared colour is never what lands on screen:
+
+- The wash must be **visible** against every surface it can cover — panel, interaction fill, screen, and the inline-code fill. Floored at 1.3; it measures 1.41–1.77.
+- The **ink on top** must stay readable, with `color` deliberately untouched. Primary prose ink holds full AA and lands at 7.3–9.7.
+
+Secondary ink — descriptions, blockquotes — is the one floor in the system below AA, at **4.3**, and only while it is actively selected (5.9–6.9 at rest). This is a measured trade, not a rounding-down: hold every ink at 4.5 and the wash falls to ~1.25 visibility, which is a selection you have to hunt for. The reference implementations sit in the same place — GitHub's dark theme drops its own muted text to ~4.44. `SELECTED_DIM` in `contrast.mjs` carries the reasoning.
+
+The wash is the accent's own colour wherever the accent can carry it. Two worlds cannot: Ink's accent on a dark ground *is* white, and a white wash lifts the ground past what selected secondary text can survive, so a true-neutral world takes a neutral wash; and Aurora's mint is the most luminous accent in the set, so its dark wash is the accent's hue at a deeper value. This is also why the industry standard is blue — blue-violet is the darkest hue per unit of chroma, so it is the family that can tint a dark ground without washing the text out.
 
 ## Typography
 
@@ -345,8 +369,11 @@ The vocabulary is defined once in `clients/web/src/index.css` as Tailwind `@util
 
 ## Do's and Don'ts
 
-**Do** separate regions with a value step, whitespace, or type weight.
-**Don't** reach for a border. If a region needs bounding, it needs space.
+**Do** draw the frame — column edges, header undersides, footer tops, list separators — with the `*-edge-*` utilities.
+**Don't** reach for a border inside the frame. If a region needs bounding, it needs space.
+
+**Do** use `panel-raised` for hover and `accent-quiet` for selected.
+**Don't** use the same fill for both — then neither reads.
 
 **Do** spend a fill on hover, selection, or machine output.
 **Don't** paint a region just to show it is a region — it costs the fills that mean something.
@@ -359,6 +386,9 @@ The vocabulary is defined once in `clients/web/src/index.css` as Tailwind `@util
 
 **Do** run `bun run contrast` after any token change. It gates all eight palettes and it reads the shipped CSS.
 **Don't** lower a threshold to make it pass. Both times a value failed the gate, the value was wrong.
+
+**Do** let `::selection` be a transparent wash with no `color` override.
+**Don't** give it a solid fill — you lose every syntax colour and code chip under it.
 
 **Do** pair every status colour with a word.
 **Don't** signal state with colour alone, in any world.

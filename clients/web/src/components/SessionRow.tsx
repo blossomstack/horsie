@@ -10,6 +10,7 @@ import { statusMeta } from "../lib/status";
 import { useSetSessionTag } from "../hooks/useSessionTags";
 import { useDeleteSession } from "../hooks/useSessions";
 import { Menu, MenuItem } from "./Menu";
+import { useRenameSession } from "../hooks/useSessions";
 import { StatusDot } from "./StatusBadge";
 
 /** One channel strip on the rail: lamp, name, and what the channel last did. */
@@ -27,6 +28,7 @@ export function SessionRow({
   const setTag = useSetSessionTag();
   const del = useDeleteSession();
   const navigate = useNavigate();
+  const rename = useRenameSession();
   const [draft, setDraft] = useState("");
   const mine = new Set(sessionTags(s));
   // Whether this row is the session on screen — including when what is on
@@ -83,7 +85,7 @@ export function SessionRow({
             // top of it drew a that competed with the sub session rails
             // beneath for the same job.
             isActive
-              ? "bg-raised text-legend"
+              ? "bg-accent-quiet text-legend"
               : "text-dim hover:bg-raised hover:text-legend",
           )
         }
@@ -140,7 +142,7 @@ export function SessionRow({
             <input
               data-testid="new-tag-input"
               aria-label="New tag"
-              className="w-full rounded-[var(--radius-control)] border bg-panel px-2 py-1 text-[0.8125rem] text-legend outline-none placeholder:text-faint focus:border-[var(--rule-strong)]"
+              className="field !py-1 !text-[0.8125rem]"
               placeholder="New tag…"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -150,6 +152,25 @@ export function SessionRow({
             />
           </div>
           <div className="my-1 " role="separator" />
+          {/* The header used to carry this as a click-to-edit title, which put
+              an editable control where a page title goes. A rename is an
+              action on a session, and this is where a session's actions are —
+              in the same shape as the tag field above it, rather than a
+              `window.prompt` that matches nothing else in the build. */}
+          <div className="px-2 py-1.5">
+            <input
+              data-testid="session-title-input"
+              aria-label="Rename session"
+              className="field !py-1 !text-[0.8125rem]"
+              placeholder="Rename…"
+              defaultValue={title}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const next = e.currentTarget.value.trim();
+                if (next && next !== s.name) rename.mutate({ id: s.id, name: next });
+              }}
+            />
+          </div>
           <MenuItem
             danger
             testId={`delete-session-${s.id}`}

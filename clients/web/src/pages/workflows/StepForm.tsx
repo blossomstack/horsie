@@ -148,7 +148,7 @@ export function StepForm({
                 data-testid="outcome-description"
               />
               <button
-                className="key key-danger !px-2 !py-1"
+                className="key key-danger key-sm"
                 aria-label={`Remove outcome ${o.value || oi + 1}`}
                 onClick={() =>
                   onChange({ outcomes: step.outcomes.filter((_, j) => j !== oi) })
@@ -159,7 +159,7 @@ export function StepForm({
             </div>
           ))}
           <button
-            className="key !px-2 !py-1 text-xs"
+            className="key key-sm"
             onClick={() => onChange({ outcomes: [...step.outcomes, emptyOutcome()] })}
             data-testid="add-outcome"
           >
@@ -238,7 +238,7 @@ export function StepForm({
                 required
               </label>
               <button
-                className="key key-danger !px-2 !py-1"
+                className="key key-danger key-sm"
                 aria-label={`Remove field ${f.name || fi + 1}`}
                 onClick={() =>
                   onChange({ fields: step.fields.filter((_, j) => j !== fi) })
@@ -249,7 +249,7 @@ export function StepForm({
             </div>
           ))}
           <button
-            className="key !px-2 !py-1 text-xs"
+            className="key key-sm"
             onClick={() => onChange({ fields: [...step.fields, emptyField()] })}
             data-testid="add-output-field"
           >
@@ -347,7 +347,7 @@ export function StepForm({
                 ))}
               </select>
               <button
-                className="key key-danger !px-2 !py-1"
+                className="key key-danger key-sm"
                 aria-label={`Remove transition ${ti + 1}`}
                 onClick={() =>
                   onChange({
@@ -360,7 +360,7 @@ export function StepForm({
             </div>
           ))}
           <button
-            className="key !px-2 !py-1 text-xs"
+            className="key key-sm"
             onClick={() =>
               onChange({
                 transitions: [...step.transitions, { to: "", when: undefined }],

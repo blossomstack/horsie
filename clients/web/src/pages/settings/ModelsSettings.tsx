@@ -20,13 +20,13 @@ import {
 } from "../../hooks/useSettings";
 import {
   ListRow,
+  Rows,
   RowAction,
   RowLabel,
   Section,
-  SettingsPane,
+  SettingsPage,
   TextField,
 } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
 import { askConfirm } from "../../lib/confirm";
 
 type ProviderKind = "anthropic" | "openai" | "openai-responses" | "chatgpt";
@@ -337,15 +337,12 @@ export function ModelsSettings() {
         : null;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Models & providers"
         desc="API endpoints and the model aliases sessions pick from. Each provider and each model saves on its own — open one, edit it, press its Save."
         saving={busy}
         saved={wroteOk}
-      />
-
-      <SettingsPane>
+    >
         {isLoading && (
           <div className="py-16 text-center text-sm text-faint">Loading…</div>
         )}
@@ -386,6 +383,7 @@ export function ModelsSettings() {
                   busy={busy}
                 />
               )}
+              <Rows>
               {providers.map((p) => {
                 const count = models.filter((m) => m.provider === p.name).length;
                 return editingProvider === p.name ? (
@@ -499,6 +497,7 @@ export function ModelsSettings() {
                   </ListRow>
                 );
               })}
+              </Rows>
             </Section>
 
             {selected && (
@@ -530,6 +529,7 @@ export function ModelsSettings() {
                     busy={busy}
                   />
                 )}
+                <Rows>
                 {providerModels.map((m) =>
                   editingModel === m.alias ? (
                     <ModelEditor
@@ -575,12 +575,12 @@ export function ModelsSettings() {
                     />
                   ),
                 )}
+                </Rows>
               </Section>
             )}
           </>
         )}
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }
 

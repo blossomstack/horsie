@@ -20,11 +20,20 @@ function boundary(seq: number): RenderedCompaction {
   };
 }
 
+/** What every case shares, so a new prop is added in one place. */
+const base = {
+  boundaries: [] as RenderedCompaction[],
+  onSeek: () => {},
+  view: 0.5,
+  progress: 0,
+  onScrollTo: () => {},
+};
+
 describe("TranscriptSpine", () => {
   /** The control does not appear and disappear as a session's shape changes:
    * jump-to-start is useful in a long session that has never compacted. */
   it("is just the two caps with no compactions", () => {
-    render(<TranscriptSpine boundaries={[]} onSeek={() => {}} />);
+    render(<TranscriptSpine {...base} boundaries={[]} />);
     expect(screen.getByTestId("spine-start")).toBeTruthy();
     expect(screen.getByTestId("spine-end")).toBeTruthy();
     expect(screen.queryAllByTestId("spine-tick")).toHaveLength(0);
@@ -33,8 +42,8 @@ describe("TranscriptSpine", () => {
   it("renders one tick per boundary, carrying its seq", () => {
     render(
       <TranscriptSpine
+        {...base}
         boundaries={[boundary(12), boundary(40)]}
-        onSeek={() => {}}
       />,
     );
     const ticks = screen.getAllByTestId("spine-tick");
@@ -43,7 +52,7 @@ describe("TranscriptSpine", () => {
 
   it("seeks to a boundary by seq, and to either end", () => {
     const onSeek = vi.fn();
-    render(<TranscriptSpine boundaries={[boundary(12)]} onSeek={onSeek} />);
+    render(<TranscriptSpine {...base} boundaries={[boundary(12)]} onSeek={onSeek} />);
     fireEvent.click(screen.getByTestId("spine-tick"));
     expect(onSeek).toHaveBeenCalledWith(12);
     fireEvent.click(screen.getByTestId("spine-start"));

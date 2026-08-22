@@ -6,7 +6,7 @@ export type ThemeChoice = "light" | "dark" | "system";
 export type Mode = "light" | "dark";
 /** Which of the four worlds. Graphite is the default and carries NO
  * attribute, so `index.css` keeps the specificity it was written against. */
-export type Skin = "graphite" | "ink" | "aurora" | "glass";
+export type Skin = "paper" | "signal";
 /** How big the interface is drawn. Scales every rem in the build, so the
  * spacing grows with the type instead of the type outgrowing its slots. */
 export type TextSize = "compact" | "default" | "large";
@@ -19,28 +19,16 @@ export const TEXT_SIZES: { id: TextSize; name: string; blurb: string }[] = [
 
 export const SKINS: { id: Skin; name: string; blurb: string }[] = [
   {
-    id: "graphite",
-    name: "Graphite",
+    id: "paper",
+    name: "Paper",
     blurb:
-      "Cool graphite under an electric indigo accent. The default: enough colour to have an identity, quiet enough to watch for an hour.",
+      "Warm all the way down — bone in the light, warm charcoal in the dark, one vermillion for the control that commits.",
   },
   {
-    id: "ink",
-    name: "Ink",
+    id: "signal",
+    name: "Signal",
     blurb:
-      "Bright minimal, true neutral. The accent is ink itself, so the control that commits is the highest-contrast thing on screen rather than the most colourful.",
-  },
-  {
-    id: "aurora",
-    name: "Aurora",
-    blurb:
-      "Tinted and vivid. Every ground carries the accent's own hue at low chroma and mint is the action. Rounder, in a rounder letter.",
-  },
-  {
-    id: "glass",
-    name: "Glass",
-    blurb:
-      "Soft depth. A tinted ground with two coloured lights on it, and the interface as a frosted sheet laid over the top.",
+      "The cold opposite — a blue-black ground under a single lime accent. Same layout, other temperature.",
   },
 ];
 
@@ -67,9 +55,9 @@ function readChoice(): ThemeChoice {
 function readSkin(): Skin {
   try {
     const raw = localStorage.getItem(SKIN_KEY);
-    return SKINS.some((s) => s.id === raw) ? (raw as Skin) : "graphite";
+    return SKINS.some((s) => s.id === raw) ? (raw as Skin) : "paper";
   } catch {
-    return "graphite";
+    return "paper";
   }
 }
 
@@ -114,9 +102,9 @@ const emit = () => {
 function apply() {
   const root = document.documentElement;
   root.dataset.theme = resolveMode(choice);
-  // Graphite is the default and deliberately carries no attribute, so every
+  // Paper is the default and deliberately carries no attribute, so every
   // selector in index.css keeps the specificity it was written against.
-  if (skin === "graphite") delete root.dataset.skin;
+  if (skin === "paper") delete root.dataset.skin;
   else root.dataset.skin = skin;
   // Same convention: the shipped density carries no attribute, so `--text-root`
   // falls through to its default rather than being restated in two places.
@@ -148,19 +136,8 @@ function setChoice(next: ThemeChoice) {
   emit();
 }
 
-/**
- * The two extra faces are fetched only when a world that uses one is chosen,
- * so Graphite — the default, and what most installs run — pays nothing for
- * worlds nobody opened. Glass deliberately reuses Inter and costs no fetch.
- */
-const loadFace = (s: Skin) => {
-  if (s === "ink") void import("@fontsource-variable/geist");
-  if (s === "aurora") void import("@fontsource-variable/plus-jakarta-sans");
-};
-
 function setSkin(next: Skin) {
   skin = next;
-  loadFace(next);
   try {
     localStorage.setItem(SKIN_KEY, next);
   } catch {
@@ -190,11 +167,9 @@ const subscribe = (l: () => void) => {
 const getSnapshot = () => snapshot;
 
 // The inline script in index.html already set the attributes before first
-// paint; this re-asserts them for the SPA's lifetime and fetches the face.
-if (typeof document !== "undefined") {
-  apply();
-  loadFace(skin);
-}
+// paint; this re-asserts them for the SPA's lifetime. Both worlds share the
+// same two faces, so nothing is fetched on a switch.
+if (typeof document !== "undefined") apply();
 
 export function useTheme(): {
   choice: ThemeChoice;

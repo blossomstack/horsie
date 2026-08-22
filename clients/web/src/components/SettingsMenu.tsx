@@ -40,7 +40,7 @@ export function SettingsMenu() {
       </button>
       {open && (
         <div
-          className="panel absolute right-0 top-full z-10 mt-2 w-64 p-1.5 shadow-[var(--panel-lift)]"
+          className="panel absolute right-0 top-full z-10 mt-2 w-64 p-1.5 shadow-[var(--float)]"
           data-testid="settings-menu"
         >
           <p className="legend px-2 pb-1 pt-1">Display</p>

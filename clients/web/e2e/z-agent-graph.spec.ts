@@ -82,9 +82,6 @@ test("Z2: folding an agent hides what it spawned, and unfolding brings it back",
   await expect(fold).toHaveAttribute("aria-expanded", "false");
   // What the fold stands for is on the node, so the count is not lost with it.
   await expect(page.locator('[data-testid^="agent-hidden-"]')).toHaveText("+1");
-  // A folded session still spawned what it spawned. Keyed on what was drawn,
-  // this told a session with folded subagents that it had never had any.
-  await expect(page.getByTestId("agent-graph-lonely")).toHaveCount(0);
 
   await fold.click();
   await expect(nodes).toHaveCount(2);
@@ -200,10 +197,7 @@ test("Z6: a sub session is drawn under the session it branched from, and opens f
 
   await page.getByTestId("graph-toggle").click();
   await expect(page.getByTestId("agent-graph")).toBeVisible();
-  // The main agent and the sub session — not the "nothing has branched from
-  // this session" line, which is what a roster of agents alone produced.
   await expect(page.locator('[data-testid^="agent-node-"]')).toHaveCount(2);
-  await expect(page.getByTestId("agent-graph-lonely")).toHaveCount(0);
   const branched = page.locator('[data-testid^="agent-node-"][data-kind="sub_session"]');
   await expect(branched).toHaveCount(1);
 

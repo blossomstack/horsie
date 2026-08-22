@@ -125,9 +125,13 @@ export function AgentGraph({
   });
 
   return (
-    // `bg-chassis`, matching the timeline: this replaces the transcript in the
-    // same pane, and a second colour there reads as a different surface.
-    <div className="h-full overflow-auto bg-chassis" data-testid="agent-graph">
+    // The ground comes from `SessionPane`, which all three session views
+    // share. Centred both ways WHILE IT FITS: a two-node session drawn in the
+    // top-left corner of a wide pane reads as a rendering that failed rather
+    // than a session with two agents in it. `min-h-full` on the inner box is
+    // what lets it centre and still scroll once the graph outgrows the pane.
+    <div className="h-full overflow-auto" data-testid="agent-graph">
+      <div className="flex min-h-full min-w-full items-center justify-center p-6">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         width={width}
@@ -295,15 +299,7 @@ export function AgentGraph({
         })}
       </svg>
 
-      {/* Only when there is genuinely nothing below the main agent. Keyed on
-          what is drawn, this told a session with three folded subagents that it
-          had never spawned one — and, before sub sessions were drawn here, it
-          told a session made entirely of them the same thing. */}
-      {tree.nodes.length === 1 && tree.hidden === 0 && (
-        <p className="px-6 pb-4 text-center text-sm text-dim" data-testid="agent-graph-lonely">
-          Nothing has branched from this session, and it has delegated nothing.
-        </p>
-      )}
+      </div>
     </div>
   );
 }

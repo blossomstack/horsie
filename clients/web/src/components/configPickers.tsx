@@ -72,7 +72,7 @@ export interface PickerSpec {
 function optionClass(selected: boolean): string {
   return cn(
     "flex w-full items-center gap-2 rounded-[var(--radius-chip)] px-2 py-1.5 text-left text-sm",
-    selected ? "bg-raised text-legend" : "hover:bg-raised",
+    selected ? "bg-accent-quiet text-legend" : "hover:bg-raised",
   );
 }
 

@@ -1,17 +1,21 @@
-import { Plus, Trash2 } from "lucide-react";
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
+import { Plus } from "lucide-react";
 import { RailToggle } from "../../components/rail";
+import { RosterRow } from "../../components/RosterRow";
 import { askConfirm } from "../../lib/confirm";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useEnvironments, useDeleteEnvironment } from "../../hooks/useEnvironments";
 
 export function EnvironmentsPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: environments, isLoading, isError } = useEnvironments();
   const del = useDeleteEnvironment();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="environments-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">Environments</h1>
         <button
@@ -23,8 +27,7 @@ export function EnvironmentsPage() {
           New environment
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-        <div className="mx-auto max-w-3xl">
+      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6" onScroll={onScroll}>
           {isLoading && (
             <div className="flex items-center gap-2">
               <span className="lamp lamp-live text-live-ink" aria-hidden />
@@ -48,30 +51,16 @@ export function EnvironmentsPage() {
               </p>
             </section>
           )}
-          <div className="space-y-px">
+          <div className="list-divided">
             {(environments ?? []).map((e) => (
-              <div
+              <RosterRow
                 key={e.name}
-                className="flex items-center gap-3 row px-2.5 py-2"
-                data-testid="environment-row"
-                data-environment-name={e.name}
-              >
-                <Link
-                  to={`/environments/${encodeURIComponent(e.name)}/edit`}
-                  className="min-w-0 flex-1"
-                >
-                  <div className="flex items-baseline gap-2">
-                    <span className="font-mono text-sm font-medium text-legend">
-                      {e.name}
-                    </span>
-                    <span className="legend">{e.vendor}</span>
-                  </div>
-                  {e.description && (
-                    <div className="truncate text-sm text-dim">
-                      {e.description}
-                    </div>
-                  )}
-                  <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1">
+                to={`/environments/${encodeURIComponent(e.name)}/edit`}
+                name={e.name}
+                meta={e.vendor}
+                description={e.description}
+                facts={
+                  <>
                     {e.repos.length > 0 && (
                       <span className="legend">{e.repos.length} repos</span>
                     )}
@@ -81,23 +70,19 @@ export function EnvironmentsPage() {
                     {e.provision.length > 0 && (
                       <span className="legend">{e.provision.length} steps</span>
                     )}
-                  </div>
-                </Link>
-                <button
-                  className="key-icon shrink-0 !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
-                  title={`Delete ${e.name}`}
-                  data-testid={`delete-environment-${e.name}`}
-                  onClick={async () => {
-                    if (await askConfirm(`Delete environment '${e.name}'?`))
-                      del.mutate(e.name);
-                  }}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
+                  </>
+                }
+                testId="environment-row"
+                nameAttr={{ "data-environment-name": e.name }}
+                deleteLabel={`Delete ${e.name}`}
+                deleteTestId={`delete-environment-${e.name}`}
+                onDelete={async () => {
+                  if (await askConfirm(`Delete environment '${e.name}'?`))
+                    del.mutate(e.name);
+                }}
+              />
             ))}
           </div>
-        </div>
       </div>
     </div>
   );

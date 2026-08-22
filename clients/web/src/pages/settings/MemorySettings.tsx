@@ -4,8 +4,7 @@ import { ApiRequestError } from "../../api/client";
 import type { MemorySpaceView, MemoryView } from "../../api/types";
 import { cn } from "../../lib/cn";
 import { ReadError } from "../../components/ReadError";
-import { SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { SettingsPage } from "./fields";
 import { askConfirm } from "../../lib/confirm";
 import {
   useCreateMemory,
@@ -50,13 +49,10 @@ export function MemorySettings() {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Memory"
         desc="Durable notes the agent saves and reads back — grouped into spaces you pick per session."
-      />
-
-      <SettingsPane>
+    >
           <section className="section">
             <SectionHeading
               icon={<FolderPlus size={15} className="mt-0.5 text-faint" />}
@@ -181,8 +177,7 @@ export function MemorySettings() {
               </>
             )}
           </section>
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }
 
@@ -216,7 +211,7 @@ function SpaceRow({
         // build. Amber is reserved for a measured, live value — this row is
         // neither, and it only ever looked grey because a `border-color`
         // utility could not win the cascade.
-        active && "bg-raised",
+        active && "bg-accent-quiet",
       )}
     >
       <button

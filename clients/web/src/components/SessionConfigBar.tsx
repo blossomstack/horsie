@@ -19,7 +19,7 @@ function KeyRow({
   return (
     <div className="mx-auto w-full max-w-[54rem] px-4 sm:px-6">
       <div
-        className="flex items-center gap-0.5 pb-1.5"
+        className="flex items-center gap-0.5 pb-1.5 pt-1.5"
         data-testid="session-config-bar"
         data-mode={mode}
       >

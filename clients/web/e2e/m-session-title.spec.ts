@@ -50,7 +50,12 @@ test("M2: a session can be renamed by hand when the model never titles it", asyn
   await expect(page.getByTestId("assistant-text")).toContainText("The answer is 4.");
   await expect(page.getByTestId("session-title")).toHaveText("what is 2 + 2");
 
-  await page.getByTestId("session-title").click();
+  // Renaming lives on the session's own actions menu in the rail, beside its
+  // tags and its delete — the header title is a title, not a control.
+  await page
+    .locator(`[data-testid="session-row"][data-session-id="${id}"]`)
+    .hover();
+  await page.getByTestId(`session-row-menu-${id}`).click();
   const input = page.getByTestId("session-title-input");
   await input.fill("Arithmetic");
   await input.press("Enter");

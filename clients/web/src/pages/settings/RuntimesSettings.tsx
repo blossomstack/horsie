@@ -11,8 +11,7 @@ import {
 } from "../../hooks/useRuntimeVendors";
 import { useSettings, useSetDefaultRuntimeVendor } from "../../hooks/useSettings";
 import { askConfirm } from "../../lib/confirm";
-import { ListRow, RowAction, RowShell, Section, SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { ListRow, RowAction, Rows, RowShell, Section, SettingsPage } from "./fields";
 import {
   emptyVendorDraft,
   summarise,
@@ -182,15 +181,12 @@ export function RuntimesSettings() {
   const adding = draft && !draft.existing ? draft : null;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Runtimes"
         desc="Where sessions execute. Agent processes connect to this server and are configured where they run; cloud vendors are configured here."
         saving={update.isPending}
         saved={update.isSuccess && !update.isPending}
-      />
-
-      <SettingsPane>
+    >
         {saveError && (
           <p className="rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
             {saveError}
@@ -214,6 +210,7 @@ export function RuntimesSettings() {
             />
           )}
 
+          <Rows>
           {rows.map(({ name, view, config }) => {
             const editing = draft?.existing && draft.name === name;
             const isDefault = view
@@ -353,6 +350,7 @@ export function RuntimesSettings() {
               }
             />
           )}
+          </Rows>
 
           {/* Adding stays below the list: a vendor that does not exist yet has
             no row to expand into. */}
@@ -386,7 +384,6 @@ export function RuntimesSettings() {
             </div>
           )}
         </Section>
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }

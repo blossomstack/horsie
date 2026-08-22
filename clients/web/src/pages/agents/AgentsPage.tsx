@@ -1,17 +1,21 @@
-import { Plus, Trash2 } from "lucide-react";
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
+import { Plus } from "lucide-react";
 import { RailToggle } from "../../components/rail";
+import { RosterRow } from "../../components/RosterRow";
 import { askConfirm } from "../../lib/confirm";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useAgents, useDeleteAgent } from "../../hooks/useAgents";
 
 export function AgentsPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: agents, isLoading, isError } = useAgents();
   const del = useDeleteAgent();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="agents-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">Agents</h1>
         <button
@@ -23,8 +27,7 @@ export function AgentsPage() {
           New agent
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6">
-        <div className="mx-auto max-w-3xl">
+      <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6" onScroll={onScroll}>
           {isLoading && (
             <div className="flex items-center gap-2">
               <span className="lamp lamp-live text-live-ink" aria-hidden />
@@ -54,32 +57,16 @@ export function AgentsPage() {
               </pre>
             </section>
           )}
-          <div className="space-y-px">
+          <div className="list-divided">
             {(agents ?? []).map((a) => (
-              <div
+              <RosterRow
                 key={a.name}
-                className="flex items-center gap-3 row px-2.5 py-2"
-                data-testid="agent-row"
-                data-agent-name={a.name}
-              >
-                <Link
-                  to={`/agents/${encodeURIComponent(a.name)}/edit`}
-                  className="min-w-0 flex-1"
-                >
-                  <div className="flex items-baseline gap-2">
-                    <span className="item-title">
-                      {a.name}
-                    </span>
-                    <span className="legend">
-                      {a.model}
-                    </span>
-                  </div>
-                  {a.description && (
-                    <div className="truncate text-sm text-dim">
-                      {a.description}
-                    </div>
-                  )}
-                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+                to={`/agents/${encodeURIComponent(a.name)}/edit`}
+                name={a.name}
+                meta={a.model}
+                description={a.description}
+                facts={
+                  <>
                     {a.plugins.length > 0 && (
                       <span className="legend">{a.plugins.length} skills</span>
                     )}
@@ -91,23 +78,19 @@ export function AgentsPage() {
                     {a.mcpServers.length > 0 && (
                       <span className="legend">{a.mcpServers.length} MCP</span>
                     )}
-                  </div>
-                </Link>
-                <button
-                  className="key-icon shrink-0 !h-7 !w-7 hover:!bg-red-quiet hover:!text-red-ink"
-                  title={`Delete ${a.name}`}
-                  data-testid={`delete-agent-${a.name}`}
-                  onClick={async () => {
-                    if (await askConfirm(`Delete agent '${a.name}'?`))
-                      del.mutate(a.name);
-                  }}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
+                  </>
+                }
+                testId="agent-row"
+                nameAttr={{ "data-agent-name": a.name }}
+                deleteLabel={`Delete ${a.name}`}
+                deleteTestId={`delete-agent-${a.name}`}
+                onDelete={async () => {
+                  if (await askConfirm(`Delete agent '${a.name}'?`))
+                    del.mutate(a.name);
+                }}
+              />
             ))}
           </div>
-        </div>
       </div>
     </div>
   );

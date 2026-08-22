@@ -157,20 +157,20 @@ function WorkflowEditor() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-edit-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${name}` : "New workflow"}
         </h1>
         <button
-          className="key key-blank !px-2.5 !py-1.5 text-xs"
+          className="key key-blank key-sm"
           onClick={() => navigate("/workflows")}
           data-testid="cancel-workflow"
         >
           Cancel
         </button>
         <button
-          className="key key-go !px-2.5 !py-1.5 text-xs"
+          className="key key-go key-sm"
           onClick={save}
           data-testid="save-workflow"
           disabled={!slug.trim() || stepNames.length === 0}
@@ -264,7 +264,7 @@ function WorkflowEditor() {
                     )}
                   </button>
                   <button
-                    className="key key-danger !px-1.5 !py-1 md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
+                    className="key key-danger key-sm md:opacity-0 md:group-hover:opacity-100 md:focus:opacity-100"
                     aria-label={`Remove step ${s.name || i + 1}`}
                     onClick={() => removeStep(i)}
                     data-testid="remove-step"
@@ -291,7 +291,7 @@ function WorkflowEditor() {
               // a config key holding a value does. Amber would be wrong — it
               // means a live measured value, not a control that is on.
               className={cn(
-                "key key-blank !px-2 !py-1.5 text-xs md:w-full",
+                "key key-blank key-sm md:w-full",
                 visualizing && "bg-raised !text-legend",
               )}
               onClick={() => setVisualizing((v) => !v)}
@@ -434,7 +434,7 @@ function SidebarRow({
       className={cn(
         "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2 py-1.5 text-left transition-colors md:w-full",
         active
-          ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+          ? "bg-accent-quiet text-legend"
           : "text-dim hover:bg-raised hover:text-legend",
       )}
       onClick={onClick}

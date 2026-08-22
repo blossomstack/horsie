@@ -9,21 +9,17 @@ import {
   useUpdateModelCard,
 } from "../../hooks/useModelCards";
 import { compactNumber } from "../../lib/format";
-import { ListRow, RowAction, RowLabel, Section, SettingsPane } from "../settings/fields";
-import { SettingsHeader } from "../settings/SettingsHeader";
+import { ListRow, RowAction, RowLabel, Section, SettingsPage } from "../settings/fields";
 import { askConfirm } from "../../lib/confirm";
 
 export function ModelCardsPage() {
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Model cards"
         desc="Well-known models and their token limits. Settings → Models autocompletes model ids from these and prefills empty limit fields; editing a card never changes an already-configured model."
-      />
-      <SettingsPane>
+    >
         <ModelCardsSection />
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }
 

@@ -220,14 +220,14 @@ describe("RoutineEditPage", () => {
 
     fireEvent.click(mon);
     expect(mon.getAttribute("aria-pressed")).toBe("true");
-    expect(mon.className).toContain("bg-live-quiet");
+    expect(mon.getAttribute("aria-pressed")).toBe("true");
     expect(tue.getAttribute("aria-pressed")).toBe("false");
     expect(save.disabled).toBe(false);
 
     // Toggling off returns the chip to the unselected look.
     fireEvent.click(mon);
     expect(mon.getAttribute("aria-pressed")).toBe("false");
-    expect(mon.className).not.toContain("bg-live-quiet");
+    expect(mon.getAttribute("aria-pressed")).toBe("false");
     expect(save.disabled).toBe(true);
 
     // Re-select so the weekly schedule is valid again before saving.

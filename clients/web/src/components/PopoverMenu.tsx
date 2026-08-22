@@ -83,6 +83,7 @@ function clipBounds(from: HTMLElement): { left: number; right: number } {
 export function PopoverMenu({
   label,
   legend,
+  labelClassName = "font-mono text-[0.6875rem] text-legend",
   icon,
   variant = "field",
   placement = "up",
@@ -103,6 +104,10 @@ export function PopoverMenu({
    * carries the accessible name and the tooltip — losing the visible label
    * must not mean losing the label. */
   legend?: string;
+  /** How the trigger's label is set. Defaults to the mono voice, which is
+   * right for a model alias or a runtime id — and wrong for a project name,
+   * which is a name and sits among the rail's own nav rows. */
+  labelClassName?: string;
   icon?: ReactNode;
   variant?: "field" | "icon";
   placement?: "up" | "down";
@@ -329,9 +334,7 @@ export function PopoverMenu({
           {icon && <span className="text-faint">{icon}</span>}
           <span className="min-w-0 flex-1">
             {legend && <span className="legend block leading-none">{legend}</span>}
-            <span className="block truncate font-mono text-[0.6875rem] text-legend">
-              {label}
-            </span>
+            <span className={cn("block truncate", labelClassName)}>{label}</span>
           </span>
           {!disabled && (
             <ChevronDown size={12} className="shrink-0 text-faint" aria-hidden />

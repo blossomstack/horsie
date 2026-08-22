@@ -158,7 +158,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-run-view">
-      <header className="flex items-center gap-4 px-6 py-3">
+      <header className="bar-scroll flex items-center gap-4 px-6 py-3">
         <div className="min-w-0">
           <h1 className="page-title truncate">{graph.workflow}</h1>
           <span
@@ -173,7 +173,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           {(graph.inputTokens + graph.outputTokens).toLocaleString()} tokens
         </span>
         <button
-          className="key key-stop !px-2 !py-1 text-xs"
+          className="key key-stop key-sm"
           onClick={onStop}
           disabled={!live}
           data-testid="run-stop"
@@ -182,7 +182,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
           Interrupt
         </button>
         <button
-          className="key key-danger !px-2 !py-1 text-xs"
+          className="key key-danger key-sm"
           onClick={onDelete}
           data-testid="run-delete"
         >
@@ -211,7 +211,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
               here moves it, and the question itself lives in the step's own
               transcript, where its choices and answer box are. */}
           <button
-            className="key key-go ml-auto !px-2 !py-1 text-xs"
+            className="key key-go ml-auto key-sm"
             onClick={() =>
               navigate(`/sessions/${sessionId}/agents/${parked.agentId}`)
             }
@@ -234,7 +234,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
             rolled back, so it starts from whatever the last attempt left.
           </span>
           <button
-            className="key key-go ml-auto !px-2 !py-1 text-xs"
+            className="key key-go ml-auto key-sm"
             onClick={() => void retryStep(resume.index, resume.step)}
             disabled={retryUnavailable(status, retry.isPending)}
             data-testid="resume-run"
@@ -318,14 +318,14 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
                         )}
                         <div className="mt-2 flex gap-2">
                           <button
-                            className="key !px-2 !py-1 text-xs"
+                            className="key key-sm"
                             onClick={() => navigate(`/sessions/${sessionId}/agents/${r.agentId}`)}
                             data-testid="open-step"
                           >
                             Open
                           </button>
                           <button
-                            className="key !px-2 !py-1 text-xs"
+                            className="key key-sm"
                             onClick={() => void retryStep(r.index, selectedNode.step)}
                             disabled={retryUnavailable(status, retry.isPending, r)}
                             data-testid="retry-step"

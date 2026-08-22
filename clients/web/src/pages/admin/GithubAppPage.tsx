@@ -9,11 +9,10 @@ import {
 import { usePublishDirty } from "../settings/dirty";
 import {
   Section,
-  SettingsPane,
+  SettingsPage,
   TextAreaField,
   TextField,
 } from "../settings/fields";
-import { SettingsHeader } from "../settings/SettingsHeader";
 
 /**
  * The GitHub App's credentials.
@@ -100,8 +99,7 @@ export function GithubAppPage() {
   };
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="GitHub App"
         desc="Registration details for the GitHub App this server acts as. Set once; users then connect their own accounts from Settings → Integrations."
         dirty={dirty}
@@ -117,9 +115,7 @@ export function GithubAppPage() {
           setCallbackBase(cfg?.callbackBase ?? "");
           setDirty(false);
         }}
-      />
-
-      <SettingsPane>
+    >
         <Section
           title="Credentials"
           desc="From the app's page on GitHub. The secret and private key are write-only — the server reports only whether each one is set."
@@ -226,7 +222,6 @@ export function GithubAppPage() {
             testId="github-callback-base"
           />
         </Section>
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }

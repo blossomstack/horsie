@@ -17,7 +17,7 @@ export function SettingsNav({
   const { confirmLeave } = useSettingsDirty();
   return (
     <nav
-      className="flex shrink-0 flex-col border-rule bg-chassis md:h-full md:w-48 "
+      className="flex shrink-0 flex-col bg-chassis max-md:bar-scroll md:h-full md:w-48 md:column-edge-r"
       data-testid="settings-nav"
       aria-label={title}
     >
@@ -37,7 +37,7 @@ export function SettingsNav({
                 "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2.5 py-2 text-[0.8125rem] transition-colors md:gap-2.5",
                 // Fill only, like every other selected row in the app.
                 isActive
-                  ? "bg-raised text-legend"
+                  ? "bg-accent-quiet text-legend"
                   : "text-dim hover:bg-raised hover:text-legend",
               )
             }

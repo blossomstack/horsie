@@ -11,19 +11,19 @@ test.describe("appearance", () => {
   }) => {
     await page.goto(`${appBase}/settings/appearance`);
 
-    // Graphite is the default and deliberately carries no attribute, so its
+    // Paper is the default and deliberately carries no attribute, so its
     // selectors keep the specificity index.css was written against.
     await expect(page.locator("html")).not.toHaveAttribute("data-skin", /.+/);
 
-    await page.getByTestId("skin-option-aurora").click();
-    await expect(page.locator("html")).toHaveAttribute("data-skin", "aurora");
+    await page.getByTestId("skin-option-signal").click();
+    await expect(page.locator("html")).toHaveAttribute("data-skin", "signal");
 
     await page.reload();
-    await expect(page.locator("html")).toHaveAttribute("data-skin", "aurora");
+    await expect(page.locator("html")).toHaveAttribute("data-skin", "signal");
 
-    // And back: choosing Graphite removes the attribute rather than setting it
+    // And back: choosing Paper removes the attribute rather than setting it
     // to a value no CSS block matches.
-    await page.getByTestId("skin-option-graphite").click();
+    await page.getByTestId("skin-option-paper").click();
     await expect(page.locator("html")).not.toHaveAttribute("data-skin", /.+/);
   });
 
@@ -32,20 +32,20 @@ test.describe("appearance", () => {
     appBase,
   }) => {
     await page.goto(`${appBase}/settings/appearance`);
-    await page.getByTestId("skin-option-ink").click();
-    await expect(page.locator("html")).toHaveAttribute("data-skin", "ink");
+    await page.getByTestId("skin-option-signal").click();
+    await expect(page.locator("html")).toHaveAttribute("data-skin", "signal");
 
     // The inline script in index.html sets the attributes, so the very first
     // document the browser paints is already the chosen world. Reading the
     // attribute at `domcontentloaded` — before React has mounted — is what
     // distinguishes that from a post-hydration correction the user would see
-    // as a flash of Graphite.
+    // as a flash of Paper.
     await page.goto(`${appBase}/settings/appearance`, {
       waitUntil: "domcontentloaded",
     });
-    await expect(page.locator("html")).toHaveAttribute("data-skin", "ink");
+    await expect(page.locator("html")).toHaveAttribute("data-skin", "signal");
 
-    await page.getByTestId("skin-option-graphite").click();
+    await page.getByTestId("skin-option-paper").click();
   });
 
   test("R3: light/dark is a three-way choice and System follows the OS", async ({

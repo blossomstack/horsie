@@ -8,8 +8,7 @@ import {
   type ThemeChoice,
 } from "../../hooks/useTheme";
 import { cn } from "../../lib/cn";
-import { Section, SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { Section, SettingsPage } from "./fields";
 
 const MODES: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
   { id: "light", label: "Light", icon: Sun },
@@ -30,7 +29,7 @@ const MODES: { id: ThemeChoice; label: string; icon: typeof Sun }[] = [
 function SkinSwatch({ skin, mode }: { skin: Skin; mode: "light" | "dark" }) {
   return (
     <div
-      data-skin={skin === "graphite" ? undefined : skin}
+      data-skin={skin === "paper" ? undefined : skin}
       data-theme={mode}
       className="pointer-events-none flex h-[4.25rem] w-full flex-col gap-1.5 overflow-hidden rounded-[var(--radius-control)] p-2"
       style={{ background: "var(--chassis)" }}
@@ -72,13 +71,10 @@ export function AppearanceSettings() {
   const { values, toggle } = useUiSettings();
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Appearance"
         desc="How this browser renders horsie. Stored locally, not on the server, so each browser you use can differ."
-      />
-
-      <SettingsPane>
+    >
         <Section
           title="Theme"
           desc="Same layouts, different material. Every theme ships light and dark, and every one is measured to WCAG AA in both."
@@ -205,7 +201,6 @@ export function AppearanceSettings() {
             </button>
           ))}
         </Section>
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }

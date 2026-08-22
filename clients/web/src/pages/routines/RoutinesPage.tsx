@@ -1,5 +1,7 @@
-import { Plus, Trash2 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { useScrolledUnder } from "../../hooks/useScrolledUnder";
+import { Plus } from "lucide-react";
+import { RosterRow } from "../../components/RosterRow";
+import { useNavigate } from "react-router-dom";
 import type { RoutineView } from "../../api/types";
 import { relativeTime } from "../../lib/format";
 import { askConfirm } from "../../lib/confirm";
@@ -16,17 +18,19 @@ function scheduleLine(r: RoutineView): string {
 }
 
 export function RoutinesPage() {
+  const { onScroll, barProps } = useScrolledUnder();
   const { data: routines, isLoading, isError } = useRoutines();
   const del = useDeleteRoutine();
   const navigate = useNavigate();
 
   return (
     <div className="flex h-full flex-col" data-testid="routines-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div {...barProps}
+        className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title">Routines</h1>
         <button
-          className="key key-go ml-auto !px-2.5 !py-1.5 text-xs"
+          className="key key-go ml-auto key-sm"
           onClick={() => navigate("/routines/new")}
           data-testid="new-routine-button"
         >
@@ -34,7 +38,7 @@ export function RoutinesPage() {
           New routine
         </button>
       </div>
-      <div className="flex-1 overflow-y-auto px-6 py-4">
+      <div className="flex-1 overflow-y-auto px-6 py-4" onScroll={onScroll}>
         {isLoading && <p className="text-sm text-faint">Loading…</p>}
         {isError && (
           <p className="text-sm text-red-ink">Can’t reach the server.</p>
@@ -50,56 +54,37 @@ export function RoutinesPage() {
             </p>
           </section>
         )}
-        <div className="space-y-px">
+        <div className="list-divided">
           {(routines ?? []).map((r) => (
-            <div
+            <RosterRow
               key={r.name}
-              className="flex items-center gap-3 row px-2.5 py-2"
-              data-testid="routine-row"
-              data-routine-name={r.name}
-            >
-              <Link
-                to={`/routines/${encodeURIComponent(r.name)}`}
-                className="min-w-0 flex-1"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-sm font-medium text-legend">
-                    {r.name}
-                  </span>
-                  <span className="text-xs text-faint">
-                    {r.agent} · {scheduleLine(r)}
-                  </span>
-                </div>
-                {r.description && (
-                  <div className="truncate text-sm text-dim">
-                    {r.description}
-                  </div>
-                )}
-                <div className="mt-1 flex gap-2 text-[0.6875rem] text-faint">
+              to={`/routines/${encodeURIComponent(r.name)}`}
+              name={r.name}
+              meta={`${r.agent} · ${scheduleLine(r)}`}
+              description={r.description}
+              facts={
+                <>
                   {r.lastRunAtMs !== undefined && (
-                    <span>ran {relativeTime(r.lastRunAtMs)}</span>
+                    <span className="legend">ran {relativeTime(r.lastRunAtMs)}</span>
                   )}
                   {r.lastError && (
-                    <span className="text-red-ink">{r.lastError}</span>
+                    <span className="legend !text-red-ink">{r.lastError}</span>
                   )}
-                </div>
-              </Link>
-              <button
-                className="rounded-[var(--radius-chip)] p-1.5 text-faint hover:bg-raised hover:text-red-ink"
-                title={`Delete ${r.name}`}
-                data-testid={`delete-routine-${r.name}`}
-                onClick={async () => {
-                  if (
-                    await askConfirm(
-                      `Delete routine '${r.name}' and every session it created?`,
-                    )
+                </>
+              }
+              testId="routine-row"
+              nameAttr={{ "data-routine-name": r.name }}
+              deleteLabel={`Delete ${r.name}`}
+              deleteTestId={`delete-routine-${r.name}`}
+              onDelete={async () => {
+                if (
+                  await askConfirm(
+                    `Delete routine '${r.name}' and every session it created?`,
                   )
-                    del.mutate(r.name);
-                }}
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
+                )
+                  del.mutate(r.name);
+              }}
+            />
           ))}
         </div>
       </div>

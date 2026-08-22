@@ -56,10 +56,10 @@ export function TaskListPanel({
         // sm a 16rem overlay left a ~134px sliver of transcript with code
         // clipped mid-token, so there it takes the full width instead of
         // pretending to still be a column.
-        className="flex w-64 shrink-0 flex-col bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--panel-lift)] max-sm:w-full"
+        className="column-edge-l flex w-64 shrink-0 flex-col bg-panel max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-20 max-lg:shadow-[var(--float)] max-sm:w-full"
         data-testid="task-list-panel"
       >
-        <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 px-3">
+        <div className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 px-3">
           <h2 className="legend !text-dim">Plan</h2>
           {tasks.length > 0 && (
             <span className="readout text-[0.6875rem]" data-testid="task-list-progress">
