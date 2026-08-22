@@ -84,8 +84,8 @@ async fn a_skill_written_by_an_agent_lands_in_a_runtimes_tree() {
         .unwrap();
 
     let skill = dir.join("field-notes/skills/rolling-back/SKILL.md");
-    let content = std::fs::read_to_string(&skill)
-        .unwrap_or_else(|e| panic!("{}: {e}", skill.display()));
+    let content =
+        std::fs::read_to_string(&skill).unwrap_or_else(|e| panic!("{}: {e}", skill.display()));
     let (name, description) = horsie_support::plugin::skills::parse(&content)
         .expect("the runtime must be able to read what the server rendered");
     assert_eq!(name, "rolling-back");
@@ -99,8 +99,7 @@ async fn a_skill_written_by_an_agent_lands_in_a_runtimes_tree() {
 
     // The manifest is the portable dialect, so the same tree is readable by any
     // conformant client — not just by this one.
-    let manifest =
-        std::fs::read_to_string(dir.join("field-notes/plugin.json")).unwrap();
+    let manifest = std::fs::read_to_string(dir.join("field-notes/plugin.json")).unwrap();
     assert!(
         manifest.contains("agent-plugins.org/schemas/1.0.0/plugin.schema.json"),
         "{manifest}"

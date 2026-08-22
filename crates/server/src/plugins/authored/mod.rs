@@ -11,5 +11,5 @@ mod store;
 pub mod toolbox;
 
 pub use service::{AuthoredService, pack};
-pub use toolbox::AuthoringToolbox;
 pub use store::{AuthoredFile, AuthoredPluginRow, AuthoredSkillRow, AuthoredStore};
+pub use toolbox::AuthoringToolbox;

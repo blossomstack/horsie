@@ -144,9 +144,9 @@ impl AuthoredStore {
             "authored_skill_files",
             "authored_skills",
         ] {
-            let sql = self
-                .db
-                .q(&format!("DELETE FROM {table} WHERE project_id = ? AND plugin = ?"));
+            let sql = self.db.q(&format!(
+                "DELETE FROM {table} WHERE project_id = ? AND plugin = ?"
+            ));
             sqlx::query(&sql)
                 .bind(self.user.as_str())
                 .bind(name)
@@ -211,10 +211,8 @@ impl AuthoredStore {
     }
 
     pub async fn files_for(&self, plugin: &str, skill: &str) -> Result<Vec<AuthoredFile>, String> {
-        let sql = self.db.q(
-            "SELECT path, content FROM authored_skill_files \
-             WHERE project_id = ? AND plugin = ? AND skill = ? ORDER BY path",
-        );
+        let sql = self.db.q("SELECT path, content FROM authored_skill_files \
+             WHERE project_id = ? AND plugin = ? AND skill = ? ORDER BY path");
         let rows = sqlx::query(&sql)
             .bind(self.user.as_str())
             .bind(plugin)
@@ -285,12 +283,7 @@ impl AuthoredStore {
 
     /// Remove a skill's head, keeping its history and recording the removal as
     /// a revision of its own.
-    pub async fn delete_skill(
-        &self,
-        plugin: &str,
-        name: &str,
-        now: &str,
-    ) -> Result<u64, String> {
+    pub async fn delete_skill(&self, plugin: &str, name: &str, now: &str) -> Result<u64, String> {
         let mut tx = self.db.begin_write().await.map_err(|e| e.to_string())?;
         let revision = self.next_revision(&mut tx, plugin, name).await?;
         self.append_revision(&mut tx, plugin, name, revision, "", "", &[], true, now)
@@ -362,10 +355,12 @@ impl AuthoredStore {
         plugin: &str,
         skill: &str,
     ) -> Result<u64, String> {
-        let row = sqlx::query(&self.db.q(
-            "SELECT MAX(revision) AS top FROM authored_skill_revisions \
-             WHERE project_id = ? AND plugin = ? AND skill = ?",
-        ))
+        let row = sqlx::query(
+            &self
+                .db
+                .q("SELECT MAX(revision) AS top FROM authored_skill_revisions \
+             WHERE project_id = ? AND plugin = ? AND skill = ?"),
+        )
         .bind(self.user.as_str())
         .bind(plugin)
         .bind(skill)
@@ -389,11 +384,9 @@ impl AuthoredStore {
         deleted: bool,
         now: &str,
     ) -> Result<(), String> {
-        sqlx::query(&self.db.q(
-            "INSERT INTO authored_skill_revisions \
+        sqlx::query(&self.db.q("INSERT INTO authored_skill_revisions \
              (project_id, plugin, skill, revision, description, body, files, deleted, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ))
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"))
         .bind(self.user.as_str())
         .bind(plugin)
         .bind(skill)
@@ -468,7 +461,9 @@ impl AuthoredStore {
 
 fn row_to_plugin(row: &AnyRow) -> Result<AuthoredPluginRow, String> {
     Ok(AuthoredPluginRow {
-        name: row.try_get("name").map_err(|e: sqlx::Error| e.to_string())?,
+        name: row
+            .try_get("name")
+            .map_err(|e: sqlx::Error| e.to_string())?,
         description: row
             .try_get::<Option<String>, _>("description")
             .map_err(|e| e.to_string())?,
@@ -484,12 +479,17 @@ fn row_to_plugin(row: &AnyRow) -> Result<AuthoredPluginRow, String> {
 
 fn row_to_skill(row: &AnyRow) -> Result<AuthoredSkillRow, String> {
     Ok(AuthoredSkillRow {
-        plugin: row.try_get("plugin").map_err(|e: sqlx::Error| e.to_string())?,
+        plugin: row
+            .try_get("plugin")
+            .map_err(|e: sqlx::Error| e.to_string())?,
         name: row.try_get("name").map_err(|e| e.to_string())?,
         description: row.try_get("description").map_err(|e| e.to_string())?,
         body: row.try_get("body").map_err(|e| e.to_string())?,
-        revision: u64::try_from(row.try_get::<i64, _>("revision").map_err(|e| e.to_string())?)
-            .unwrap_or(0),
+        revision: u64::try_from(
+            row.try_get::<i64, _>("revision")
+                .map_err(|e| e.to_string())?,
+        )
+        .unwrap_or(0),
         updated_at: row.try_get("updated_at").map_err(|e| e.to_string())?,
     })
 }
@@ -508,7 +508,10 @@ fn row_to_revision(row: &AnyRow) -> Result<AuthoredRevisionRow, String> {
             .ok()
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
-        deleted: row.try_get::<i64, _>("deleted").map_err(|e| e.to_string())? != 0,
+        deleted: row
+            .try_get::<i64, _>("deleted")
+            .map_err(|e| e.to_string())?
+            != 0,
         created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
     })
 }

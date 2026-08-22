@@ -489,11 +489,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let dir = store
-            .provision_agent(
-                "agent-1",
-                &[external("pack", &hash.clone())],
-                &source,
-            )
+            .provision_agent("agent-1", &[external("pack", &hash.clone())], &source)
             .await
             .unwrap();
 
@@ -546,7 +542,11 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent("agent-1", &[authored("notes", 1, "not-the-digest")], &source)
+            .provision_agent(
+                "agent-1",
+                &[authored("notes", 1, "not-the-digest")],
+                &source,
+            )
             .await
             .unwrap_err();
         assert!(err.contains("notes"), "{err}");
@@ -611,19 +611,11 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         store
-            .provision_agent(
-                "a1",
-                &[external("one", &h1)],
-                &source,
-            )
+            .provision_agent("a1", &[external("one", &h1)], &source)
             .await
             .unwrap();
         let dir = store
-            .provision_agent(
-                "a1",
-                &[external("two", &h2)],
-                &source,
-            )
+            .provision_agent("a1", &[external("two", &h2)], &source)
             .await
             .unwrap();
 
@@ -641,11 +633,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent(
-                "a1",
-                &[external("pack", &hash)],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", &hash)], &source)
             .await
             .unwrap_err();
 
@@ -670,11 +658,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let err = store
-            .provision_agent(
-                "a1",
-                &[external("pack", "not-the-real-hash")],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", "not-the-real-hash")], &source)
             .await
             .unwrap_err();
 
@@ -719,11 +703,7 @@ mod tests {
         let store = PluginStore::new(root.path().to_path_buf());
 
         let dir = store
-            .provision_agent(
-                "a1",
-                &[external("pack", &hash)],
-                &source,
-            )
+            .provision_agent("a1", &[external("pack", &hash)], &source)
             .await
             .unwrap();
 

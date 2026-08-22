@@ -40,10 +40,11 @@ use crate::projects::SCOPED_TABLES as SCOPED;
 /// other direction destroys data.
 const ALLOWED: &[(&str, &str)] = &[
     (
-        "SELECT artifact_hash FROM plugins",
-        "artifact GC needs the union of hashes across accounts: artifacts are \
+        "SELECT digest FROM plugins WHERE source_kind != ?",
+        "artifact GC needs the union of digests across accounts: artifacts are \
          content-addressed and shared, so a scoped keep-set would delete bundle \
-         bytes another account still references",
+         bytes another account still references. The predicate excludes authored \
+         bundles, which have no artifact on disk at all",
     ),
     (
         "SELECT project_id, {COLS} FROM routines",

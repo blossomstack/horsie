@@ -473,15 +473,13 @@ async fn journal_logs_are_separated_by_their_id_alone() {
 fn plugin(name: &str, hash: &str) -> horsie_server::plugins::PluginRow {
     horsie_server::plugins::PluginRow {
         name: name.into(),
-        kind: horsie_models::plugins::PluginKind::Claude(
-            horsie_models::plugins::ExternalOrigin {
-                url: "https://example.com/x.git".into(),
-                git_ref: None,
-                subpath: None,
-                marketplace: None,
-                marketplace_entry: None,
-            },
-        ),
+        kind: horsie_models::plugins::PluginKind::Claude(horsie_models::plugins::ExternalOrigin {
+            url: "https://example.com/x.git".into(),
+            git_ref: None,
+            subpath: None,
+            marketplace: None,
+            marketplace_entry: None,
+        }),
         version: None,
         description: None,
         catalog: Vec::new(),

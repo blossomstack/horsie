@@ -11,12 +11,32 @@
 //! compatible with — and rendering what the reader in `horsie_support` parses
 //! means the two halves of this feature check each other rather than drifting.
 
+use serde::Serialize;
 use std::path::Path;
 
 /// The identifier every rendered manifest declares. Pinned, not derived: it
 /// names the shape of the bytes, so a client reading it is entitled to assume
 /// exactly this layout.
 pub const SCHEMA: &str = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+
+/// The manifest, as a struct rather than a map.
+///
+/// Field order here is the byte order out, whatever `serde_json::Map` happens
+/// to be — and it is not always the same thing. A workspace crate elsewhere in
+/// the dependency graph enables `serde_json/preserve_order`, so under feature
+/// unification a `Map` is insertion-ordered and otherwise it is sorted. Since
+/// these bytes are what a bundle's digest is taken over, that would have made
+/// the digest a function of how the server was *built* as well as of the rows
+/// it was built from.
+#[derive(Serialize)]
+struct Manifest<'a> {
+    #[serde(rename = "$schema")]
+    schema: &'a str,
+    name: &'a str,
+    version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
 
 /// One skill as it will be written out.
 pub struct RenderedSkill {
@@ -69,18 +89,14 @@ pub fn render(
     generation: u64,
     skills: &[RenderedSkill],
 ) -> Result<(), String> {
-    let mut manifest = serde_json::Map::new();
-    manifest.insert("$schema".to_string(), SCHEMA.into());
-    manifest.insert("name".to_string(), name.into());
-    manifest.insert("version".to_string(), format!("0.0.{generation}").into());
-    if let Some(d) = description.map(str::trim).filter(|d| !d.is_empty()) {
-        manifest.insert("description".to_string(), d.into());
-    }
-    // Keys come out sorted rather than in insertion order — `serde_json`'s map
-    // is a `BTreeMap` here. That is what makes the bytes a function of the
-    // fields alone, which is what a digest recorded at save time depends on.
-    let json = serde_json::to_string_pretty(&serde_json::Value::Object(manifest))
-        .map_err(|e| format!("render plugin.json: {e}"))?;
+    let manifest = Manifest {
+        schema: SCHEMA,
+        name,
+        version: format!("0.0.{generation}"),
+        description: description.map(str::trim).filter(|d| !d.is_empty()),
+    };
+    let json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| format!("render plugin.json: {e}"))?;
     write(&dir.join("plugin.json"), &json)?;
 
     for skill in skills {
@@ -188,13 +204,7 @@ mod tests {
 
     #[test]
     fn a_traversing_file_path_is_refused() {
-        for bad in [
-            "../escape.sh",
-            "/etc/passwd",
-            "scripts/../../x",
-            "./x",
-            "",
-        ] {
+        for bad in ["../escape.sh", "/etc/passwd", "scripts/../../x", "./x", ""] {
             assert!(validate_file_path(bad).is_err(), "{bad} should be refused");
         }
         for ok in ["scripts/run.sh", "references/api.md", "a.txt"] {
@@ -229,8 +239,8 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("plugin.json")).unwrap(),
             "{\n  \"$schema\": \"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json\",\n  \
-             \"description\": \"things I worked out\",\n  \"name\": \"my-notes\",\n  \
-             \"version\": \"0.0.7\"\n}"
+             \"name\": \"my-notes\",\n  \"version\": \"0.0.7\",\n  \
+             \"description\": \"things I worked out\"\n}"
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("skills/deploying/SKILL.md")).unwrap(),
@@ -244,14 +254,7 @@ mod tests {
     fn rendering_is_deterministic() {
         let render_once = || {
             let dir = tempfile::tempdir().unwrap();
-            render(
-                dir.path(),
-                "p",
-                Some("d"),
-                3,
-                &[skill("b"), skill("a")],
-            )
-            .unwrap();
+            render(dir.path(), "p", Some("d"), 3, &[skill("b"), skill("a")]).unwrap();
             std::fs::read_to_string(dir.path().join("plugin.json")).unwrap()
         };
         assert_eq!(render_once(), render_once());

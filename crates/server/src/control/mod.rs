@@ -15,8 +15,8 @@ use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 
-mod authored;
 pub mod agents;
+mod authored;
 pub mod environments;
 pub mod http;
 pub mod marketplaces;

@@ -4,8 +4,8 @@
 
 use crate::db::Db;
 use crate::plugins::kind;
-use horsie_models::plugins::PluginKind;
 use crate::projects::ProjectId;
+use horsie_models::plugins::PluginKind;
 use sqlx::Row;
 use sqlx::any::AnyRow;
 use std::collections::HashSet;
@@ -299,8 +299,8 @@ mod tests {
     async fn provenance_survives_and_lists_installed_entries() {
         let s = PluginStore::new(testing::db().await, ProjectId::new("1"));
         let mut r = row("api-security-testing", "h1");
-        r.kind = horsie_models::plugins::PluginKind::Claude(
-            horsie_models::plugins::ExternalOrigin {
+        r.kind =
+            horsie_models::plugins::PluginKind::Claude(horsie_models::plugins::ExternalOrigin {
                 url: "https://example.com/x.git".into(),
                 git_ref: None,
                 subpath: Some("./plugins/api".into()),
@@ -308,8 +308,7 @@ mod tests {
                 // The index's name for an entry is not always the name it
                 // installs as.
                 marketplace_entry: Some("42crunch-api-security-testing".into()),
-            },
-        );
+            });
         s.upsert(&r).await.unwrap();
         s.upsert(&row("plain", "h2")).await.unwrap();
 

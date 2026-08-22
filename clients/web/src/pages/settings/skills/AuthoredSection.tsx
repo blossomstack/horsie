@@ -2,6 +2,7 @@ import { ChevronRight, History, Loader2, PenLine, Plus, Trash2 } from "lucide-re
 import { useState } from "react";
 import { askConfirm } from "../../../lib/confirm";
 import type { AuthoredPluginView, AuthoredSkillSummary } from "../../../api/types";
+import { TextField } from "../fields";
 import {
   useCreateAuthoredPlugin,
   useRemoveAuthoredPlugin,
@@ -207,38 +208,41 @@ export function AuthoredSection({
         </div>
       </div>
 
-      <div className="mb-3 flex gap-2">
-        <input
-          className="input flex-1"
-          placeholder="new-plugin-name"
+      {/* The same field and key the install box above uses, so the two ways of
+          getting a plugin onto this page read as the same kind of act. */}
+      <div className="mb-3">
+        <TextField
+          label="New plugin"
           value={name}
-          onChange={(e) => setName(e.target.value)}
-          aria-label="New authored plugin name"
+          onChange={setName}
+          placeholder="field-notes"
+          testId="authored-plugin-name"
         />
-        <button
-          type="button"
-          className="btn"
-          disabled={!name.trim() || create.isPending}
-          onClick={() =>
-            create.mutate(
-              { name: name.trim(), description: undefined },
-              { onSuccess: () => setName("") },
-            )
-          }
-        >
-          {create.isPending ? (
-            <Loader2 size={15} className="animate-spin" />
-          ) : (
-            <Plus size={15} />
-          )}
-          Create
-        </button>
+        {create.isError && (
+          <div className="mt-3 rounded-[var(--radius-control)] border border-red bg-red-quiet px-3 py-2.5 text-sm leading-relaxed text-red-ink">
+            {(create.error as Error).message}
+          </div>
+        )}
+        <div className="mt-3 flex justify-end">
+          <button
+            className="key key-go"
+            disabled={!name.trim() || create.isPending}
+            onClick={() =>
+              create.mutate(
+                { name: name.trim(), description: undefined },
+                { onSuccess: () => setName("") },
+              )
+            }
+          >
+            {create.isPending ? (
+              <Loader2 size={15} className="animate-spin" />
+            ) : (
+              <Plus size={15} />
+            )}
+            Create
+          </button>
+        </div>
       </div>
-      {create.isError && (
-        <p className="mb-2 text-xs text-[var(--danger)]">
-          {(create.error as Error).message}
-        </p>
-      )}
 
       <div className="space-y-2.5">
         {plugins.length === 0 && (

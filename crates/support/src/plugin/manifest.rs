@@ -406,7 +406,10 @@ mod tests {
     #[test]
     fn root_manifest_with_a_foreign_schema_is_rejected() {
         let dir = TempDir::new().unwrap();
-        write_portable(dir.path(), r#"{"$schema":"https://example.com/x","name":"x"}"#);
+        write_portable(
+            dir.path(),
+            r#"{"$schema":"https://example.com/x","name":"x"}"#,
+        );
         let err = PluginManifest::read(dir.path()).unwrap_err();
         assert!(err.contains("not an Agent Plugins schema"), "{err}");
     }

@@ -5,10 +5,10 @@
 //! `horsie_shared`) is unchanged — this only manages bundles and delivers their
 //! bytes to a plugins dir the runtime fetches into.
 
-pub mod authored;
-pub mod kind;
 mod artifact;
+pub mod authored;
 pub(crate) mod ingest;
+pub mod kind;
 mod marketplace_store;
 mod service;
 mod store;

@@ -402,7 +402,10 @@ pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/api/health", get(handlers::health))
         .route("/api/tools", get(handlers::tool_catalog))
-        .route("/api/plugin-bundles/{name}/{version}", get(plugins::get_bundle))
+        .route(
+            "/api/plugin-bundles/{name}/{version}",
+            get(plugins::get_bundle),
+        )
         // An account's own routes, outside any project: what projects it has,
         // and how to gain or lose one.
         .route(

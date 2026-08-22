@@ -9,11 +9,11 @@ use super::marketplace_store::{MarketplaceRow, MarketplaceStore};
 use super::store::{PluginRow, PluginStore};
 use super::{PluginProvisioner, kind};
 use horsie_models::plugins::PluginKind;
-use horsie_models::runtime::{BundleGeneration, BundleHash, BundleRef, BundleVersion};
 use horsie_models::plugins::{
     CatalogEntryView, InstallOutcome, MarketplacePluginView, MarketplaceView, PluginDefaultInput,
     PluginInstallInput, PluginView,
 };
+use horsie_models::runtime::{BundleGeneration, BundleHash, BundleRef, BundleVersion};
 use horsie_support::plugin::source_location;
 use horsie_support::remote_url::redact_url_credentials;
 use std::sync::Arc;
@@ -679,10 +679,7 @@ mod tests {
             PluginStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             MarketplaceStore::new(db.clone(), crate::projects::ProjectId::new("1")),
             artifacts.clone(),
-            crate::plugins::authored::AuthoredStore::new(
-                db,
-                crate::projects::ProjectId::new("1"),
-            ),
+            crate::plugins::authored::AuthoredStore::new(db, crate::projects::ProjectId::new("1")),
         );
         (svc, artifacts, tmp)
     }

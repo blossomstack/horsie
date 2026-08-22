@@ -55,11 +55,7 @@ pub async fn pack(store: &AuthoredStore, name: &str) -> Result<(PluginBundle, u6
     )?;
     // Through the same reader a clone goes through, so an authored bundle
     // cannot be described differently from a cloned one holding the same skill.
-    let bundle = bundle_from_dir(
-        dir.path(),
-        &plugin.name,
-        Some(format!("0.0.{generation}")),
-    )?;
+    let bundle = bundle_from_dir(dir.path(), &plugin.name, Some(format!("0.0.{generation}")))?;
     Ok((bundle, generation))
 }
 
@@ -399,7 +395,10 @@ mod tests {
     #[tokio::test]
     async fn writing_a_skill_publishes_a_bundle() {
         let (authored, plugins) = service().await;
-        authored.write_plugin("notes", Some("things I learnt")).await.unwrap();
+        authored
+            .write_plugin("notes", Some("things I learnt"))
+            .await
+            .unwrap();
         authored
             .write_skill(write("notes", "deploying", "how to deploy", "Step 1."))
             .await
@@ -408,7 +407,10 @@ mod tests {
         let row = plugins.row("notes").await.unwrap().expect("published");
         assert!(crate::plugins::kind::is_authored(&row.kind));
         assert_eq!(
-            row.catalog.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            row.catalog
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["deploying"],
             "the published bundle offers the skill that was written"
         );
@@ -502,7 +504,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(restored.body, "one");
-        assert_eq!(restored.revision, 4, "restoring appends, it does not rewind");
+        assert_eq!(
+            restored.revision, 4,
+            "restoring appends, it does not rewind"
+        );
         assert!(plugins.row("notes").await.unwrap().is_some());
     }
 
@@ -585,10 +590,7 @@ mod tests {
         };
         assert_eq!(generation, 2, "the plugin, then the skill");
 
-        let bytes = plugins
-            .package("notes", &refs[0].version)
-            .await
-            .unwrap();
+        let bytes = plugins.package("notes", &refs[0].version).await.unwrap();
         assert_eq!(
             crate::plugins::sha256_hex_for_test(&bytes),
             refs[0].digest,
