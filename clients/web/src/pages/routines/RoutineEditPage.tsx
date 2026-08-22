@@ -456,11 +456,7 @@ function RoutineForm({ initial }: { initial?: RoutineView }) {
                           <button
                             key={d}
                             type="button"
-                            className={`chip min-h-10 min-w-10 justify-center transition-colors ${
-                              weekdays.has(d)
-                                ? "bg-live-quiet text-live-ink"
-                                : "hover:bg-raised hover:text-legend"
-                            }`}
+                            className="chip chip-toggle min-h-10 min-w-10 justify-center"
                             aria-label={FULL_WEEKDAY_NAMES[d]}
                             aria-pressed={weekdays.has(d)}
                             onClick={() =>

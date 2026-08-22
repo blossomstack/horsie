@@ -19,9 +19,10 @@ import { RailToggle } from "../components/rail";
 import { ContextGauge } from "../components/ContextGauge";
 import { SessionConfigBar } from "../components/SessionConfigBar";
 import { AgentGraph } from "../components/AgentGraph";
+import { SessionPane } from "../components/SessionPane";
 import { SessionTimeline } from "../components/SessionTimeline";
 import { SettingsMenu } from "../components/SettingsMenu";
-import { StatusPill } from "../components/StatusBadge";
+import { StatusLamp } from "../components/StatusBadge";
 import { TaskListPanel } from "../components/TaskListPanel";
 import { Transcript } from "../components/Transcript";
 import { TranscriptSpine } from "../components/TranscriptSpine";
@@ -36,7 +37,6 @@ import {
   useDeleteSession,
   useDeleteSubSession,
   useAnswerAsks,
-  useRenameSession,
   useSendMessage,
   useSession,
   useAgent,
@@ -83,93 +83,18 @@ const VIEWS: {
   },
 ];
 
-/** The session's name, and the only way a person can change it.
+/** The session's name.
  *
- * The agent's title tool was the sole writer: a session the model never titled
- * kept its raw first message as its name indefinitely, and nothing could
- * correct it. Editing in place rather than behind a dialog because the title is
- * live state on an instrument face, and a rename is one word.
- *
- * A step is titled by its run, so it is read-only there. */
-function SessionTitle({
-  id,
-  name,
-  editable,
-}: {
-  id: string;
-  name: string | undefined;
-  editable: boolean;
-}) {
-  const rename = useRenameSession();
-  const [draft, setDraft] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  if (draft === null) {
-    const title = sessionTitle(name);
-    if (!editable) {
-      return (
-        <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
-          {title}
-        </h1>
-      );
-    }
-    return (
-      <h1 className="min-w-0 flex-1">
-        <button
-          type="button"
-          className="page-title block w-full cursor-text truncate rounded-[var(--radius-control)] px-1 text-left hover:bg-raised"
-          onClick={() => {
-            setError(null);
-            setDraft(name ?? "");
-          }}
-          title="Rename this session"
-          data-testid="session-title"
-        >
-          {title}
-        </button>
-      </h1>
-    );
-  }
-
-  const commit = async () => {
-    const next = draft.trim();
-    if (!next || next === (name ?? "")) {
-      setDraft(null);
-      return;
-    }
-    try {
-      await rename.mutateAsync({ id, name: next });
-      setDraft(null);
-    } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : "Rename failed.");
-    }
-  };
-
+ * A title, and nothing else. It used to be click-to-edit, which put an
+ * editable control where a page title goes and gave the header a hover state
+ * that meant "you can type here" on the one line that names what you are
+ * looking at. Renaming moved to the session's actions menu in the rail, next
+ * to its tags and its delete. */
+function SessionTitle({ name }: { name: string | undefined }) {
   return (
-    <div className="min-w-0 flex-1">
-      <input
-        className="field page-title w-full !py-0.5"
-        value={draft}
-        autoFocus
-        maxLength={60}
-        aria-label="Session name"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => void commit()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void commit();
-          if (e.key === "Escape") {
-            setDraft(null);
-            setError(null);
-          }
-        }}
-        data-testid="session-title-input"
-      />
-      {error && (
-        <p className="text-xs text-red-ink" data-testid="session-title-error">
-          {error}
-        </p>
-      )}
-    </div>
+    <h1 data-testid="session-title" className="page-title min-w-0 flex-1 truncate">
+      {sessionTitle(name)}
+    </h1>
   );
 }
 
@@ -698,7 +623,7 @@ export function SessionView() {
             className="flex h-[var(--header-h)] shrink-0 items-center bar-scroll gap-2 bg-panel px-4 sm:gap-3 sm:px-6"
           >
             <RailToggle />
-            {status && <StatusPill status={status} />}
+            {status && <StatusLamp status={status} />}
             {openSubSession ? (
               <SubSessionTitle
                 sessionId={id}
@@ -706,7 +631,7 @@ export function SessionView() {
                 subSession={openSubSession}
               />
             ) : (
-              <SessionTitle id={id} name={detail?.name} editable={!agentId} />
+              <SessionTitle name={detail?.name} />
             )}
             {/* Beside the title rather than in the key cluster on the right:
                 this changes *what you are looking at*, and that cluster is for
@@ -826,7 +751,7 @@ export function SessionView() {
               config bar below stay put, so a session can still be driven while
               the map is up. */}
           {timelineOpen && (
-            <div className="min-h-0 flex-1">
+            <SessionPane>
               <SessionTimeline
                 timeline={timeline}
                 expanded={expanded}
@@ -846,13 +771,13 @@ export function SessionView() {
                 }}
                 onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
               />
-            </div>
+            </SessionPane>
           )}
 
           {/* The same roster the timeline lays along an axis, laid along its
               lineage instead. */}
           {graphOpen && (
-            <div className="min-h-0 flex-1">
+            <SessionPane>
               <AgentGraph
                 tree={agentTree}
                 onToggleCollapse={(agent) =>
@@ -862,15 +787,16 @@ export function SessionView() {
                 }
                 onSelectAgent={(agent) => navigate(`/sessions/${id}/agents/${agent}`)}
               />
-            </div>
+            </SessionPane>
           )}
 
           {/* Transcript */}
-          <div
+          <SessionPane
+            scroll
             ref={scrollRef}
             onScroll={onScroll}
             data-testid="transcript-scroll"
-            className={cn("relative flex-1 overflow-y-auto", overlayOpen && "hidden")}
+            className={cn(overlayOpen && "hidden")}
           >
             {/* Inside the scroller so the spine's own `sticky` keeps it in
                 view; outside it there would be nothing to stick to. */}
@@ -930,7 +856,7 @@ export function SessionView() {
                 />
               </>
             )}
-          </div>
+          </SessionPane>
 
           {/* Errors */}
           {(sendError || stream.streamError) && (

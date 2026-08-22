@@ -4,8 +4,7 @@ import { ApiRequestError, api } from "../../api/client";
 import { AUTH_STATUS_KEY, useAuthStatus } from "../../hooks/useAuth";
 import { ReadError } from "../../components/ReadError";
 import { askConfirm } from "../../lib/confirm";
-import { SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { SettingsPage } from "./fields";
 
 /** Long-lived tokens for headless vendor processes: a container, a CI runner, a
  *  machine with nobody to approve a device code. */
@@ -180,9 +179,7 @@ export function AccountSettings() {
 
   if (!status?.enabled) {
     return (
-      <div className="flex h-full flex-col">
-        <SettingsHeader title="Account" desc="Sign-in for this server." />
-        <SettingsPane>
+      <SettingsPage title="Account" desc="Sign-in for this server.">
           <p
             data-testid="account-disabled"
             className="section  text-sm text-dim"
@@ -190,8 +187,7 @@ export function AccountSettings() {
             Authentication is disabled on this deployment, so there is no
             account to manage. Anyone who can reach this server has full access.
           </p>
-        </SettingsPane>
-      </div>
+      </SettingsPage>
     );
   }
 
@@ -199,9 +195,7 @@ export function AccountSettings() {
     change.error instanceof ApiRequestError ? change.error.message : null;
 
   return (
-    <div className="flex h-full flex-col">
-      <SettingsHeader title="Account" desc="Sign-in for this server." />
-      <SettingsPane>
+    <SettingsPage title="Account" desc="Sign-in for this server.">
         {status.mustChangePassword && (
           <p
             data-testid="account-must-change"
@@ -276,7 +270,6 @@ export function AccountSettings() {
           Sign out
         </button>
         <MachineTokens />
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }

@@ -370,6 +370,7 @@
  * Rows go square inside it: a rounded hover fill against a full-width
  * separator leaves a notch at every corner. */
 @utility list-divided {
+  --row-radius: 0;
   & > * + * {
     border-top: 1px solid var(--edge);
   }
@@ -663,7 +664,10 @@
     display: flex;
     align-items: center;
     gap: 0.625rem;
-    border-radius: var(--radius-control);
+    /* Inherited, not competed for: `list-divided` sets this to 0 on the
+     * container and every row in it squares up without either utility having
+     * to out-specify the other. */
+    border-radius: var(--row-radius, var(--radius-control));
     padding: 0.375rem 0.625rem;
     transition:
       background 110ms ease,
@@ -690,7 +694,6 @@
     align-items: center;
     gap: 0.3125rem;
     border-radius: var(--radius-chip);
-    border: 1px solid transparent;
     background: var(--screen);
     padding: 0.0625rem 0.4375rem;
     font-family: var(--font-sans);
@@ -699,6 +702,39 @@
     line-height: 1.45;
     color: var(--legend-dim);
     white-space: nowrap;
+  }
+
+  /* A chip you can press.
+   *
+   * `.chip` is a LABEL — a fact printed on the surface — and a tag filter was
+   * wearing it while being a control, so it was the one interactive thing in
+   * the build that did not fill under the pointer. It only changed its text
+   * colour, which is why it read as a different family from every button
+   * beside it. Same three states as everything else: a quiet fill at rest,
+   * the interaction fill on hover, the accent wash when it is on. */
+  .chip-toggle {
+    cursor: pointer;
+    transition:
+      background 120ms ease,
+      color 120ms ease;
+  }
+  .chip-toggle:hover {
+    background: var(--panel-raised);
+    color: var(--legend);
+  }
+  /* Keyed off the accessibility attributes a pressable thing already has to
+   * carry, so a call site gets the styling by being correct rather than by
+   * remembering a class. Three sites had three different renderings of "this
+   * one is on", two of them in `live` — the colour reserved for a value in
+   * flight, which a picked weekday is not. */
+  .chip-toggle[aria-pressed="true"],
+  .chip-toggle[data-selected="true"],
+  .chip-toggle[data-state="require"] {
+    background: var(--accent-quiet);
+    color: var(--legend);
+  }
+  .chip-toggle:disabled {
+    cursor: default;
   }
 
   /* A chip carrying arbitrary-length content — an `ask_user` choice is

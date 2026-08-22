@@ -1,17 +1,74 @@
 import { Plus, Trash2 } from "lucide-react";
 import { useId, type ReactNode } from "react";
 import { useSettingsScroll } from "./scrollShadow";
+import { SettingsHeader } from "./SettingsHeader";
 import { cn } from "../../lib/cn";
 
 /**
- * The scrolling body every settings and admin page shares.
+ * The whole shell every settings and admin page shares: the full-height
+ * column, the header bar, and the scrolling body under it.
  *
- * Extracted because it had already drifted: six pages centred their content in
- * a `max-w-3xl` column and Account did not, so the same app looked like two
- * apps depending on which item of the nav you clicked. One wrapper means the
- * next page cannot get it wrong.
+ * `SettingsPane` alone was not enough. It was extracted because six pages
+ * centred their content and Account did not — and then the SHELL around it
+ * drifted the same way, because each page still assembled its own. Projects
+ * put the header inside the pane and had no full-height wrapper at all, so
+ * its pane stopped where the content did and the column's own ground showed
+ * through underneath as a different colour for the bottom half of the page.
+ *
+ * A page cannot get that wrong if it does not write it. Take this, pass the
+ * header's props through it, and put sections in the body.
  */
-export function SettingsPane({ children }: { children: ReactNode }) {
+export function SettingsPage({
+  title,
+  desc,
+  dirty,
+  saved,
+  saving,
+  saveBlocked,
+  onSave,
+  onDiscard,
+  children,
+}: {
+  title: string;
+  desc: string;
+  dirty?: boolean;
+  saved?: boolean;
+  saving?: boolean;
+  saveBlocked?: boolean;
+  onSave?: () => void;
+  onDiscard?: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex h-full flex-col overflow-hidden bg-chassis">
+      <SettingsHeader
+        title={title}
+        desc={desc}
+        dirty={dirty}
+        saved={saved}
+        saving={saving}
+        saveBlocked={saveBlocked}
+        onSave={onSave}
+        onDiscard={onDiscard}
+      />
+      <SettingsPane>{children}</SettingsPane>
+    </div>
+  );
+}
+
+/**
+ * A list of rows, separated by a hairline.
+ *
+ * Explicit rather than something `Section` does to whatever it is given.
+ * While the section divided all its children, a group that held a list AND
+ * the buttons under it drew a separator between the last row and the buttons
+ * — a line across a boundary that is not one — and a single-row list still
+ * got one under it.
+ */
+export function Rows({ children }: { children: ReactNode }) {
+  return <div className="list-divided">{children}</div>;
+}
+function SettingsPane({ children }: { children: ReactNode }) {
   const { onScroll } = useSettingsScroll();
   return (
     <div className="min-h-0 flex-1 overflow-y-auto bg-chassis" onScroll={onScroll}>
@@ -73,7 +130,7 @@ export function Section({
           </button>
         )}
       </div>
-      <div className="list-divided">
+      <div className="space-y-2">
         {empty && (
           <p className="screen break-words px-3 py-4 text-center text-sm text-faint">
             {empty}
@@ -331,7 +388,7 @@ export function RowShell({
   children: ReactNode;
 }) {
   return (
-    <div className="rounded-[var(--radius-control)] bg-raised p-2.5">
+    <div className="-mx-1.5 bg-raised px-2.5 py-2.5">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">{children}</div>
         <button

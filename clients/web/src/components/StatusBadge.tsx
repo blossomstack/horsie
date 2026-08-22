@@ -3,12 +3,14 @@ import { cn } from "../lib/cn";
 import { statusMeta, TONE_TEXT } from "../lib/status";
 
 /**
- * The session's status at the head of its title: a lamp AND the word.
+ * The session's status at the head of its title.
  *
- * An earlier pass made this a bare glyph, which meant the word survived only
- * in the tooltip — and a tooltip is not something a sighted reader sees at a
- * glance. Carrying the word restores the standing rule that status is never
- * colour alone, and it costs about eight characters of title.
+ * The lamp alone here, with the word in the tooltip and the accessible name.
+ * This is the one place the "a lamp AND a word" rule is relaxed, and it is
+ * relaxed deliberately: the header carries the title of the thing you are
+ * looking at, and a second reading of a state the rail already spells out
+ * beside every session cost more than it told anyone. Every OTHER lamp in
+ * the build still has its word.
  */
 /**
  * The session's status at the head of its title.
@@ -16,17 +18,18 @@ import { statusMeta, TONE_TEXT } from "../lib/status";
  * Carries `data-testid` and `data-status` because this is now the one status
  * readout on the session header — the e2e suite's `expectStatus` reads them.
  */
-export function StatusPill({ status }: { status: SessionStatusKind }) {
+export function StatusLamp({ status }: { status: SessionStatusKind }) {
   const meta = statusMeta(status);
   return (
     <span
       data-testid="status-badge"
       data-status={status}
-      className={cn("flex shrink-0 items-center gap-1.5", TONE_TEXT[meta.tone])}
-      title={meta.hint}
+      className={cn("flex shrink-0 items-center", TONE_TEXT[meta.tone])}
+      title={`${meta.label} — ${meta.hint}`}
+      aria-label={`Status: ${meta.label}`}
+      role="img"
     >
       <StatusDot status={status} />
-      <span className="text-[0.75rem] font-medium text-current">{meta.label}</span>
     </span>
   );
 }

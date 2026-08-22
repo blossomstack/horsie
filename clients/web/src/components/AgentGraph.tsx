@@ -127,7 +127,7 @@ export function AgentGraph({
   return (
     // `bg-chassis`, matching the timeline: this replaces the transcript in the
     // same pane, and a second colour there reads as a different surface.
-    <div className="h-full overflow-auto bg-chassis" data-testid="agent-graph">
+    <div className="h-full overflow-auto" data-testid="agent-graph">
       <svg
         viewBox={`0 0 ${width} ${height}`}
         width={width}

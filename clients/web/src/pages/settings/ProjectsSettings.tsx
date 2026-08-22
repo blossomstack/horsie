@@ -9,8 +9,7 @@ import {
   useRenameProject,
 } from "../../hooks/useProjects";
 import { askConfirm } from "../../lib/confirm";
-import { ListRow, RowAction, Section, SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { ListRow, RowAction, Rows, Section, SettingsPage } from "./fields";
 
 /**
  * Settings → Projects.
@@ -47,20 +46,17 @@ export function ProjectsSettings() {
 
   if (projects.error) {
     return (
-      <SettingsPane>
-        <SettingsHeader title="Projects" desc="This account's projects." />
+      <SettingsPage title="Projects" desc="This account's projects.">
         <ReadError error={projects.error} what="projects" />
-      </SettingsPane>
+      </SettingsPage>
     );
   }
 
   return (
-    <SettingsPane>
-      <SettingsHeader
-        title="Projects"
-        desc="One per body of work. Nothing is shared between them."
-      />
-
+    <SettingsPage
+      title="Projects"
+      desc="One per body of work. Nothing is shared between them."
+    >
       <Section
         title="Projects"
         desc="Everything else on this rail belongs to one project: its models, runtimes, skills, memory spaces, integrations, agents and sessions. A new project starts empty, credentials included."
@@ -70,6 +66,7 @@ export function ProjectsSettings() {
             : null
         }
       >
+<Rows>
         {projects.data?.map((p) => (
           <ListRow
             key={p.id}
@@ -94,7 +91,6 @@ export function ProjectsSettings() {
                 p.name
               )
             }
-            subtitle={p.id === current ? "Currently open" : undefined}
             meta={
               p.isDefault ? (
                 <span className="chip" title="Always present, and cannot be deleted">
@@ -147,6 +143,7 @@ export function ProjectsSettings() {
             }
           />
         ))}
+        </Rows>
       </Section>
 
       <Section title="New project" desc="It starts empty — add its models and runtimes once it exists.">
@@ -175,6 +172,6 @@ export function ProjectsSettings() {
           </button>
         </form>
       </Section>
-    </SettingsPane>
+    </SettingsPage>
   );
 }

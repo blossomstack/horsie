@@ -42,9 +42,7 @@ export function TagFilterPanel({
                   : t
             }
             className={cn(
-              "chip transition-colors hover:!text-legend",
-              state === "require" &&
-                "!bg-accent-quiet !text-legend",
+              "chip chip-toggle",
               state === "exclude" && "!text-faint line-through",
             )}
             onClick={() => onChange(cycleTag(filter, t))}

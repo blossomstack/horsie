@@ -8,8 +8,7 @@ import {
 } from "../../hooks/usePlugins";
 import { useAuthoredPlugins } from "../../hooks/useAuthored";
 import { ReadError } from "../../components/ReadError";
-import { TextField, SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { TextField, SettingsPage } from "./fields";
 import { AuthoredSection } from "./skills/AuthoredSection";
 import { BundleRow } from "./skills/BundleRow";
 import { MarketplaceRow } from "./skills/MarketplaceRow";
@@ -56,13 +55,10 @@ export function SkillsSettings() {
         : null;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Skills"
         desc="Shareable skill bundles installed from git repos — pick them per session."
-      />
-
-      <SettingsPane>
+    >
         <section className="section">
           <div className="mb-3 flex items-start gap-2">
             <Download size={15} className="mt-0.5 text-faint" />
@@ -185,7 +181,6 @@ export function SkillsSettings() {
             ))}
           </div>
         </section>
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }

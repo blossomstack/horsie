@@ -115,7 +115,7 @@ export function SessionTimeline({
     // `bg-chassis`, which is what the body is painted and therefore what the
     // transcript pane shows through. Painted `panel` this pane was a different
     // colour from the transcript it replaces and from the composer beneath it.
-    <div className="h-full overflow-auto bg-chassis" data-testid="session-timeline">
+    <div className="h-full overflow-auto" data-testid="session-timeline">
       <div className="relative w-max min-w-full pb-6">
         {/* Collapsed idle stretches, behind everything else. */}
         {timeline.gaps.map((g) => (

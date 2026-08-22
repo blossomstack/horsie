@@ -103,10 +103,9 @@ export function AskUserCard({ call }: { call: RenderedToolCall }) {
                     // `.chip` alone sets `white-space: nowrap`, which sent a
                     // long choice label straight out of the card — the model
                     // writes these, so their length is unbounded.
-                    "chip chip-wrap",
-                    pending && "cursor-pointer hover:bg-raised",
+                    "chip chip-wrap chip-toggle",
                     (pending ? selected.includes(c) : picked?.has(c)) &&
-                      "bg-live-quiet font-medium text-legend",
+                      "font-medium",
                   )}
                 >
                   {c}

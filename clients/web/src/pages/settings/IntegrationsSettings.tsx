@@ -18,8 +18,7 @@ import {
 import { useSettings } from "../../hooks/useSettings";
 import { askConfirm } from "../../lib/confirm";
 import { ReadError } from "../../components/ReadError";
-import { RowLabel, RowShell, TextField, SettingsPane } from "./fields";
-import { SettingsHeader } from "./SettingsHeader";
+import { RowLabel, RowShell, TextField, SettingsPage } from "./fields";
 
 /** The remote GitHub MCP endpoint reused via the GitHub App connection. */
 const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
@@ -33,13 +32,10 @@ const GITHUB_MCP_NAME = "github";
 export function IntegrationsSettings() {
   const { data: settings, isLoading, isError } = useSettings();
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <SettingsHeader
+    <SettingsPage
         title="Integrations"
         desc="GitHub, MCP servers, and this server's build info."
-      />
-
-      <SettingsPane>
+    >
           {isLoading && (
             <div className="py-16 text-center text-sm text-faint">Loading…</div>
           )}
@@ -54,8 +50,7 @@ export function IntegrationsSettings() {
           <McpSection />
 
           {settings && <ServerInfoCard view={settings} />}
-      </SettingsPane>
-    </div>
+      </SettingsPage>
   );
 }
 
