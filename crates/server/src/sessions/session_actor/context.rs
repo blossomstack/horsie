@@ -1789,9 +1789,9 @@ mod tests {
     async fn a_session_starts_once_but_every_prompt_is_hooked() {
         let (f, session) = stop_harness(vec![]).await;
         send(&session, "first").await;
-        settled_inputs(&session).await;
+        await_turns(&session, 1).await;
         send(&session, "second").await;
-        settled_inputs(&session).await;
+        await_turns(&session, 2).await;
 
         let starts = f
             .agent
