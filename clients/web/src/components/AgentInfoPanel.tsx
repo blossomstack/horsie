@@ -420,7 +420,8 @@ export function AgentInfoPanel({
           {/* The same glyph the jump key on a node carries. One action, one
               icon: the panel's key and the node's key go to the same place. */}
           <MessageSquareText size={13} aria-hidden />
-          Transcript
+          {/* A run's page is its graph; every other kind has a transcript. */}
+          {agent.kind === "run" ? "Run" : "Transcript"}
         </button>
         {onDelete && (
           <button

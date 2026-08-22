@@ -1,5 +1,5 @@
 import { MessageSquareText } from "lucide-react";
-import type { AgentTree, PlacedAgent } from "../lib/agentTree";
+import type { AgentKind, AgentTree, PlacedAgent } from "../lib/agentTree";
 import { KIND_LABEL } from "../lib/agentTree";
 import { cn } from "../lib/cn";
 
@@ -74,6 +74,11 @@ const NAME_MAX_2 = 30;
 const DETAIL_MAX = 38;
 /** One character of the `+3` a fold carries, at 10px. */
 const BADGE_CHAR_W = 6;
+
+/** What the jump key on a node opens, said in the words of what it opens. */
+function openLabel(kind: AgentKind, label: string): string {
+  return kind === "run" ? `Open the ${label} run` : `Open ${label}'s transcript`;
+}
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
@@ -355,10 +360,13 @@ export function AgentGraph({
                 }}
                 tabIndex={0}
                 role="button"
-                aria-label={`Open ${n.label}'s transcript`}
+                // A run's page is its own graph, not a transcript — it has no
+                // transcript to open, which is the whole reason it is drawn as
+                // a node rather than as an agent.
+                aria-label={openLabel(n.kind, n.label)}
                 className="group/jump cursor-pointer focus:outline-none"
               >
-                <title>{`Open ${n.label}'s transcript`}</title>
+                <title>{openLabel(n.kind, n.label)}</title>
                 {/* An icon key, drawn the way every other icon key in the
                     console is: nothing at rest, a cap under the pointer.
                     `screen` rather than `raised`, which is what an icon key

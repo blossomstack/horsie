@@ -300,8 +300,9 @@ function LaneRow({
             type="button"
             data-testid={`timeline-open-${lane.agentId}`}
             className="shrink-0 text-faint opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-legend"
-            title={`Open ${lane.label}'s transcript`}
-            aria-label={`Open ${lane.label}'s transcript`}
+            // A run has no transcript of its own: its page is its graph.
+            title={openLabel(lane)}
+            aria-label={openLabel(lane)}
             onClick={() => onOpenAgent(lane.agentId)}
           >
             {/* The transcript's own glyph, the one a graph node's key and
@@ -457,6 +458,13 @@ function BarView({
       }}
     />
   );
+}
+
+/** What a lane's jump key opens, in the words of what it opens. */
+function openLabel(lane: Lane): string {
+  return lane.kind === "run"
+    ? `Open the ${lane.label} run`
+    : `Open ${lane.label}'s transcript`;
 }
 
 function humanGap(ms: number): string {
