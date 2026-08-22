@@ -25,12 +25,18 @@
  *
  * Three rules, and every decision below follows from them:
  *
- *   1. NOTHING IS SEPARATED BY A LINE. Regions differ by a small step in
- *      value, by whitespace, and by type weight. A 1px rule around a
- *      region is a boundary drawn twice, and a screen full of them reads
- *      as clutter before it reads as structure. The only borders left in
- *      the build are the ones that carry meaning on their own: an error
- *      outline, a focus ring, a graph edge.
+ *   1. A LINE MARKS THE CHROME, NEVER A REGION. `--edge` draws exactly
+ *      four things: the outer boundary of a column (rail, settings nav,
+ *      task panel), the underside of a header bar, the top of a footer
+ *      bar, and the separator between rows of one list. That is the
+ *      structural frame, and it holds the layout together.
+ *
+ *      Everything INSIDE the frame separates by a step in value, by
+ *      whitespace, and by type weight. A box drawn round a settings
+ *      section or a card drawn round a list row is a boundary stated
+ *      twice, and a screen full of them reads as clutter before it reads
+ *      as structure. Beyond the frame, a border must carry meaning on its
+ *      own: an error outline, a focus ring, a tree rail, a graph edge.
  *
  *   2. A FILL MEANS SOMETHING HAPPENED. Ground is ground; a fill marks
  *      hover, selection, or machine output. If a region is filled for no
@@ -89,12 +95,16 @@
    * and a white fill on a white panel separates from nothing. The previous
    * system held material roles by brightness across both themes, which is
    * why light-mode hover states were invisible. */
-  --panel-raised: oklch(0.245 0.006 268);
+  --panel-raised: oklch(0.272 0.006 268);
   /* Machine output: tool results, code, logs. A tint, not a recess. */
   --screen: oklch(0.148 0.005 268);
 
-  /* Kept for the few places a line still carries meaning — a graph edge, a
-   * table's header separation, a dashed drop target. Not for regions. */
+  /* The structural frame: column edges, header underside, footer top, and
+   * the separator between rows of one list. Nothing else. */
+  --edge: oklch(0.278 0.007 268);
+
+  /* Lines that carry meaning on their own — a tree rail, a graph edge, a
+   * horizontal rule, a dashed drop target. */
   --rule: oklch(0.268 0.007 268);
   --rule-strong: oklch(0.36 0.009 268);
 
@@ -111,7 +121,8 @@
   --accent: oklch(0.605 0.212 275);
   --accent-hover: oklch(0.655 0.2 275);
   --accent-ink: oklch(0.985 0.008 275);
-  --accent-quiet: oklch(0.3 0.09 275);
+  --accent-quiet: oklch(0.365 0.105 275);
+  --selection: oklch(0.45 0.14 275);
 
   --live: oklch(0.82 0.14 82);
   --live-ink: oklch(0.82 0.14 82);
@@ -143,15 +154,17 @@
   --chassis: oklch(0.968 0.003 268);
   --panel: oklch(0.992 0.001 268);
   /* Darker than the panel — see the note on the dark block. */
-  --panel-raised: oklch(0.938 0.005 268);
+  --panel-raised: oklch(0.912 0.007 268);
   --screen: oklch(0.958 0.004 268);
+
+  --edge: oklch(0.898 0.006 268);
 
   --rule: oklch(0.912 0.005 268);
   --rule-strong: oklch(0.828 0.008 268);
 
   --legend: oklch(0.215 0.01 268);
   --legend-dim: oklch(0.435 0.013 268);
-  --legend-faint: oklch(0.508 0.014 268);
+  --legend-faint: oklch(0.492 0.014 268);
 
   --keycap: oklch(0.902 0.005 268);
   --keycap-hover: oklch(0.862 0.007 268);
@@ -160,7 +173,8 @@
   --accent: oklch(0.492 0.222 275);
   --accent-hover: oklch(0.442 0.215 275);
   --accent-ink: oklch(0.995 0.004 275);
-  --accent-quiet: oklch(0.945 0.035 275);
+  --accent-quiet: oklch(0.862 0.085 275);
+  --selection: oklch(0.815 0.115 275);
 
   --live: oklch(0.72 0.15 82);
   --live-ink: oklch(0.482 0.115 72);
@@ -188,6 +202,7 @@
   --color-panel: var(--panel);
   --color-raised: var(--panel-raised);
   --color-screen: var(--screen);
+  --color-edge: var(--edge);
   --color-rule: var(--rule);
   --color-rule-strong: var(--rule-strong);
 
@@ -262,7 +277,7 @@
   }
 
   ::selection {
-    background: var(--accent-quiet);
+    background: var(--selection);
     color: var(--legend);
   }
 
@@ -307,6 +322,34 @@
 /* ==================================================================== *
  * Surfaces
  * ==================================================================== */
+
+/* The structural frame. One hairline, four jobs, and the utility names
+ * are the jobs — `border-edge` on an arbitrary element is reviewable as a
+ * mistake in a way that a bare `border` never was. */
+@utility column-edge-r {
+  border-right: 1px solid var(--edge);
+}
+@utility column-edge-l {
+  border-left: 1px solid var(--edge);
+}
+@utility bar-edge-b {
+  border-bottom: 1px solid var(--edge);
+}
+@utility bar-edge-t {
+  border-top: 1px solid var(--edge);
+}
+
+/* A list whose rows are separated by a hairline rather than by a gap.
+ * Rows go square inside it: a rounded hover fill against a full-width
+ * separator leaves a notch at every corner. */
+@utility list-divided {
+  & > * + * {
+    border-top: 1px solid var(--edge);
+  }
+  & > * {
+    border-radius: 0;
+  }
+}
 
 /* A contained region. No border — that is the whole point of the redesign
  * — and no fill either unless it is floating. Most callers want this for
@@ -540,9 +583,12 @@
   .field:hover:not(:disabled):not(:focus) {
     background: var(--panel-raised);
   }
+  /* One indicator, not two. This drew a solid 1px accent border AND a 3px
+   * near-opaque halo — 4px of heavy colour around every focused input. The
+   * ring alone is what WCAG 1.4.11 asks for, and it is measured composited
+   * by contrast.mjs, so it can be thin without becoming invisible. */
   .field:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--focus-ring);
+    box-shadow: 0 0 0 2px var(--focus-ring);
     outline: none;
   }
   .field:disabled {
@@ -597,9 +643,13 @@
   .row:hover {
     background: var(--panel-raised);
   }
+  /* Hover is a neutral fill; SELECTED is the accent wash. Two greys a few
+   * points apart cannot say "you are pointing at this" and "this is the one
+   * you picked" at the same time, which is why a selected provider row was
+   * indistinguishable from a hovered one. */
   .row[data-active="true"],
   .row[aria-selected="true"] {
-    background: var(--panel-raised);
+    background: var(--accent-quiet);
     color: var(--legend);
   }
 

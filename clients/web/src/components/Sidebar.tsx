@@ -49,7 +49,7 @@ function PrimaryLink({
           "flex items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-1.5 text-[0.8125rem] transition-colors",
           // Fill only, like every other selected row in the app.
           isActive
-            ? "bg-raised text-legend"
+            ? "bg-accent-quiet text-legend"
             : "text-dim hover:bg-raised hover:text-legend",
         )
       }
@@ -79,7 +79,7 @@ function FooterLink({
       title={label}
       aria-label={label}
       className={({ isActive }) =>
-        cn("key-icon shrink-0", isActive && "bg-raised text-legend")
+        cn("key-icon shrink-0", isActive && "bg-accent-quiet text-legend")
       }
     >
       {icon}
@@ -136,11 +136,11 @@ export function Sidebar() {
   const navigate = useNavigate();
 
   return (
-    <aside className="flex h-full w-[17.5rem] shrink-0 flex-col bg-chassis">
+    <aside className="column-edge-r flex h-full w-[17.5rem] shrink-0 flex-col bg-chassis">
       {/* Nameplate. The lamp reports the rail's own link to the server, so a
           dead feed is visible before you click anything. Height is shared with
           the session and task-panel headers so the three columns line up. */}
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2.5 px-3">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2.5 px-3">
         <Link
           to="/"
           data-testid="home-link"
@@ -214,7 +214,7 @@ export function Sidebar() {
                 // failure mode of a collapsible filter is a short rail read as
                 // an account that has lost its sessions.
                 filterIsActive(filter) &&
-                  "!bg-raised !text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]",
+                  "!bg-accent-quiet !text-legend",
               )}
               onClick={() => setPanelOpen((v) => !v)}
               aria-expanded={panelOpen}
@@ -316,7 +316,7 @@ export function Sidebar() {
           destinations, on one strip. The switcher used to sit under the
           nameplate with the word "Project" over it — two rows of rail height
           for one string that is also in the URL. */}
-      <div className="flex items-center gap-0.5 px-1.5 py-1.5">
+      <div className="bar-edge-t flex items-center gap-0.5 px-1.5 py-1.5">
         <ProjectSwitcher />
         <FooterLink
           to="/settings"

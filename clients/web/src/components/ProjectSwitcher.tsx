@@ -29,6 +29,7 @@ export function ProjectSwitcher() {
     <div className="min-w-0 flex-1">
       <PopoverMenu
         label={here?.name ?? "…"}
+        labelClassName="text-[0.8125rem] font-medium text-legend"
         placement="up"
         className="w-full"
         testId="project-switcher"

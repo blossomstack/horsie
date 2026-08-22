@@ -174,7 +174,7 @@ function UserTurn({ msg }: { msg: RenderedMessage }) {
           viewport and pushes the reply you came back for off screen. Only
           when it actually overflows — a "More" under three lines would be
           chrome advertising a job it does not have. */}
-      <CollapsibleText className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 shadow-[inset_0_0_0_1px_var(--row-ring)] text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
+      <CollapsibleText className="rounded-[var(--radius-control)] bg-raised px-3.5 py-2.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap text-legend">
         {msg.text}
       </CollapsibleText>
       {msg.queued && (

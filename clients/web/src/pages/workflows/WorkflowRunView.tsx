@@ -158,7 +158,7 @@ export function WorkflowRunView({ sessionId, onStop, onDelete }: Props) {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-run-view">
-      <header className="flex items-center gap-4 px-6 py-3">
+      <header className="bar-edge-b flex items-center gap-4 px-6 py-3">
         <div className="min-w-0">
           <h1 className="page-title truncate">{graph.workflow}</h1>
           <span

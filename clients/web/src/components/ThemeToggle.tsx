@@ -8,13 +8,13 @@ export function ThemeToggle() {
   const { mode, toggle } = useTheme();
   return (
     <button
-      className="key-icon"
+      className="key-icon shrink-0"
       onClick={toggle}
       title={`Switch to ${mode === "dark" ? "light" : "dark"}`}
       aria-label="Toggle light and dark"
       data-testid="theme-toggle"
     >
-      {mode === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+      {mode === "dark" ? <Sun size={14} /> : <Moon size={14} />}
     </button>
   );
 }

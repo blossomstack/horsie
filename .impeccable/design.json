@@ -41,8 +41,8 @@
       "panel-raised": {
         "role": "neutral",
         "displayName": "Interaction fill",
-        "canonical": "oklch(0.245 0.006 268)",
-        "light": "oklch(0.938 0.005 268)",
+        "canonical": "oklch(0.272 0.006 268)",
+        "light": "oklch(0.912 0.007 268)",
         "purpose": "Hover, selection, a menu. The one token whose brightness FLIPS between exposures \u2014 lighter in the dark, darker in the light \u2014 because what it must do is separate from the ground it lands on.",
         "tonalRamp": [
           "oklch(0.15 0.006 268)",
@@ -144,7 +144,7 @@
         "role": "neutral",
         "displayName": "Ink, faint",
         "canonical": "oklch(0.678 0.011 268)",
-        "light": "oklch(0.508 0.014 268)",
+        "light": "oklch(0.492 0.014 268)",
         "purpose": "Labels and metadata. The tightest AA case in the system.",
         "tonalRamp": [
           "oklch(0.15 0.011 268)",
@@ -259,9 +259,9 @@
       "accent-quiet": {
         "role": "accent",
         "displayName": "Accent wash",
-        "canonical": "oklch(0.3 0.09 275)",
-        "light": "oklch(0.945 0.035 275)",
-        "purpose": "::selection, and the quiet band behind an accent notice.",
+        "canonical": "oklch(0.365 0.105 275)",
+        "light": "oklch(0.862 0.085 275)",
+        "purpose": "The SELECTED fill \u2014 a row, a nav item, a picked option. Distinct from panel-raised, which is hover: two greys a few points apart cannot say 'pointing at' and 'picked' at once.",
         "tonalRamp": [
           "oklch(0.15 0.09 275)",
           "oklch(0.26 0.09 275)",
@@ -487,6 +487,20 @@
           "oklch(0.84 0.212 275)",
           "oklch(0.95 0.212 275)"
         ]
+      },
+      "edge": {
+        "role": "neutral",
+        "displayName": "Chrome edge",
+        "canonical": "oklch(0.278 0.007 268)",
+        "light": "oklch(0.898 0.006 268)",
+        "purpose": "The structural frame, and only four jobs: a column's outer boundary, a header bar's underside, a footer bar's top, and the separator between rows of one list."
+      },
+      "selection": {
+        "role": "accent",
+        "displayName": "Text selection",
+        "canonical": "oklch(0.45 0.14 275)",
+        "light": "oklch(0.815 0.115 275)",
+        "purpose": "The ::selection tint. Its own token because it must be seen on the interaction fill too \u2014 it rode accent-quiet, a wash by design, so selecting text inside a user bubble highlighted nothing."
       }
     },
     "typographyMeta": {
@@ -630,10 +644,10 @@
     ],
     "accessibility": {
       "floor": "WCAG AA 4.5:1 for every ink against all four surfaces (chassis, panel, panel-raised, screen) in both exposures, and WCAG 1.4.11 3:1 for the focus ring composited over each.",
-      "worstDark": "5.30 - legend-faint on panel-raised (glass)",
-      "worstLight": "4.62 - legend-faint on panel-raised (aurora)",
+      "worstDark": "4.90 - legend-faint on panel-raised (glass)",
+      "worstLight": "4.65 - legend-faint on panel-raised (aurora)",
       "worstFocusRing": "3.30 - graphite dark, measured composited",
-      "interactionFill": "panel-raised separates from panel by 1.14-1.18 across all eight palettes; the gate floors it at 1.10.",
+      "interactionFill": "panel-raised separates from panel by >=1.20 in all eight palettes; accent-quiet separates from panel-raised by >=1.10; edge separates from both chassis and panel by >=1.15; ::selection by >=1.20 from every surface it can land on. All floored by the gate.",
       "script": "clients/web/scripts/contrast.mjs",
       "note": "The gate DISCOVERS the worlds by scanning skins.css for data-skin blocks rather than carrying a list, and it parses the shipped CSS rather than restating values."
     },
@@ -760,14 +774,20 @@
       "kind": "text",
       "refersTo": "page-title / section-title / item-title",
       "description": "Three roles, one rendition each, so the same job never ships in two looks. All carry negative tracking; .legend, the label role, carries none."
+    },
+    {
+      "name": "Roster row",
+      "kind": "list-item",
+      "refersTo": "RosterRow",
+      "description": "One entry in a roster - agents, environments, routines, workflows. A component rather than a pattern because the four pages had drifted into four dialects: mono names on two, three different delete controls at three icon sizes, two alignments."
     }
   ],
   "narrative": {
     "northStar": "One Surface",
     "overview": "horsie is a long-running process you watch. The interface's whole job is to show its state and then get out of the way, so it is built as a single quiet surface rather than a stack of boxes. There is no chassis, no bezel and no card: a session, a settings page and a roster are all the same sheet, and what separates their regions is a small step in value, whitespace, and type weight.",
     "keyCharacteristics": [
-      "Nothing is separated by a line. The only borders in the build carry meaning alone: an error outline, the focus ring, a tree rail, a graph edge, a dashed timeline guide.",
-      "A fill means something happened - hover, selection, or machine output, and nothing else.",
+      "A line marks the chrome, never a region: column edges, header undersides, footer tops, list separators. Inside the frame, regions separate by value, whitespace and type weight.",
+      "A fill means something happened. Hover is the neutral fill; selected is the accent wash - two different jobs, two different fills.",
       "One accent for the control that commits; live for a value in flight; red for interrupt and destroy; green for a healthy channel.",
       "Two self-hosted faces: Inter for everything read, Geist Mono for identifiers, paths and code. No font ever comes from a CDN.",
       "Titles carry negative tracking, labels carry none. Sentence case throughout.",
@@ -777,8 +797,10 @@
       "Every ink clears WCAG AA against every surface it can land on, in all four worlds and both exposures - measured, not assumed."
     ],
     "rules": [
-      "A 1px rule around a region is a boundary drawn twice; the region already has an edge, because its content stops.",
-      "If a region needs bounding, it needs space - not a border.",
+      "The frame holds the layout together; without column edges and bar edges the columns float and the app stops reading as one instrument.",
+      "Inside the frame, if a region needs bounding it needs space - not a border.",
+      "Hover and selection must be different fills, or neither reads.",
+      "One focus indicator, not two: the ring alone. A solid accent border AND a 3px halo is 4px of heavy colour round every input.",
       "A region painted for no reason costs the fills that do mean something.",
       "The rails are chassis and the content is panel, in that order. Painting the rail lighter than the content inverts the reading.",
       "panel-raised is the interaction fill, so its brightness flips between exposures. Holding material roles by brightness in both is what made every light-mode hover invisible.",
@@ -791,7 +813,8 @@
       "AA is measured by contrast.mjs against the shipped CSS, and the gate discovers the worlds rather than listing them."
     ],
     "dos": [
-      "Separate regions with a value step, whitespace, or type weight.",
+      "Draw the frame with the *-edge-* utilities: column-edge-r/l, bar-edge-b/t, list-divided.",
+      "Use panel-raised for hover and accent-quiet for selected.",
       "Spend a fill on hover, selection, or machine output.",
       "Add a seam variable when a world needs to vary something.",
       "Use .section for a group of content on a page, .panel for a contained surface, .floating for a menu or dialog.",
@@ -801,7 +824,8 @@
       "Run bun run contrast after any token change."
     ],
     "donts": [
-      "Do not reach for a border to bound a region.",
+      "Do not reach for a border inside the frame.",
+      "Do not use the same fill for hover and selection.",
       "Do not paint a region just to show it is a region.",
       "Do not override a seam value at a call site.",
       "Do not build a card per row - a fill, a ring, a gap and a radius is four separations for one boundary.",

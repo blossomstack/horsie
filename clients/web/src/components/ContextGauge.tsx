@@ -182,7 +182,7 @@ export function ContextGauge({
 
       {open && (
         <div
-          className="panel absolute right-0 top-full z-20 mt-2 w-[19rem] p-3.5 shadow-[var(--panel-lift)]"
+          className="panel absolute right-0 top-full z-20 mt-2 w-[19rem] p-3.5 shadow-[var(--float)]"
           data-testid="context-stats-panel"
         >
           <div title="Tokens currently loaded in the main agent's context, out of its context window. Cache status doesn't shrink this — it only affects price and speed.">

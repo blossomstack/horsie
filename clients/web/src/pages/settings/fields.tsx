@@ -71,7 +71,7 @@ export function Section({
           </button>
         )}
       </div>
-      <div className="space-y-px">
+      <div className="list-divided">
         {empty && (
           <p className="screen break-words px-3 py-4 text-center text-sm text-faint">
             {empty}
@@ -172,7 +172,7 @@ export function ListRow({
     <div
       className={cn(
         "rounded-[var(--radius-control)] transition-colors hover:bg-raised",
-        active && "bg-raised",
+        active && "bg-accent-quiet",
       )}
       data-testid={testId}
       data-active={active ? "true" : undefined}

@@ -83,7 +83,7 @@ export function SessionRow({
             // top of it drew a that competed with the sub session rails
             // beneath for the same job.
             isActive
-              ? "bg-raised text-legend"
+              ? "bg-accent-quiet text-legend"
               : "text-dim hover:bg-raised hover:text-legend",
           )
         }

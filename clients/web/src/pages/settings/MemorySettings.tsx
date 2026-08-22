@@ -216,7 +216,7 @@ function SpaceRow({
         // build. Amber is reserved for a measured, live value — this row is
         // neither, and it only ever looked grey because a `border-color`
         // utility could not win the cascade.
-        active && "bg-raised",
+        active && "bg-accent-quiet",
       )}
     >
       <button

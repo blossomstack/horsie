@@ -76,7 +76,7 @@ export function NewSessionView() {
 
   return (
     <div className="flex h-full flex-col" data-testid="new-session-view">
-      <header className="flex items-center gap-2 bg-panel px-4 py-3 md:hidden">
+      <header className="bar-edge-b flex items-center gap-2 bg-panel px-4 py-3 md:hidden">
         <RailToggle />
         <span className="legend">{draft.workflow ? "New run" : "New session"}</span>
       </header>

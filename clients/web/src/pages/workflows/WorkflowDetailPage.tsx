@@ -41,7 +41,7 @@ export function WorkflowDetailPage() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-detail-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <Link
           to="/workflows"

@@ -155,6 +155,8 @@ for (const [skin, mode, T] of PALETTES) {
     "keycap",
     "keycap-ink",
     "focus-ring",
+    "edge",
+    "selection",
     "accent",
     "accent-ink",
   ].filter((k) => !T[k]);
@@ -210,8 +212,31 @@ for (const [skin, mode, T] of PALETTES) {
   // the ordering by brightness in both exposures, which is precisely why the
   // light theme's hover states were invisible: a white fill on a white panel.
   const sep = contrast(T["panel-raised"], T.panel);
-  if (sep < 1.1) fail(`interaction fill only ${sep.toFixed(2)} against the panel`);
+  if (sep < 1.2) fail(`interaction fill only ${sep.toFixed(2)} against the panel`);
   else console.log(`  ok    ${"fill:panel".padEnd(13)} ${sep.toFixed(2)}`);
+
+  // Selection is a DIFFERENT job from hover, so it has to be told apart from
+  // it — two greys a few points apart cannot say "pointing at" and "picked".
+  const sel = contrast(T["accent-quiet"], T["panel-raised"]);
+  if (sel < 1.1) fail(`selected fill only ${sel.toFixed(2)} against the hover fill`);
+  else console.log(`  ok    ${"select:hover".padEnd(13)} ${sel.toFixed(2)}`);
+
+  // Text selection has to be seen on the surfaces it can land on — including
+  // a user bubble, which is itself the interaction fill.
+  for (const under of ["panel", "panel-raised", "screen"]) {
+    const v = contrast(T.selection, T[under]);
+    if (v < 1.2) fail(`::selection only ${v.toFixed(2)} on ${under}`);
+  }
+  const selInk = contrast(T.legend, T.selection);
+  if (selInk < AA) fail(`legend on ::selection ${selInk.toFixed(2)}`);
+
+  // The chrome frame. A hairline that cannot be seen against the surfaces it
+  // divides is a frame nobody drew — which is how the columns came to float.
+  for (const under of ["chassis", "panel"]) {
+    const v = contrast(T.edge, T[under]);
+    if (v < 1.15) fail(`edge only ${v.toFixed(2)} against ${under}`);
+    else console.log(`  ok    ${`edge:${under}`.padEnd(13)} ${v.toFixed(2)}`);
+  }
 
   // Machine output is a tint on the surface, and a tint you cannot see is not
   // marking anything.

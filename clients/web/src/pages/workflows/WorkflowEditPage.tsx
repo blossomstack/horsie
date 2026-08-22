@@ -157,7 +157,7 @@ function WorkflowEditor() {
 
   return (
     <div className="flex h-full flex-col" data-testid="workflow-edit-page">
-      <div className="flex h-[var(--header-h)] shrink-0 items-center gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
+      <div className="flex h-[var(--header-h)] shrink-0 items-center bar-edge-b gap-2 bg-panel px-4 sm:gap-3 sm:px-6">
         <RailToggle />
         <h1 className="page-title min-w-0 flex-1 truncate">
           {editing ? `Edit ${name}` : "New workflow"}
@@ -434,7 +434,7 @@ function SidebarRow({
       className={cn(
         "flex shrink-0 items-center gap-2 rounded-[var(--radius-control)] px-2 py-1.5 text-left transition-colors md:w-full",
         active
-          ? "bg-raised text-legend shadow-[inset_0_0_0_1px_var(--rule-strong)]"
+          ? "bg-accent-quiet text-legend"
           : "text-dim hover:bg-raised hover:text-legend",
       )}
       onClick={onClick}
